@@ -1,0 +1,19 @@
+ARG GO_VERSION=1.26.5
+FROM golang:${GO_VERSION}-alpine AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o /out/authclaw-gateway .
+
+FROM alpine:3.24
+WORKDIR /app
+RUN addgroup -S authclaw && adduser -S -G authclaw authclaw && mkdir -p /var/lib/authclaw-gateway && chown -R authclaw:authclaw /var/lib/authclaw-gateway
+COPY --from=build --chown=authclaw:authclaw /out/authclaw-gateway /app/authclaw-gateway
+
+EXPOSE 8080
+
+USER authclaw
+
+CMD ["/app/authclaw-gateway"]

@@ -1,0 +1,33 @@
+{
+  "contract_version": "2026-07-07",
+  "providers": {
+    "openai": {
+      "status": "production-ready",
+      "last_reviewed": "2026-07-07",
+      "endpoint": "/v1/chat/completions",
+      "payload_shape": "OpenAI chat.completions messages[]",
+      "stream_shape": "SSE data choices[].delta.content with [DONE]"
+    },
+    "anthropic": {
+      "status": "production-ready",
+      "last_reviewed": "2026-07-07",
+      "endpoint": "/v1/messages",
+      "payload_shape": "Anthropic messages with max_tokens and messages[]",
+      "stream_shape": "SSE content_block_delta delta.text events"
+    },
+    "cohere": {
+      "status": "production-ready",
+      "last_reviewed": "2026-07-07",
+      "endpoint": "/v2/chat",
+      "payload_shape": "Cohere v2 chat messages[]",
+      "stream_shape": "SSE content-delta delta.message.content.text events"
+    },
+    "azure_openai": {
+      "status": "production-ready",
+      "last_reviewed": "2026-07-07",
+      "endpoint": "/openai/deployments/{deployment}/chat/completions?api-version=2024-10-21",
+      "payload_shape": "Azure OpenAI deployment chat.completions messages[]",
+      "stream_shape": "SSE data choices[].delta.content with [DONE]"
+    }
+  }
+}

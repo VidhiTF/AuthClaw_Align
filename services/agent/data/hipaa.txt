@@ -1,0 +1,5 @@
+HIPAA Security Rule:
+
+Healthcare information must be protected through administrative safeguards, physical safeguards, and technical safeguards.
+
+Organizations must control access to patient records, encrypt sensitive data, maintain audit logs, and ensure confidentiality, integrity, and availability of protected health information (PHI).

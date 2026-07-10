@@ -1,0 +1,31 @@
+{
+  "release_id": "local-no-credential-2026-07-08",
+  "generated_at": "2026-07-08T12:00:00Z",
+  "label": "local-proof",
+  "artifacts": [
+    "infra/security/no_credential_proof.local.json",
+    "infra/security/audit-ready-release-checklist.local.json",
+    "infra/security/AUDIT_READY_RELEASE_CHECKLIST.md",
+    "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md",
+    "infra/terraform/DR_RUNBOOK.md"
+  ],
+  "signed_audit_export": {
+    "label": "local-proof",
+    "tests": [
+      "backend/tests/test_audit_export.py"
+    ],
+    "verifier": "backend/scripts/verify_audit_export.py",
+    "proves": [
+      "signature verification",
+      "payload digest verification",
+      "hash-chain verification",
+      "tamper detection"
+    ]
+  },
+  "excluded_live_claims": [
+    "external penetration test completion",
+    "SOC 2 attestation",
+    "live Route53 failover timing",
+    "live cloud remediation side effects"
+  ]
+}

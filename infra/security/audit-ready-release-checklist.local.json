@@ -1,0 +1,10 @@
+{
+  "tests": true,
+  "scans": true,
+  "migrations": true,
+  "rollback_notes": true,
+  "dr_notes": true,
+  "signed_audit_export_verification": true,
+  "red_team_thresholds": true,
+  "tenant_isolation": true
+}

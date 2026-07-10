@@ -1,0 +1,22 @@
+topics:
+  gateway.traffic:
+    partitions: 12
+    replication_factor: 3
+    retention_ms: 604800000
+    cleanup_policy: delete
+    key: tenant_id
+    replay_policy: Reset the authclaw-audit-consumer group offset; consumer idempotency prevents duplicate ClickHouse rows.
+  audit.events:
+    partitions: 12
+    replication_factor: 3
+    retention_ms: 2592000000
+    cleanup_policy: delete
+    key: tenant_id
+    replay_policy: Reset consumer offsets for Kafka replay, or use Postgres-to-ClickHouse replay for audit-chain recovery.
+  audit.deadletter:
+    partitions: 6
+    replication_factor: 3
+    retention_ms: 7776000000
+    cleanup_policy: delete
+    key: tenant_id
+    replay_policy: Reprocess manually after fixing the failure reason; original_payload is preserved.

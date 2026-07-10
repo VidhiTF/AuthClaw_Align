@@ -1,0 +1,254 @@
+# Lite/demo-only stack. Use docker-compose.full.yml for real integration,
+# load, latency, and release-gate testing.
+services:
+  postgres:
+    image: postgres:17
+    container_name: authclaw-demo-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-authclaw}
+      POSTGRES_USER: ${POSTGRES_USER:-authclaw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-authclaw}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - demo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-authclaw} -d ${POSTGRES_DB:-authclaw}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  agent-postgres:
+    image: postgres:17
+    container_name: authclaw-demo-agent-postgres
+    environment:
+      POSTGRES_DB: ${AGENT_POSTGRES_DB:-authclaw_agent}
+      POSTGRES_USER: ${AGENT_POSTGRES_USER:-authclaw_agent}
+      POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:-change-me-agent-local}
+    volumes:
+      - demo_agent_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AGENT_POSTGRES_USER:-authclaw_agent} -d ${AGENT_POSTGRES_DB:-authclaw_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: authclaw-demo-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: authclaw-demo-opa
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "/policies"
+    volumes:
+      - ./infra/opa:/policies:ro
+    ports:
+      - "${OPA_PORT:-8181}:8181"
+
+  presidio:
+    image: mcr.microsoft.com/presidio-analyzer:latest
+    container_name: authclaw-demo-presidio
+    ports:
+      - "${PRESIDIO_PORT:-3000}:3000"
+
+  mock-provider:
+    image: python:3.12-slim
+    container_name: authclaw-demo-mock-provider
+    profiles: ["ci"]
+    working_dir: /app
+    command: ["python", "/app/scripts/mock_llm_provider.py", "--host", "0.0.0.0", "--port", "19090"]
+    volumes:
+      - ./scripts/mock_llm_provider.py:/app/scripts/mock_llm_provider.py:ro
+    ports:
+      - "${MOCK_PROVIDER_PORT:-19090}:19090"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:19090/health', timeout=2).read()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: authclaw-demo-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_started
+      presidio:
+        condition: service_started
+    environment:
+      OWNER_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
+      APP_DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-authclaw_app}:${POSTGRES_APP_PASSWORD:-authclaw_app}@postgres:5432/${POSTGRES_DB:-authclaw}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-authclaw_app}:${POSTGRES_APP_PASSWORD:-authclaw_app}@postgres:5432/${POSTGRES_DB:-authclaw}
+      POSTGRES_DB: ${POSTGRES_DB:-authclaw}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-authclaw_app}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-authclaw_app}
+      REDIS_URL: redis://redis:6379
+      OPA_URL: http://opa:8181
+      PRESIDIO_URL: http://presidio:3000
+      CLICKHOUSE_URL: ""
+      KAFKA_BROKERS: ""
+      API_DEBUG: "false"
+      AWS_ENABLED: ${AWS_ENABLED:-false}
+      BEDROCK_ENABLED: ${BEDROCK_ENABLED:-false}
+      AWS_SECRETS_MANAGER_ENABLED: ${AWS_SECRETS_MANAGER_ENABLED:-false}
+      AUTHCLAW_ENV: ${AUTHCLAW_ENV:-demo}
+      JWT_SECRET: ${JWT_SECRET:-demo-change-me}
+      SESSION_SECRET: ${SESSION_SECRET:-demo-change-me}
+      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-demo-api-key-hash-change-me}
+      ENVELOPE_KEY: ${ENVELOPE_KEY:-demo-local-envelope-key-change-me}
+      KMS_KEY_ID: ${KMS_KEY_ID:-demo-local-key}
+      DEMO_OTP_VISIBLE: ${DEMO_OTP_VISIBLE:-false}
+      AUTHCLAW_EMAIL_OUTBOX_PATH: ${AUTHCLAW_EMAIL_OUTBOX_PATH:-/app/.authclaw/email-outbox.jsonl}
+      AUTHCLAW_LITE_DEMO_PASSWORD: ${AUTHCLAW_LITE_DEMO_PASSWORD:-AuthClawDemo!234}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      SMTP_TLS: ${SMTP_TLS:-true}
+      PUBLIC_GATEWAY_URL: ${PUBLIC_GATEWAY_URL:-http://localhost:18080}
+      ONBOARDING_SIGNUP_EMAIL_PER_HOUR: ${ONBOARDING_SIGNUP_EMAIL_PER_HOUR:-3}
+      ONBOARDING_SIGNUP_IP_PER_DAY: ${ONBOARDING_SIGNUP_IP_PER_DAY:-10}
+      ONBOARDING_VERIFY_IP_PER_HOUR: ${ONBOARDING_VERIFY_IP_PER_HOUR:-30}
+      GATEWAY_RATE_LIMIT_ENABLED: ${GATEWAY_RATE_LIMIT_ENABLED:-true}
+      GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-30}
+      GATEWAY_RATE_LIMIT_BURST_10S: ${GATEWAY_RATE_LIMIT_BURST_10S:-10}
+      GATEWAY_RATE_LIMIT_DAILY: ${GATEWAY_RATE_LIMIT_DAILY:-1000}
+      GATEWAY_MAX_BODY_BYTES: ${GATEWAY_MAX_BODY_BYTES:-131072}
+      GATEWAY_MAX_DAILY_SPEND_USD: ${GATEWAY_MAX_DAILY_SPEND_USD:-5}
+      GATEWAY_ESTIMATED_COST_PER_1K_REQUESTS_USD: ${GATEWAY_ESTIMATED_COST_PER_1K_REQUESTS_USD:-1}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    command: ["sh", "-c", "DATABASE_URL=\"$$OWNER_DATABASE_URL\" alembic upgrade head && DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$APP_DATABASE_URL\" python -m uvicorn main:app --host 0.0.0.0 --port 8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile.demo
+    container_name: authclaw-demo-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      opa:
+        condition: service_started
+      presidio:
+        condition: service_started
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgresql://${POSTGRES_APP_USER:-authclaw_app}:${POSTGRES_APP_PASSWORD:-authclaw_app}@postgres:5432/${POSTGRES_DB:-authclaw}?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      OPA_URL: http://opa:8181
+      PRESIDIO_URL: http://presidio:3000
+      PRESIDIO_ANALYZE_TIMEOUT_MS: ${PRESIDIO_ANALYZE_TIMEOUT_MS:-750}
+      KAFKA_BROKERS: ""
+      ENVELOPE_KEY: ${ENVELOPE_KEY:-demo-local-envelope-key-change-me}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      COHERE_BASE_URL: ${COHERE_BASE_URL:-https://api.cohere.ai}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}
+      AZURE_OPENAI_BASE_URL: ${AZURE_OPENAI_BASE_URL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      AWS_ENABLED: ${AWS_ENABLED:-false}
+      BEDROCK_ENABLED: ${BEDROCK_ENABLED:-false}
+      AUTHCLAW_ENV: ${AUTHCLAW_ENV:-demo}
+      JWT_SECRET: ${JWT_SECRET:-demo-change-me}
+      SESSION_SECRET: ${SESSION_SECRET:-demo-change-me}
+      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-demo-api-key-hash-change-me}
+      AUDIT_FAIL_CLOSED: ${AUDIT_FAIL_CLOSED:-false}
+      AUDIT_OUTBOX_PATH: /var/lib/authclaw-gateway/audit-outbox.ndjson
+      GATEWAY_RATE_LIMIT_ENABLED: ${GATEWAY_RATE_LIMIT_ENABLED:-true}
+      GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-30}
+      GATEWAY_RATE_LIMIT_BURST_10S: ${GATEWAY_RATE_LIMIT_BURST_10S:-10}
+      GATEWAY_RATE_LIMIT_DAILY: ${GATEWAY_RATE_LIMIT_DAILY:-1000}
+      GATEWAY_MAX_BODY_BYTES: ${GATEWAY_MAX_BODY_BYTES:-131072}
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    volumes:
+      - demo_gateway_audit_outbox:/var/lib/authclaw-gateway
+
+  agent:
+    build:
+      context: ./services/agent
+    container_name: authclaw-demo-agent
+    depends_on:
+      agent-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${AGENT_POSTGRES_USER:-authclaw_agent}:${AGENT_POSTGRES_PASSWORD:-change-me-agent-local}@agent-postgres:5432/${AGENT_POSTGRES_DB:-authclaw_agent}
+      REDIS_URL: redis://redis:6379
+      AUTHCLAW_ENV: demo
+      AUTHCLAW_ALLOWED_ORIGINS: http://localhost:3001
+      AUTHCLAW_DISABLE_BACKGROUND_MONITOR: "true"
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-gemini}
+      MODEL_NAME: ${MODEL_NAME:-gemini-2.5-flash-lite}
+      GOOGLE_API_KEY: ${GEMINI_API_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-demo-change-me}
+      AUTHCLAW_ENCRYPTION_KEY: ${ENVELOPE_KEY:-demo-local-envelope-key-change-me}
+      AUTHCLAW_REDACTION_SALT: ${SESSION_SECRET:-demo-change-me}
+      AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
+    ports:
+      - "${AGENT_PORT:-8001}:8001"
+
+  console:
+    build:
+      context: ./console
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:18000/api/v1}
+        NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:18080}
+        NEXT_PUBLIC_AUTHCLAW_DEMO_MODE: ${NEXT_PUBLIC_AUTHCLAW_DEMO_MODE:-true}
+        NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: ${NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES:-false}
+    container_name: authclaw-demo-console
+    depends_on:
+      backend:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_APP_USER:-authclaw_app}:${POSTGRES_APP_PASSWORD:-authclaw_app}@postgres:5432/${POSTGRES_DB:-authclaw}
+      API_URL: http://backend:8000
+      GATEWAY_INTERNAL_URL: http://gateway:8080
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:18000/api/v1}
+      NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:18080}
+      NEXT_PUBLIC_AUTHCLAW_DEMO_MODE: ${NEXT_PUBLIC_AUTHCLAW_DEMO_MODE:-true}
+      NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: ${NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES:-false}
+      AUTHCLAW_COOKIE_SECURE: ${AUTHCLAW_COOKIE_SECURE:-false}
+      SESSION_SECRET: ${SESSION_SECRET:-demo-change-me}
+      NODE_ENV: production
+    ports:
+      - "${CONSOLE_PORT:-3001}:3001"
+
+volumes:
+  demo_postgres_data:
+  demo_agent_postgres_data:
+  demo_gateway_audit_outbox:

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://unpkg.com/knip@latest/schema.json",
+  "ignore": [
+    ".next/**",
+    "node_modules/**",
+    "coverage/**",
+    "dist/**",
+    "build/**",
+    "vendor/**",
+    "scripts/**",
+    "infra/**",
+    "**/*.test.ts",
+    "**/*.spec.ts"
+  ],
+  "ignoreDependencies": [
+    "@types/*",
+    "eslint-config-*",
+    "prettier"
+  ],
+  "ignoreBinaries": [
+    "pytest",
+    "alembic"
+  ]
+}

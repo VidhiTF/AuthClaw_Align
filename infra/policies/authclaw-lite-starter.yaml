@@ -1,0 +1,30 @@
+regex_rules:
+  - name: customer_email
+    pattern: "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
+    reason: "Email addresses are redacted before model egress."
+    severity: medium
+    action: redact
+
+  - name: patient_health_data
+    pattern: "(?i)\\b(patient|diagnosis|prescription|medical record)\\b"
+    reason: "Health context requires human approval before model egress."
+    severity: high
+    action: require_approval
+    hitl_timeout_seconds: 1800
+
+  - name: ssn_block
+    pattern: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+    reason: "SSNs are blocked in the Lite demo policy."
+    severity: critical
+    action: block
+
+model_rules:
+  whitelist:
+    - gpt-4o-mini
+    - gemini-2.5-flash-lite
+  blacklist: []
+
+topic_rules: []
+
+rate_limits:
+  requests_per_minute: 60

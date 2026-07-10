@@ -1,0 +1,528 @@
+"""
+Compliance workflow runner
+
+Bridges the LangGraph compliance graph with AuthClaw infrastructure:
+  - PostgreSQL persistence (ComplianceWorkflow model)
+  - Kafka audit event emission
+  - HITL approval via pending_approvals table
+  - Crash recovery and resumption
+"""
+
+import logging
+import uuid
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.db.models import ComplianceWorkflow, PendingApproval
+from app.orchestrator.graph import (
+    ComplianceState,
+    ExecutionStatus,
+    WorkflowState,
+    RemediationState,
+    build_compliance_graph,
+    awaiting_approval,
+    execute_remediation,
+    rollback_remediation,
+    verify_results,
+)
+from app.services import event_backbone, evidence_service, findings_service
+
+logger = logging.getLogger("orchestrator.runner")
+
+
+_kafka_producer = None
+
+
+def _init_kafka_producer():
+    """Lazy-init a Kafka producer for audit events. Non-fatal if unavailable."""
+    global _kafka_producer
+    if _kafka_producer is not None:
+        return
+    try:
+        _kafka_producer = event_backbone.make_kafka_producer()
+        logger.info("Kafka producer initialized for orchestrator audit events")
+    except Exception as exc:
+        logger.warning("Kafka producer unavailable — audit events logged to stdout only: %s", exc)
+
+
+def emit_audit_event(
+    workflow_id: str,
+    tenant_id: str,
+    request_id: str,
+    transition: str,
+    action: str,
+    status: str,
+    extra_trace: Optional[list[str]] = None,
+) -> None:
+    """Emit a workflow audit event through the Kafka pipeline."""
+    execution_trace = [
+        f"workflow_id={workflow_id}",
+        f"transition={transition}",
+    ]
+    if extra_trace:
+        execution_trace.extend(extra_trace)
+
+    event = event_backbone.audit_event(
+        event_type="workflow",
+        tenant_id=tenant_id,
+        subject_id=workflow_id,
+        identity_action=f"{transition}:{action}:{status}:{request_id or ''}",
+        request_id=request_id or "",
+        action=f"workflow:{action}",
+        reason=f"{transition} [{status}]",
+        provider="orchestrator",
+        trace=execution_trace,
+    )
+
+    _init_kafka_producer()
+    if exc := event_backbone.publish_audit_event(_kafka_producer, tenant_id, event):
+        logger.warning("Failed to emit audit event to Kafka: %s", exc)
+
+    logger.info(
+        "[AUDIT] workflow=%s tenant=%s transition=%s action=%s status=%s",
+        workflow_id, tenant_id, transition, action, status,
+    )
+
+
+def _persist_state_to_db(db: Session, state: ComplianceState) -> None:
+    """Write the current workflow state snapshot to PostgreSQL."""
+    workflow_id = state.get("workflow_id", "")
+    tenant_id = state.get("tenant_id", "")
+    if tenant_id:
+        db.execute(
+            text("SELECT set_config('app.current_tenant_id', :tid, false)"),
+            {"tid": tenant_id},
+        )
+    wf = db.query(ComplianceWorkflow).filter(
+        ComplianceWorkflow.workflow_id == workflow_id
+    ).first()
+
+    if not wf:
+        logger.warning("Workflow %s not found in DB for persistence", workflow_id)
+        return
+
+    wf.current_state = state.get("current_state", wf.current_state)
+    wf.findings = state.get("findings")
+    wf.risk_score = state.get("risk_score")
+    wf.remediation_plan = state.get("remediation_plan")
+    wf.approval_status = state.get("approval_status")
+    wf.execution_status = state.get("execution_status", "RUNNING")
+    if state.get("approval_id"):
+        wf.approval_id = uuid.UUID(state["approval_id"]) if isinstance(state["approval_id"], str) else state["approval_id"]
+    else:
+        wf.approval_id = None
+    wf.execution_result = state.get("execution_result")
+    wf.error_message = state.get("error_message")
+    wf.retry_count = state.get("retry_count", 0)
+    wf.updated_at = datetime.now(tz=timezone.utc)
+
+    if state.get("completed_at"):
+        try:
+            wf.completed_at = datetime.fromisoformat(state["completed_at"])
+        except (ValueError, TypeError):
+            pass
+
+    # Store full state snapshot for crash recovery (exclude internal callbacks)
+    safe_state = {k: v for k, v in state.items() if not k.startswith("_")}
+    wf.state_data = safe_state
+
+    db.commit()
+    logger.debug("Persisted workflow %s state=%s", workflow_id, wf.current_state)
+
+
+def _create_approval_in_db(
+    db: Session,
+    tenant_id: str,
+    workflow_id: str,
+    plan: list,
+) -> str:
+    """Create a pending_approvals record for HITL review."""
+    approval_id = str(uuid.uuid4())
+
+    # Set tenant context for RLS before querying users table
+    db.execute(
+        text("SELECT set_config('app.current_tenant_id', :tid, false)"),
+        {"tid": tenant_id},
+    )
+
+    # Look up a valid user_id for the requester (use first active user in tenant)
+    result = db.execute(
+        text("SELECT id FROM users WHERE tenant_id = :tid AND is_active = true LIMIT 1"),
+        {"tid": tenant_id},
+    ).first()
+    requester_id = result[0] if result else uuid.UUID(tenant_id)
+
+    approval = PendingApproval(
+        id=uuid.UUID(approval_id),
+        tenant_id=uuid.UUID(tenant_id),
+        action_id=workflow_id,
+        action_type="remediation",
+        action_description=f"Compliance remediation plan ({len(plan)} actions)",
+        action_payload={"workflow_id": workflow_id, "plan": plan},
+        status="PENDING",
+        requester_id=requester_id,
+        expires_at=datetime.now(tz=timezone.utc) + timedelta(minutes=30),
+    )
+
+    db.add(approval)
+    db.commit()
+
+    logger.info("Created approval %s for workflow %s", approval_id, workflow_id)
+    return approval_id
+
+
+def _make_store_evidence_fn(db: Session):
+    """
+    Return a closure that matches the _store_evidence callback signature expected
+    by graph nodes.  The closure forwards to evidence_service.create_evidence()
+    and is entirely non-fatal — a failure here must never break the workflow.
+
+    Signature passed to graph state:
+      store_fn(tenant_id, workflow_id, framework, source_type, source_reference,
+               evidence_type, evidence_data, severity) -> None
+    """
+    def _store(tenant_id, workflow_id, framework, source_type, source_reference,
+               evidence_type, evidence_data, severity="info"):
+        try:
+            evidence_service.create_evidence(
+                db,
+                tenant_id=tenant_id,
+                workflow_id=workflow_id,
+                framework=framework,
+                source_type=source_type,
+                source_reference=source_reference,
+                evidence_type=evidence_type,
+                evidence_data=evidence_data,
+                severity=severity,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[evidence] create_evidence failed (non-fatal) workflow=%s: %s",
+                workflow_id, exc,
+            )
+    return _store
+
+
+def _make_store_finding_fn(db: Session):
+    def _store(tenant_id, workflow_id, evidence_id, framework, finding_type, source_reference, title, description, severity="medium", status="OPEN", risk_score=0.0, remediation_summary=None):
+        try:
+            # Look up EvidenceRecord to ensure tight traceability
+            if not evidence_id:
+                from app.db.models import EvidenceRecord
+                import uuid
+                evidence = db.query(EvidenceRecord).filter_by(
+                    tenant_id=uuid.UUID(tenant_id),
+                    workflow_id=workflow_id,
+                    source_reference=source_reference
+                ).order_by(EvidenceRecord.created_at.desc()).first()
+                
+                if evidence:
+                    evidence_id = str(evidence.id)
+
+            findings_service.create_finding(
+                db,
+                tenant_id=tenant_id,
+                workflow_id=workflow_id,
+                evidence_id=evidence_id,
+                framework=framework,
+                finding_type=finding_type,
+                source_reference=source_reference,
+                title=title,
+                description=description,
+                severity=severity,
+                status=status,
+                risk_score=risk_score,
+                remediation_summary=remediation_summary
+            )
+        except Exception as exc:
+            logger.warning(
+                "[finding] create_finding failed (non-fatal) workflow=%s: %s",
+                workflow_id, exc,
+            )
+    return _store
+
+
+def _check_approval_in_db(db: Session, approval_id: str) -> str:
+    """Check the status of a pending approval."""
+    try:
+        approval = db.query(PendingApproval).filter(
+            PendingApproval.id == uuid.UUID(approval_id)
+        ).first()
+    except ValueError:
+        return "EXPIRED"
+
+    if not approval:
+        return "EXPIRED"
+
+    # Check expiry
+    now = datetime.now(tz=timezone.utc)
+    if approval.expires_at and approval.expires_at.replace(tzinfo=timezone.utc) < now:
+        approval.status = "EXPIRED"
+        db.commit()
+        return "EXPIRED"
+
+    plan = (approval.action_payload or {}).get("plan") or []
+    destructive = any(bool(item.get("destructive")) for item in plan if isinstance(item, dict))
+    if approval.status == "APPROVED" and destructive:
+        mfa_timestamp = approval.mfa_timestamp
+        if mfa_timestamp and mfa_timestamp.tzinfo is None:
+            mfa_timestamp = mfa_timestamp.replace(tzinfo=timezone.utc)
+        if not approval.mfa_verified or not mfa_timestamp or mfa_timestamp < now - timedelta(minutes=30):
+            approval.status = "EXPIRED"
+            db.commit()
+            return "EXPIRED"
+
+    return approval.status
+
+
+class ComplianceWorkflowRunner:
+    """Manages the lifecycle of a compliance workflow execution."""
+
+    def __init__(self, db: Session):
+        self.db = db
+        self.graph = build_compliance_graph()
+
+    def start(
+        self,
+        tenant_id: str,
+        framework: str,
+        request_id: Optional[str] = None,
+    ) -> dict:
+        """Start a new compliance workflow."""
+        workflow_id = str(uuid.uuid4())
+        now = datetime.now(tz=timezone.utc)
+
+        # Create DB record
+        db_workflow = ComplianceWorkflow(
+            id=uuid.uuid4(),
+            tenant_id=uuid.UUID(tenant_id),
+            workflow_id=workflow_id,
+            request_id=request_id or "",
+            framework=framework,
+            current_state=WorkflowState.GATHER_EVIDENCE.value,
+            execution_status=ExecutionStatus.RUNNING.value,
+            started_at=now,
+            updated_at=now,
+        )
+
+        # Set tenant context for RLS, create record, then clear
+        self.db.execute(
+            text("SELECT set_config('app.current_tenant_id', :tid, false)"),
+            {"tid": tenant_id},
+        )
+        self.db.add(db_workflow)
+        self.db.commit()
+        self.db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
+
+        emit_audit_event(workflow_id, tenant_id, request_id or "",
+                         "START→GATHER_EVIDENCE", "workflow_start", "running")
+
+        # Build initial state with callback bindings
+        initial_state: ComplianceState = {
+            "workflow_id": workflow_id,
+            "tenant_id": tenant_id,
+            "request_id": request_id or "",
+            "framework": framework,
+            "current_state": WorkflowState.GATHER_EVIDENCE.value,
+            "findings": [],
+            "risk_score": 0.0,
+            "remediation_plan": [],
+            "remediation_state": RemediationState.NOT_STARTED.value,
+            "remediation_actions": [],
+            "rollback_result": {},
+            "approval_status": "",
+            "approval_id": "",
+            "execution_status": ExecutionStatus.RUNNING.value,
+            "execution_result": {},
+            "error_message": "",
+            "retry_count": 0,
+            "started_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "completed_at": "",
+            "_emit_audit": emit_audit_event,
+            "_persist_state": lambda s: _persist_state_to_db(self.db, s),
+            "_create_approval": lambda tid, wid, plan: _create_approval_in_db(self.db, tid, wid, plan),
+            "_check_approval": lambda aid: _check_approval_in_db(self.db, aid),
+            "_store_evidence": _make_store_evidence_fn(self.db),
+            "_store_finding": _make_store_finding_fn(self.db),
+        }
+
+        # Execute the graph
+        try:
+            final_state = self.graph.invoke(initial_state)
+        except Exception as exc:
+            logger.error("Workflow %s failed: %s", workflow_id, exc)
+            emit_audit_event(workflow_id, tenant_id, request_id or "",
+                             "FAILED", "workflow_error", str(exc))
+            # Update DB
+            wf = self.db.query(ComplianceWorkflow).filter(
+                ComplianceWorkflow.workflow_id == workflow_id
+            ).first()
+            if wf:
+                wf.execution_status = ExecutionStatus.FAILED.value
+                wf.error_message = str(exc)
+                wf.current_state = WorkflowState.FAILED.value
+                wf.updated_at = datetime.now(tz=timezone.utc)
+                self.db.commit()
+            raise
+
+        # Return sanitized state (no internal callbacks)
+        return {k: v for k, v in final_state.items() if not k.startswith("_")}
+
+    def _drive_remediation_states(self, state: ComplianceState) -> ComplianceState:
+        """Continue active remediation nodes until pause or terminal state."""
+        for _ in range(12):
+            current = state.get("current_state")
+            if current == WorkflowState.EXECUTE_REMEDIATION.value:
+                state = execute_remediation(state)
+                continue
+            if current == WorkflowState.VERIFY_RESULTS.value:
+                state = verify_results(state)
+                continue
+            if current == WorkflowState.ROLLBACK_REMEDIATION.value:
+                state = rollback_remediation(state)
+                continue
+            break
+        return state
+
+    def resume(
+        self,
+        workflow_id: str,
+        tenant_id: str,
+    ) -> dict:
+        """Resume a paused workflow (e.g., after approval)."""
+        lock_key = int(uuid.UUID(workflow_id).int & 0x7fffffffffffffff)
+        lock_acquired = self.db.execute(
+            text("SELECT pg_try_advisory_lock(:key)"),
+            {"key": lock_key}
+        ).scalar()
+
+        if not lock_acquired:
+            logger.warning("Workflow %s recovery/resume lock could not be acquired", workflow_id)
+            raise ValueError(f"Workflow {workflow_id} is currently being processed by another worker")
+
+        try:
+            wf = self.db.query(ComplianceWorkflow).filter(
+                ComplianceWorkflow.workflow_id == workflow_id,
+                ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
+            ).first()
+
+            if not wf:
+                raise ValueError(f"Workflow {workflow_id} not found for tenant {tenant_id}")
+
+            if wf.execution_status not in (ExecutionStatus.PAUSED.value, ExecutionStatus.RUNNING.value):
+                raise ValueError(
+                    f"Workflow {workflow_id} cannot be resumed (status={wf.execution_status})"
+                )
+
+            # Restore state from snapshot
+            state_data = wf.state_data or {}
+            state: ComplianceState = {
+                **state_data,
+                "execution_status": ExecutionStatus.RUNNING.value,
+                "_emit_audit": emit_audit_event,
+                "_persist_state": lambda s: _persist_state_to_db(self.db, s),
+                "_create_approval": lambda tid, wid, plan: _create_approval_in_db(self.db, tid, wid, plan),
+                "_check_approval": lambda aid: _check_approval_in_db(self.db, aid),
+                "_store_evidence": _make_store_evidence_fn(self.db),
+                "_store_finding": _make_store_finding_fn(self.db),
+            }
+
+            emit_audit_event(workflow_id, tenant_id, state.get("request_id", ""),
+                             f"RESUME→{wf.current_state}", "workflow_resume", "running")
+
+            # Update DB status
+            wf.execution_status = ExecutionStatus.RUNNING.value
+            wf.updated_at = datetime.now(tz=timezone.utc)
+            self.db.commit()
+
+            # Execute remaining nodes from current state
+            try:
+                current = wf.current_state
+
+                if current == WorkflowState.AWAITING_APPROVAL.value:
+                    state = awaiting_approval(state)
+                    approval_status = state.get("approval_status", "PENDING")
+                    if approval_status == "APPROVED":
+                        state = self._drive_remediation_states(state)
+                elif current in (
+                    WorkflowState.EXECUTE_REMEDIATION.value,
+                    WorkflowState.VERIFY_RESULTS.value,
+                    WorkflowState.ROLLBACK_REMEDIATION.value,
+                ):
+                    state = self._drive_remediation_states(state)
+
+            except Exception as exc:
+                logger.error("Workflow %s resume failed: %s", workflow_id, exc)
+                emit_audit_event(workflow_id, tenant_id, state.get("request_id", ""),
+                                 "FAILED", "workflow_resume_error", str(exc))
+                wf.execution_status = ExecutionStatus.FAILED.value
+                wf.error_message = str(exc)
+                wf.updated_at = datetime.now(tz=timezone.utc)
+                self.db.commit()
+                raise
+
+            return {k: v for k, v in state.items() if not k.startswith("_")}
+        finally:
+            try:
+                self.db.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": lock_key}
+                )
+            except Exception as unlock_exc:
+                logger.warning("Failed to release advisory lock for workflow %s: %s", workflow_id, unlock_exc)
+
+    def get_status(self, workflow_id: str, tenant_id: str) -> Optional[dict]:
+        """Get the current status of a workflow."""
+        wf = self.db.query(ComplianceWorkflow).filter(
+            ComplianceWorkflow.workflow_id == workflow_id,
+            ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
+        ).first()
+
+        if not wf:
+            return None
+
+        state_data = wf.state_data or {}
+        execution_result = wf.execution_result or {}
+        return {
+            "workflow_id": wf.workflow_id,
+            "tenant_id": str(wf.tenant_id),
+            "framework": wf.framework,
+            "current_state": wf.current_state,
+            "execution_status": wf.execution_status,
+            "risk_score": wf.risk_score,
+            "findings": wf.findings,
+            "remediation_plan": wf.remediation_plan,
+            "remediation_state": state_data.get("remediation_state") or execution_result.get("remediation_state"),
+            "remediation_actions": state_data.get("remediation_actions") or execution_result.get("actions"),
+            "rollback_result": state_data.get("rollback_result"),
+            "approval_status": wf.approval_status,
+            "approval_id": str(wf.approval_id) if wf.approval_id else None,
+            "execution_result": wf.execution_result,
+            "error_message": wf.error_message,
+            "retry_count": wf.retry_count,
+            "started_at": wf.started_at.isoformat() if wf.started_at else None,
+            "updated_at": wf.updated_at.isoformat() if wf.updated_at else None,
+            "completed_at": wf.completed_at.isoformat() if wf.completed_at else None,
+        }
+
+    def recover_interrupted(self, tenant_id: str) -> list[dict]:
+        """Find and recover workflows that were interrupted (RUNNING but not completed)."""
+        interrupted = self.db.query(ComplianceWorkflow).filter(
+            ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
+            ComplianceWorkflow.execution_status.in_(["RUNNING"]),
+            ComplianceWorkflow.completed_at.is_(None),
+        ).all()
+
+        results = []
+        for wf in interrupted:
+            try:
+                result = self.resume(wf.workflow_id, tenant_id)
+                results.append({"workflow_id": wf.workflow_id, "status": "recovered", "state": result})
+            except Exception as exc:
+                results.append({"workflow_id": wf.workflow_id, "status": "failed", "error": str(exc)})
+
+        return results

@@ -1,0 +1,44 @@
+{
+  "availability_target_percent": 99.99,
+  "data_write_topology": "active-standby",
+  "database": {
+    "promoted_read_replica_workflow": true,
+    "replica_lag_seconds": 12,
+    "promotion_started_at": "2026-07-08T10:00:00Z",
+    "promotion_completed_at": "2026-07-08T10:02:10Z"
+  },
+  "route53": {
+    "primary_record_withdrawn": true,
+    "secondary_record_served": true,
+    "failover_observed_seconds": 35
+  },
+  "chaos": {
+    "failure_modes": [
+      "primary_region_unavailable",
+      "database_primary_unavailable"
+    ],
+    "commands": [
+      "aws ecs update-service --desired-count 0",
+      "aws rds promote-read-replica",
+      "dig +short authclaw.example.com"
+    ]
+  },
+  "recovery": {
+    "rto_seconds": 190,
+    "write_probe_verified": true,
+    "audit_chain_verified": true,
+    "no_failed_requests_after_recovery": true,
+    "health_checks": {
+      "console": true,
+      "backend": true,
+      "gateway": true
+    }
+  },
+  "latency": {
+    "post_failover": {
+      "gateway_p95_ms": 300,
+      "gateway_p99_ms": 520,
+      "gateway_overhead_p95_ms": 42
+    }
+  }
+}

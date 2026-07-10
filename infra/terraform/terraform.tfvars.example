@@ -1,0 +1,32 @@
+project          = "authclaw"
+environment      = "prod"
+primary_region   = "us-east-1"
+secondary_region = "us-west-2"
+
+container_images = {
+  backend        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-backend:latest"
+  gateway        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-gateway:latest"
+  console        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-console:latest"
+  audit_consumer = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-audit-consumer:latest"
+  opa            = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-opa:latest"
+  presidio       = "mcr.microsoft.com/presidio-analyzer:latest"
+}
+
+# Use "production" only after regional ACM certificates, SMTP, and HTTPS DNS are configured.
+authclaw_env = "staging"
+
+# Keep true for an SRS-style warm standby database. Set false only for isolated regional test stacks.
+enable_cross_region_db_replica = true
+
+# Optional Route53 failover record.
+# hosted_zone_id = "Z1234567890"
+# domain_name    = "authclaw.example.com"
+# primary_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/..."
+# secondary_certificate_arn = "arn:aws:acm:us-west-2:123456789012:certificate/..."
+
+# Optional production email/audit integrations.
+# smtp_host = "email-smtp.us-east-1.amazonaws.com"
+# smtp_from = "security@example.com"
+# kafka_brokers = "b-1.example.kafka.us-east-1.amazonaws.com:9092"
+# clickhouse_host = "clickhouse.example.internal"
+# enable_audit_consumer = true

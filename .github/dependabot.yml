@@ -1,0 +1,96 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/console"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      console-npm-production:
+        dependency-type: "production"
+        patterns:
+          - "*"
+      console-npm-development:
+        dependency-type: "development"
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      backend-python:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/audit_consumer"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      audit-consumer-python:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "gomod"
+    directory: "/gateway"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      gateway-go:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      backend-docker:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/gateway"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      gateway-docker:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/console"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      console-docker:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/audit_consumer"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      audit-consumer-docker:
+        patterns:
+          - "*"

@@ -1,0 +1,11 @@
+title = "AuthClaw secret scanning"
+
+[allowlist]
+description = "Non-secret envelope marker strings used by AuthClaw encryption."
+regexes = [
+  '''authclaw-secret-v[12]:''',
+  # Deliberate detector fixtures; these values are not accepted credentials.
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''ghp_supersecretsecretsecretsecret''',
+  '''sk-proj-abc123XYZabc123XYZabc123XYZabc123XYZabc123''',
+]

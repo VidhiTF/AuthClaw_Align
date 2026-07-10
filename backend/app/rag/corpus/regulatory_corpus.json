@@ -1,0 +1,112 @@
+{
+  "corpus_key": "authclaw-regulatory-core",
+  "corpus_version": "2026.06.30",
+  "description": "Curated AuthClaw regulatory corpus for GDPR, HIPAA Security Rule, and SOC 2 Trust Services Criteria retrieval. Passages are concise operational summaries with official source citations.",
+  "documents": [
+    {
+      "framework": "GDPR",
+      "source_name": "Regulation (EU) 2016/679",
+      "source_url": "https://eur-lex.europa.eu/eli/reg/2016/679/oj",
+      "sections": [
+        {
+          "section_id": "GDPR-ART-5",
+          "title": "Article 5 - Processing Principles",
+          "citation_label": "GDPR Article 5",
+          "text": "Personal data processing must be lawful, fair, transparent, purpose limited, data minimized, accurate, storage limited, integrity/confidentiality protected, and accountable. AuthClaw controls should prove purpose limitation, redaction, auditability, and retention discipline.",
+          "keywords": ["lawfulness", "fairness", "transparency", "purpose limitation", "data minimization", "accuracy", "storage limitation", "integrity", "confidentiality", "accountability", "retention", "redaction"]
+        },
+        {
+          "section_id": "GDPR-ART-25",
+          "title": "Article 25 - Data Protection By Design And By Default",
+          "citation_label": "GDPR Article 25",
+          "text": "Controllers must apply appropriate technical and organizational measures, including pseudonymization and default minimization, so only necessary personal data is processed. AuthClaw remediation should prefer privacy-by-default routes, minimized prompts, scoped access, and reversible token controls only where justified.",
+          "keywords": ["privacy by design", "privacy by default", "pseudonymization", "minimization", "technical measures", "organizational measures", "default settings", "scoped access"]
+        },
+        {
+          "section_id": "GDPR-ART-32",
+          "title": "Article 32 - Security Of Processing",
+          "citation_label": "GDPR Article 32",
+          "text": "Security measures should reflect risk and may include pseudonymization, encryption, confidentiality, integrity, availability, resilience, restoration capability, and regular testing. AuthClaw evidence should tie redaction, key rotation, audit integrity, recovery, and tests to risk reduction.",
+          "keywords": ["security of processing", "encryption", "pseudonymization", "confidentiality", "integrity", "availability", "resilience", "restore", "testing", "risk"]
+        },
+        {
+          "section_id": "GDPR-ART-30",
+          "title": "Article 30 - Records Of Processing Activities",
+          "citation_label": "GDPR Article 30",
+          "text": "Organizations must maintain processing records describing purposes, categories of data, recipients, transfers, retention periods, and security measures. AuthClaw evidence exports should preserve policy versions, gateway routes, approvals, redaction metrics, and audit-chain proof.",
+          "keywords": ["records of processing", "processing activity", "recipients", "transfers", "retention periods", "security measures", "audit export", "policy versions"]
+        }
+      ]
+    },
+    {
+      "framework": "HIPAA",
+      "source_name": "HHS HIPAA Security Rule",
+      "source_url": "https://www.hhs.gov/hipaa/for-professionals/security/laws-regulations/index.html",
+      "sections": [
+        {
+          "section_id": "HIPAA-164-308",
+          "title": "45 CFR 164.308 - Administrative Safeguards",
+          "citation_label": "45 CFR 164.308",
+          "text": "Administrative safeguards require security management processes, assigned responsibility, workforce controls, information access management, awareness training, incident procedures, contingency planning, evaluation, and business associate controls. AuthClaw should show owner assignment, approval workflows, audit trails, and repeatable review evidence.",
+          "keywords": ["administrative safeguards", "risk analysis", "risk management", "assigned responsibility", "workforce", "access management", "training", "incident", "contingency", "evaluation", "business associate"]
+        },
+        {
+          "section_id": "HIPAA-164-312",
+          "title": "45 CFR 164.312 - Technical Safeguards",
+          "citation_label": "45 CFR 164.312",
+          "text": "Technical safeguards cover access control, unique user identification, emergency access, automatic logoff, encryption/decryption, audit controls, integrity controls, authentication, and transmission security. AuthClaw evidence should connect API key lifecycle, MFA approvals, PHI redaction, audit hash-chain integrity, and provider credential protection.",
+          "keywords": ["technical safeguards", "access control", "unique user identification", "automatic logoff", "encryption", "audit controls", "integrity", "authentication", "transmission security", "PHI", "MFA"]
+        },
+        {
+          "section_id": "HIPAA-164-310",
+          "title": "45 CFR 164.310 - Physical Safeguards",
+          "citation_label": "45 CFR 164.310",
+          "text": "Physical safeguards address facility access controls, workstation use, workstation security, and device/media controls. In cloud-native AuthClaw deployments, evidence should map hosting controls, endpoint restrictions, backup handling, and infrastructure access to the covered environment.",
+          "keywords": ["physical safeguards", "facility access", "workstation", "device controls", "media controls", "cloud hosting", "backup", "infrastructure access"]
+        },
+        {
+          "section_id": "HIPAA-164-316",
+          "title": "45 CFR 164.316 - Policies, Procedures, And Documentation",
+          "citation_label": "45 CFR 164.316",
+          "text": "Covered entities must maintain required policies, procedures, and documentation, retain them for required periods, make them available to responsible persons, and review/update them as needed. AuthClaw should preserve policy-as-code versions, runbooks, approvals, and evidence packages.",
+          "keywords": ["policies", "procedures", "documentation", "retention", "review", "updates", "policy as code", "runbooks", "evidence package"]
+        }
+      ]
+    },
+    {
+      "framework": "SOC2",
+      "source_name": "AICPA Trust Services Criteria",
+      "source_url": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022",
+      "sections": [
+        {
+          "section_id": "SOC2-CC6",
+          "title": "Common Criteria CC6 - Logical And Physical Access Controls",
+          "citation_label": "SOC 2 CC6",
+          "text": "Logical access controls should restrict system access to authorized users and protect credentials through provisioning, authentication, authorization, review, and removal. AuthClaw evidence should include API key expiry/rotation, scoped roles, provider credential rotation, tenant isolation, and access review artifacts.",
+          "keywords": ["logical access", "physical access", "authentication", "authorization", "provisioning", "deprovisioning", "credential", "access review", "tenant isolation", "API key"]
+        },
+        {
+          "section_id": "SOC2-CC7",
+          "title": "Common Criteria CC7 - System Operations",
+          "citation_label": "SOC 2 CC7",
+          "text": "System operations criteria emphasize detection, monitoring, incident response, and corrective action. AuthClaw evidence should connect gateway telemetry, redaction fallback metrics, DLQs, audit chain verification, alert runbooks, and remediation action audit events.",
+          "keywords": ["system operations", "monitoring", "detection", "incident response", "corrective action", "telemetry", "DLQ", "audit chain", "metrics", "runbook"]
+        },
+        {
+          "section_id": "SOC2-CC8",
+          "title": "Common Criteria CC8 - Change Management",
+          "citation_label": "SOC 2 CC8",
+          "text": "Change management criteria expect controlled development, testing, approval, and deployment of changes. AuthClaw should preserve policy validation, dry-run decisions, version activation/rollback, CI evidence, Terraform plans, and reviewed deployment history.",
+          "keywords": ["change management", "testing", "approval", "deployment", "policy validation", "dry run", "rollback", "CI", "Terraform", "version"]
+        },
+        {
+          "section_id": "SOC2-C1",
+          "title": "Confidentiality Category",
+          "citation_label": "SOC 2 Confidentiality",
+          "text": "Confidentiality commitments require identifying confidential information, protecting it through its lifecycle, limiting access and disclosure, and securely disposing of it. AuthClaw should map redaction, token retention/purge, encryption, provider controls, and audit exports to confidentiality commitments.",
+          "keywords": ["confidentiality", "lifecycle", "access", "disclosure", "disposal", "redaction", "retention", "purge", "encryption", "provider controls"]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "release_id": "release-2026-07-08",
+  "generated_at": "2026-07-08T12:00:00Z",
+  "ci_gates": {
+    "codeql_sast": true,
+    "python_dependency_audit": true,
+    "node_dependency_audit": true,
+    "go_vulnerability_audit": true,
+    "secret_scan": true,
+    "iac_scan": true,
+    "container_scan": true
+  },
+  "external_pentest": {
+    "performed_by_external_vendor": true,
+    "report_reference": "pentest/AuthClaw-External-Pentest-2026Q3.pdf",
+    "completed_at": "2026-07-08T11:30:00Z",
+    "open_critical_findings": 0,
+    "open_high_findings": 0,
+    "open_medium_findings": 0,
+    "retest_passed": true
+  },
+  "security_runbooks": {
+    "incident_response": "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#incident-response",
+    "vulnerability_management": "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#vulnerability-management",
+    "access_review": "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#access-review",
+    "backup_restore": "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#backup-and-restore",
+    "key_rotation": "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#key-rotation"
+  },
+  "soc2_evidence": {
+    "automated_collection_enabled": true,
+    "controls": {
+      "CC6.1": ["github-codeql", "access-review"],
+      "CC6.6": ["gateway-contract-tests"],
+      "CC7.1": ["trivy-fs", "gitleaks"],
+      "CC7.2": ["red-team-run"],
+      "CC7.3": ["findings-fix-cycle"],
+      "A1.2": ["ha-failover-proof"]
+    }
+  },
+  "control_evidence_pipeline": {
+    "traceability_links_created": true,
+    "mapped_controls": 6,
+    "evidence_records": 12,
+    "export_verified": true
+  },
+  "red_team_thresholds": {
+    "probe_count": 4,
+    "failed_critical": 0,
+    "failed_high": 0,
+    "max_risk_score": 0,
+    "latest_run_reference": "redteam-2026-07-08"
+  },
+  "audit_ready_release_checklist": {
+    "external_pentest_closed": true,
+    "security_gates_green": true,
+    "soc2_evidence_complete": true,
+    "control_traceability_complete": true,
+    "red_team_thresholds_passed": true,
+    "audit_export_verified": true,
+    "release_owner_approved": true
+  }
+}

@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+.next/
+**/.next/
+dist/
+build/
+coverage/
+
+# Virtual Environments
+.venv/
+venv/
+
+# Environment Variables
+.env
+.env.local
+.env.demo.local
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# Runtime state
+.authclaw/
+console/.authclaw/
+sessions.json
+console/sessions.json
+
+# Go binaries
+*.exe
+.gocache/
+
+# Test caches
+.pytest_cache/
+console/test-results/
+test-results/
+playwright-report/
+report/
+
+# Generated benchmark output
+gateway-benchmark*.json
+loc_results*.json
+tokei.zip
+tokei.exe
+
+# Local line-count helpers
+.tokeignore
+scripts/download_tokei.py
+
+# Local study artifacts
+PROJECT_MIND_MAP.md
+Home_Page/
+
+# Terraform
+.terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+*.tfplan
+*.tfvars
+!*.tfvars.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Semantic Merge Tool
+.venv_semantic_merge/
+.semantic_merge_cache.pkl
+semantic_merge_report.*

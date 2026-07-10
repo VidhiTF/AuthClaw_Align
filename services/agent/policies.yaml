@@ -1,0 +1,89 @@
+version: "1.0.0"
+
+blocked_keywords:
+  - bomb
+  - explosive
+  - hack
+  - weapon
+
+high_risk_keywords:
+  # Destructive operations
+  - delete
+  - remove
+  - drop
+  - shutdown
+  - terminate
+  - production
+  # Privilege escalation — must trigger approval workflow
+  - grant admin
+  - grant administrator
+  - grant root
+  - assign root
+  - assign administrator
+  - make admin
+  - make administrator
+  - super admin
+  - superuser
+  - elevate privileges
+  - privilege escalation
+  - elevate role
+  - role escalation
+  - modify permissions
+  - change permissions
+  - grant permissions
+  - mass permission
+  - access control modification
+  - rbac modification
+  - promote all users
+  - admin access to all
+
+medium_risk_keywords:
+  - update
+  - modify
+  - change
+  - edit
+
+redaction:
+  email: mask
+  phone: hash
+  aadhaar: mask
+  credit_card: synthetic
+
+sensitive_data:
+  default_action: redact
+  approval_confidence_threshold: 1.01
+  actions:
+    secrets: block
+    openai_api_key: block
+    google_api_key: block
+    aws_access_key: block
+    jwt_token: block
+    bearer_token: block
+    api_key_param: block
+    secret_param: block
+    token_param: block
+    access_token: block
+    private_key: block
+    email: mask
+    phone: hash
+    aadhaar: mask
+    pan: tokenize
+    gstin: tokenize
+    credit_card: redact
+    ssn: redact
+    name: redact
+    person: redact
+    address: redact
+    medical_identifier: redact
+    financial_identifier: tokenize
+
+opa:
+  package: authclaw.policy
+  bundle_version: "1.0.0"
+  fail_closed: true
+
+approval:
+  require_mfa: true
+  default_mfa_code: "123456"
+  expiry_minutes: 30
+  execution_expiry_minutes: 10

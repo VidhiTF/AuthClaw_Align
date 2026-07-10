@@ -1,0 +1,3 @@
+SOC2:
+
+Organizations should implement strong access controls, monitoring, audit logging, incident response procedures, and security policies to protect customer data.

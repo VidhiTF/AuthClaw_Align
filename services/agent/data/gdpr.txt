@@ -1,0 +1,5 @@
+GDPR Article 5:
+
+Personal data shall be processed lawfully, fairly, and transparently.
+
+Organizations must collect only necessary personal data, protect it appropriately, and provide individuals with rights such as access, correction, and deletion.

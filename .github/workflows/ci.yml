@@ -1,0 +1,625 @@
+name: AuthClaw CI/CD Hard Gates
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+concurrency:
+  group: authclaw-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "22"
+  GO_VERSION_FILE: gateway/go.mod
+  REGISTRY: ghcr.io
+
+jobs:
+  line-budget:
+    name: Source Size Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Tokei
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tokei
+
+      - name: Enforce AGENTS.md line budgets
+        run: |
+          tokei backend/app gateway audit_consumer services/agent console/src \
+            --exclude '*_test.go' \
+            --exclude 'tests' \
+            --exclude '__pycache__' \
+            -o json | python3 scripts/check_line_budget.py
+
+  sast-codeql:
+    name: SAST / CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go for CodeQL autobuild
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: gateway/go.sum
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: python,javascript-typescript,go
+
+      - name: Build Go gateway for CodeQL trace
+        working-directory: gateway
+        run: go build ./...
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:multi"
+
+  dependency-and-secret-scan:
+    name: Dependency, Secret, and IaC Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v3
+        with:
+          args: detect --source . --no-git --redact --verbose --config .gitleaks.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Python dependency audit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
+          pip-audit -r backend/requirements.txt -r audit_consumer/requirements.txt -r services/agent/requirements.txt --strict
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: Node dependency audit
+        working-directory: console
+        run: npm audit --audit-level=high
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: gateway/go.sum
+
+      - name: Go vulnerability audit
+        working-directory: gateway
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Filesystem vulnerability, secret, and IaC scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,config
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+          skip-dirs: ".git,.terraform,node_modules,console/node_modules,backend/.venv,audit_consumer/.venv,backend/.pytest_cache,audit_consumer/.pytest_cache"
+
+  backend-tests:
+    name: Backend Migrations and Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: authclaw
+          POSTGRES_USER: authclaw
+          POSTGRES_PASSWORD: authclaw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U authclaw -d authclaw"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      clickhouse:
+        image: clickhouse/clickhouse-server:latest
+        env:
+          CLICKHOUSE_DB: authclaw
+          CLICKHOUSE_USER: authclaw
+          CLICKHOUSE_PASSWORD: authclaw
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+    env:
+      OWNER_DATABASE_URL: postgresql+psycopg://authclaw:authclaw@localhost:5432/authclaw
+      DATABASE_URL: postgresql+psycopg://authclaw:authclaw@localhost:5432/authclaw
+      POSTGRES_DB: authclaw
+      POSTGRES_APP_USER: authclaw_app
+      POSTGRES_APP_PASSWORD: authclaw_app
+      REDIS_URL: redis://localhost:6379
+      CLICKHOUSE_URL: http://authclaw:authclaw@localhost:8123/authclaw
+      AUTHCLAW_ENV: ci
+      JWT_SECRET: ci-jwt-secret
+      SESSION_SECRET: ci-session-secret
+      ENVELOPE_KEY: ci-envelope-key
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Apply migrations and restricted app role
+        working-directory: backend
+        run: |
+          alembic upgrade head
+          python scripts/ensure_app_db_role.py
+
+      - name: Run backend tests
+        working-directory: backend
+        run: >
+          pytest --cov=app --cov-report=term-missing
+          tests/test_audit_export.py
+          tests/test_audit_store.py
+          tests/test_auth_baseline.py
+          tests/test_compliance_scoring.py
+          tests/test_ephemeral_workers.py
+          tests/test_event_backbone.py
+          tests/test_phase10.py::test_phase10_production_approval_requires_mfa_enrollment
+          tests/test_policy_engine.py
+          tests/test_rag_service.py
+          tests/test_secret_crypto.py
+          tests/test_trust_center.py
+
+  audit-consumer-tests:
+    name: Audit Consumer Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install audit consumer dependencies
+        working-directory: audit_consumer
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run audit consumer tests
+        working-directory: audit_consumer
+        run: pytest tests/ -q
+
+  agent-tests:
+    name: Agent Compile and Core Smoke Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install agent dependencies
+        working-directory: services/agent
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile agent service
+        working-directory: services/agent
+        run: python -m compileall -q .
+
+      - name: Run dependency-light agent smoke tests
+        working-directory: services/agent
+        run: python -m unittest discover -s smoke_tests -v
+
+  gateway-tests:
+    name: Gateway Deterministic Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: authclaw
+          POSTGRES_USER: authclaw
+          POSTGRES_PASSWORD: authclaw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U authclaw -d authclaw"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://authclaw:authclaw@localhost:5432/authclaw?sslmode=disable
+      AUTHCLAW_GATEWAY_AUDIT_DB_TESTS: "true"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: gateway/go.sum
+
+      - name: Run deterministic gateway tests
+        working-directory: gateway
+        run: |
+          go test ./... -run 'Test(PayloadFidelityContract|StreamingPayloadFidelityContracts|ProviderContractManifestDriftGate|ExtractAndNormalize|ProviderRouteValidation|ApplyProviderCredentialHeaders|AzureOpenAIRequiresTenantProviderCredential|HITLTimeoutUses|PublishAuditEvent|EmitAuditEvent|AuditEvent|DLQMessage|PublishToDLQ|ValidatePolicyYAML|NormalizeDetected|StaticReversalReader|StreamingReversalReader|AnalyzePrompt|FallbackAnalyze|PresidioAnalyze|HashStrategy|SecretEnvelope|ValidateEnvelope|HealthCheck)' -count=1
+
+  sdk-tests:
+    name: Python SDK Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run install-free SDK tests
+        run: python -m unittest discover -s sdk/python -p "test_*.py"
+
+  ha-failover-proof:
+    name: HA Failover Proof Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Run HA evidence validator tests
+        run: python -m unittest scripts/test_ha_failover_evidence.py
+
+      - name: Validate sample HA failover evidence
+        run: python scripts/ha_failover_evidence.py infra/terraform/ha_failover_evidence.example.json
+
+  console-tests:
+    name: Console Lint, Typecheck, Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: Install console dependencies
+        working-directory: console
+        run: npm ci
+
+      - name: Lint
+        working-directory: console
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: console
+        run: npx tsc --noEmit --pretty false
+
+      - name: API contract adapter test
+        working-directory: console
+        run: npm run test:contract
+
+      - name: Build
+        working-directory: console
+        run: npm run build
+        env:
+          API_URL: http://localhost:8000
+          NEXT_PUBLIC_GATEWAY_URL: http://localhost:8080
+          NEXT_PUBLIC_AUTHCLAW_DEMO_MODE: "true"
+          NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+          NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: "true"
+          SESSION_SECRET: ci-console-session-secret
+
+  integration-and-benchmark:
+    name: Full Stack Integration and Benchmark Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs:
+      - backend-tests
+      - audit-consumer-tests
+      - agent-tests
+      - gateway-tests
+      - console-tests
+    env:
+      AUTHCLAW_LITE_DEMO_KEY: acl_lite_demo_key
+      NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: "true"
+      AUTHCLAW_LITE_DEMO_PASSWORD: AuthClawDemo!234
+      GEMINI_BASE_URL: http://mock-provider:19090
+      PRESIDIO_ANALYZE_TIMEOUT_MS: "25"
+      REDACTION_LOCAL_ANALYZER_ONLY: "true"
+      AUTHCLAW_LITE_POLICY_REQUESTS_PER_MINUTE: "0"
+      GATEWAY_RATE_LIMIT_ENABLED: "false"
+      GATEWAY_HTTP_LOGGER_ENABLED: "false"
+      GATEWAY_AUTH_LAST_USED_ENABLED: "false"
+      GATEWAY_AUTH_CACHE_TTL_MS: "60000"
+      PROVIDER_CREDENTIAL_CACHE_TTL_MS: "60000"
+      GATEWAY_POLICY_DECISION_CACHE_TTL_MS: "60000"
+      GATEWAY_RATE_LIMIT_PER_MINUTE: "600"
+      GATEWAY_RATE_LIMIT_BURST_10S: "200"
+      AUTHCLAW_SMOKE_PORTS: "8000:FastAPI Backend,8001:LangGraph Agent,8080:Go Gateway,3001:Next.js Console,6379:Redis"
+      AUTHCLAW_SMOKE_ENDPOINTS: "http://localhost:8000/health=200,http://localhost:8001/health/ready=200,http://localhost:8080/health=200,http://localhost:3001/login=200,http://localhost:3001/trust/shared/tc_not_real=200"
+      AUTHCLAW_SMOKE_RETRIES: "30"
+      AUTHCLAW_SMOKE_RETRY_DELAY_SECONDS: "2"
+      AUTHCLAW_BENCH_GATEWAY_URL: http://localhost:8080
+      AUTHCLAW_BENCH_API_KEY: acl_lite_demo_key
+      AUTHCLAW_BENCH_PROVIDER: gemini
+      AUTHCLAW_BENCH_MODEL: gemini-2.5-flash-lite
+      AUTHCLAW_BENCH_PROVIDER_BASELINE_URL: http://localhost:19090
+      AUTHCLAW_BENCH_SCENARIOS: allow,redact,block,stream
+      AUTHCLAW_BENCH_REQUESTS: "12"
+      AUTHCLAW_BENCH_CONCURRENCY: "5"
+      AUTHCLAW_BENCH_P95_MS: "900"
+      AUTHCLAW_BENCH_P99_MS: "1200"
+      AUTHCLAW_BENCH_OVERHEAD_P50_MS: "50"
+      AUTHCLAW_BENCH_OVERHEAD_P95_MS: "50"
+      AUTHCLAW_BENCH_OVERHEAD_P99_MS: "50"
+      AUTHCLAW_BENCH_TRANSFORM_OVERHEAD_P50_MS: "250"
+      AUTHCLAW_BENCH_TRANSFORM_OVERHEAD_P95_MS: "300"
+      AUTHCLAW_BENCH_TRANSFORM_OVERHEAD_P99_MS: "300"
+      AUTHCLAW_BENCH_STREAM_FIRST_BYTE_OVERHEAD_P95_MS: "150"
+      AUTHCLAW_BENCH_STREAM_OVERHEAD_P50_MS: "150"
+      AUTHCLAW_BENCH_STREAM_OVERHEAD_P95_MS: "150"
+      AUTHCLAW_BENCH_STREAM_OVERHEAD_P99_MS: "150"
+      AUTHCLAW_BENCH_JSON_OUTPUT: gateway-benchmark-ci.json
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Start full stack with CI mock provider
+        run: docker compose --profile ci -f docker-compose.full.yml up -d --build
+
+      - name: Seed full-stack tenant and gateway key
+        run: docker compose -f docker-compose.full.yml exec -T backend sh -c 'cd /app && AUTHCLAW_LITE_POLICY_REQUESTS_PER_MINUTE=0 DATABASE_URL="$OWNER_DATABASE_URL" PYTHONPATH=/app python scripts/seed_authclaw_lite.py'
+
+      - name: Smoke test full stack
+        run: python scripts/smoke_test.py
+
+      - name: Set up Node.js for Playwright
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: Install Playwright dependencies
+        working-directory: console
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run console E2E checks
+        working-directory: console
+        run: npx playwright test
+        env:
+          E2E_LOGIN_EMAIL: admin@authclaw-lite.demo
+          E2E_LOGIN_PASSWORD: AuthClawDemo!234
+
+      - name: Gateway latency benchmark gate
+        run: python scripts/gateway_latency_benchmark.py --require-provider-baseline
+
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gateway-benchmark-ci
+          path: gateway-benchmark-ci.json
+          if-no-files-found: warn
+
+      - name: Dump Compose logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.full.yml logs --no-color
+
+      - name: Stop full stack
+        if: always()
+        run: docker compose --profile ci -f docker-compose.full.yml down -v
+
+  compliance-hardening-proof:
+    name: Compliance Hardening Proof Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - sast-codeql
+      - dependency-and-secret-scan
+      - backend-tests
+      - audit-consumer-tests
+      - agent-tests
+      - gateway-tests
+      - sdk-tests
+      - ha-failover-proof
+      - console-tests
+      - integration-and-benchmark
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Run compliance hardening evidence tests
+        run: python -m unittest scripts/test_compliance_hardening_evidence.py
+
+      - name: Validate sample compliance hardening evidence
+        run: python scripts/compliance_hardening_evidence.py infra/security/compliance_hardening_evidence.example.json
+
+  docker-build-push:
+    name: Docker Image Build and Push
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs:
+      - line-budget
+      - sast-codeql
+      - dependency-and-secret-scan
+      - backend-tests
+      - audit-consumer-tests
+      - agent-tests
+      - gateway-tests
+      - sdk-tests
+      - ha-failover-proof
+      - console-tests
+      - integration-and-benchmark
+      - compliance-hardening-proof
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: backend
+            context: ./backend
+            dockerfile: ./backend/Dockerfile.demo
+          - service: gateway
+            context: ./gateway
+            dockerfile: ./gateway/Dockerfile.demo
+          - service: console
+            context: ./console
+            dockerfile: ./console/Dockerfile
+          - service: agent
+            context: ./services/agent
+            dockerfile: ./services/agent/Dockerfile
+          - service: audit-consumer
+            context: .
+            dockerfile: ./audit_consumer/Dockerfile
+          - service: opa-bundle
+            context: ./infra/opa
+            dockerfile: ./infra/opa/Dockerfile
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Compute lowercase image name
+        id: image
+        shell: bash
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"
+          echo "name=${REGISTRY}/${repo}/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=ci-${{ github.sha }}
+            type=sha,prefix=
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build local image for mandatory scan
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          build-args: |
+            NEXT_PUBLIC_API_URL=http://localhost:18000/api/v1
+            NEXT_PUBLIC_GATEWAY_URL=http://localhost:18080
+            NEXT_PUBLIC_AUTHCLAW_DEMO_MODE=true
+
+      - name: Scan built image for high/critical CVEs
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.name }}:ci-${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Push scanned image
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          build-args: |
+            NEXT_PUBLIC_API_URL=http://localhost:18000/api/v1
+            NEXT_PUBLIC_GATEWAY_URL=http://localhost:18080
+            NEXT_PUBLIC_AUTHCLAW_DEMO_MODE=true

@@ -1,0 +1,11 @@
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+*.pyo
+*.pyd
+*.log
+tests
+console_ui_phase12_check.py
+console_ui_sanity_check.py
+test_*.py
