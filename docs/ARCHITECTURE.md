@@ -1,5 +1,8 @@
 # Consolidated architecture
 
+The proposed canonical monorepo and component boundaries are recorded in
+[ADR-0001](adr/0001-canonical-monorepo-component-boundaries.md), pending Binod approval.
+
 ## Runtime boundaries
 
 1. The **console** calls the FastAPI **control plane** using a short-lived bearer API key.
