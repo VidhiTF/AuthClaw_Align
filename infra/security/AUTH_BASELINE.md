@@ -42,6 +42,42 @@ Set `AUTHCLAW_SECRET_PROVIDER` to one of:
 
 Production must set `AUTHCLAW_SECRET_KEY_VERSION`. Rotate secrets by adding a new versioned key, deploying with the new version, rotating provider credentials, and then retiring old material after all rows have moved.
 
+### Managed envelope model
+
+- Backend and gateway field encryption uses randomized AES-256-GCM. The runtime
+  envelope key is injected from AWS Secrets Manager; the Terraform stack encrypts
+  that secret with the environment KMS key. The ciphertext records provider and key
+  version so old material can remain available during rotation.
+- Agent database fields can use per-record AWS KMS envelope encryption by setting
+  `AUTHCLAW_ENVELOPE_PROVIDER=aws_kms` and `AUTHCLAW_AWS_KMS_KEY_ID`. Each write calls
+  `GenerateDataKey`, stores only the wrapped data key, key identifier and AES-GCM
+  ciphertext, and binds KMS operations to the `authclaw:purpose=database-field`
+  encryption context.
+- Selecting a managed envelope provider is fail-closed. KMS/Vault errors never fall
+  back to local encryption, and provider error details are not returned to callers.
+
+### Rotation and failure procedure
+
+1. Preserve the previous version as `ENVELOPE_KEY_<OLD_VERSION>` for backend and
+   gateway reads; never overwrite it in place.
+2. Add the next managed secret and set `AUTHCLAW_SECRET_KEY_VERSION` plus
+   `ENVELOPE_KEY_<NEW_VERSION>` for the deployment.
+3. Re-save or rotate provider, connector and OIDC credentials so new ciphertext uses
+   the new version/key identifier.
+4. Prove both old and new rows decrypt, then remove the previous key only after no
+   records reference it.
+5. For per-record KMS envelopes, change `AUTHCLAW_AWS_KMS_KEY_ID` for new writes. Old
+   ciphertext retains its original key identifier and remains decryptable while that
+   KMS key is enabled.
+6. A disabled key, wrong key identifier/context, malformed envelope or failed KMS call
+   must fail the request. Do not retry with local keys.
+
+Production service boundaries default to TLS enforcement. Backend requires HTTPS for
+`GATEWAY_INTERNAL_URL`, `OPA_URL` and `PRESIDIO_URL`; gateway requires HTTPS for OPA and
+Presidio. Staging can exercise the same guard with
+`AUTHCLAW_REQUIRE_SERVICE_TLS=true`. Live certificates and TLS handshakes remain an AWS
+acceptance-evidence step.
+
 ## OIDC/SSO Hooks
 
 OIDC discovery is exposed at:

@@ -6,6 +6,8 @@ The proposed public URL, AWS edge, environment-isolation and ownership contract 
 recorded in [ADR-0002](adr/0002-aws-url-environment-boundary.md). ADR-0002 remains
 pending Binod approval; existing Terraform must not be interpreted as satisfying it
 until ACL-14 supplies implementation and acceptance evidence.
+The managed cryptography, key-rotation, TLS-boundary and no-credential evidence model
+is recorded in [ADR-0004](adr/0004-acl-10-managed-cryptography.md).
 
 ## Runtime boundaries
 

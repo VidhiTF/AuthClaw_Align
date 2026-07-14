@@ -606,6 +606,28 @@ func TestValidateEnvelopeKeyConfigRejectsDemoProductionKey(t *testing.T) {
 	}
 }
 
+func TestValidateServiceTLSConfigFailsClosedInProduction(t *testing.T) {
+	t.Setenv("AUTHCLAW_ENV", "production")
+	t.Setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "")
+	t.Setenv("OPA_URL", "http://opa.internal:8181")
+	t.Setenv("PRESIDIO_URL", "https://presidio.internal:3000")
+
+	if err := ValidateServiceTLSConfig(); err == nil || !strings.Contains(err.Error(), "OPA_URL") {
+		t.Fatalf("expected plaintext OPA URL to be rejected, got %v", err)
+	}
+}
+
+func TestValidateServiceTLSConfigAcceptsHTTPSServiceURLs(t *testing.T) {
+	t.Setenv("AUTHCLAW_ENV", "staging")
+	t.Setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true")
+	t.Setenv("OPA_URL", "https://opa.internal:8181")
+	t.Setenv("PRESIDIO_URL", "https://presidio.internal:3000")
+
+	if err := ValidateServiceTLSConfig(); err != nil {
+		t.Fatalf("expected HTTPS service URLs to pass, got %v", err)
+	}
+}
+
 func TestRedactEngine(t *testing.T) {
 	// 1. Init DB
 	InitDB()

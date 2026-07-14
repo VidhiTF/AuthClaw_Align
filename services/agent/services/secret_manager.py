@@ -50,6 +50,7 @@ SENSITIVE_ENV_NAMES = {
 }
 
 _LOCAL_SECRET_CACHE: Dict[str, str] = {}
+KMS_ENCRYPTION_CONTEXT = {"authclaw:purpose": "database-field"}
 
 
 def normalize_provider(provider: str) -> str:
@@ -123,12 +124,15 @@ class SecretManager:
         self.region_name = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
 
     def selection_policy(self) -> Dict[str, Any]:
+        envelope_provider = self._envelope_provider()
         return {
             "requested_backend": (os.getenv("AUTHCLAW_SECRET_BACKEND") or "auto").strip().lower(),
             "selected_backend": self.backend,
             "fallback_hierarchy": ["hashicorp_vault", "aws_secrets_manager", "local_env"],
             "production_allows_local": not _is_production(),
             "rotation_supported": self.backend in {"local_env", "local", "aws_secrets_manager", "hashicorp_vault", "vault"},
+            "envelope_provider": envelope_provider or "local",
+            "envelope_fail_closed": envelope_provider not in {"", "local", "local_env", "disabled", "none"},
         }
 
     def get_secret(self, name: str) -> Optional[str]:
@@ -334,30 +338,41 @@ class SecretManager:
         provider = self._envelope_provider()
         if provider in {"", "local", "local_env", "disabled", "none"}:
             return None
-        try:
-            data_key, encrypted_data_key, key_id = self._generate_envelope_data_key(provider)
-            nonce = os.urandom(12)
-            ciphertext = AESGCM(data_key).encrypt(nonce, value.encode("utf-8"), None)
-            payload = {
-                "provider": provider,
-                "key_id": key_id,
-                "encrypted_data_key": base64.urlsafe_b64encode(encrypted_data_key).decode("utf-8"),
-                "ciphertext": base64.urlsafe_b64encode(nonce + ciphertext).decode("utf-8"),
-                "alg": "AES-256-GCM",
-            }
-            return "v3:envelope:" + base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")
-        except Exception:
-            if _is_production() and os.getenv("AUTHCLAW_REQUIRE_REMOTE_KMS", "").lower() in {"1", "true", "yes", "on"}:
-                raise
-            return None
+        data_key, encrypted_data_key, key_id = self._generate_envelope_data_key(provider)
+        if len(data_key) != 32 or not encrypted_data_key or not key_id:
+            raise SecretManagerError("Managed envelope provider returned invalid key material.")
+        nonce = os.urandom(12)
+        ciphertext = AESGCM(data_key).encrypt(nonce, value.encode("utf-8"), None)
+        payload = {
+            "provider": provider,
+            "key_id": key_id,
+            "encrypted_data_key": base64.urlsafe_b64encode(encrypted_data_key).decode("utf-8"),
+            "ciphertext": base64.urlsafe_b64encode(nonce + ciphertext).decode("utf-8"),
+            "encryption_context": KMS_ENCRYPTION_CONTEXT if provider in {"aws", "aws_kms", "kms"} else {},
+            "alg": "AES-256-GCM",
+        }
+        return "v3:envelope:" + base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")
 
     def _decrypt_with_envelope(self, encrypted_value: str) -> str:
-        encoded = encrypted_value.split(":", 2)[2]
-        payload = json.loads(base64.urlsafe_b64decode(encoded.encode("utf-8")).decode("utf-8"))
-        provider = str(payload.get("provider") or self._envelope_provider()).lower()
-        encrypted_data_key = base64.urlsafe_b64decode(payload["encrypted_data_key"].encode("utf-8"))
-        data_key = self._decrypt_envelope_data_key(provider, encrypted_data_key, payload.get("key_id"))
-        ciphertext_payload = base64.urlsafe_b64decode(payload["ciphertext"].encode("utf-8"))
+        try:
+            encoded = encrypted_value.split(":", 2)[2]
+            payload = json.loads(base64.b64decode(encoded, altchars=b"-_", validate=True).decode("utf-8"))
+            provider = str(payload["provider"]).lower()
+            key_id = str(payload["key_id"])
+            if payload.get("alg") != "AES-256-GCM" or not key_id:
+                raise ValueError("unsupported algorithm or missing key identifier")
+            encrypted_data_key = base64.b64decode(payload["encrypted_data_key"], altchars=b"-_", validate=True)
+            ciphertext_payload = base64.b64decode(payload["ciphertext"], altchars=b"-_", validate=True)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SecretManagerError("Managed envelope payload is invalid.") from exc
+        if len(ciphertext_payload) <= 12:
+            raise SecretManagerError("Managed envelope ciphertext is invalid.")
+        encryption_context = payload.get("encryption_context")
+        if encryption_context is not None and not isinstance(encryption_context, dict):
+            raise SecretManagerError("Managed envelope encryption context is invalid.")
+        data_key = self._decrypt_envelope_data_key(provider, encrypted_data_key, key_id, encryption_context)
+        if len(data_key) != 32:
+            raise SecretManagerError("Managed envelope provider returned an invalid data key.")
         nonce, ciphertext = ciphertext_payload[:12], ciphertext_payload[12:]
         return AESGCM(data_key).decrypt(nonce, ciphertext, None).decode("utf-8")
 
@@ -368,9 +383,15 @@ class SecretManager:
             return self._vault_generate_data_key()
         raise SecretManagerError(f"Unsupported envelope provider '{provider}'.")
 
-    def _decrypt_envelope_data_key(self, provider: str, encrypted_data_key: bytes, key_id: Optional[str]) -> bytes:
+    def _decrypt_envelope_data_key(
+        self,
+        provider: str,
+        encrypted_data_key: bytes,
+        key_id: Optional[str],
+        encryption_context: Optional[Dict[str, str]] = None,
+    ) -> bytes:
         if provider in {"aws", "aws_kms", "kms"}:
-            return self._aws_kms_decrypt_data_key(encrypted_data_key)
+            return self._aws_kms_decrypt_data_key(encrypted_data_key, key_id, encryption_context)
         if provider in {"vault", "hashicorp_vault"}:
             return self._vault_decrypt_data_key(encrypted_data_key, key_id)
         raise SecretManagerError(f"Unsupported envelope provider '{provider}'.")
@@ -392,12 +413,32 @@ class SecretManager:
 
     def _aws_kms_generate_data_key(self):
         key_id = self._aws_kms_key_id()
-        response = self._kms_client().generate_data_key(KeyId=key_id, KeySpec="AES_256")
-        return response["Plaintext"], response["CiphertextBlob"], key_id
+        try:
+            response = self._kms_client().generate_data_key(
+                KeyId=key_id,
+                KeySpec="AES_256",
+                EncryptionContext=KMS_ENCRYPTION_CONTEXT,
+            )
+            return response["Plaintext"], response["CiphertextBlob"], key_id
+        except Exception as exc:
+            raise SecretManagerError(f"AWS KMS GenerateDataKey failed: {type(exc).__name__}.") from exc
 
-    def _aws_kms_decrypt_data_key(self, encrypted_data_key: bytes) -> bytes:
-        response = self._kms_client().decrypt(CiphertextBlob=encrypted_data_key)
-        return response["Plaintext"]
+    def _aws_kms_decrypt_data_key(
+        self,
+        encrypted_data_key: bytes,
+        key_id: Optional[str],
+        encryption_context: Optional[Dict[str, str]],
+    ) -> bytes:
+        if not key_id:
+            raise SecretManagerError("AWS KMS key identifier is missing from the envelope.")
+        try:
+            request: Dict[str, Any] = {"CiphertextBlob": encrypted_data_key, "KeyId": key_id}
+            if encryption_context is not None:
+                request["EncryptionContext"] = encryption_context
+            response = self._kms_client().decrypt(**request)
+            return response["Plaintext"]
+        except Exception as exc:
+            raise SecretManagerError(f"AWS KMS decrypt failed: {type(exc).__name__}.") from exc
 
     def _vault_transit_key(self) -> str:
         return os.getenv("VAULT_TRANSIT_KEY", "authclaw-tenant-key")

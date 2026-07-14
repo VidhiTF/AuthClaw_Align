@@ -1,6 +1,10 @@
+import base64
+import sys
+from types import SimpleNamespace
+
 import pytest
 
-from app.core.crypto import decrypt_secret, encrypt_deterministic, encrypt_secret
+from app.core.crypto import decrypt_secret, encrypt_deterministic, encrypt_secret, secret_management_status
 from app.core.startup_checks import validate_production_environment
 
 
@@ -72,3 +76,103 @@ def test_production_env_provider_requires_key_version_and_real_key(monkeypatch):
 
     assert "AUTHCLAW_SECRET_KEY_VERSION" in str(exc.value)
     assert "non-demo secret" in str(exc.value)
+
+
+def test_aws_kms_wrapped_key_encrypts_fields_and_reports_key_id(monkeypatch):
+    data_key = b"k" * 32
+    requests = []
+
+    class KMS:
+        def decrypt(self, **kwargs):
+            requests.append(kwargs)
+            return {"Plaintext": data_key}
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda service: KMS()))
+    monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "aws_kms")
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v3")
+    monkeypatch.setenv("AUTHCLAW_AWS_KMS_KEY_ID", "alias/authclaw-test")
+    monkeypatch.setenv("AWS_KMS_ENCRYPTED_DATA_KEY", base64.b64encode(b"wrapped-data-key").decode())
+
+    encrypted = encrypt_secret("sk-managed-secret")
+
+    assert encrypted.startswith("authclaw-secret-v2:aws_kms:v3:")
+    assert "sk-managed-secret" not in encrypted
+    assert decrypt_secret(encrypted) == "sk-managed-secret"
+    assert requests[-1]["KeyId"] == "alias/authclaw-test"
+    assert secret_management_status()["key_id"] == "alias/authclaw-test"
+    assert secret_management_status()["managed"] is True
+
+
+def test_aws_kms_failure_is_safe_and_fail_closed(monkeypatch):
+    class KMS:
+        def decrypt(self, **_kwargs):
+            raise PermissionError("provider-detail-must-not-leak")
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda service: KMS()))
+    monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "aws_kms")
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v3")
+    monkeypatch.setenv("AUTHCLAW_AWS_KMS_KEY_ID", "alias/authclaw-test")
+    monkeypatch.setenv("AWS_KMS_ENCRYPTED_DATA_KEY", base64.b64encode(b"wrapped-data-key").decode())
+
+    with pytest.raises(RuntimeError) as exc:
+        encrypt_secret("must-not-fallback")
+
+    assert "PermissionError" in str(exc.value)
+    assert "provider-detail-must-not-leak" not in str(exc.value)
+
+
+def test_managed_field_ciphertext_rejects_tampering(monkeypatch):
+    data_key = b"t" * 32
+    monkeypatch.setitem(
+        sys.modules,
+        "boto3",
+        SimpleNamespace(client=lambda service: SimpleNamespace(decrypt=lambda **kwargs: {"Plaintext": data_key})),
+    )
+    monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "aws_kms")
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v4")
+    monkeypatch.setenv("AUTHCLAW_AWS_KMS_KEY_ID", "alias/authclaw-test")
+    monkeypatch.setenv("AWS_KMS_ENCRYPTED_DATA_KEY", base64.b64encode(b"wrapped-data-key").decode())
+    encrypted = encrypt_secret("tamper-evident-secret")
+    prefix, provider, version, payload = encrypted.split(":", 3)
+    raw = bytearray(base64.b64decode(payload))
+    raw[-1] ^= 1
+    tampered = ":".join((prefix, provider, version, base64.b64encode(raw).decode()))
+
+    with pytest.raises(ValueError):
+        decrypt_secret(tampered)
+
+
+def test_service_tls_boundary_rejects_plaintext_internal_urls(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_ENV", "staging")
+    monkeypatch.setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true")
+    monkeypatch.setenv("GATEWAY_INTERNAL_URL", "https://gateway.internal")
+    monkeypatch.setenv("OPA_URL", "http://opa.internal")
+    monkeypatch.setenv("PRESIDIO_URL", "https://presidio.internal")
+
+    with pytest.raises(RuntimeError) as exc:
+        validate_production_environment()
+
+    assert "OPA_URL must use https" in str(exc.value)
+
+
+def test_production_kms_provider_requires_key_identifier(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_ENV", "production")
+    monkeypatch.setenv("JWT_SECRET", "a" * 32)
+    monkeypatch.setenv("SESSION_SECRET", "b" * 32)
+    monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "aws_kms")
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
+    monkeypatch.setenv("AWS_KMS_ENCRYPTED_DATA_KEY", base64.b64encode(b"wrapped-data-key").decode())
+    monkeypatch.delenv("AUTHCLAW_AWS_KMS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_KMS_KEY_ID", raising=False)
+    monkeypatch.setenv("GATEWAY_INTERNAL_URL", "https://gateway.internal")
+    monkeypatch.setenv("OPA_URL", "https://opa.internal")
+    monkeypatch.setenv("PRESIDIO_URL", "https://presidio.internal")
+    monkeypatch.setenv("PUBLIC_GATEWAY_URL", "https://gateway.example.com")
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("SMTP_FROM", "security@example.com")
+    monkeypatch.setenv("DEMO_OTP_VISIBLE", "false")
+
+    with pytest.raises(RuntimeError) as exc:
+        validate_production_environment()
+
+    assert "AUTHCLAW_AWS_KMS_KEY_ID" in str(exc.value)
