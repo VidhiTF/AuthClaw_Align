@@ -82,7 +82,7 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.demo
     container_name: authclaw-demo-backend
     depends_on:
       postgres:
@@ -113,7 +113,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-demo-change-me}
       SESSION_SECRET: ${SESSION_SECRET:-demo-change-me}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-demo-api-key-hash-change-me}
-      ENVELOPE_KEY: ${ENVELOPE_KEY:-demo-local-envelope-key-change-me}
+      ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       KMS_KEY_ID: ${KMS_KEY_ID:-demo-local-key}
       DEMO_OTP_VISIBLE: ${DEMO_OTP_VISIBLE:-false}
       AUTHCLAW_EMAIL_OUTBOX_PATH: ${AUTHCLAW_EMAIL_OUTBOX_PATH:-/app/.authclaw/email-outbox.jsonl}
@@ -167,7 +167,7 @@ services:
       PRESIDIO_URL: http://presidio:3000
       PRESIDIO_ANALYZE_TIMEOUT_MS: ${PRESIDIO_ANALYZE_TIMEOUT_MS:-750}
       KAFKA_BROKERS: ""
-      ENVELOPE_KEY: ${ENVELOPE_KEY:-demo-local-envelope-key-change-me}
+      ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
       COHERE_BASE_URL: ${COHERE_BASE_URL:-https://api.cohere.ai}
@@ -213,7 +213,7 @@ services:
       MODEL_NAME: ${MODEL_NAME:-gemini-2.5-flash-lite}
       GOOGLE_API_KEY: ${GEMINI_API_KEY:-}
       JWT_SECRET: ${JWT_SECRET:-demo-change-me}
-      AUTHCLAW_ENCRYPTION_KEY: ${ENVELOPE_KEY:-demo-local-envelope-key-change-me}
+      AUTHCLAW_ENCRYPTION_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       AUTHCLAW_REDACTION_SALT: ${SESSION_SECRET:-demo-change-me}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
     ports:

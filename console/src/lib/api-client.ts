@@ -67,7 +67,7 @@ async function request<T>(
   config: RequestConfig = {},
 ): Promise<ApiResponse<T>> {
   const mapped = mapCanonicalRequest(method, path);
-  const url = new URL(mapped.path, `${API_URL.replace(/\/$/, '')}/`);
+  const url = new URL(mapped.path.replace(/^\/+/, ''), `${API_URL.replace(/\/$/, '')}/`);
   appendQuery(url, config.params);
 
   const headers: Record<string, string> = {

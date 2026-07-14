@@ -168,10 +168,10 @@ services:
       BEDROCK_ENABLED: ${BEDROCK_ENABLED:-false}
       AWS_SECRETS_MANAGER_ENABLED: ${AWS_SECRETS_MANAGER_ENABLED:-false}
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
-      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-v1}
+      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-change-me}
       SESSION_SECRET: ${SESSION_SECRET:-authclaw-full-local-session-secret}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
-      ENVELOPE_KEY: ${ENVELOPE_KEY:-authclaw-full-local-envelope-key-v1}
+      ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       KMS_KEY_ID: ${KMS_KEY_ID:-full-local-key}
       DEMO_OTP_VISIBLE: ${DEMO_OTP_VISIBLE:-false}
       AUTHCLAW_EMAIL_OUTBOX_PATH: ${AUTHCLAW_EMAIL_OUTBOX_PATH:-/app/.authclaw/email-outbox.jsonl}
@@ -231,7 +231,7 @@ services:
       PRESIDIO_ANALYZE_TIMEOUT_MS: ${PRESIDIO_ANALYZE_TIMEOUT_MS:-750}
       REDACTION_LOCAL_ANALYZER_ONLY: ${REDACTION_LOCAL_ANALYZER_ONLY:-false}
       KAFKA_BROKERS: kafka:29092
-      ENVELOPE_KEY: ${ENVELOPE_KEY:-authclaw-full-local-envelope-key-v1}
+      ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
       COHERE_BASE_URL: ${COHERE_BASE_URL:-https://api.cohere.ai}
@@ -241,7 +241,7 @@ services:
       AWS_ENABLED: ${AWS_ENABLED:-false}
       BEDROCK_ENABLED: ${BEDROCK_ENABLED:-false}
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
-      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-v1}
+      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-change-me}
       SESSION_SECRET: ${SESSION_SECRET:-authclaw-full-local-session-secret}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
       GATEWAY_HTTP_LOGGER_ENABLED: ${GATEWAY_HTTP_LOGGER_ENABLED:-true}
@@ -282,9 +282,8 @@ services:
       MODEL_PROVIDER: ${MODEL_PROVIDER:-gemini}
       MODEL_NAME: ${MODEL_NAME:-gemini-2.5-flash-lite}
       GOOGLE_API_KEY: ${GEMINI_API_KEY:-}
-      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-v1}
-      # Fernet requires a URL-safe base64 encoding of exactly 32 key bytes.
-      AUTHCLAW_ENCRYPTION_KEY: ${AUTHCLAW_AGENT_ENCRYPTION_KEY:-YXV0aGNsYXctZnVsbC1sb2NhbC1mZXJuZXQta2V5ISE=}
+      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-change-me}
+      AUTHCLAW_ENCRYPTION_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       AUTHCLAW_REDACTION_SALT: ${SESSION_SECRET:-authclaw-full-local-session-secret}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
     ports:

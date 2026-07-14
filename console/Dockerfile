@@ -1,4 +1,4 @@
-FROM node:22-alpine AS base
+FROM node:22.23.1-alpine3.23@sha256:8516dce0483394d5708d4b2ee6cacb79fb1d617ea4e2787c2120bcca92ce372e AS base
 
 # Install dependencies only when needed
 FROM base AS deps
@@ -35,6 +35,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
+
+# The production server only needs node; omit npm's dependency tree from runtime.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Set the correct permission for prerender cache
 RUN mkdir .next

@@ -2,10 +2,10 @@ import { defineConfig, devices } from '@playwright/test';
 
 const port = process.env.PLAYWRIGHT_PORT || process.env.PORT || '3000';
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://localhost:${port}`;
-const reuseExistingServer = process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === 'true' || !process.env.CI;
 
 export default defineConfig({
   testDir: './tests',
+  testMatch: '**/*.spec.ts',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
@@ -24,7 +24,7 @@ export default defineConfig({
   webServer: {
     command: `npm run dev -- --port ${port}`,
     url: baseURL,
-    reuseExistingServer,
+    reuseExistingServer: !!process.env.PLAYWRIGHT_BASE_URL || !process.env.CI,
     timeout: 120 * 1000,
   },
 });
