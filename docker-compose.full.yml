@@ -129,7 +129,7 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.demo
     container_name: authclaw-full-backend
     depends_on:
       postgres:

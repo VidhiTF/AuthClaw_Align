@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   packages: write
   security-events: write
@@ -83,11 +84,11 @@ jobs:
           fetch-depth: 0
 
       - name: Scan for committed secrets
-        uses: gitleaks/gitleaks-action@v3
-        with:
-          args: detect --source . --no-git --redact --verbose --config .gitleaks.toml
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          docker run --rm
+          -v "${{ github.workspace }}:/repo:ro"
+          ghcr.io/gitleaks/gitleaks:v8.24.3
+          dir --redact --verbose --config=/repo/.gitleaks.toml /repo
 
       - name: Set up Python
         uses: actions/setup-python@v6
