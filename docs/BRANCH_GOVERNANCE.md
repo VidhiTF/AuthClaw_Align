@@ -19,8 +19,16 @@
 - Require the CI, dependency/secret scan, backend, gateway, agent and console checks.
 - Do not allow branch deletion.
 
-Developers branch from their assigned `dev/*` branch, use names such as
-`ACL-12-short-description`, and open a PR back to their `dev/*` branch. The owner opens
-or approves the release PR from `dev/*` to `master`.
+## Required GitHub rules for `dev/*`
+
+- Require feature branches to merge through pull requests.
+- Require the applicable CI checks and resolved conversations.
+- Block force pushes and branch deletion.
+- Keep the repository owner eligible to review and merge.
+
+Developers branch from their assigned `dev/*` branch and use
+`feat|fix|chore/<area>/<JIRA-KEY>-slug`, for example
+`feat/docs/ACL-12-aws-url-contract`. They open a PR back to their `dev/*` branch. The
+owner opens or approves the release PR from `dev/*` to `master`.
 
 `CODEOWNERS` supports review routing; it does not replace branch protection.
