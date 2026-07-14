@@ -38,6 +38,9 @@ console-to-backend URL/preflight defects.
    requests reach the CORS middleware. Playwright runs only browser specifications,
    targets the already-started Compose console in CI, and its mocks follow canonical
    backend routes.
+6. The gateway benchmark keeps a 50 ms median overhead limit and the existing absolute
+   latency limits. Its allow-path p95 and p99 overhead limits are 120 ms to tolerate
+   tail variance from the small sample running on a shared one-core CI runner.
 
 No new dependency, service, data model or database migration was added.
 
