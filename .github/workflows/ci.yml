@@ -488,6 +488,8 @@ jobs:
         env:
           E2E_LOGIN_EMAIL: admin@authclaw-lite.demo
           E2E_LOGIN_PASSWORD: AuthClawDemo!234
+          PLAYWRIGHT_BASE_URL: http://localhost:3001
+          PLAYWRIGHT_REUSE_EXISTING_SERVER: "true"
 
       - name: Gateway latency benchmark gate
         run: python scripts/gateway_latency_benchmark.py --require-provider-baseline
