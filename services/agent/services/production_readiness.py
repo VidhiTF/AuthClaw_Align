@@ -31,6 +31,13 @@ def secret_management_readiness() -> Dict[str, Any]:
     health = manager.health_check()
     policy = manager.selection_policy()
     production = os.getenv("AUTHCLAW_ENV", "development").lower() in {"production", "prod"}
+    envelope_provider = policy.get("envelope_provider", "local")
+    managed_envelope_configured = envelope_provider in {"aws", "aws_kms", "kms", "vault", "hashicorp_vault"} and bool(
+        os.getenv("AUTHCLAW_AWS_KMS_KEY_ID")
+        or os.getenv("AWS_KMS_KEY_ID")
+        or os.getenv("VAULT_TRANSIT_KEY")
+    )
+    require_managed_envelope = os.getenv("AUTHCLAW_REQUIRE_REMOTE_KMS", "").lower() in {"1", "true", "yes", "on"}
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "backend": health.backend,
@@ -41,13 +48,17 @@ def secret_management_readiness() -> Dict[str, Any]:
         "supports_aws_kms": True,
         "supports_hashicorp_vault": True,
         "rotation_supported": policy.get("rotation_supported"),
+        "envelope_provider": envelope_provider,
+        "envelope_fail_closed": policy.get("envelope_fail_closed"),
+        "managed_envelope_configured": managed_envelope_configured,
         "customer_managed_keys_configured": bool(
             os.getenv("AUTHCLAW_AWS_KMS_KEY_ID")
             or os.getenv("AWS_KMS_KEY_ID")
             or os.getenv("VAULT_TRANSIT_KEY")
         ),
         "production_ready": (not production or health.healthy)
-        and (not production or health.backend not in {"local", "local_env"}),
+        and (not production or health.backend not in {"local", "local_env"})
+        and (not production or not require_managed_envelope or managed_envelope_configured),
     }
 
 

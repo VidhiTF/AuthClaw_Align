@@ -29,6 +29,9 @@ func main() {
 	if err := ValidateEnvelopeKeyConfig(); err != nil {
 		log.Fatalf("Invalid secret management configuration: %v", err)
 	}
+	if err := ValidateServiceTLSConfig(); err != nil {
+		log.Fatalf("Invalid service TLS configuration: %v", err)
+	}
 
 	// Initialize database
 	InitDB()

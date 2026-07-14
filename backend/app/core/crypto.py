@@ -86,10 +86,14 @@ def _aws_kms_key_material() -> bytes:
     try:
         import boto3
         ciphertext = base64.b64decode(encrypted_data_key)
-        response = boto3.client("kms").decrypt(CiphertextBlob=ciphertext)
+        request = {"CiphertextBlob": ciphertext}
+        key_id = os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID")
+        if key_id:
+            request["KeyId"] = key_id
+        response = boto3.client("kms").decrypt(**request)
         return response["Plaintext"]
     except Exception as exc:
-        raise RuntimeError(f"Failed to decrypt AWS KMS data key: {exc}") from exc
+        raise RuntimeError(f"Failed to decrypt AWS KMS data key: {type(exc).__name__}") from exc
 
 
 def get_secret_envelope_key(provider: str | None = None, version: str | None = None) -> bytes:
@@ -125,11 +129,15 @@ def secret_management_status() -> dict:
         )
         detail = "vault key path configured" if configured else "vault configuration incomplete"
     elif provider == "aws_kms":
-        configured = bool(os.getenv("AWS_KMS_ENCRYPTED_DATA_KEY") or os.getenv("KMS_ENCRYPTED_DATA_KEY"))
-        detail = "kms encrypted data key configured" if configured else "kms encrypted data key missing"
+        encrypted_key = os.getenv("AWS_KMS_ENCRYPTED_DATA_KEY") or os.getenv("KMS_ENCRYPTED_DATA_KEY")
+        key_id = os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID")
+        configured = bool(encrypted_key and key_id)
+        detail = "kms key id and encrypted data key configured" if configured else "kms key id or encrypted data key missing"
     return {
         "provider": provider,
         "key_version": version,
+        "key_id": os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID") or version,
+        "managed": provider in {"vault", "aws_kms"},
         "configured": configured,
         "detail": detail,
     }

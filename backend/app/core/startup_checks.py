@@ -24,11 +24,30 @@ def _is_missing_or_demo(value: str | None) -> bool:
     return value.strip() in _DEMO_VALUES or value.strip().startswith("change-this")
 
 
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def validate_production_environment() -> None:
-    if not is_production():
+    production = is_production()
+    require_service_tls = _truthy(
+        os.getenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true" if production else "false")
+    )
+    if not production and not require_service_tls:
         return
 
     errors: list[str] = []
+    if require_service_tls:
+        for name in ("GATEWAY_INTERNAL_URL", "OPA_URL", "PRESIDIO_URL"):
+            value = os.getenv(name, "").strip()
+            if not value.startswith("https://"):
+                errors.append(f"{name} must use https when service TLS is required")
+
+    if not production:
+        if errors:
+            raise RuntimeError(f"Service TLS validation failed: {'; '.join(errors)}")
+        return
+
     for name in ("JWT_SECRET", "SESSION_SECRET"):
         if _is_missing_or_demo(os.getenv(name)):
             errors.append(f"{name} must be set to a non-demo secret")
@@ -55,6 +74,8 @@ def validate_production_environment() -> None:
     elif provider == "aws_kms":
         if not (os.getenv("AWS_KMS_ENCRYPTED_DATA_KEY") or os.getenv("KMS_ENCRYPTED_DATA_KEY")):
             errors.append("AWS_KMS_ENCRYPTED_DATA_KEY must be configured for aws_kms secret provider")
+        if not (os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID")):
+            errors.append("AUTHCLAW_AWS_KMS_KEY_ID must be configured for aws_kms secret provider")
     else:
         errors.append("AUTHCLAW_SECRET_PROVIDER must be one of: env, vault, aws_kms")
 

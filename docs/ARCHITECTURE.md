@@ -1,5 +1,14 @@
 # Consolidated architecture
 
+The proposed canonical monorepo and component boundaries are recorded in
+[ADR-0001](adr/0001-canonical-monorepo-component-boundaries.md), pending Binod approval.
+The proposed public URL, AWS edge, environment-isolation and ownership contract is
+recorded in [ADR-0002](adr/0002-aws-url-environment-boundary.md). ADR-0002 remains
+pending Binod approval; existing Terraform must not be interpreted as satisfying it
+until ACL-14 supplies implementation and acceptance evidence.
+The managed cryptography, key-rotation, TLS-boundary and no-credential evidence model
+is recorded in [ADR-0004](adr/0004-acl-10-managed-cryptography.md).
+
 ## Runtime boundaries
 
 1. The **console** calls the FastAPI **control plane** using a short-lived bearer API key.
