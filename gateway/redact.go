@@ -717,6 +717,26 @@ func ValidateEnvelopeKeyConfig() error {
 	return nil
 }
 
+func serviceTLSEnforced() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("AUTHCLAW_REQUIRE_SERVICE_TLS")))
+	if value == "" {
+		return isProductionEnv()
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func ValidateServiceTLSConfig() error {
+	if !serviceTLSEnforced() {
+		return nil
+	}
+	for _, name := range []string{"OPA_URL", "PRESIDIO_URL"} {
+		if !strings.HasPrefix(strings.TrimSpace(os.Getenv(name)), "https://") {
+			return fmt.Errorf("%s must use https when service TLS is required", name)
+		}
+	}
+	return nil
+}
+
 func normalizeEnvelopeKey(keyStr string) []byte {
 	if keyStr == "" {
 		keyStr = "authclaw-default-32-byte-key-12"
