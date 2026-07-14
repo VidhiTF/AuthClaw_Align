@@ -283,7 +283,8 @@ services:
       MODEL_NAME: ${MODEL_NAME:-gemini-2.5-flash-lite}
       GOOGLE_API_KEY: ${GEMINI_API_KEY:-}
       JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-v1}
-      AUTHCLAW_ENCRYPTION_KEY: ${ENVELOPE_KEY:-authclaw-full-local-envelope-key-v1}
+      # Fernet requires a URL-safe base64 encoding of exactly 32 key bytes.
+      AUTHCLAW_ENCRYPTION_KEY: ${AUTHCLAW_AGENT_ENCRYPTION_KEY:-YXV0aGNsYXctZnVsbC1sb2NhbC1mZXJuZXQta2V5ISE=}
       AUTHCLAW_REDACTION_SALT: ${SESSION_SECRET:-authclaw-full-local-session-secret}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
     ports:
