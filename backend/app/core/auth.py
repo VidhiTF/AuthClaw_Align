@@ -49,7 +49,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/v1/auth/password-reset/request",
             "/v1/auth/password-reset/confirm",
         }
-        if canonical_path in public_paths or path.startswith("/static") or canonical_path.startswith("/v1/trust-center/public"):
+        if request.method == "OPTIONS" or canonical_path in public_paths or path.startswith("/static") or canonical_path.startswith("/v1/trust-center/public"):
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization")

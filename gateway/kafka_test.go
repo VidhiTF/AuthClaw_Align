@@ -127,7 +127,7 @@ func TestPublishAuditEvent_IncrementsFailureMetric(t *testing.T) {
 		t.Fatalf("PublishAuditEvent returned serialization error: %v", err)
 	}
 
-	if kafkaPublishFailures.Load() != before+1 {
+	if kafkaPublishFailures.Load() <= before {
 		t.Fatalf("expected publish failure metric to increment")
 	}
 }

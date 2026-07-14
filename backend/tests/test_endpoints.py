@@ -84,6 +84,17 @@ def test_public_health(client: TestClient):
 
 def test_authentication_gates(client: TestClient):
     """Test secure routes block unauthenticated/mismatched requests"""
+    preflight = client.options(
+        "/v1/audit-logs",
+        headers={
+            "Origin": "http://localhost:3001",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+    assert preflight.status_code == status.HTTP_200_OK
+    assert preflight.headers["access-control-allow-origin"] == "http://localhost:3001"
+
     # 1. Missing Authorization header
     response = client.get("/v1/audit-logs")
     assert response.status_code == status.HTTP_401_UNAUTHORIZED

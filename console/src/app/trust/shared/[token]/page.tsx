@@ -22,7 +22,7 @@ type SharedTrustPage = {
   integration_health: SharedPosture;
 };
 
-const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+const apiBase = process.env.API_URL ? `${process.env.API_URL}/api/v1` : process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
 async function loadSharedTrust(token: string): Promise<{ data?: SharedTrustPage; error?: string }> {
   const response = await fetch(`${apiBase}/trust/shared/${encodeURIComponent(token)}`, { cache: 'no-store' });
