@@ -70,10 +70,31 @@ jobs:
         run: go build ./...
 
       - name: Analyze
+        id: codeql-analysis
         uses: github/codeql-action/analyze@v4
         with:
           category: "/language:multi"
+          # This private repository does not currently have GitHub code scanning enabled.
+          # Keep running CodeQL and retain its SARIF output as auditable CI evidence.
           upload: never
+          output: ${{ runner.temp }}/codeql-results
+
+      - name: Record CodeQL SARIF evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sarif_dir='${{ steps.codeql-analysis.outputs.sarif-output }}'
+          mapfile -d '' sarif_files < <(find "$sarif_dir" -type f -name '*.sarif' -print0)
+          test "${#sarif_files[@]}" -gt 0
+          {
+            echo '### CodeQL SARIF evidence'
+            echo
+            echo "Generated ${#sarif_files[@]} SARIF files. GitHub code scanning is not enabled, so their checksums are recorded here."
+            echo '```text'
+            sha256sum "${sarif_files[@]}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   dependency-and-secret-scan:
     name: Dependency, Secret, and IaC Scan
@@ -86,11 +107,11 @@ jobs:
           fetch-depth: 0
 
       - name: Scan for committed secrets
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_CONFIG: .gitleaks.toml
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+        run: >-
+          docker run --rm
+          -v "${{ github.workspace }}:/repo:ro"
+          ghcr.io/gitleaks/gitleaks:v8.24.3
+          dir --redact --verbose --config=/repo/.gitleaks.toml /repo
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -475,9 +496,26 @@ jobs:
         run: python scripts/gateway_latency_benchmark.py --require-provider-baseline
 
       - name: Record benchmark evidence
+        if: always()
+        shell: bash
         run: |
-          echo '### Gateway benchmark' >> "$GITHUB_STEP_SUMMARY"
-          cat gateway-benchmark-ci.json >> "$GITHUB_STEP_SUMMARY"
+          if [[ ! -f gateway-benchmark-ci.json ]]; then
+            echo '::warning::Benchmark evidence was not generated.'
+            exit 0
+          fi
+          {
+            echo '### Gateway benchmark evidence'
+            echo
+            echo '```json'
+            cat gateway-benchmark-ci.json
+            echo
+            echo '```'
+            echo
+            echo 'SHA-256:'
+            echo '```text'
+            sha256sum gateway-benchmark-ci.json
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Dump Compose logs on failure
         if: failure()

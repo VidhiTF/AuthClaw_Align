@@ -24,3 +24,12 @@ Production compliance also depends on cloud configuration, corporate policies, s
 training, vendor agreements, legal basis/consent records, incident response, backup tests,
 access reviews, change management and independent audit evidence. Product features alone
 cannot establish organizational compliance.
+
+## Governance artifacts
+
+- [`compliance/GDPR_SOC2_CONTROL_MATRIX.md`](compliance/GDPR_SOC2_CONTROL_MATRIX.md)
+  maps the P0 launch controls to implementation and operational owners, evidence sources,
+  collection frequencies and open gaps.
+- [`compliance/PUBLIC_CLAIM_REGISTER.md`](compliance/PUBLIC_CLAIM_REGISTER.md) defines
+  built-in, audit-ready, report-ready and externally attested language and records which
+  public claims are approved, conditional or prohibited.
