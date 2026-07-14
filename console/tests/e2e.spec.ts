@@ -388,7 +388,7 @@ test('pdf admin console navigation aligns with safe connected surfaces', async (
   await page.getByRole('button', { name: /^Share$/i }).click();
   await expect(page.getByRole('heading', { name: /Trust Center share link created/i })).toBeVisible();
   await expect(page.getByText(/share-token-once/i)).toBeVisible();
-  expect(shareCreated).toBeTruthy();
+  await expect.poll(() => shareCreated).toBeTruthy();
 
   await page.goto('/risk');
   await expect(page.getByText(/Go \/ No-Go Posture/i)).toBeVisible();
@@ -405,7 +405,7 @@ test('pdf admin console navigation aligns with safe connected surfaces', async (
   await expect(page.locator('input[value="Acme Security"]')).toBeVisible();
   await page.getByLabel(/Rate-limit tier/i).selectOption('enterprise');
   await page.getByRole('button', { name: /^Save Tenant$/i }).click();
-  expect(tenantPatchCalled).toBeTruthy();
+  await expect.poll(() => tenantPatchCalled).toBeTruthy();
   await page.getByLabel(/Role for auditor@example.com/i).selectOption('analyst');
   await expect.poll(() => rolePatchCalled).toBeTruthy();
   await page.getByRole('button', { name: /^Generate Key$/i }).first().click();
@@ -525,7 +525,7 @@ test('manual sync calls API and shows queued state', async ({ page }) => {
   await page.getByRole('button', { name: /^sync$/i }).click();
 
   await expect(page.getByRole('button', { name: /queued/i })).toBeVisible();
-  expect(syncCalled).toBeTruthy();
+  await expect.poll(() => syncCalled).toBeTruthy();
 });
 
 test('read-only users cannot access integration write actions', async ({ page }) => {
@@ -756,7 +756,7 @@ test('framework and control detail render controls, evidence, mappings, gaps, an
   await expect(page.getByText(/normalized .* evidence/i).first()).toBeVisible();
   await expect(page.getByRole('cell', { name: 'Mapping requires human review' })).toBeVisible();
   await page.getByRole('button', { name: /^approve$/i }).click();
-  expect(reviewCalled).toBeTruthy();
+  await expect.poll(() => reviewCalled).toBeTruthy();
 });
 
 test('evidence library filters and detail drawer avoid raw secret display', async ({ page }) => {
@@ -1212,7 +1212,7 @@ test('remediation plan list filters and request approval flow call safe APIs', a
   await page.getByLabel(/reason/i).fill('Please review validated draft.');
   await page.getByRole('dialog').getByRole('button', { name: /request approval/i }).click();
 
-  expect(requestedApproval).toBeTruthy();
+  await expect.poll(() => requestedApproval).toBeTruthy();
   await expect(page.getByRole('button', { name: /execute|apply|dry-run|terraform/i })).toHaveCount(0);
 });
 
@@ -1232,7 +1232,7 @@ test('remediation plan detail shows artifact hash, warnings, validation, and no 
   await expect(page.getByText('public_access_change')).toBeVisible();
   await expect(page.getByText('manual_review_required')).toBeVisible();
   await page.getByRole('button', { name: /^validate$/i }).click();
-  expect(validateCalled).toBeTruthy();
+  await expect.poll(() => validateCalled).toBeTruthy();
   await expect(page.getByText('super-secret-value')).toHaveCount(0);
   await expect(page.getByText('raw_provider_payload')).toHaveCount(0);
   await expect(page.getByText(/AKIA|ghp_/)).toHaveCount(0);
@@ -1620,7 +1620,7 @@ test('notification center lists and marks sanitized notifications read', async (
   await expect(page.getByText('Notification Center')).toBeVisible();
   await expect(page.getByText('Evidence-supported posture package needs review.')).toBeVisible();
   await page.getByRole('button', { name: /mark read/i }).click();
-  expect(markReadCalled).toBeTruthy();
+  await expect.poll(() => markReadCalled).toBeTruthy();
   await expect(page.getByText('Notification marked read')).toBeVisible();
   await expect(page.getByText(/raw provider payloads/i)).toBeVisible();
   await expect(page.getByText(/legally compliant|certified|guaranteed|audit-ready guaranteed|AKIA|ghp_|super-secret|raw_provider_payload|vault:\/\//i)).toHaveCount(0);
