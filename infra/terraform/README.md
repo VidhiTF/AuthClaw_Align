@@ -1,5 +1,10 @@
 # AuthClaw Terraform
 
+> **Architecture gate:** [ADR-0002](../../docs/adr/0002-aws-url-environment-boundary.md)
+> defines the proposed public URL and private-origin contract. This Terraform is an
+> earlier baseline with an internet-facing ALB and must not be deployed as the approved
+> staging/production edge until ACL-14 implements that ADR and Binod records approval.
+
 This directory is the SRS NFR-3.1 baseline for deploying AuthClaw as a multi-region AWS stack.
 
 It creates a primary regional stack and, by default, a warm secondary regional stack. Each region includes:
