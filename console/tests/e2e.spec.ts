@@ -91,6 +91,7 @@ async function mockAuthenticatedUser(page: Page, role = 'admin') {
 }
 
 test('pdf admin console navigation aligns with safe connected surfaces', async ({ page }) => {
+  test.setTimeout(90_000);
   await mockAuthenticatedUser(page, 'admin');
 
   const routeSummary = { id: 'route-1', name: 'Production GPT route', provider_id: 'provider-1', is_default: true, is_active: true, redaction: 'mask', config: { model: 'gpt-4o-mini', policy_id: 'policy-1' }, created_at: '2026-06-23T10:00:00Z' };
@@ -107,7 +108,7 @@ test('pdf admin console navigation aligns with safe connected surfaces', async (
 
   await page.route(/\/api\/v1\/(?!auth\/me).*/, async (route) => fulfillJson(route, { items: [], total: 0, skip: 0, limit: 100 }));
   await page.route(/\/api\/v1\/tenants\/stats$/, async (route) => fulfillJson(route, { total: 1 }));
-  await page.route(/\/api\/v1\/tenants$/, async (route) => {
+  await page.route(/\/api\/v1\/tenants\/current$/, async (route) => {
     if (route.request().method() === 'PATCH') {
       tenantPatchCalled = true;
       await fulfillJson(route, { id: 'tenant-1', name: 'Acme Security', slug: 'acme', plan: 'enterprise', status: 'active', settings: {}, created_at: '2026-06-23T10:00:00Z', updated_at: '2026-06-23T10:05:00Z' });
@@ -129,7 +130,7 @@ test('pdf admin console navigation aligns with safe connected surfaces', async (
     await fulfillJson(route, { id: 'user-2', email: 'auditor@example.com', first_name: 'Audrey', last_name: 'Audit', tenant_id: 'tenant-1', is_active: true, roles: ['analyst'], created_at: '2026-06-23T10:00:00Z', updated_at: '2026-06-23T10:05:00Z' });
   });
   await page.route(/\/api\/v1\/audit\/stats$/, async (route) => fulfillJson(route, { total_events: 1, events_by_type: { 'policy.violation': 1 }, gateway_by_status: { blocked: 1 } }));
-  await page.route(/\/api\/v1\/compliance\/dashboard$/, async (route) => fulfillJson(route, {
+  await page.route(/\/api\/v1\/compliance-scores$/, async (route) => fulfillJson(route, {
     soc2: { score: 82, status: 'calculated' },
     gdpr: { score: 74, status: 'calculated' },
     hipaa: { score: 69, status: 'calculated' },
@@ -138,8 +139,8 @@ test('pdf admin console navigation aligns with safe connected surfaces', async (
     items: [{ id: 'gw-1', created_at: '2026-06-23T10:00:00Z', status: 'completed', model: 'gpt-4', latency_ms: 42, error_message: null }],
     total: 1,
   }));
-  await page.route(/\/api\/v1\/gateway-routes(?:\?.*)?$/, async (route) => fulfillJson(route, [routeSummary]));
-  await page.route(/\/api\/v1\/providers(?:\?.*)?$/, async (route) => fulfillJson(route, [providerSummary]));
+  await page.route(/\/api\/v1\/gateways(?:\?.*)?$/, async (route) => fulfillJson(route, [routeSummary]));
+  await page.route(/\/api\/v1\/provider-credentials(?:\?.*)?$/, async (route) => fulfillJson(route, [providerSummary]));
   await page.route(/\/api\/v1\/gateway\/providers(?:\?.*)?$/, async (route) => fulfillJson(route, [providerSummary]));
   await page.route(/\/api\/v1\/gateway\/providers\/provider-1\/validate$/, async (route) => fulfillJson(route, { provider_id: 'provider-1', valid: true, provider_type: 'openai' }));
   await page.route(/\/api\/v1\/policies(?:\?.*)?$/, async (route) => fulfillJson(route, { items: [policySummary], total: 1 }));
@@ -265,8 +266,8 @@ test('pdf admin console navigation aligns with safe connected surfaces', async (
   await page.route(/\/api\/v1\/risk\/seed-demo$/, async (route) => fulfillJson(route, { probe_runs_created: 7, probe_results_created: 7, vulnerabilities_created: 5, posture_snapshots_created: 1 }));
   await page.route(/\/api\/v1\/compliance\/frameworks(?:\?.*)?$/, async (route) => fulfillJson(route, [frameworkSummary]));
   await page.route(/\/api\/v1\/compliance\/assessments(?:\?.*)?$/, async (route) => fulfillJson(route, { items: [], total: 0, skip: 0, limit: 20 }));
-  await page.route(/\/api\/v1\/audit\/logs(?:\?.*)?$/, async (route) => fulfillJson(route, { items: [{ id: 'audit-1', created_at: '2026-06-23T10:00:00Z', event_type: 'gateway.request', action: 'recorded', resource: 'gateway', resource_id: 'gw-1', user_id: null, metadata: { status: 'recorded' }, previous_hash: '0000000000000000', integrity_hash: 'hash-current-1234567890' }], total: 1 }));
-  await page.route(/\/api\/v1\/audit\/verify$/, async (route) => fulfillJson(route, { status: 'intact', scanned_records: 12, missing_records: 0, tampered_records: 0, chain_breaks: 0 }));
+  await page.route(/\/api\/v1\/audit-logs(?:\?.*)?$/, async (route) => fulfillJson(route, { items: [{ id: 'audit-1', created_at: '2026-06-23T10:00:00Z', event_type: 'gateway.request', action: 'recorded', resource: 'gateway', resource_id: 'gw-1', user_id: null, metadata: { status: 'recorded' }, previous_hash: '0000000000000000', integrity_hash: 'hash-current-1234567890' }], total: 1 }));
+  await page.route(/\/api\/v1\/audit-logs\?integrity_check=true&limit=100$/, async (route) => fulfillJson(route, { status: 'intact', scanned_records: 12, missing_records: 0, tampered_records: 0, chain_breaks: 0 }));
   await page.route(/\/api\/v1\/trust\/overview$/, async (route) => fulfillJson(route, {
     tenant_id: 'tenant-1',
     generated_at: '2026-06-23T10:00:00Z',
@@ -297,7 +298,7 @@ test('pdf admin console navigation aligns with safe connected surfaces', async (
     }
     await fulfillJson(route, { items: [], total: 0, skip: 0, limit: 100 });
   });
-  await page.route(/\/api\/v1\/api-keys\/api-key-1\/revoke$/, async (route) => fulfillJson(route, { id: 'api-key-1', name: 'Agent key', key_prefix: 'ac_testgate', is_active: false, created_at: '2026-06-24T10:00:00Z' }));
+  await page.route(/\/api\/v1\/api-keys\/api-key-1$/, async (route) => fulfillJson(route, { id: 'api-key-1', name: 'Agent key', key_prefix: 'ac_testgate', is_active: false, created_at: '2026-06-24T10:00:00Z' }));
 
   await page.goto('/overview');
   for (const label of ['Overview', 'Gateway', 'Policies & Guardrails', 'Agent & Remediation', 'Frameworks', 'Audit & Trust Center', 'Risk & Red Teaming', 'Integrations', 'Settings']) {

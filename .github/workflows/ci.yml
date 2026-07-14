@@ -8,8 +8,10 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   packages: write
+  pull-requests: read
   security-events: write
 
 concurrency:
@@ -84,10 +86,9 @@ jobs:
 
       - name: Scan for committed secrets
         uses: gitleaks/gitleaks-action@v3
-        with:
-          args: detect --source . --no-git --redact --verbose --config .gitleaks.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -215,6 +216,7 @@ jobs:
           tests/test_auth_baseline.py
           tests/test_compliance_scoring.py
           tests/test_ephemeral_workers.py
+          tests/test_endpoints.py::test_authentication_gates
           tests/test_event_backbone.py
           tests/test_phase10.py::test_phase10_production_approval_requires_mfa_enrollment
           tests/test_policy_engine.py
