@@ -28,14 +28,16 @@ console-to-backend URL/preflight defects.
    enforcement authority.
 3. CI now runs for pull requests to `dev/**`, grants the least additional read access
    required by CodeQL and Gitleaks, uses supported Gitleaks environment settings, and
-   keeps findings blocking without relying on optional SARIF artifact storage.
+   keeps scanning independent of optional SARIF storage. CodeQL analysis runs locally
+   in the job without uploading until repository code scanning is enabled by an admin.
 4. Full and demo Compose builds use the existing backend `Dockerfile.demo` and valid
    development-only JWT and Fernet defaults. Production still fails closed without
    managed secrets.
 5. The console preserves `/api/v1` when joining canonical API paths, server-side shared
    Trust Center requests use the private backend URL, and authenticated CORS preflight
-   requests reach the CORS middleware. Playwright runs only browser specifications and
-   its mocks follow canonical backend routes.
+   requests reach the CORS middleware. Playwright runs only browser specifications,
+   targets the already-started Compose console in CI, and its mocks follow canonical
+   backend routes.
 
 No new dependency, service, data model or database migration was added.
 
@@ -65,7 +67,9 @@ scanning and the clean full-stack gate.
 ## Telemetry and rollback
 
 Runtime verification uses the existing health endpoints, container logs and GitHub job
-logs. No additional telemetry pipeline is required for repository governance.
+logs. Gateway benchmark evidence is retained in the job summary so the gate does not
+depend on optional artifact storage. No additional telemetry pipeline is required for
+repository governance.
 
 Rollback is a normal revert of the ACL-9 commit. The change has no schema migration and
 does not alter production data. Local disposable state can be removed with:

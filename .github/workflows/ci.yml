@@ -73,6 +73,7 @@ jobs:
         uses: github/codeql-action/analyze@v4
         with:
           category: "/language:multi"
+          upload: never
 
   dependency-and-secret-scan:
     name: Dependency, Secret, and IaC Scan
@@ -468,17 +469,15 @@ jobs:
         env:
           E2E_LOGIN_EMAIL: admin@authclaw-lite.demo
           E2E_LOGIN_PASSWORD: AuthClawDemo!234
+          PLAYWRIGHT_BASE_URL: http://localhost:3001
 
       - name: Gateway latency benchmark gate
         run: python scripts/gateway_latency_benchmark.py --require-provider-baseline
 
-      - name: Upload benchmark evidence
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: gateway-benchmark-ci
-          path: gateway-benchmark-ci.json
-          if-no-files-found: warn
+      - name: Record benchmark evidence
+        run: |
+          echo '### Gateway benchmark' >> "$GITHUB_STEP_SUMMARY"
+          cat gateway-benchmark-ci.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Dump Compose logs on failure
         if: failure()
