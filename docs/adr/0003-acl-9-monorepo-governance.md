@@ -41,6 +41,9 @@ console-to-backend URL/preflight defects.
 6. The gateway benchmark keeps a 50 ms median overhead limit and the existing absolute
    latency limits. Its allow-path p95 and p99 overhead limits are 120 ms to tolerate
    tail variance from the small sample running on a shared one-core CI runner.
+7. Production image builds pin their Go and Node base manifests. OPA is built from the
+   pinned v1.18.2 source release with Go 1.26.5, and the console runtime omits npm/npx
+   because production starts the standalone server directly with Node.
 
 No new dependency, service, data model or database migration was added.
 
@@ -60,7 +63,8 @@ Local verification completed before review:
   (eight explicitly opt-in real-stack scenarios remain skipped by CI);
 - Gitleaks with no findings, `pip-audit` with no known vulnerabilities,
   `govulncheck ./...` with no vulnerabilities, and `npm audit --audit-level=high`
-  with no high-severity failure;
+  with no high-severity failure; Trivy image scans found no fixed high/critical
+  vulnerabilities in the pinned OPA and console production images;
 - gateway latency benchmark within configured thresholds;
 - both Compose files render successfully and `git diff --check` passes.
 
