@@ -27,7 +27,8 @@ console-to-backend URL/preflight defects.
    routing, required evidence and rollback expectations. GitHub branch rules remain the
    enforcement authority.
 3. CI now runs for pull requests to `dev/**`, grants the least additional read access
-   required by CodeQL and Gitleaks, and uses the supported Gitleaks configuration input.
+   required by CodeQL and Gitleaks, uses supported Gitleaks environment settings, and
+   keeps findings blocking without relying on optional SARIF artifact storage.
 4. Full and demo Compose builds use the existing backend `Dockerfile.demo` and valid
    development-only JWT and Fernet defaults. Production still fails closed without
    managed secrets.
