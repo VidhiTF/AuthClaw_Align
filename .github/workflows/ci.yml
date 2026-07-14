@@ -545,10 +545,16 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Run compliance hardening evidence tests
-        run: python -m unittest scripts/test_compliance_hardening_evidence.py
+        run: >
+          python -m unittest
+          scripts/test_compliance_hardening_evidence.py
+          scripts/test_no_credential_proof.py
+          scripts/test_acl10_cryptography_controls.py
 
       - name: Validate sample compliance hardening evidence
-        run: python scripts/compliance_hardening_evidence.py infra/security/compliance_hardening_evidence.example.json
+        run: |
+          python scripts/compliance_hardening_evidence.py infra/security/compliance_hardening_evidence.example.json
+          python scripts/no_credential_proof.py infra/security/no_credential_proof.local.json
 
   docker-build-push:
     name: Docker Image Build and Push
