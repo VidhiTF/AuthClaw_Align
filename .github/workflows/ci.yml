@@ -78,13 +78,22 @@ jobs:
           upload: never
           output: ${{ runner.temp }}/codeql-results
 
-      - name: Upload CodeQL SARIF evidence
+      - name: Record CodeQL SARIF evidence
         if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: codeql-sarif
-          path: ${{ steps.codeql-analysis.outputs.sarif-output }}
-          if-no-files-found: error
+        shell: bash
+        run: |
+          set -euo pipefail
+          sarif_dir='${{ steps.codeql-analysis.outputs.sarif-output }}'
+          mapfile -d '' sarif_files < <(find "$sarif_dir" -type f -name '*.sarif' -print0)
+          test "${#sarif_files[@]}" -gt 0
+          {
+            echo '### CodeQL SARIF evidence'
+            echo
+            echo "Generated ${#sarif_files[@]} SARIF files. GitHub code scanning is not enabled, so their checksums are recorded here."
+            echo '```text'
+            sha256sum "${sarif_files[@]}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   dependency-and-secret-scan:
     name: Dependency, Secret, and IaC Scan
@@ -483,13 +492,27 @@ jobs:
       - name: Gateway latency benchmark gate
         run: python scripts/gateway_latency_benchmark.py --require-provider-baseline
 
-      - name: Upload benchmark evidence
-        uses: actions/upload-artifact@v7
+      - name: Record benchmark evidence
         if: always()
-        with:
-          name: gateway-benchmark-ci
-          path: gateway-benchmark-ci.json
-          if-no-files-found: warn
+        shell: bash
+        run: |
+          if [[ ! -f gateway-benchmark-ci.json ]]; then
+            echo '::warning::Benchmark evidence was not generated.'
+            exit 0
+          fi
+          {
+            echo '### Gateway benchmark evidence'
+            echo
+            echo '```json'
+            cat gateway-benchmark-ci.json
+            echo
+            echo '```'
+            echo
+            echo 'SHA-256:'
+            echo '```text'
+            sha256sum gateway-benchmark-ci.json
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Dump Compose logs on failure
         if: failure()

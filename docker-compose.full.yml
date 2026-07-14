@@ -168,7 +168,7 @@ services:
       BEDROCK_ENABLED: ${BEDROCK_ENABLED:-false}
       AWS_SECRETS_MANAGER_ENABLED: ${AWS_SECRETS_MANAGER_ENABLED:-false}
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
-      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret}
+      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-v1}
       SESSION_SECRET: ${SESSION_SECRET:-authclaw-full-local-session-secret}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
       ENVELOPE_KEY: ${ENVELOPE_KEY:-authclaw-full-local-envelope-key-v1}
@@ -241,7 +241,7 @@ services:
       AWS_ENABLED: ${AWS_ENABLED:-false}
       BEDROCK_ENABLED: ${BEDROCK_ENABLED:-false}
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
-      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret}
+      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-v1}
       SESSION_SECRET: ${SESSION_SECRET:-authclaw-full-local-session-secret}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
       GATEWAY_HTTP_LOGGER_ENABLED: ${GATEWAY_HTTP_LOGGER_ENABLED:-true}
@@ -282,7 +282,7 @@ services:
       MODEL_PROVIDER: ${MODEL_PROVIDER:-gemini}
       MODEL_NAME: ${MODEL_NAME:-gemini-2.5-flash-lite}
       GOOGLE_API_KEY: ${GEMINI_API_KEY:-}
-      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret}
+      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-v1}
       AUTHCLAW_ENCRYPTION_KEY: ${ENVELOPE_KEY:-authclaw-full-local-envelope-key-v1}
       AUTHCLAW_REDACTION_SALT: ${SESSION_SECRET:-authclaw-full-local-session-secret}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
