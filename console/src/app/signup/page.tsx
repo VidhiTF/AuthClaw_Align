@@ -193,7 +193,7 @@ function SignupPageContent() {
               <ShieldCheck className="h-5 w-5 text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight">AuthClaw Lite</h1>
+              <h1 className="text-xl font-bold tracking-tight">AuthClaw</h1>
               <p className="text-xs text-[#6B7488]">Create a protected AI gateway tenant</p>
             </div>
           </div>

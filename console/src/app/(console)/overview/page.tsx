@@ -257,7 +257,7 @@ export default function OverviewPage() {
           </div>
 
           <div className="mt-6 pt-4 border-t border-[#E6E9F0] flex justify-end">
-            <Link href="/frameworks" className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition">
+            <Link href="/compliance" className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition">
               View framework controls <ArrowUpRight className="w-3.5 h-3.5" />
             </Link>
           </div>

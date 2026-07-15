@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AuthClaw Lite",
-  description: "AI Governance Layer Demo",
+  title: "AuthClaw",
+  description: "AI governance and compliance console",
 };
 
 export default function RootLayout({
