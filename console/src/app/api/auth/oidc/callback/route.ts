@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { sessionCookieOptions } from "@/lib/cookie-options";
 import { sessionStore } from "@/lib/session-store";
+import { consumeOidcState, openOidcState, type OidcState } from "@/lib/oidc-state";
 
 const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
 
@@ -20,15 +21,20 @@ export async function GET(request: Request) {
   }
   if (!stateCookie) return fail("SSO state expired. Try again.");
 
-  let expected: { state: string; nonce: string; tenantName: string; redirectUri: string };
+  let expected: OidcState;
   try {
-    expected = JSON.parse(stateCookie);
+    expected = openOidcState(stateCookie);
   } catch {
     return fail("Invalid SSO state");
   }
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
   if (!code || state !== expected.state) return fail("Invalid SSO callback state");
+  try {
+    consumeOidcState(stateCookie);
+  } catch {
+    return fail("Invalid SSO state");
+  }
 
   const backendResponse = await fetch(`${BACKEND_URL}/v1/auth/oidc/callback`, {
     method: "POST",

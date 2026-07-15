@@ -1,4 +1,10 @@
 import hmac
+import time
+from unittest.mock import MagicMock
+
+import jwt
+import pytest
+from fastapi import HTTPException
 
 from app.core.auth import hash_key
 from app.core import oidc
@@ -6,6 +12,7 @@ from app.core.passwords import hash_password, verify_password
 from app.schemas.models import APIKeyCreate, APIKeyRotate
 from app.services import oidc_sso
 from app.services.email_service import send_otp_email
+from app.api.v1.endpoints import auth as auth_endpoints
 
 
 def test_api_key_create_rejects_unknown_scope():
@@ -93,6 +100,133 @@ def test_oidc_group_role_mapping_uses_highest_privilege_group():
     role = oidc_sso.role_from_claims(config, {"groups": ["readers", "admins"]})
 
     assert role == "admin"
+
+
+def _identity_policy():
+    return {
+        "tenant_claim": "tenant_id",
+        "tenant_claim_value": "immutable-external-tenant-id",
+        "require_mfa": True,
+        "accepted_amr": ["mfa"],
+        "accepted_acr": [],
+        "max_auth_age_seconds": 43200,
+    }
+
+
+def test_oidc_rejects_wrong_tenant():
+    claims = {"tenant_id": "another-tenant", "amr": ["mfa"], "auth_time": int(time.time())}
+
+    with pytest.raises(oidc_sso.OIDCAuthorizationError, match="not authorized"):
+        oidc_sso.validate_identity_context(_identity_policy(), claims)
+
+
+def test_oidc_rejects_missing_required_mfa_context():
+    claims = {"tenant_id": "immutable-external-tenant-id", "amr": ["pwd"], "auth_time": int(time.time())}
+
+    with pytest.raises(oidc_sso.OIDCAuthorizationError, match="MFA context"):
+        oidc_sso.validate_identity_context(_identity_policy(), claims)
+
+
+@pytest.mark.parametrize("azp", [None, "another-client"])
+def test_oidc_rejects_invalid_azp_for_multiple_audiences(monkeypatch, azp):
+    claims = {
+        "aud": ["authclaw-console", "another-client"],
+        "azp": azp,
+        "nonce": "nonce",
+        "tenant_id": "immutable-external-tenant-id",
+        "amr": ["mfa"],
+        "auth_time": int(time.time()),
+    }
+    key = MagicMock(key="signing-key")
+    monkeypatch.setattr(jwt, "PyJWKClient", lambda *_: MagicMock(get_signing_key_from_jwt=lambda *_: key))
+    monkeypatch.setattr(jwt, "decode", lambda *_args, **_kwargs: claims)
+
+    with pytest.raises(oidc_sso.OIDCAuthenticationError):
+        oidc_sso.validate_id_token({**_identity_policy(), "issuer": "https://idp.example.com", "client_id": "authclaw-console", "jwks_uri": "https://idp.example.com/jwks"}, "token", "nonce")
+
+
+def test_oidc_accepts_single_audience_without_azp(monkeypatch):
+    claims = {
+        "aud": "authclaw-console",
+        "nonce": "nonce",
+        "tenant_id": "immutable-external-tenant-id",
+        "amr": ["mfa"],
+        "auth_time": int(time.time()),
+    }
+    key = MagicMock(key="signing-key")
+    monkeypatch.setattr(jwt, "PyJWKClient", lambda *_: MagicMock(get_signing_key_from_jwt=lambda *_: key))
+    monkeypatch.setattr(jwt, "decode", lambda *_args, **_kwargs: claims)
+
+    assert oidc_sso.validate_id_token({**_identity_policy(), "issuer": "https://idp.example.com", "client_id": "authclaw-console", "jwks_uri": "https://idp.example.com/jwks"}, "token", "nonce") == claims
+
+
+def test_oidc_invalid_token_returns_sanitized_401(monkeypatch):
+    db = MagicMock()
+    tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
+    monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
+    monkeypatch.setattr(oidc_sso, "exchange_code", lambda *_: {"id_token": "invalid"})
+    monkeypatch.setattr(oidc_sso, "validate_id_token", MagicMock(side_effect=jwt.InvalidSignatureError("sensitive detail")))
+
+    with pytest.raises(HTTPException) as exc:
+        auth_endpoints.oidc_callback(auth_endpoints.OIDCCallbackRequest(
+            code="code",
+            state="state",
+            nonce="nonce",
+            tenant_name="tenant",
+            redirect_uri=config["redirect_uri"],
+        ))
+
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "OIDC authentication failed"
+    assert "sensitive" not in exc.value.detail
+
+
+@pytest.mark.parametrize("error", [
+    oidc_sso.OIDCAuthorizationError("OIDC identity is not authorized for this tenant"),
+    oidc_sso.OIDCAuthorizationError("Required OIDC MFA context is missing"),
+])
+def test_oidc_policy_rejection_returns_403(monkeypatch, error):
+    db = MagicMock()
+    tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
+    monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
+    monkeypatch.setattr(oidc_sso, "exchange_code", lambda *_: {"id_token": "token"})
+    monkeypatch.setattr(oidc_sso, "validate_id_token", MagicMock(side_effect=error))
+
+    with pytest.raises(HTTPException) as exc:
+        auth_endpoints.oidc_callback(auth_endpoints.OIDCCallbackRequest(
+            code="code",
+            state="state",
+            nonce="nonce",
+            tenant_name="tenant",
+            redirect_uri=config["redirect_uri"],
+        ))
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == str(error)
+
+
+def test_oidc_rejects_redirect_uri_mismatch(monkeypatch):
+    db = MagicMock()
+    tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
+    monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
+
+    with pytest.raises(HTTPException) as exc:
+        auth_endpoints.oidc_callback(auth_endpoints.OIDCCallbackRequest(
+            code="code",
+            state="state",
+            nonce="nonce",
+            tenant_name="tenant",
+            redirect_uri="https://evil.example.com/callback",
+        ))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Invalid OIDC redirect URI"
 
 
 def test_password_hash_round_trips_and_rejects_wrong_password():

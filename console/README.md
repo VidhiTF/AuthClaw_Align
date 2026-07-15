@@ -45,6 +45,14 @@ npx playwright test
 
 Playwright requires the seeded full stack described by the repository CI workflow.
 
+## Enterprise OIDC identity context
+
+An enabled tenant OIDC configuration requires an immutable external tenant identifier.
+The verified ID-token `tenant_id` claim must match that value. MFA context is required
+by default through `amr=mfa` or a tenant-configured accepted `acr`, with `auth_time`
+limited to 43,200 seconds. These values can be changed per tenant in Settings without
+changing the existing application TOTP policy for sensitive actions.
+
 ## Deployment and rollback
 
 `console/Dockerfile.demo` is built by the root Compose definitions and by the required
@@ -52,3 +60,11 @@ CI console job. To roll back F07 without restoring a legacy deployment, redeploy
 previous monorepo image. Existing `/frameworks` bookmarks remain safe through the local
 compatibility redirect. Database or backend API rollback is not required because F07
 does not change either contract.
+
+To roll back ACL-13, deploy the prior application image first, then downgrade migration
+`026` to `025`. Existing tenant OIDC configuration remains disabled after rollback until
+its prior policy is explicitly re-enabled.
+
+For existing active OIDC configurations, set `AUTHCLAW_OIDC_TENANT_MAPPINGS` to a JSON
+object mapping internal tenant UUIDs to immutable external tenant IDs. Migration `026`
+backfills those values transactionally and stops before schema changes if any mapping is missing.

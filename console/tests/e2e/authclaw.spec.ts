@@ -36,6 +36,20 @@ test.describe('AuthClaw E2E Console Verification', () => {
     const session = sessionResponse.body;
     expect(session.tenantName).toBe(tenantName);
 
+    const sessionCookie = (await page.context().cookies()).find((cookie) => cookie.name === 'authclaw_session');
+    expect(sessionCookie).toBeTruthy();
+    const sessionPayload = JSON.parse(decodeURIComponent(sessionCookie!.value));
+    for (const changes of [
+      { sessionId: 'forged-session' },
+      { role: sessionPayload.role === 'owner' ? 'viewer' : 'owner' },
+      { tenantId: 'forged-tenant' },
+      { expiresAt: Date.now() + 86400000 },
+    ]) {
+      const value = JSON.stringify({ ...sessionPayload, ...changes });
+      const baseURL = process.env.E2E_BASE_URL || 'http://localhost:3001';
+      expect((await fetch(`${baseURL}/overview`, { headers: { cookie: `authclaw_session=${value}` } })).status).toBe(401);
+    }
+
     await page.goto('/overview');
     await expect(page.locator('body')).toContainText('Overview');
     await expect(page.locator('body')).toContainText('Total API calls intercepted');
@@ -89,5 +103,9 @@ test.describe('AuthClaw E2E Console Verification', () => {
     await expect(page.getByText('Execution Trace')).toBeVisible();
     await expect(page.getByText('REQUEST ID')).toBeVisible();
     await expect(page.getByText(/from go_gateway/i)).toBeVisible();
+
+    await page.request.post('/api/auth/logout');
+    await page.context().addCookies([{ ...sessionCookie!, expires: -1 }]);
+    expect((await page.request.get('/api/auth/session')).status()).toBe(401);
   });
 });

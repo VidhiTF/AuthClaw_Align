@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import secrets
+import jwt
+import requests
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -108,9 +110,15 @@ class OIDCAdminConfigRequest(BaseModel):
     jwks_uri: str | None = None
     email_claim: str = "email"
     groups_claim: str = "groups"
+    tenant_claim: str = "tenant_id"
+    tenant_claim_value: str = ""
     role_mapping: dict[str, str] = Field(default_factory=dict)
     default_role: str = "viewer"
     auto_provision: bool = False
+    require_mfa: bool = True
+    accepted_amr: list[str] = Field(default_factory=lambda: ["mfa"])
+    accepted_acr: list[str] = Field(default_factory=list)
+    max_auth_age_seconds: int = Field(default=43200, ge=0)
 
 
 def _generate_console_key() -> str:
@@ -195,6 +203,9 @@ def oidc_callback(payload: OIDCCallbackRequest):
     db = OwnerSessionLocal()
     try:
         tenant, config = _oidc_callback_config(db, payload.tenant_name)
+        configured_redirect_uri = config["redirect_uri"] if isinstance(config, dict) else config.redirect_uri
+        if payload.redirect_uri != configured_redirect_uri:
+            raise HTTPException(status_code=400, detail="Invalid OIDC redirect URI")
         tokens = oidc_sso.exchange_code(config, payload.code, payload.redirect_uri)
         id_token = tokens.get("id_token")
         if not id_token:
@@ -213,12 +224,18 @@ def oidc_callback(payload: OIDCCallbackRequest):
             scopes=scopes,
             api_key=raw_key,
         )
-    except PermissionError as exc:
+    except oidc_sso.OIDCAuthorizationError as exc:
         db.rollback()
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
+    except (oidc_sso.OIDCAuthenticationError, jwt.PyJWTError, jwt.PyJWKClientError, requests.HTTPError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=401, detail="OIDC authentication failed") from exc
+    except (ValueError, TypeError) as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail="OIDC provider request failed") from exc
     except HTTPException:
         db.rollback()
         raise
