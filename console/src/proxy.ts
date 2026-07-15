@@ -19,6 +19,7 @@ export function proxy(request: NextRequest) {
     publicMarketingFiles.has(path) ||
     path === "/login" ||
     path === "/signup" ||
+    path.startsWith("/trust/shared") ||
     path.startsWith("/trust-center") ||
     path.startsWith("/api/auth");
   const isAssetPath =
