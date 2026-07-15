@@ -66,6 +66,22 @@ interface ChatSession {
   title: string;
 }
 
+interface AgentRemediationFinding {
+  id: number;
+  provider: string;
+  resource_id: string;
+  finding_type: string;
+  finding: string;
+  recommendation: string;
+  severity: string;
+  status: string;
+}
+
+interface AgentRemediationSummary {
+  connectors: unknown[];
+  findings: AgentRemediationFinding[];
+}
+
 interface ChatHistoryMessage {
   sender: "user" | "agent";
   text: string;
@@ -130,6 +146,29 @@ interface RAGAnswerResult {
   retrieved_chunks: RAGChunk[];
 }
 
+interface AgentTraceEvent {
+  agent?: string;
+  event?: string;
+  details?: string;
+  request_id?: string;
+  sequence?: number;
+}
+
+interface AgentExecutionResult {
+  request_id: string;
+  status?: string;
+  response?: string;
+  risk_level?: string;
+  provider?: string;
+  model?: string;
+  route_id?: string | null;
+  decision?: string | null;
+  reason?: string;
+  category?: string;
+  approval_id?: string;
+  trace?: AgentTraceEvent[];
+}
+
 interface RemediationAction {
   id?: string;
   finding_control?: string;
@@ -184,7 +223,7 @@ type WorkflowInspection = Partial<Workflow> & {
   workflow_id?: string;
 };
 
-type AgentResult = WorkflowInspection | RAGAnswerResult;
+type AgentResult = WorkflowInspection | RAGAnswerResult | AgentExecutionResult;
 
 const isRagResult = (result?: AgentResult | null): result is RAGAnswerResult => {
   return Boolean(result && "type" in result && result.type === "rag_answer");
@@ -192,6 +231,10 @@ const isRagResult = (result?: AgentResult | null): result is RAGAnswerResult => 
 
 const isWorkflowResult = (result?: AgentResult | null): result is WorkflowInspection => {
   return Boolean(result && "workflow_id" in result && result.workflow_id);
+};
+
+const isAgentExecutionResult = (result?: AgentResult | null): result is AgentExecutionResult => {
+  return Boolean(result && "request_id" in result && result.request_id && !("workflow_id" in result));
 };
 
 const formatStateLabel = (value?: string | null) => {
@@ -348,10 +391,57 @@ function RemediationTimeline({ workflow }: { workflow: WorkflowInspection }) {
   );
 }
 
+function AgentRemediationStatus({ summary, error }: { summary: AgentRemediationSummary | null; error: string | null }) {
+  return (
+    <div className="rounded-xl border border-[#E6E9F0] bg-white p-4 text-xs space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="font-bold text-[#0E1726]">Agent Service Remediation</p>
+          <p className="mt-0.5 text-[10px] text-[#6B7488]">Read-only connector findings reported directly by services/agent.</p>
+        </div>
+        <span className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase ${
+          error
+            ? "border-red-500/20 bg-red-500/10 text-red-400"
+            : "border-emerald-500/20 bg-emerald-500/10 text-emerald-500"
+        }`}>
+          {error ? "Unavailable" : "Connected"}
+        </span>
+      </div>
+      {error ? (
+        <p className="rounded border border-red-500/20 bg-red-500/5 p-2 text-[10px] text-red-500">{error}</p>
+      ) : (
+        <>
+          <div className="flex gap-4 text-[10px] text-[#6B7488]">
+            <span><strong className="text-[#475069]">{summary?.connectors.length || 0}</strong> connectors</span>
+            <span><strong className="text-[#475069]">{summary?.findings.length || 0}</strong> findings</span>
+          </div>
+          {summary?.findings.slice(0, 5).map((finding) => (
+            <div key={finding.id} className="rounded border border-[#E6E9F0] bg-[#F5F7FA] p-2.5">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-semibold text-[#475069]">{finding.finding}</p>
+                  <p className="mt-1 break-all font-mono text-[9px] text-[#6B7488]">{finding.provider}: {finding.resource_id}</p>
+                </div>
+                <span className="shrink-0 text-[9px] font-bold uppercase text-amber-500">{finding.severity}</span>
+              </div>
+              <p className="mt-1 text-[10px] text-[#6B7488]">{finding.recommendation}</p>
+            </div>
+          ))}
+          {!summary?.connectors.length && !summary?.findings.length && (
+            <p className="text-[10px] italic text-[#6B7488]">No Agent remediation connectors or findings are configured for this tenant.</p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function AgentPage() {
   const [activePane, setActivePane] = useState<"chat" | "scans">("chat");
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [agentRemediation, setAgentRemediation] = useState<AgentRemediationSummary | null>(null);
+  const [agentRemediationError, setAgentRemediationError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Chat Sessions States
@@ -407,7 +497,10 @@ export default function AgentPage() {
 
   const fetchWorkflowsAndApprovals = async () => {
     try {
-      const res = await fetch("/api/workflows");
+      const [res, remediationRes] = await Promise.all([
+        fetch("/api/workflows"),
+        fetch("/api/agent/remediation"),
+      ]);
       if (res.status === 401) {
         window.location.href = "/login";
         return;
@@ -416,6 +509,13 @@ export default function AgentPage() {
       const data = await res.json();
       setWorkflows(data.workflows || []);
       setApprovals(data.approvals || []);
+      if (remediationRes.ok) {
+        setAgentRemediation(await remediationRes.json());
+        setAgentRemediationError(null);
+      } else {
+        const remediationError = await remediationRes.json().catch(() => ({}));
+        setAgentRemediationError(remediationError.error || "Agent remediation service unavailable");
+      }
     } catch (err: unknown) {
       console.warn("Agent fetchWorkflowsAndApprovals failed:", getErrorMessage(err, "Unknown error"));
     } finally {
@@ -798,7 +898,11 @@ export default function AgentPage() {
                             }}
                             className="mt-2 text-[10px] font-bold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 underline transition cursor-pointer"
                           >
-                            {isRagResult(msg.results) ? "View Evidence" : "Inspect Run"}
+                            {isRagResult(msg.results)
+                              ? "View Evidence"
+                              : isAgentExecutionResult(msg.results)
+                                ? "Inspect Agent Trace"
+                                : "Inspect Run"}
                           </button>
                         )}
                       </div>
@@ -835,12 +939,16 @@ export default function AgentPage() {
                   <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500" />
                 </div>
               ) : workflows.length === 0 ? (
-                <div className="text-center py-12 text-[#6B7488] text-xs flex flex-col items-center">
-                  <Activity className="w-8 h-8 text-[#6B7488] mb-2" />
-                  No compliance runs yet.
+                <div className="space-y-4">
+                  <AgentRemediationStatus summary={agentRemediation} error={agentRemediationError} />
+                  <div className="text-center py-8 text-[#6B7488] text-xs flex flex-col items-center">
+                    <Activity className="w-8 h-8 text-[#6B7488] mb-2" />
+                    No control-plane compliance runs yet.
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-4">
+                  <AgentRemediationStatus summary={agentRemediation} error={agentRemediationError} />
                   {workflows.map((wf) => {
                     const isCompleted = wf.execution_status === "COMPLETED";
                     const isPaused = wf.execution_status === "PAUSED";
@@ -1010,7 +1118,7 @@ export default function AgentPage() {
                 <Terminal className="w-4 h-4 text-indigo-400" />
                 Result Inspector
               </div>
-              {(isWorkflowResult(selectedResult) || isRagResult(selectedResult)) && (
+              {selectedResult && (
                 <button
                   onClick={() => setShowRawJson(!showRawJson)}
                   className="px-2 py-1 text-[9px] font-bold uppercase tracking-wider rounded border border-[#E6E9F0] bg-[#F5F7FA] hover:bg-[#F5F7FA]/80 text-[#6B7488] hover:text-[#0E1726] transition cursor-pointer"
@@ -1020,7 +1128,66 @@ export default function AgentPage() {
               )}
             </div>
 
-            {isRagResult(selectedResult) && !showRawJson ? (
+            {isAgentExecutionResult(selectedResult) && !showRawJson ? (
+              <div className="space-y-4 text-xs max-h-[450px] overflow-y-auto pr-1">
+                <div className="rounded-xl border border-[#E6E9F0] bg-[#F5F7FA] p-3.5 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-400">Agent Execution</span>
+                    <span className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase ${
+                      selectedResult.status === "blocked"
+                        ? "border-red-500/20 bg-red-500/10 text-red-400"
+                        : selectedResult.status === "approval_required"
+                          ? "border-amber-500/20 bg-amber-500/10 text-amber-400"
+                          : "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                    }`}>
+                      {formatStateLabel(selectedResult.status || "completed")}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-[10px]">
+                    <div>
+                      <p className="font-bold text-[#6B7488]">REQUEST ID</p>
+                      <p className="break-all font-mono text-[#475069]">{selectedResult.request_id}</p>
+                    </div>
+                    <div>
+                      <p className="font-bold text-[#6B7488]">RISK</p>
+                      <p className="font-semibold text-[#475069]">{selectedResult.risk_level || "Not reported"}</p>
+                    </div>
+                    <div>
+                      <p className="font-bold text-[#6B7488]">PROVIDER / MODEL</p>
+                      <p className="text-[#475069]">{selectedResult.provider || "AuthClaw Gateway"} / {selectedResult.model || "default"}</p>
+                    </div>
+                    <div>
+                      <p className="font-bold text-[#6B7488]">DECISION</p>
+                      <p className="text-[#475069]">{selectedResult.decision || selectedResult.reason || "Allowed"}</p>
+                    </div>
+                  </div>
+                  {selectedResult.approval_id && (
+                    <div className="rounded border border-amber-500/20 bg-amber-500/10 p-2 text-[10px] text-amber-500">
+                      Awaiting human approval: <span className="font-mono">{selectedResult.approval_id}</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-400">Execution Trace</div>
+                  {!selectedResult.trace?.length ? (
+                    <div className="rounded-xl border border-[#E6E9F0] bg-[#F5F7FA] p-3 text-center italic text-[#6B7488]">
+                      No trace events were returned by the Agent service.
+                    </div>
+                  ) : (
+                    selectedResult.trace.map((event, index) => (
+                      <div key={`${event.sequence ?? index}-${event.event ?? "event"}`} className="rounded-xl border border-[#E6E9F0] bg-[#F5F7FA] p-3 space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-[#475069]">{event.agent || "Agent"}</span>
+                          <span className="font-mono text-[9px] text-indigo-400">{event.event || `step ${index + 1}`}</span>
+                        </div>
+                        {event.details && <p className="text-[10px] leading-relaxed text-[#6B7488]">{event.details}</p>}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : isRagResult(selectedResult) && !showRawJson ? (
               <div className="space-y-4 text-xs max-h-[450px] overflow-y-auto pr-1">
                 <div className="p-3.5 rounded-xl border border-[#E6E9F0] bg-[#F5F7FA] space-y-2">
                   <div className="flex justify-between items-center">

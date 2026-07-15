@@ -435,7 +435,7 @@ jobs:
       GATEWAY_RATE_LIMIT_PER_MINUTE: "600"
       GATEWAY_RATE_LIMIT_BURST_10S: "200"
       AUTHCLAW_SMOKE_PORTS: "8000:FastAPI Backend,8001:LangGraph Agent,8080:Go Gateway,3001:Next.js Console,6379:Redis"
-      AUTHCLAW_SMOKE_ENDPOINTS: "http://localhost:8000/health=200,http://localhost:8001/health/ready=200,http://localhost:8080/health=200,http://localhost:3001/login=200,http://localhost:3001/trust-center/tc_not_real=200"
+      AUTHCLAW_SMOKE_ENDPOINTS: "http://localhost:8000/health=200,http://localhost:8001/health/ready=200,http://localhost:8080/health=200,http://localhost:3001/login=200,http://localhost:3001/trust/shared/tc_not_real=200,http://localhost:3001/trust-center/tc_not_real=200"
       AUTHCLAW_SMOKE_RETRIES: "30"
       AUTHCLAW_SMOKE_RETRY_DELAY_SECONDS: "2"
       AUTHCLAW_BENCH_GATEWAY_URL: http://localhost:8080
@@ -586,7 +586,7 @@ jobs:
             dockerfile: ./gateway/Dockerfile.demo
           - service: console
             context: ./console
-            dockerfile: ./console/Dockerfile.demo
+            dockerfile: ./console/Dockerfile
           - service: agent
             context: ./services/agent
             dockerfile: ./services/agent/Dockerfile

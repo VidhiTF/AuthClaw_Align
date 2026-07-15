@@ -5,6 +5,9 @@ the canonical control plane. Server route handlers and `console/src/lib/api-clie
 cover launch-critical contract differences without creating a second identity or data
 model.
 
+The console remains a presentation and server-side adapter for that canonical backend. It
+does not own users, tenants, policy, audit, evidence or workflow records.
+
 ## Controlled-beta route boundary
 
 - `/gateway`, `/compliance`, `/approvals`, and `/audit` are first-class routes in the
@@ -16,30 +19,55 @@ model.
 - The static files under `console/public/` are public marketing content, not a second
   authenticated application.
 
-## Adapted now
+## Runtime boundary
 
-- Password login using Kunal's short-lived bearer API key and `/auth/me` principal lookup.
-- Tenant-scoped API-key list/create/revoke.
-- Gateway route list/create/update/delete.
-- Provider credential list/create/delete and path translation.
-- Policy list/create/validate.
-- Approval list/approve/reject.
-- Audit list and client-side integrity summary shape.
-- Compliance score/dashboard reads and score recalculation.
-- `/api/v1` compatibility alias for the imported console and existing clients.
+- `backend/` authenticates users and remains the identity, tenant and authorization
+  authority. Console login delegates to `/v1/auth/login`.
+- `console/src/app/api/**` is a browser-facing BFF. Authenticated handlers use
+  `console/src/lib/api-client.ts` to forward the backend-issued API key to canonical
+  `/v1/**` routes.
+- `console/src/lib/session-store.ts` stores the short-lived backend credential server-side
+  with AES-256-GCM encryption. The browser receives only an HTTP-only session cookie.
+- Agent requests are server-to-server, HMAC-signed and scoped to the authenticated backend
+  tenant, user and role. Unsigned, expired or cross-tenant requests are rejected.
+- The ACL-29 public route `/trust/shared/:token` is preserved by a same-origin rewrite to
+  the replacement page at `/trust-center/:token`; both use the canonical backend Trust
+  Center API.
 
-## Must be completed before enabling the affected page in production
+## Wired contracts
 
-- Provider credential edit semantics (rotation is supported; generic patch is not).
-- Tenant profile edit and rate-tier screens.
-- User role update semantics and invite/OTP UX.
-- The signup verification screen for Kunal's two-step email OTP onboarding.
-- Rich assessment, mapping, report, remediation, risk and trust-report endpoints that exist
-  in Ravi's original API but not in Kunal's control plane under the same contract.
-- End-to-end tests proving every enabled route against the consolidated backend.
+- Login, logout, session lookup, OIDC administration and password reset.
+- Signup OTP request/resend/verification and tenant onboarding status.
+- Tenant-scoped users, invites, MFA, API keys and provider credentials.
+- Gateway routes and gateway connectivity tests.
+- Policies, simulation, activation, rollback, approvals and remediation workflows.
+- Dashboard, compliance scores, audit, signed audit export/verification, evidence and
+  findings.
+- Trust Center shares, public reports, signed exports and verification.
+- Agent session creation, history and chat through the authenticated agent boundary.
+- AWS status/usage/S3 and ephemeral cloud-connector operations through backend routes.
 
-Pages without a verified contract should be feature-flagged or hidden at launch. A page
-rendering successfully is not proof that its mutations are connected safely. The imported
-agent/remediation, risk/red-team and integrations navigation entries are hidden by default;
-set `NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES=true` only in a non-production validation
-environment until their contracts pass end-to-end tests.
+## Verification evidence
+
+- [Pull request #16](https://github.com/AgentsArchitects/AuthClaw/pull/16) passed console
+  lint, TypeScript, unit tests and the production build.
+- The full-stack CI gate started `docker-compose.full.yml`, checked all service health
+  endpoints, logged in through the console, verified backend session/tenant context,
+  opened audit data and completed an agent chat against the real services.
+- Agent smoke tests cover signature scope and expiry. Console unit tests cover encrypted
+  session credentials and plaintext-session migration.
+- Production console images are built from the pinned standalone `console/Dockerfile`;
+  the demo image remains isolated in `console/Dockerfile.demo`.
+
+## Remaining production evidence
+
+The adapters are wired, but production release still requires environment-owned proof:
+
+- SendGrid sender verification and live OTP/password-reset delivery.
+- Live provider credentials and provider-specific error/rotation behavior.
+- AWS connector, S3, KMS, CloudFront/WAF and origin-denial evidence owned by ACL-14,
+  ACL-29, ACL-30 and ACL-37.
+- Expanded end-to-end coverage for destructive administration, SSO and cloud mutations.
+
+These are deployment and acceptance gates, not alternate API contracts. Pages must keep
+using the BFF and canonical backend/agent authorities while that evidence is collected.

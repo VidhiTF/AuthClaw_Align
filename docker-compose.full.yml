@@ -227,6 +227,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_APP_USER:-authclaw_app}:${POSTGRES_APP_PASSWORD:-authclaw_app}@postgres:5432/${POSTGRES_DB:-authclaw}?sslmode=disable
       REDIS_URL: redis://redis:6379
       OPA_URL: http://opa:8181
+      OPA_TIMEOUT_MS: ${OPA_TIMEOUT_MS:-5000}
       PRESIDIO_URL: http://presidio:3000
       PRESIDIO_ANALYZE_TIMEOUT_MS: ${PRESIDIO_ANALYZE_TIMEOUT_MS:-750}
       REDACTION_LOCAL_ANALYZER_ONLY: ${REDACTION_LOCAL_ANALYZER_ONLY:-false}
@@ -286,9 +287,10 @@ services:
       AUTHCLAW_PROVIDER_GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       AUTHCLAW_PROVIDER_GEMINI_API_BASE: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}
       AUTHCLAW_PROVIDER_GEMINI_MODEL: ${MODEL_NAME:-gemini-2.5-flash-lite}
-      JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-change-me}
-      AUTHCLAW_ENCRYPTION_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
-      AUTHCLAW_REDACTION_SALT: ${SESSION_SECRET:-authclaw-full-local-session-secret}
+      AUTHCLAW_GO_GATEWAY_URL: http://gateway:8080
+      JWT_SECRET: ${AGENT_JWT_SECRET:-authclaw-full-agent-jwt-secret-change-me}
+      AUTHCLAW_ENCRYPTION_KEY: ${AGENT_ENCRYPTION_KEY:-YXV0aGNsYXctYWdlbnQtbG9jYWwtZmVybmV0LWtleSE=}
+      AUTHCLAW_REDACTION_SALT: ${AGENT_REDACTION_SALT:-authclaw-full-agent-redaction-salt-change-me}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
       AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-full-internal-service-secret-change-me}
     ports:
@@ -321,7 +323,7 @@ services:
   console:
     build:
       context: ./console
-      dockerfile: Dockerfile.demo
+      dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
         NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:8080}

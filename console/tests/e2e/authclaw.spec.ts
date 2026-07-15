@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('AuthClaw E2E Console Verification', () => {
   test('complete app shell flow', async ({ page }) => {
+    test.setTimeout(90_000);
     const email = process.env.E2E_LOGIN_EMAIL || 'admin@authclaw-lite.demo';
     const password = process.env.E2E_LOGIN_PASSWORD || 'AuthClawDemo!234';
     const tenantName = process.env.E2E_LOGIN_TENANT || 'AuthClaw Lite Demo';
@@ -9,20 +10,30 @@ test.describe('AuthClaw E2E Console Verification', () => {
     await page.goto('/login');
     await expect(page.locator('body')).toContainText('AuthClaw');
 
-    await page.fill('input[type="email"]', email);
-    await page.fill('input[type="password"]', password);
-    await page.click('button[type="submit"]');
+    const emailInput = page.locator('input[type="email"]');
+    const passwordInput = page.locator('input[type="password"]');
+    const tenantInput = page.getByPlaceholder('Only needed if your email has multiple tenants');
+    const signIn = page.getByRole('button', { name: 'Sign In' });
+    await expect(emailInput).toBeVisible();
+    await expect(passwordInput).toBeVisible();
+    await expect(signIn).toBeEnabled();
+    await emailInput.fill(email);
+    await passwordInput.fill(password);
+    await tenantInput.fill(tenantName);
+    await expect(emailInput).toHaveValue(email);
+    await expect(passwordInput).toHaveValue(password);
+    await expect(tenantInput).toHaveValue(tenantName);
+    await signIn.click();
 
     await page.waitForURL('/connect');
     await expect(page).toHaveURL(/.*connect/);
     await expect(page.locator('body')).toContainText('Connect Your AI App');
-    await expect
-      .poll(async () => {
-        const response = await page.request.get('/api/auth/session');
-        return response.status();
-      })
-      .toBe(200);
-    const session = await (await page.request.get('/api/auth/session')).json();
+    const sessionResponse = await page.evaluate(async () => {
+      const response = await fetch('/api/auth/session');
+      return { status: response.status, body: await response.json() };
+    });
+    expect(sessionResponse.status).toBe(200);
+    const session = sessionResponse.body;
     expect(session.tenantName).toBe(tenantName);
 
     await page.goto('/overview');
@@ -57,6 +68,11 @@ test.describe('AuthClaw E2E Console Verification', () => {
     await page.goto('/agent');
     await expect(page.locator('h1')).toContainText('Compliance Agent');
 
+    await page.getByRole('button', { name: 'Runs' }).click();
+    await expect(page.getByText('Agent Service Remediation')).toBeVisible();
+    await expect(page.getByText('Connected', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: /Ask Agen/ }).click();
+
     const chatInput = page.locator('input[placeholder="Ask about compliance evidence or remediation..."]');
     await expect(chatInput).toBeVisible();
 
@@ -65,5 +81,13 @@ test.describe('AuthClaw E2E Console Verification', () => {
 
     await expect(page.locator('body')).toContainText('GDPR');
     await expect(page.locator('body')).toContainText(/citation|evidence|framework|audit/i);
+
+    const inspectTrace = page.getByRole('button', { name: 'Inspect Agent Trace' }).last();
+    await expect(inspectTrace).toBeVisible({ timeout: 45_000 });
+    await inspectTrace.click();
+    await expect(page.getByText('Agent Execution')).toBeVisible();
+    await expect(page.getByText('Execution Trace')).toBeVisible();
+    await expect(page.getByText('REQUEST ID')).toBeVisible();
+    await expect(page.getByText(/from go_gateway/i)).toBeVisible();
   });
 });

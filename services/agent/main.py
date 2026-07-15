@@ -862,6 +862,8 @@ class RemediationScanRequest(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
 
 
 class RedactPlaygroundRequest(BaseModel):
@@ -998,6 +1000,8 @@ def gateway_chat(
             session_id=request.session_id,
             x_api_key=x_api_key,
             authorization=authorization,
+            provider=request.provider or "AuthClaw Gateway",
+            model=request.model or "authclaw-gateway",
         )
         return service.format_chat_response(execution)
     except GatewayProviderConfigurationError as e:
@@ -1033,6 +1037,8 @@ def chat(
             session_id=request.session_id,
             x_api_key=x_api_key,
             authorization=authorization,
+            provider=request.provider or "AuthClaw Gateway",
+            model=request.model or "authclaw-gateway",
         )
         return service.format_chat_response(execution)
     except GatewayProviderConfigurationError as e:
@@ -6866,6 +6872,9 @@ def auth_verify_domain(req: DomainVerifyRequest):
 # 11. API KEY LIFECYCLE MANAGEMENT ENDPOINTS
 
 def get_authenticated_tenant(authorization: str = Header(None)) -> int:
+    context_tenant_id = get_current_tenant_id()
+    if context_tenant_id is not None:
+        return int(context_tenant_id)
     return resolve_tenant_from_authorization(authorization)
 
 @app.get("/analytics/governance")

@@ -63,14 +63,14 @@ routes review but does not replace protected-branch rules or explicit approval.
 
 ## Unresolved integration risks
 
-| Risk | Owner | Closure ticket or gate |
-| --- | --- | --- |
-| Console routes and response shapes are not yet fully aligned with backend APIs | Ravi + Kunal | Console contract work and ACL-14 integration gate |
-| Agent service-to-service authentication and tenant context are not complete | Vidhi + Kunal | Agent integration work before public exposure |
-| Redaction behavior spans gateway, backend records and agent workflows | Vidhi + Kunal | Canonical contract and end-to-end policy tests |
-| Local Compose, clean build and required CI do not yet prove the complete stack | Kunal | ACL-14 |
-| AWS edge, private origins and environment separation are not implemented | Kunal | ACL-29 decision followed by ACL-14/ACL-30 implementation |
-| Compliance language must remain audit-readiness language until independent reports exist | Vidhi + Binod | Claims review and release go/no-go |
+| Risk | Current evidence | Owner | Closure ticket or gate |
+| --- | --- | --- | --- |
+| Console/backend compatibility | Partially closed: the replacement console uses authenticated BFF routes for the canonical backend; live external-service proof remains listed in `docs/CONSOLE_API_COMPATIBILITY.md` | Ravi + Kunal | ACL-14 deployment evidence |
+| Agent service authentication and tenant context | Closed for local/CI: console-to-agent requests are HMAC-signed and tenant-scoped, with expiry and cross-tenant guards | Vidhi + Kunal | Production secret provisioning in ACL-14 |
+| Redaction behavior spans gateway, backend records and agent workflows | Open: the authority boundary is unchanged | Vidhi + Kunal | Canonical contract and end-to-end policy tests |
+| Local Compose, clean build and required CI | Closed for the repository baseline by PR #16's full-stack integration, benchmark and image gates | Kunal | ACL-14 owns deployed-environment proof |
+| AWS edge, private origins and environment separation | Open: design exists but infrastructure is not implemented | Kunal | ACL-29 decision followed by ACL-14/ACL-30 implementation |
+| Compliance language must remain audit-readiness language until independent reports exist | Open | Vidhi + Binod | Claims review and release go/no-go |
 
 These risks do not reopen component selection. Each must be closed or explicitly accepted
 by its named owner in the relevant delivery ticket.
@@ -85,6 +85,8 @@ by its named owner in the relevant delivery ticket.
   boundaries.
 - [`docs/CONSOLE_API_COMPATIBILITY.md`](../CONSOLE_API_COMPATIBILITY.md) records the
   current console/backend integration boundary and remaining work.
+- [Pull request #16](https://github.com/AgentsArchitects/AuthClaw/pull/16) records the
+  replacement-console, agent-authentication and full-stack CI evidence.
 - Binod's approval of this ADR must be retained in the approved pull request or linked
   Jira evidence before ACL-6 is considered accepted.
 
