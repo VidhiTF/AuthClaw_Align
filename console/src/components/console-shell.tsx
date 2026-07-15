@@ -7,6 +7,7 @@ import {
   Building,
   Cable,
   ChevronDown,
+  ClipboardCheck,
   Cloud,
   Cpu,
   LayoutDashboard,
@@ -31,13 +32,14 @@ interface ConsoleShellProps {
 
 const navigation = [
   { name: "Overview", href: "/overview", icon: LayoutDashboard, roles: ["owner", "admin", "viewer"] },
-  { name: "Frameworks", href: "/frameworks", icon: ShieldCheck, roles: ["owner", "admin", "viewer"] },
+  { name: "Gateway", href: "/gateway", icon: Cpu, roles: ["owner", "admin"] },
+  { name: "Compliance", href: "/compliance", icon: ShieldCheck, roles: ["owner", "admin", "viewer"] },
+  { name: "Approvals", href: "/approvals", icon: ClipboardCheck, roles: ["owner", "admin", "viewer"] },
+  { name: "Audit", href: "/audit", icon: ScrollText, roles: ["owner", "admin", "viewer"] },
   { name: "Agent & Remediation", href: "/agent", icon: MessageSquare, roles: ["owner", "admin", "viewer"] },
   { name: "Integrations", href: "/connect", icon: Cable, roles: ["owner", "admin"] },
-  { name: "Gateway", href: "/gateway", icon: Cpu, roles: ["owner", "admin"] },
   { name: "Policies & Guardrails", href: "/policies", icon: ShieldAlert, roles: ["owner", "admin"] },
   { name: "Risk & Red Teaming", href: "/risk", icon: ShieldAlert, roles: ["owner", "admin", "viewer"] },
-  { name: "Audit & Trust Center", href: "/audit", icon: ScrollText, roles: ["owner", "admin", "viewer"] },
   { name: "Evidence", href: "/evidence", icon: ScrollText, roles: ["owner", "admin", "viewer"] },
   { name: "Findings", href: "/findings", icon: ShieldAlert, roles: ["owner", "admin", "viewer"] },
   { name: "Cloud", href: "/aws", icon: Cloud, roles: ["owner", "admin"] },
@@ -95,7 +97,7 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
             <ShieldCheck className="w-4 h-4 text-white" />
           </div>
           <div>
-            <span className="block font-bold text-sm text-[#0E1726]">AuthClaw Lite</span>
+            <span className="block font-bold text-sm text-[#0E1726]">AuthClaw</span>
             <span className="block text-[10px] uppercase tracking-wider text-[#6B7488]">Governance Layer</span>
           </div>
         </div>
@@ -118,7 +120,7 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
               <ShieldCheck className="w-4.5 h-4.5 text-white" />
             </div>
             <div>
-              <span className="block font-bold text-base text-[#0E1726] tracking-wide">AuthClaw Lite</span>
+              <span className="block font-bold text-base text-[#0E1726] tracking-wide">AuthClaw</span>
               <span className="block text-[10px] font-semibold uppercase tracking-wider text-[#6B7488]">AI Governance Layer</span>
             </div>
           </div>
@@ -152,7 +154,7 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
                   <div className="w-8 h-8 rounded-[10px] bg-[#6D28D9] flex items-center justify-center">
                     <ShieldCheck className="w-4.5 h-4.5 text-white" />
                   </div>
-                  <span className="font-bold text-[#0E1726]">AuthClaw Lite</span>
+                  <span className="font-bold text-[#0E1726]">AuthClaw</span>
                 </div>
                 <button onClick={() => setMobileMenuOpen(false)} className="text-[#6B7488] hover:text-[#0E1726]" aria-label="Close navigation">
                   <X className="w-5 h-5" />

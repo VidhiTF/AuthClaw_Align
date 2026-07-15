@@ -131,7 +131,7 @@ export default function LoginPage() {
             <ShieldCheck className="w-6 h-6 text-white" />
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-[#0E1726]">
-            AuthClaw Lite
+            AuthClaw
           </h1>
           <p className="text-xs text-[#6B7488] mt-1">
             Sign in with your console account

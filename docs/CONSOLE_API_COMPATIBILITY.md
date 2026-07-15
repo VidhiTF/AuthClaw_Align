@@ -1,8 +1,20 @@
 # Console API compatibility
 
-Ravi's console is retained as the UI shell while Kunal's backend is the canonical control
-plane. The adapter in `console/src/lib/api-contract.ts` covers launch-critical contract
-differences without creating a second identity or data model.
+The console under `console/` is the single canonical customer UI while the backend remains
+the canonical control plane. Server route handlers and `console/src/lib/api-client.ts`
+cover launch-critical contract differences without creating a second identity or data
+model.
+
+## Controlled-beta route boundary
+
+- `/gateway`, `/compliance`, `/approvals`, and `/audit` are first-class routes in the
+  canonical Next.js access shell.
+- `/frameworks` is an internal compatibility redirect to `/compliance`; it never leaves
+  the canonical application.
+- Approval decisions reuse the canonical workflow approval endpoints and retain backend
+  scope and MFA enforcement.
+- The static files under `console/public/` are public marketing content, not a second
+  authenticated application.
 
 ## Adapted now
 

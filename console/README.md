@@ -1,36 +1,54 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AuthClaw console
 
-## Getting Started
+The customer-facing AuthClaw console is the canonical Next.js application in this
+directory. It uses the App Router and a server-side access shell; browser pages call
+same-origin route handlers, which authenticate requests to the canonical control plane
+and agent service.
 
-First, run the development server:
+## Controlled-beta navigation
+
+The primary customer surfaces are:
+
+- `/gateway` - provider gateway configuration and status (owner/admin)
+- `/compliance` - compliance readiness, evidence traceability, and trust sharing
+- `/approvals` - tenant-scoped human-in-the-loop gateway decisions
+- `/audit` - audit events, exports, and integrity verification
+
+The historical `/frameworks` link redirects inside this application to `/compliance`.
+No authenticated route redirects to or depends on a separate legacy console.
+
+## Local development
+
+From this directory:
 
 ```bash
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The console listens on `http://localhost:3001`. The full monorepo stack is normally
+started from the repository root:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+docker compose --env-file .env.full -f docker-compose.full.yml up -d --build
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Validation
 
-## Learn More
+```bash
+npm run lint
+npx tsc --noEmit --pretty false
+npm run test:unit
+npm run build
+npx playwright test
+```
 
-To learn more about Next.js, take a look at the following resources:
+Playwright requires the seeded full stack described by the repository CI workflow.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Deployment and rollback
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`console/Dockerfile.demo` is built by the root Compose definitions and by the required
+CI console job. To roll back F07 without restoring a legacy deployment, redeploy the
+previous monorepo image. Existing `/frameworks` bookmarks remain safe through the local
+compatibility redirect. Database or backend API rollback is not required because F07
+does not change either contract.

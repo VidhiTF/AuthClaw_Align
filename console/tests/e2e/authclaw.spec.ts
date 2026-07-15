@@ -7,7 +7,7 @@ test.describe('AuthClaw E2E Console Verification', () => {
     const tenantName = process.env.E2E_LOGIN_TENANT || 'AuthClaw Lite Demo';
 
     await page.goto('/login');
-    await expect(page.locator('body')).toContainText('AuthClaw Lite');
+    await expect(page.locator('body')).toContainText('AuthClaw');
 
     await page.fill('input[type="email"]', email);
     await page.fill('input[type="password"]', password);
@@ -28,6 +28,19 @@ test.describe('AuthClaw E2E Console Verification', () => {
     await page.goto('/overview');
     await expect(page.locator('body')).toContainText('Overview');
     await expect(page.locator('body')).toContainText('Total API calls intercepted');
+
+    for (const section of [
+      { name: 'Gateway', path: '/gateway', heading: 'Gateway' },
+      { name: 'Compliance', path: '/compliance', heading: 'Compliance Frameworks' },
+      { name: 'Approvals', path: '/approvals', heading: 'Approvals' },
+      { name: 'Audit', path: '/audit', heading: 'Audit Explorer' },
+    ]) {
+      const link = page.getByRole('link', { name: section.name, exact: true }).first();
+      await expect(link).toHaveAttribute('href', section.path);
+      await link.click();
+      await expect(page).toHaveURL(new RegExp(`${section.path}$`));
+      await expect(page.locator('h1')).toContainText(section.heading);
+    }
 
     await page.goto('/audit');
     await expect(page.locator('h1')).toContainText('Audit Explorer');
