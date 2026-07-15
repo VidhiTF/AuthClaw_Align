@@ -275,7 +275,7 @@ function FindingDrawer({
             <h3 className="text-sm font-semibold text-[#0E1726]">Manage Status</h3>
             <div className="bg-white border border-[#E6E9F0] rounded-xl p-4 flex flex-col gap-3">
               <label className="text-xs text-[#6B7488]">Update Status</label>
-              <selec
+              <select
                 value={finding.status}
                 onChange={(e) => onStatusChange(finding.id, e.target.value)}
                 className="bg-[#F5F7FA] border border-[#E6E9F0] text-[#475069] text-sm rounded-lg px-3 py-2 outline-none focus:border-indigo-500/50"

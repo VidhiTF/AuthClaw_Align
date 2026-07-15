@@ -345,7 +345,7 @@ export default function EvidencePage() {
           Filters:
         </div>
 
-        <FilterSelec
+        <FilterSelect
           label="All Frameworks"
           value={framework}
           options={FRAMEWORK_OPTIONS}
@@ -354,7 +354,7 @@ export default function EvidencePage() {
             setPage(1);
           }}
         />
-        <FilterSelec
+        <FilterSelect
           label="All Types"
           value={evidenceType}
           options={EVIDENCE_TYPE_OPTIONS}
@@ -363,7 +363,7 @@ export default function EvidencePage() {
             setPage(1);
           }}
         />
-        <FilterSelec
+        <FilterSelect
           label="All Severities"
           value={severity}
           options={SEVERITY_OPTIONS}

@@ -147,7 +147,7 @@ export default function GatewayPage() {
     setSubmitting(true);
     setFormError(null);
 
-    const model_whitelist = whitelistInpu
+    const model_whitelist = whitelistInput
       ? whitelistInput.split(",").map((s) => s.trim()).filter(Boolean)
       : null;
 
@@ -463,7 +463,7 @@ export default function GatewayPage() {
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] mb-1.5">
                   Route Name
                 </label>
-                <inpu
+                <input
                   type="text"
                   required
                   value={name}
@@ -478,7 +478,7 @@ export default function GatewayPage() {
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] mb-1.5">
                     Provider
                   </label>
-                  <selec
+                  <select
                     value={provider}
                     onChange={(e) => handleProviderChange(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-indigo-500/80 transition"
@@ -494,7 +494,7 @@ export default function GatewayPage() {
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] mb-1.5">
                     Redaction strategy
                   </label>
-                  <selec
+                  <select
                     value={redactionStrategy}
                     onChange={(e) => setRedactionStrategy(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-indigo-500/80 transition"
@@ -510,7 +510,7 @@ export default function GatewayPage() {
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] mb-1.5">
                   Token Retention
                 </label>
-                <selec
+                <select
                   value={retentionDays}
                   onChange={(e) => setRetentionDays(Number(e.target.value))}
                   className="w-full px-3 py-2 rounded-lg bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-indigo-500/80 transition"
@@ -527,7 +527,7 @@ export default function GatewayPage() {
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] mb-1.5">
                   Endpoint URL
                 </label>
-                <inpu
+                <input
                   type="text"
                   required
                   value={endpoint}
@@ -541,7 +541,7 @@ export default function GatewayPage() {
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] mb-1.5">
                   Model Whitelist (comma-separated, leave blank for all)
                 </label>
-                <inpu
+                <input
                   type="text"
                   value={whitelistInput}
                   onChange={(e) => setWhitelistInput(e.target.value)}

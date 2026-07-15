@@ -822,7 +822,7 @@ export default function SettingsPage() {
     if (generatedWorkerToken) await flashBooleanCopy(generatedWorkerToken, setWorkerCopied);
   };
 
-  const inviteLink = inviteResul
+  const inviteLink = inviteResult
     ? `${typeof window !== "undefined" ? window.location.origin : ""}/signup?invite=${inviteResult.signup_id}`
     : "";
 
@@ -1177,7 +1177,7 @@ export default function SettingsPage() {
                   </p>
                 </div>
                 <label className="inline-flex items-center gap-2 rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs font-semibold text-[#475069]">
-                  <inpu
+                  <input
                     type="checkbox"
                     checked={ssoConfig.enabled}
                     onChange={(event) => setSsoConfig((current) => ({ ...current, enabled: event.target.checked }))}
@@ -1206,7 +1206,7 @@ export default function SettingsPage() {
                 ].map(([label, key, placeholder]) => (
                   <label key={key} className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
                     {label}
-                    <inpu
+                    <input
                       value={String(ssoConfig[key as keyof SsoConfig] || "")}
                       onChange={(event) => setSsoConfig((current) => ({ ...current, [key]: event.target.value }))}
                       placeholder={placeholder}
@@ -1216,7 +1216,7 @@ export default function SettingsPage() {
                 ))}
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
                   Client Secre
-                  <inpu
+                  <input
                     type="password"
                     value={ssoClientSecret}
                     onChange={(event) => setSsoClientSecret(event.target.value)}
@@ -1226,7 +1226,7 @@ export default function SettingsPage() {
                 </label>
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
                   Scopes
-                  <inpu
+                  <input
                     value={ssoConfig.scopes.join(" ")}
                     onChange={(event) => setSsoConfig((current) => ({ ...current, scopes: event.target.value.split(/\s+/).filter(Boolean) }))}
                     className="mt-1 w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs normal-case tracking-normal text-[#0E1726] outline-none focus:border-indigo-500"
@@ -1234,7 +1234,7 @@ export default function SettingsPage() {
                 </label>
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
                   Default Role
-                  <selec
+                  <select
                     value={ssoConfig.default_role}
                     onChange={(event) => setSsoConfig((current) => ({ ...current, default_role: event.target.value }))}
                     className="mt-1 w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs normal-case tracking-normal text-[#0E1726] outline-none focus:border-indigo-500"
@@ -1243,7 +1243,7 @@ export default function SettingsPage() {
                   </select>
                 </label>
                 <label className="flex items-center gap-2 rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs font-semibold text-[#475069]">
-                  <inpu
+                  <input
                     type="checkbox"
                     checked={ssoConfig.auto_provision}
                     onChange={(event) => setSsoConfig((current) => ({ ...current, auto_provision: event.target.checked }))}
@@ -1426,7 +1426,7 @@ export default function SettingsPage() {
               </div>
 
               <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">Display Name</label>
-              <inpu
+              <input
                 value={cloudDisplayName}
                 onChange={(event) => setCloudDisplayName(event.target.value)}
                 className="mb-4 w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
@@ -1447,7 +1447,7 @@ export default function SettingsPage() {
                         className="w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 font-mono text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
                       />
                     ) : (
-                      <inpu
+                      <input
                         type={field.includes("secret") || field === "token" ? "password" : "text"}
                         value={cloudForm[field] || ""}
                         onChange={(event) => setCloudForm((current) => ({ ...current, [field]: event.target.value }))}
@@ -1598,7 +1598,7 @@ export default function SettingsPage() {
                   <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
                     Connector
                   </label>
-                  <selec
+                  <select
                     value={workerForm.connector}
                     onChange={(event) => updateWorkerConnector(event.target.value)}
                     className="w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
@@ -1614,7 +1614,7 @@ export default function SettingsPage() {
                   <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
                     Purpose
                   </label>
-                  <selec
+                  <select
                     value={workerForm.purpose}
                     onChange={(event) => setWorkerForm((current) => ({ ...current, purpose: event.target.value }))}
                     className="w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
@@ -1629,7 +1629,7 @@ export default function SettingsPage() {
                   <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
                     Action
                   </label>
-                  <selec
+                  <select
                     value={workerForm.action_id}
                     onChange={(event) => updateWorkerAction(event.target.value)}
                     className="w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
@@ -1645,7 +1645,7 @@ export default function SettingsPage() {
                   <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
                     Token Lifetime
                   </label>
-                  <inpu
+                  <input
                     type="number"
                     min={60}
                     max={1800}
@@ -1661,7 +1661,7 @@ export default function SettingsPage() {
                 <div className="grid gap-2 sm:grid-cols-2">
                   {(selectedWorkerConnector?.scopes || []).map((scope) => (
                     <label key={scope} className="flex items-center gap-2 rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs text-[#475069]">
-                      <inpu
+                      <input
                         type="checkbox"
                         checked={workerForm.scopes.includes(scope)}
                         onChange={() => toggleWorkerScope(scope)}
@@ -1978,7 +1978,7 @@ export default function SettingsPage() {
                     Invite Verification Link
                   </label>
                   <div className="flex gap-2 rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] p-2">
-                    <inpu
+                    <input
                       readOnly
                       value={inviteLink}
                       onFocus={(event) => event.currentTarget.select()}
@@ -2013,7 +2013,7 @@ export default function SettingsPage() {
                   <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-[#6B7488]">
                     <Mail className="w-4 h-4" />
                   </span>
-                  <inpu
+                  <input
                     type="email"
                     required
                     value={userEmail}
@@ -2028,7 +2028,7 @@ export default function SettingsPage() {
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] mb-1.5">
                   Role Permission
                 </label>
-                <selec
+                <select
                   value={userRole}
                   onChange={(e) => setUserRole(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-indigo-500/80 transition"
@@ -2107,7 +2107,7 @@ export default function SettingsPage() {
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] mb-1.5">
                     Token Name / Label
                   </label>
-                  <inpu
+                  <input
                     type="text"
                     required
                     value={keyName}
@@ -2124,7 +2124,7 @@ export default function SettingsPage() {
                   <div className="space-y-2 mt-1.5">
                     {["read", "write", "admin"].map((scope) => (
                       <label key={scope} className="flex items-center gap-2 text-xs text-[#475069] capitalize cursor-pointer">
-                        <inpu
+                        <input
                           type="checkbox"
                           checked={keyScopes.includes(scope)}
                           onChange={() => toggleScope(scope)}
@@ -2140,7 +2140,7 @@ export default function SettingsPage() {
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] mb-1.5">
                     Expires In
                   </label>
-                  <selec
+                  <select
                     value={keyExpiresInDays}
                     onChange={(e) => setKeyExpiresInDays(Number(e.target.value))}
                     className="w-full px-3 py-2 rounded-lg bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-indigo-500/80 transition"

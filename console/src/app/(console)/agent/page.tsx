@@ -809,7 +809,7 @@ export default function AgentPage() {
 
                 {/* Chat Input */}
                 <form onSubmit={handleSend} className="p-3 border-t border-[#E6E9F0] bg-[#F5F7FA]/40 flex gap-2">
-                  <inpu
+                  <input
                     type="text"
                     value={input}
                     onChange={(e) => setInput(e.target.value)}

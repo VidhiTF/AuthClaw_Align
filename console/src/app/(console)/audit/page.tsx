@@ -17,7 +17,7 @@ import {
   Copy,
   Check,
   ShieldCheck,
-  ShieldAler
+  ShieldAlert
 } from "lucide-react";
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
@@ -322,7 +322,7 @@ export default function AuditPage() {
             {signedExportBusy ? "Signing..." : "Signed Export"}
           </button>
 
-          <inpu
+          <input
             ref={verifyInputRef}
             type="file"
             accept="application/json,.json"
@@ -347,7 +347,7 @@ export default function AuditPage() {
         <div className={`rounded-[20px] border p-4 text-xs ${
           verifyResult?.verified
             ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-100"
-            : verifyResul
+            : verifyResult
               ? "border-red-500/20 bg-red-500/10 text-red-100"
               : "border-[#E6E9F0] bg-white text-[#475069]"
         }`}>
@@ -390,7 +390,7 @@ export default function AuditPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
           <div>
             <label className="block text-[10px] font-bold text-[#6B7488] uppercase mb-1.5">Action</label>
-            <selec
+            <select
               value={actionFilter}
               onChange={(e) => { setActionFilter(e.target.value); setOffset(0); }}
               className="w-full px-3 py-2 rounded-lg bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-indigo-500/80 transition"
@@ -410,7 +410,7 @@ export default function AuditPage() {
               <span className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-[#6B7488]">
                 <Search className="w-3.5 h-3.5" />
               </span>
-              <inpu
+              <input
                 type="text"
                 value={actorFilter}
                 onChange={(e) => setActorFilter(e.target.value)}
@@ -423,7 +423,7 @@ export default function AuditPage() {
           <div>
             <label className="block text-[10px] font-bold text-[#6B7488] uppercase mb-1.5">Date Start</label>
             <div className="relative">
-              <inpu
+              <input
                 type="date"
                 value={dateStart}
                 onChange={(e) => setDateStart(e.target.value)}
@@ -435,7 +435,7 @@ export default function AuditPage() {
           <div>
             <label className="block text-[10px] font-bold text-[#6B7488] uppercase mb-1.5">Date End</label>
             <div className="relative">
-              <inpu
+              <input
                 type="date"
                 value={dateEnd}
                 onChange={(e) => setDateEnd(e.target.value)}
@@ -447,7 +447,7 @@ export default function AuditPage() {
 
         <div className="flex items-center justify-between pt-2 border-t border-[#E6E9F0] text-xs">
           <label className="flex items-center gap-2 text-[#6B7488] cursor-pointer">
-            <inpu
+            <input
               type="checkbox"
               checked={integrityCheck}
               onChange={(e) => setIntegrityCheck(e.target.checked)}
