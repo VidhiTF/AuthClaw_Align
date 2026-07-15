@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pricing — AuthClaw</title>
+<meta name="description" content="AuthClaw pricing. Transparent plans that scale with your AI traffic and frameworks. No per-token markup. Start free, expand to enterprise." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="topstrip">
+  <b>New</b> — AuthClaw is now SOC 2 Type II certified
+  <span class="dot">•</span> <a href="security.html">Read the security overview →</a>
+</div>
+
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="index.html"><span class="mark"></span>AuthClaw<span class="ai">.ai</span></a>
+    <nav class="links">
+      <a href="product.html">Product</a>
+      <a href="pricing.html" class="active">Pricing</a>
+      <a href="security.html">Security</a>
+      <a href="company.html">Company</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="login" href="/login">Log in</a>
+      <a class="btn btn-primary" href="#demo">Book a demo</a>
+      <button class="burger" id="burger" aria-label="Menu"><span></span></button>
+    </div>
+  </div>
+  <div class="mobilemenu" id="mm">
+    <a href="product.html">Product</a>
+    <a href="pricing.html">Pricing</a>
+    <a href="security.html">Security</a>
+    <a href="company.html">Company</a>
+    <div class="mm-cta"><a class="btn btn-ghost" href="/login">Log in</a><a class="btn btn-primary" href="#demo">Book a demo</a></div>
+  </div>
+</header>
+
+<!-- PAGE HEADER + TOGGLE -->
+<section class="pagehead">
+  <div class="wrap">
+    <span class="eyebrow">Pricing</span>
+    <h1>Priced on the value you protect, <br>not the tokens you spend.</h1>
+    <p class="sub">AuthClaw meters on protected AI traffic and the frameworks you enforce — never a markup on model tokens. Bring your own provider keys. Start self-serve and expand to enterprise scale.</p>
+    <div class="toggle-wrap">
+      <div class="toggle annual" id="billToggle">
+        <span class="slider"></span>
+        <button id="billMonthly">Monthly</button>
+        <button id="billAnnual" class="on">Annual</button>
+      </div>
+      <span class="save-badge">Save ~20% annually</span>
+    </div>
+  </div>
+</section>
+
+<!-- PLANS -->
+<section class="band" style="padding-top:56px">
+  <div class="wrap">
+    <div class="plans">
+
+      <div class="plan reveal">
+        <div class="pname">Team</div>
+        <p class="pdesc">For a first regulated AI workload going to production.</p>
+        <div class="price"><span class="amt" data-m="$2,490" data-a="$1,990">$1,990</span><span class="per">/mo</span></div>
+        <div class="billed" data-m="billed monthly" data-a="$23,880 billed annually">$23,880 billed annually</div>
+        <a class="btn btn-ghost btn-block p-cta" href="#demo">Start free trial</a>
+        <div class="pfeat-label">Includes</div>
+        <ul class="feat">
+          <li><span class="ck">✓</span> 1 compliance framework (SOC 2, GDPR, or HIPAA)</li>
+          <li><span class="ck">✓</span> Up to 5M protected calls / month</li>
+          <li><span class="ck">✓</span> In-line gateway: redaction + policy enforcement</li>
+          <li><span class="ck">✓</span> Hash-chained audit log &amp; trust center</li>
+          <li><span class="ck">✓</span> Up to 5 seats · 1 connected environment</li>
+          <li><span class="ck">✓</span> Email support · single region</li>
+        </ul>
+      </div>
+
+      <div class="plan featured reveal">
+        <div class="ptag">Most popular</div>
+        <div class="pname">Growth</div>
+        <p class="pdesc">For teams scaling AI across multiple products and frameworks.</p>
+        <div class="price"><span class="amt" data-m="$5,500" data-a="$4,500">$4,500</span><span class="per">/mo</span></div>
+        <div class="billed" data-m="billed monthly" data-a="$54,000 billed annually">$54,000 billed annually</div>
+        <a class="btn btn-primary btn-block p-cta" href="#demo">Start free trial</a>
+        <div class="pfeat-label">Everything in Team, plus</div>
+        <ul class="feat">
+          <li><span class="ck">✓</span> All three frameworks: SOC 2 · GDPR · HIPAA</li>
+          <li><span class="ck">✓</span> Up to 25M protected calls / month</li>
+          <li><span class="ck">✓</span> Agentic remediation with HITL + MFA approvals</li>
+          <li><span class="ck">✓</span> Real-time framework scoring &amp; evidence links</li>
+          <li><span class="ck">✓</span> Up to 25 seats · 3 connected environments</li>
+          <li><span class="ck">✓</span> SSO/SAML · priority support</li>
+        </ul>
+      </div>
+
+      <div class="plan reveal">
+        <div class="pname">Enterprise</div>
+        <p class="pdesc">For regulated scale with custom volume, residency, and SLAs.</p>
+        <div class="price"><span class="custom">Custom</span></div>
+        <div class="billed">annual contract · volume-based</div>
+        <a class="btn btn-ghost btn-block p-cta" href="#demo">Contact sales</a>
+        <div class="pfeat-label">Everything in Growth, plus</div>
+        <ul class="feat">
+          <li><span class="ck">✓</span> Unlimited frameworks + custom controls</li>
+          <li><span class="ck">✓</span> Custom / uncapped protected volume</li>
+          <li><span class="ck">✓</span> 99.99% SLA · multi-region active-active</li>
+          <li><span class="ck">✓</span> Single-tenant, VPC, or air-gapped deployment</li>
+          <li><span class="ck">✓</span> Unlimited seats &amp; environments</li>
+          <li><span class="ck">✓</span> Dedicated CSM, SOC 2 support, custom DPA</li>
+        </ul>
+      </div>
+
+    </div>
+    <p class="pricenote">All plans include zero markup on model tokens — bring your own OpenAI, Anthropic, Azure, or Cohere keys. 14-day free trial, no card required.</p>
+  </div>
+</section>
+
+<!-- ADD-ONS -->
+<section class="band-tight" style="background:var(--paper-2);border-top:1px solid var(--line);border-bottom:1px solid var(--line)">
+  <div class="wrap">
+    <div class="sec-head center reveal" style="margin:0 auto">
+      <span class="eyebrow">Expand as you grow</span>
+      <h2>Usage &amp; add-ons</h2>
+      <p class="sub" style="margin-left:auto;margin-right:auto">Every plan expands along the axes that map to real value — traffic, frameworks, and reach — so you only pay for what you actually protect.</p>
+    </div>
+    <div class="addons">
+      <div class="addon reveal">
+        <div class="ico">▤</div>
+        <h4>Protected volume</h4>
+        <p>Additional AI traffic beyond your plan's monthly allowance, billed per million protected calls. Predictable bands, hard caps available.</p>
+        <div class="meta">from $180 / 1M calls</div>
+      </div>
+      <div class="addon reveal">
+        <div class="ico">◈</div>
+        <h4>Extra frameworks</h4>
+        <p>Add ISO 27001, ISO 42001, NIST AI RMF, EU AI Act, or PCI DSS — or upload your own regulation or contract as enforceable controls.</p>
+        <div class="meta">+$500 / mo per framework</div>
+      </div>
+      <div class="addon reveal">
+        <div class="ico">◇</div>
+        <h4>Seats &amp; environments</h4>
+        <p>More approver seats and connected clouds (AWS, GCP, Azure, GitHub) as remediation coverage widens across your org.</p>
+        <div class="meta">from $40 / seat · $250 / env</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ENTERPRISE BAND -->
+<section class="band">
+  <div class="wrap">
+    <div class="entband reveal">
+      <div>
+        <span class="eyebrow" style="color:var(--gold)">Enterprise</span>
+        <h3>Built for the security review, not just the sale.</h3>
+        <p>When AI traffic runs through the critical path, procurement asks hard questions. Enterprise answers them: your own tenancy, your region, your SLA, and evidence your auditors can verify cryptographically.</p>
+        <ul class="ent-list">
+          <li><span class="tk">◆</span> Single-tenant, VPC &amp; air-gapped options</li>
+          <li><span class="tk">◆</span> 99.99% uptime SLA, multi-region</li>
+          <li><span class="tk">◆</span> SSO/SAML, SCIM, granular RBAC</li>
+          <li><span class="tk">◆</span> Custom DPA, BAA &amp; subprocessor terms</li>
+          <li><span class="tk">◆</span> Volume-based, committed-use pricing</li>
+          <li><span class="tk">◆</span> Dedicated CSM &amp; security engineer</li>
+        </ul>
+      </div>
+      <div class="ent-cta">
+        <a class="btn btn-gold btn-block" href="#demo">Talk to sales</a>
+        <a class="btn btn-light btn-block" href="security.html">Review security</a>
+        <span class="note">Typical enterprise agreements start at $120k / year</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- COMPARISON TABLE -->
+<section class="band-tight">
+  <div class="wrap">
+    <div class="sec-head center reveal" style="margin:0 auto">
+      <span class="eyebrow">Compare plans</span>
+      <h2>Every capability, side by side.</h2>
+    </div>
+    <div class="ptable-wrap reveal">
+      <table class="ptable">
+        <thead>
+          <tr>
+            <th class="feat-col">Capability</th>
+            <th>Team</th>
+            <th class="hi">Growth</th>
+            <th>Enterprise</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="grouprow"><td colspan="4">In-line gateway</td></tr>
+          <tr><td>Multi-model reverse proxy</td><td>✓</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Real-time PII / PHI redaction</td><td>✓</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Streaming, token-by-token filtering</td><td>✓</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Policy-as-code (YAML + OPA)</td><td>Standard</td><td class="hi">Advanced</td><td>Custom</td></tr>
+          <tr><td>Protected calls / month</td><td>5M</td><td class="hi">25M</td><td>Custom</td></tr>
+          <tr><td>Added latency target</td><td>&lt;50ms</td><td class="hi">&lt;50ms</td><td>&lt;50ms</td></tr>
+
+          <tr class="grouprow"><td colspan="4">Agentic remediation</td></tr>
+          <tr><td>Cloud &amp; SCM scanning</td><td class="no">—</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>HITL approvals with MFA</td><td class="no">—</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Terraform / CLI remediation diffs</td><td class="no">—</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Connected environments</td><td>1</td><td class="hi">3</td><td>Unlimited</td></tr>
+
+          <tr class="grouprow"><td colspan="4">Compliance &amp; audit</td></tr>
+          <tr><td>Compliance frameworks</td><td>1</td><td class="hi">3</td><td>Unlimited</td></tr>
+          <tr><td>Real-time framework scoring</td><td>Basic</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Hash-chained audit trail</td><td>✓</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Cryptographically verifiable export</td><td>✓</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Shareable trust center</td><td>✓</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Upload custom regulations</td><td class="no">—</td><td class="hi">✓</td><td>✓</td></tr>
+
+          <tr class="grouprow"><td colspan="4">Platform &amp; security</td></tr>
+          <tr><td>Seats included</td><td>5</td><td class="hi">25</td><td>Unlimited</td></tr>
+          <tr><td>SSO / SAML &amp; SCIM</td><td class="no">—</td><td class="hi">✓</td><td>✓</td></tr>
+          <tr><td>Deployment</td><td>Multi-tenant</td><td class="hi">Multi-tenant</td><td>VPC / air-gapped</td></tr>
+          <tr><td>Uptime SLA</td><td>99.9%</td><td class="hi">99.95%</td><td>99.99%</td></tr>
+          <tr><td>Support</td><td>Email</td><td class="hi">Priority</td><td>Dedicated CSM</td></tr>
+          <tr><td>Custom DPA / BAA</td><td class="no">—</td><td class="hi">Add-on</td><td>✓</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section class="band-tight" style="background:var(--paper-2);border-top:1px solid var(--line);border-bottom:1px solid var(--line)">
+  <div class="wrap">
+    <div class="sec-head center reveal" style="margin:0 auto">
+      <span class="eyebrow">FAQ</span>
+      <h2>Pricing questions, answered.</h2>
+    </div>
+    <div class="faq">
+      <div class="qa reveal"><button>Do you mark up model tokens?<span class="ic">+</span></button>
+        <div class="ans"><p>No. AuthClaw never marks up provider tokens. You bring your own OpenAI, Anthropic, Azure OpenAI, or Cohere keys and pay those providers directly at their rates. AuthClaw charges only for the protection layer — redaction, enforcement, remediation, and audit.</p></div></div>
+      <div class="qa reveal"><button>What counts as a "protected call"?<span class="ic">+</span></button>
+        <div class="ans"><p>Any prompt or response that passes through the gateway and is inspected, redacted, or enforced. Both inbound prompts and outbound completions are counted. Health checks and blocked-before-egress requests are never double-billed.</p></div></div>
+      <div class="qa reveal"><button>What happens if I exceed my monthly volume?<span class="ic">+</span></button>
+        <div class="ans"><p>Nothing breaks — protection never turns off to save money. Overage is billed in predictable bands per million protected calls, and you can set hard caps or alerts. If you consistently run over, we'll help you move to a better-fit tier or a committed-volume Enterprise agreement.</p></div></div>
+      <div class="qa reveal"><button>Is there a free trial?<span class="ic">+</span></button>
+        <div class="ans"><p>Yes. Every self-serve plan starts with a 14-day free trial — no credit card required. You can put real traffic through the gateway, run a scan, and export a signed audit bundle before you pay anything.</p></div></div>
+      <div class="qa reveal"><button>How is Enterprise priced?<span class="ic">+</span></button>
+        <div class="ans"><p>Enterprise is a committed-use annual agreement priced on protected volume, frameworks, deployment model, and SLA. Agreements typically start around $120k / year and scale with traffic and residency requirements. Talk to sales for a tailored quote.</p></div></div>
+      <div class="qa reveal"><button>Can I deploy in my own VPC or on-prem?<span class="ic">+</span></button>
+        <div class="ans"><p>Yes, on the Enterprise plan. AuthClaw can run single-tenant inside your VPC, in a region you choose, or fully air-gapped — so no request data ever leaves your environment. Multi-tenant cloud is the default on Team and Growth.</p></div></div>
+      <div class="qa reveal"><button>Do you offer discounts for startups or multi-year deals?<span class="ic">+</span></button>
+        <div class="ans"><p>Annual billing saves roughly 20% over monthly, and multi-year commitments unlock further discounts. Early-stage healthtech and fintech startups may qualify for our design-partner program — mention it when you book a demo.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- FINAL CTA -->
+<section class="finalcta" id="demo">
+  <div class="wrap">
+    <span class="eyebrow" style="color:var(--gold)">Get started</span>
+    <h2>See AuthClaw in your path.</h2>
+    <p>Watch a live redaction, an approved remediation, and a verifiable audit export — then start a free trial the same day.</p>
+    <div class="cta-row">
+      <a class="btn btn-gold" href="/signup">Start free trial</a>
+      <a class="btn btn-light" href="/signup">Book a demo</a>
+    </div>
+  </div>
+</section>
+
+<footer class="ft">
+  <div class="wrap">
+    <div class="ft-grid">
+      <div>
+        <div class="brand"><span class="mark"></span>AuthClaw<span class="ai">.ai</span></div>
+        <p class="desc">The runtime layer for AI compliance. Redact in real time, remediate with human approval, and prove it with a tamper-proof trail.</p>
+      </div>
+      <div><h5>Product</h5><ul>
+        <li><a href="product.html">In-line gateway</a></li>
+        <li><a href="product.html">Agentic remediation</a></li>
+        <li><a href="product.html">Audit &amp; trust center</a></li>
+        <li><a href="product.html">Framework scoring</a></li>
+      </ul></div>
+      <div><h5>Solutions</h5><ul>
+        <li><a href="pricing.html">Pricing</a></li>
+        <li><a href="security.html">Security</a></li>
+        <li><a href="security.html">Trust center</a></li>
+        <li><a href="product.html">Integrations</a></li>
+      </ul></div>
+      <div><h5>Company</h5><ul>
+        <li><a href="company.html">About</a></li><li><a href="company.html">Careers</a></li>
+        <li><a href="company.html">Contact</a></li><li><a href="security.html">Responsible AI</a></li>
+      </ul></div>
+    </div>
+    <div class="ft-base">
+      <span>© <span id="yr">2026</span> AuthClaw. All rights reserved.</span>
+      <span class="made">A product by <b>AgentsArchitects.ai</b></span>
+    </div>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

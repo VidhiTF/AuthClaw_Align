@@ -1,9 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: 'standalone',
+  outputFileTracingRoot: __dirname,
+  outputFileTracingExcludes: {
+    "/*": ["next.config.ts"],
+  },
   turbopack: {
-    root: process.cwd(),
+    root: __dirname,
   },
 };
 
