@@ -1,6 +1,8 @@
 node_modules
 .next
 test-results
+playwright-report
+.pytest_cache
 sessions.json
 *.log
 .env.local

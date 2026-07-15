@@ -98,6 +98,7 @@ export default function ConnectPage() {
   const [gatewayMfaError, setGatewayMfaError] = useState<string | null>(null);
   const [gatewayMfaBusy, setGatewayMfaBusy] = useState(false);
   const [credentials, setCredentials] = useState<ProviderCredential[]>([]);
+  const [credentialsLoaded, setCredentialsLoaded] = useState(false);
   const [credentialProvider, setCredentialProvider] = useState<Provider>("gemini");
   const [credentialName, setCredentialName] = useState("Production provider key");
   const [credentialKey, setCredentialKey] = useState("");
@@ -179,6 +180,8 @@ print(response)`;
       setCredentialError(null);
     } catch (error: unknown) {
       setCredentialError(getErrorMessage(error, "Failed to load provider credentials"));
+    } finally {
+      setCredentialsLoaded(true);
     }
   };
 
@@ -688,7 +691,10 @@ print(response)`;
             </button>
           </div>
 
-          {!activeCredentialForProvider && (
+          {!credentialsLoaded && (
+            <p className="mt-3 text-xs text-[#6B7488]">Loading provider keys...</p>
+          )}
+          {credentialsLoaded && !activeCredentialForProvider && (
             <p className="mt-3 text-xs text-amber-700">
               Save an active {providerCatalog[provider].shortLabel} provider key first, then run the gateway test.
               {provider === "openai" ? " You can leave OpenAI untested until you have an OpenAI API key." : ""}

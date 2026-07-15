@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Building2, Lock, Mail, ShieldAlert, ShieldCheck } from "lucide-react";
@@ -21,6 +21,7 @@ export default function LoginPage() {
     return new URLSearchParams(window.location.search).get("sso_error");
   });
   const [message, setMessage] = useState<string | null>(null);
+  const hydrated = useSyncExternalStore(() => () => {}, () => true, () => false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -226,7 +227,7 @@ export default function LoginPage() {
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || !hydrated}
             className="relative w-full py-2.5 rounded-[10px] bg-[#6D28D9] text-white font-semibold text-sm shadow-[0_8px_20px_-8px_rgba(109,40,217,.6)] hover:bg-[#7C3AED] active:scale-[0.99] disabled:opacity-50 disabled:pointer-events-none transition-all duration-200"
           >
             {loading ? (

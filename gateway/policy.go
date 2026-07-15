@@ -345,6 +345,17 @@ type OPAResponse struct {
 	} `json:"result"`
 }
 
+func opaRequestTimeout() time.Duration {
+	timeoutMs := envInt("OPA_TIMEOUT_MS", 5000)
+	if timeoutMs < 100 {
+		timeoutMs = 100
+	}
+	if timeoutMs > 30000 {
+		timeoutMs = 30000
+	}
+	return time.Duration(timeoutMs) * time.Millisecond
+}
+
 func inStringSlice(items []string, value string) bool {
 	for _, item := range items {
 		if item == value {
@@ -452,8 +463,7 @@ func EvaluatePolicy(ctx context.Context, tenantID, model, route string, prompts 
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Use short timeout for OPA requests to avoid hanging
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: opaRequestTimeout()}
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[POLICY-ERROR] OPA query failed (service unavailable): %v", err)

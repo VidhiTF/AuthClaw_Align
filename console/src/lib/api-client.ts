@@ -25,6 +25,10 @@ interface RequestOptions extends RequestInit {
   params?: Record<string, string>;
 }
 
+interface AgentRequestOptions extends RequestInit {
+  forwardGatewayKey?: boolean;
+}
+
 type ErrorKey = "detail" | "error";
 type JsonBodyMapper = (body: Record<string, unknown>) => unknown;
 
@@ -109,7 +113,7 @@ export async function backendFetch(path: string, options: RequestOptions = {}) {
   return response.json();
 }
 
-export async function agentFetch(path: string, options: RequestInit = {}) {
+export async function agentFetch(path: string, options: AgentRequestOptions = {}) {
   const context = await readSessionContext();
   if (!context) throw new BackendRequestError("Unauthorized: No session cookie found", 401);
   if (!context.session) throw new BackendRequestError("Unauthorized: Session expired or invalid", 401);
@@ -134,10 +138,14 @@ export async function agentFetch(path: string, options: RequestInit = {}) {
   headers.set("X-AuthClaw-User-ID", principal.userId);
   headers.set("X-AuthClaw-Role", principal.role.toLowerCase());
   headers.set("X-AuthClaw-Signature", createHmac("sha256", secret).update(signaturePayload).digest("hex"));
+  if (options.forwardGatewayKey) headers.set("X-API-Key", principal.apiKey);
   if (options.body !== undefined) headers.set("Content-Type", "application/json");
 
+  const fetchOptions = { ...options };
+  delete fetchOptions.forwardGatewayKey;
+
   const response = await fetch(`${AGENT_URL}${path}`, {
-    ...options,
+    ...fetchOptions,
     method,
     headers,
     signal: options.signal || AbortSignal.timeout(AGENT_TIMEOUT_MS),

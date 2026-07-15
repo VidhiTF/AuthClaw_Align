@@ -80,6 +80,7 @@ class GatewayService:
                     "username": resolved_username,
                     "tenant_id": tenant_id,
                     "request_id": request_id,
+                    "gateway_api_key": x_api_key,
                     "route_id": route_id,
                     "provider": provider,
                     "model": model,
