@@ -282,12 +282,17 @@ services:
       MODEL_PROVIDER: ${MODEL_PROVIDER:-gemini}
       MODEL_NAME: ${MODEL_NAME:-gemini-2.5-flash-lite}
       GOOGLE_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_URL: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}
+      AUTHCLAW_PROVIDER_GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      AUTHCLAW_PROVIDER_GEMINI_API_BASE: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}
+      AUTHCLAW_PROVIDER_GEMINI_MODEL: ${MODEL_NAME:-gemini-2.5-flash-lite}
       JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-change-me}
       AUTHCLAW_ENCRYPTION_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       AUTHCLAW_REDACTION_SALT: ${SESSION_SECRET:-authclaw-full-local-session-secret}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
+      AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-full-internal-service-secret-change-me}
     ports:
-      - "${AGENT_PORT:-8001}:8001"
+      - "127.0.0.1:${AGENT_PORT:-8001}:8001"
 
   audit_consumer:
     build:
@@ -316,7 +321,7 @@ services:
   console:
     build:
       context: ./console
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.demo
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
         NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:8080}
@@ -328,10 +333,15 @@ services:
         condition: service_healthy
       gateway:
         condition: service_started
+      agent:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://${POSTGRES_APP_USER:-authclaw_app}:${POSTGRES_APP_PASSWORD:-authclaw_app}@postgres:5432/${POSTGRES_DB:-authclaw}
       API_URL: http://backend:8000
       GATEWAY_INTERNAL_URL: http://gateway:8080
+      AGENT_INTERNAL_URL: http://agent:8001
+      AGENT_TIMEOUT_MS: ${AGENT_TIMEOUT_MS:-45000}
+      AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-full-internal-service-secret-change-me}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
       NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:8080}
       NEXT_PUBLIC_AUTHCLAW_DEMO_MODE: "false"

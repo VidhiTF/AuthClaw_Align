@@ -178,7 +178,7 @@ def get_history(session_id):
     try:
         with engine.connect() as conn:
             res = conn.execute(
-                text("SELECT role, content, trace FROM chat_messages WHERE session_id = :session_id ORDER BY id ASC"),
+                text("SELECT role, content, trace, created_at FROM chat_messages WHERE session_id = :session_id ORDER BY id ASC"),
                 {"session_id": session_id}
             )
             history = []
@@ -206,6 +206,9 @@ def get_history(session_id):
                         msg["trace"] = sanitize_trace(json.loads(trace))
                     except Exception:
                         msg["trace"] = sanitize_provider_message(trace)
+
+                if row[3] is not None:
+                    msg["timestamp"] = row[3].isoformat() if hasattr(row[3], "isoformat") else str(row[3])
                     
                 history.append(msg)
             return history

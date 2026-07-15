@@ -126,6 +126,8 @@ def run_startup_migrations():
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tier VARCHAR(50) DEFAULT 'enterprise';
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_override TEXT;
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_updated_at TIMESTAMP;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS control_plane_id VARCHAR(64);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_control_plane_id ON tenants(control_plane_id);
     ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_name_key;
     ALTER TABLE gateway_routes ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;
 

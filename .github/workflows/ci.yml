@@ -392,9 +392,9 @@ jobs:
         working-directory: console
         run: npx tsc --noEmit --pretty false
 
-      - name: API contract adapter test
+      - name: Console unit tests
         working-directory: console
-        run: npm run test:contract
+        run: npm run test:unit
 
       - name: Build
         working-directory: console
@@ -421,6 +421,7 @@ jobs:
       AUTHCLAW_LITE_DEMO_KEY: acl_lite_demo_key
       NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: "true"
       AUTHCLAW_LITE_DEMO_PASSWORD: AuthClawDemo!234
+      GEMINI_API_KEY: ci-mock-provider-key
       GEMINI_BASE_URL: http://mock-provider:19090
       PRESIDIO_ANALYZE_TIMEOUT_MS: "25"
       REDACTION_LOCAL_ANALYZER_ONLY: "true"
@@ -434,7 +435,7 @@ jobs:
       GATEWAY_RATE_LIMIT_PER_MINUTE: "600"
       GATEWAY_RATE_LIMIT_BURST_10S: "200"
       AUTHCLAW_SMOKE_PORTS: "8000:FastAPI Backend,8001:LangGraph Agent,8080:Go Gateway,3001:Next.js Console,6379:Redis"
-      AUTHCLAW_SMOKE_ENDPOINTS: "http://localhost:8000/health=200,http://localhost:8001/health/ready=200,http://localhost:8080/health=200,http://localhost:3001/login=200,http://localhost:3001/trust/shared/tc_not_real=200"
+      AUTHCLAW_SMOKE_ENDPOINTS: "http://localhost:8000/health=200,http://localhost:8001/health/ready=200,http://localhost:8080/health=200,http://localhost:3001/login=200,http://localhost:3001/trust-center/tc_not_real=200"
       AUTHCLAW_SMOKE_RETRIES: "30"
       AUTHCLAW_SMOKE_RETRY_DELAY_SECONDS: "2"
       AUTHCLAW_BENCH_GATEWAY_URL: http://localhost:8080
@@ -490,7 +491,7 @@ jobs:
         env:
           E2E_LOGIN_EMAIL: admin@authclaw-lite.demo
           E2E_LOGIN_PASSWORD: AuthClawDemo!234
-          PLAYWRIGHT_BASE_URL: http://localhost:3001
+          E2E_BASE_URL: http://localhost:3001
 
       - name: Gateway latency benchmark gate
         run: python scripts/gateway_latency_benchmark.py --require-provider-baseline
@@ -585,7 +586,7 @@ jobs:
             dockerfile: ./gateway/Dockerfile.demo
           - service: console
             context: ./console
-            dockerfile: ./console/Dockerfile
+            dockerfile: ./console/Dockerfile.demo
           - service: agent
             context: ./services/agent
             dockerfile: ./services/agent/Dockerfile
