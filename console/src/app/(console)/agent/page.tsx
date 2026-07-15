@@ -661,7 +661,7 @@ export default function AgentPage() {
       {/* Header */}
       <div>
         <h1 className="text-3xl font-extrabold tracking-tight text-[#0E1726]">
-          Compliance Agen
+          Compliance Agent
         </h1>
         <p className="text-[#6B7488] text-sm mt-1">
           Ask compliance questions, review evidence-backed scans, and approve remediation work before it changes anything.
