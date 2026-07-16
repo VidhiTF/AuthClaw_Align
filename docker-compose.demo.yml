@@ -84,6 +84,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile.demo
     container_name: authclaw-demo-backend
+    env_file:
+      - .env.local
     depends_on:
       postgres:
         condition: service_healthy
@@ -118,13 +120,6 @@ services:
       DEMO_OTP_VISIBLE: ${DEMO_OTP_VISIBLE:-false}
       AUTHCLAW_EMAIL_OUTBOX_PATH: ${AUTHCLAW_EMAIL_OUTBOX_PATH:-/app/.authclaw/email-outbox.jsonl}
       AUTHCLAW_LITE_DEMO_PASSWORD: ${AUTHCLAW_LITE_DEMO_PASSWORD:-AuthClawDemo!234}
-      SMTP_HOST: ${SMTP_HOST:-}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USER: ${SMTP_USER:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      SMTP_FROM: ${SMTP_FROM:-}
-      EMAIL_FROM: ${EMAIL_FROM:-}
-      SMTP_TLS: ${SMTP_TLS:-true}
       PUBLIC_GATEWAY_URL: ${PUBLIC_GATEWAY_URL:-http://localhost:18080}
       ONBOARDING_SIGNUP_EMAIL_PER_HOUR: ${ONBOARDING_SIGNUP_EMAIL_PER_HOUR:-3}
       ONBOARDING_SIGNUP_IP_PER_DAY: ${ONBOARDING_SIGNUP_IP_PER_DAY:-10}
