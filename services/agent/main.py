@@ -39,6 +39,8 @@ from services.gateway_service import (
     GatewayProviderUnavailableError,
     GatewayService,
 )
+from services.canonical_agent_service import CanonicalAgentService, CanonicalExecutionError
+from services.remediation_runtime import RemediationRuntime, RemediationRuntimeError
 from services.enterprise_identity import (
     EnterpriseIdentityError,
     complete_oidc_callback,
@@ -499,6 +501,8 @@ def _is_public_or_auth_path(path: str) -> bool:
         "/redoc",
         "/health",
         "/health/ready",
+        "/api/v1/agent/health",
+        "/api/v1/agent/health/ready",
         "/favicon.ico",
     }
     return path in public_exact or path.startswith(("/auth/", "/static/", "/assets/"))
@@ -530,6 +534,8 @@ async def tenant_database_context_middleware(request: Request, call_next):
             tenant_id = _tenant_id_from_request_headers(request)
         except HTTPException:
             tenant_id = None
+    request.state.correlation_id = request_id
+    request.state.tenant_id = tenant_id
 
     with tenant_context(tenant_id, request_id=request_id, required=tenant_id is not None):
         response = await call_next(request)
@@ -802,6 +808,14 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class AgentExecutionRequest(BaseModel):
+    operation: str = Field(default="chat")
+    message: Optional[str] = None
+    session_id: Optional[str] = None
+    route_id: Optional[str] = None
+    finding_id: Optional[int] = None
+
+
 class RedactPlaygroundRequest(BaseModel):
     text: str
 
@@ -915,6 +929,99 @@ def home():
 
 def get_gateway_service() -> GatewayService:
     return GatewayService(graph=graph, resolve_tenant=resolve_tenant, decode_jwt=decode_jwt)
+
+
+def get_canonical_agent_service() -> CanonicalAgentService:
+    from retriever import retrieve_context
+
+    return CanonicalAgentService(
+        rag_retriever=retrieve_context,
+        remediation_runtime_factory=RemediationRuntime,
+    )
+
+
+@app.post("/api/v1/agent/executions")
+def execute_agent_capability(
+    execution_request: AgentExecutionRequest,
+    request: Request,
+    x_api_key: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
+    operation = execution_request.operation.strip().lower()
+    if operation not in {"chat", "rag", "remediation_plan"}:
+        raise HTTPException(
+            status_code=422,
+            detail="operation must be one of: chat, rag, remediation_plan",
+        )
+
+    tenant_id = resolve_tenant(x_api_key, authorization)
+    correlation_id = request.state.correlation_id
+    canonical_service = get_canonical_agent_service()
+    logger.info(
+        "canonical_agent_execution_started operation=%s tenant_id=%s correlation_id=%s",
+        operation,
+        tenant_id,
+        correlation_id,
+    )
+
+    try:
+        if operation == "rag":
+            result = canonical_service.execute_rag(
+                message=execution_request.message,
+                tenant_id=tenant_id,
+                correlation_id=correlation_id,
+            )
+        elif operation == "remediation_plan":
+            result = canonical_service.create_remediation_plan(
+                finding_id=execution_request.finding_id,
+                tenant_id=tenant_id,
+                correlation_id=correlation_id,
+            )
+        else:
+            if not execution_request.message or not execution_request.message.strip():
+                raise CanonicalExecutionError("message is required for chat execution")
+            gateway_service = get_gateway_service()
+            execution = gateway_service.execute_chat(
+                message=execution_request.message.strip(),
+                session_id=execution_request.session_id,
+                x_api_key=x_api_key,
+                authorization=authorization,
+                route_id=execution_request.route_id,
+                correlation_id=correlation_id,
+            )
+            result = canonical_service.format_chat(
+                formatted_result=gateway_service.format_chat_response(execution),
+                tenant_id=execution.tenant_id,
+                correlation_id=correlation_id,
+            )
+    except CanonicalExecutionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RemediationRuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except GatewayProviderConfigurationError as exc:
+        raise HTTPException(status_code=500, detail="provider_not_configured") from exc
+    except GatewayProviderUnavailableError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "api_version": "v1",
+                "operation": operation,
+                "status": "provider_unavailable",
+                "tenant_id": tenant_id,
+                "correlation_id": correlation_id,
+                "request_id": exc.request_id,
+                "message": PROVIDER_UNAVAILABLE_MESSAGE,
+                "trace": exc.trace,
+            },
+        )
+
+    logger.info(
+        "canonical_agent_execution_completed operation=%s tenant_id=%s correlation_id=%s",
+        operation,
+        tenant_id,
+        correlation_id,
+    )
+    return result
 
 
 PROVIDER_UNAVAILABLE_MESSAGE = (
@@ -2111,6 +2218,7 @@ def reload_policies_endpoint():
         )
 
 
+@app.get("/api/v1/agent/health")
 @app.get("/health")
 def get_health():
     return {
@@ -2146,6 +2254,7 @@ def get_health_details():
     }
 
 
+@app.get("/api/v1/agent/health/ready")
 @app.get("/health/ready")
 def get_readiness():
     checks = {
