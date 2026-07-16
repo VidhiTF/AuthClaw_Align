@@ -132,7 +132,15 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	providerCredential, credentialErr := LoadProviderCredential(r.Context(), tenantID, provider)
 	if credentialErr != nil {
 		log.Printf("Provider credential load failed: %v", credentialErr)
-		http.Error(w, "Provider credential could not be loaded", http.StatusBadGateway)
+		queueNotification(tenantID, "", "gateway_api_key_issue", "warning", "Provider credential unavailable", "The saved provider credential could not be decrypted. Verify that backend and gateway use the same envelope key.", "/connect")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{"error":"ProviderCredentialUnavailable","message":"Provider credential could not be loaded."}`))
+		EmitAuditEvent(&AuditEvent{
+			ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
+			TenantID: tenantID, Action: "block", DecisionReason: "Provider credential unavailable",
+			Provider: provider, RequestSize: int(r.ContentLength), ResponseStatus: http.StatusBadGateway, DurationMs: 0,
+		})
 		return
 	}
 	if tenantID != "" && requiresTenantProviderCredential(provider) && (providerCredential == nil || providerCredential.APIKey == "") {

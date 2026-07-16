@@ -57,6 +57,11 @@ Production access is not granted to staging workloads or CI roles.
 application origin. Promotion adds links to `app.authclaw.ai`; it does not mix marketing
 and authenticated traffic in one cache or cookie boundary.
 
+The replacement console internally names the public report page `/trust-center/:token`.
+Next.js rewrites the approved `/trust/shared/:token` contract to that page without
+redirecting the browser, so existing shared URLs, cache rules and cookie boundaries remain
+stable. `/trust/shared/*` remains the externally documented route.
+
 There is no open-registration route. Invitation acceptance is one-time, expiring,
 revocable, email-bound and tenant-bound. Any legacy registration page must redirect to
 Login or reject the request unless it is carrying a valid approved invitation.
@@ -303,7 +308,7 @@ are blockers, not implied approvals.
 - [ ] Origin-denial and staging-isolation implementation evidence is explicitly assigned
   to ACL-14, ACL-30 and ACL-37; it is not fabricated as ACL-29 design evidence.
 - [ ] DNS, certificate, deployment and rollback owners accepted their assignments.
-- [ ] Approved pull request is merged using `feat/docs/ACL-29-aws-url-contract`.
+- [x] Pull request #9 was merged from `feat/docs/ACL-29-aws-url-contract`.
 
 ## Consequences
 

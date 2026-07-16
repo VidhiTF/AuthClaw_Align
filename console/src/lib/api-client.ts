@@ -1,119 +1,284 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- compatibility facade preserves imported Axios call-site inference */
-import { clearTokens, getTokens } from './auth';
-import { mapCanonicalRequest, normalizeCanonicalResponse } from './api-contract';
+import { createHmac } from "crypto";
+import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
+import { apiErrorMessage, getErrorMessage, getErrorStatus } from "./errors";
+import { sessionStore } from "./session-store";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
+const AGENT_URL = process.env.AGENT_INTERNAL_URL || "http://localhost:8001";
+const BACKEND_TIMEOUT_MS = 15000;
+const AGENT_TIMEOUT_MS = Number(process.env.AGENT_TIMEOUT_MS || "45000");
 
-type RequestConfig = {
-  params?: Record<string, unknown>;
-  responseType?: 'blob' | 'json' | 'text';
-  headers?: Record<string, string>;
-};
-
-export type ApiResponse<T = unknown> = {
-  data: T;
+class BackendRequestError extends Error {
   status: number;
-  headers: Headers;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "BackendRequestError";
+    this.status = status;
+  }
+}
+
+export { apiErrorMessage, getErrorMessage, getErrorStatus };
+
+interface RequestOptions extends RequestInit {
+  params?: Record<string, string>;
+}
+
+interface AgentRequestOptions extends RequestInit {
+  forwardGatewayKey?: boolean;
+}
+
+type ErrorKey = "detail" | "error";
+type JsonBodyMapper = (body: Record<string, unknown>) => unknown;
+
+export type RouteContext<T extends Record<string, string> = { id: string }> = {
+  params: Promise<T>;
 };
 
-export class ApiRequestError extends Error {
-  response: { status: number; data: unknown };
-
-  constructor(status: number, data: unknown) {
-    const detail =
-      typeof data === 'object' && data && 'detail' in data
-        ? String((data as { detail: unknown }).detail)
-        : `Request failed with status ${status}`;
-    super(detail);
-    this.name = 'ApiRequestError';
-    this.response = { status, data };
+async function readSessionContext(invalidSessionMessage?: string) {
+  const cookieStore = await cookies();
+  const sessionToken = cookieStore.get("authclaw_session")?.value;
+  if (!sessionToken) return null;
+  let payload;
+  try {
+    payload = JSON.parse(sessionToken);
+  } catch (error) {
+    if (invalidSessionMessage) throw new Error(invalidSessionMessage);
+    throw error;
   }
+  return { payload, session: sessionStore.getSession(payload.sessionId) };
 }
 
-function appendQuery(url: URL, params?: Record<string, unknown>) {
-  if (!params) return;
-  for (const [key, rawValue] of Object.entries(params)) {
-    if (rawValue === null || rawValue === undefined) continue;
-    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
-    for (const value of values) {
-      if (value !== null && value !== undefined) {
-        url.searchParams.append(key, String(value));
-      }
+async function fetchBackend(url: string, options: RequestInit) {
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: options.signal || AbortSignal.timeout(BACKEND_TIMEOUT_MS),
+    });
+  } catch (error: unknown) {
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      throw new BackendRequestError("Backend request timed out", 504);
     }
+    throw error;
   }
 }
 
-async function parseResponse(response: Response, responseType?: RequestConfig['responseType']) {
-  if (response.status === 204) return null;
-  if (responseType === 'blob') return response.blob();
-  if (responseType === 'text') return response.text();
-  const text = await response.text();
-  if (!text) return null;
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('json')) {
-    try {
-      return JSON.parse(text);
-    } catch {
-      return { detail: 'The server returned invalid JSON.' };
-    }
+export async function getSessionContext() {
+  const context = await readSessionContext("Unauthorized: Invalid session format");
+  if (!context) return { response: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
+  if (!context.session) {
+    const response = NextResponse.json({ error: "Unauthorized: Session expired or invalid" }, { status: 401 });
+    response.cookies.delete("authclaw_session");
+    return { response };
   }
-  return text;
+  return context;
 }
 
-async function request<T>(
-  method: string,
-  path: string,
-  body?: unknown,
-  config: RequestConfig = {},
-): Promise<ApiResponse<T>> {
-  const mapped = mapCanonicalRequest(method, path);
-  const url = new URL(mapped.path.replace(/^\/+/, ''), `${API_URL.replace(/\/$/, '')}/`);
-  appendQuery(url, config.params);
+export async function backendFetch(path: string, options: RequestOptions = {}) {
+  const context = await readSessionContext();
+  if (!context) throw new Error("Unauthorized: No session cookie found");
+  if (!context.session) throw new Error("Unauthorized: Session expired or invalid");
 
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    ...config.headers,
-  };
-  const tokens = getTokens();
-  if (tokens?.accessToken) headers.Authorization = `Bearer ${tokens.accessToken}`;
-
-  const init: RequestInit = { method: mapped.method, headers };
-  if (body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-    init.body = JSON.stringify(body);
+  let url = `${BACKEND_URL}${path}`;
+  if (options.params) {
+    const searchParams = new URLSearchParams(options.params);
+    url += `?${searchParams.toString()}`;
   }
 
-  const response = await fetch(url, init);
-  const parsed = await parseResponse(response, config.responseType);
-  const data = config.responseType === 'blob'
-    ? parsed
-    : normalizeCanonicalResponse(path, parsed);
+  const headers = new Headers(options.headers);
+  headers.set("Authorization", `Bearer ${context.session.apiKey}`);
+  headers.set("Content-Type", "application/json");
+
+  const response = await fetchBackend(url, {
+    ...options,
+    headers,
+  });
+
   if (!response.ok) {
-    if (response.status === 401) {
-      clearTokens();
-      if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-        window.location.href = '/login';
-      }
+    let errorDetail = "Backend request failed";
+    try {
+      const errorJson = await response.json();
+      errorDetail = apiErrorMessage(errorJson, errorDetail);
+    } catch {
+      // ignore JSON parse error
     }
-    throw new ApiRequestError(response.status, data);
+    throw new BackendRequestError(errorDetail, response.status);
   }
-  return { data: data as T, status: response.status, headers: response.headers };
+
+  if (response.status === 204) {
+    return null;
+  }
+
+  return response.json();
 }
 
-export const apiClient = {
-  get<T = any>(path: string, config?: RequestConfig) {
-    return request<T>('GET', path, undefined, config);
-  },
-  post<T = any>(path: string, body?: unknown, config?: RequestConfig) {
-    return request<T>('POST', path, body, config);
-  },
-  put<T = any>(path: string, body?: unknown, config?: RequestConfig) {
-    return request<T>('PUT', path, body, config);
-  },
-  patch<T = any>(path: string, body?: unknown, config?: RequestConfig) {
-    return request<T>('PATCH', path, body, config);
-  },
-  delete<T = any>(path: string, config?: RequestConfig) {
-    return request<T>('DELETE', path, undefined, config);
-  },
-};
+export async function agentFetch(path: string, options: AgentRequestOptions = {}) {
+  const context = await readSessionContext();
+  if (!context) throw new BackendRequestError("Unauthorized: No session cookie found", 401);
+  if (!context.session) throw new BackendRequestError("Unauthorized: Session expired or invalid", 401);
+
+  const secret = process.env.AUTHCLAW_INTERNAL_SERVICE_SECRET;
+  if (!secret) throw new BackendRequestError("Agent service authentication is not configured", 503);
+
+  const method = (options.method || "GET").toUpperCase();
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const principal = context.session;
+  const signaturePayload = [
+    timestamp,
+    method,
+    path,
+    principal.tenantId,
+    principal.userId,
+    principal.role.toLowerCase(),
+  ].join("\n");
+  const headers = new Headers(options.headers);
+  headers.set("X-AuthClaw-Timestamp", timestamp);
+  headers.set("X-AuthClaw-Tenant-ID", principal.tenantId);
+  headers.set("X-AuthClaw-User-ID", principal.userId);
+  headers.set("X-AuthClaw-Role", principal.role.toLowerCase());
+  headers.set("X-AuthClaw-Signature", createHmac("sha256", secret).update(signaturePayload).digest("hex"));
+  if (options.forwardGatewayKey) headers.set("X-API-Key", principal.apiKey);
+  if (options.body !== undefined) headers.set("Content-Type", "application/json");
+
+  const fetchOptions = { ...options };
+  delete fetchOptions.forwardGatewayKey;
+
+  const response = await fetch(`${AGENT_URL}${path}`, {
+    ...fetchOptions,
+    method,
+    headers,
+    signal: options.signal || AbortSignal.timeout(AGENT_TIMEOUT_MS),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new BackendRequestError(apiErrorMessage(body, "Agent request failed"), response.status);
+  }
+  if (response.status === 204) return null;
+  return response.json();
+}
+
+export async function routeParam<T extends Record<string, string>>(
+  context: RouteContext<T>,
+  key: keyof T
+) {
+  const params = await context.params;
+  return params[key];
+}
+
+export async function proxyBackend(path: string, options: RequestOptions = {}, status?: number) {
+  try {
+    const data = await backendFetch(path, options);
+    if (status === 204) return new Response(null, { status: 204 });
+    return NextResponse.json(data, status ? { status } : undefined);
+  } catch (error: unknown) {
+    return handleApiError(error);
+  }
+}
+
+export async function proxyBackendJson(
+  request: Request,
+  path: string,
+  method: string,
+  status?: number
+) {
+  try {
+    const body = await request.json();
+    return proxyBackend(path, {
+      method,
+      body: JSON.stringify(body),
+    }, status);
+  } catch (error: unknown) {
+    return handleApiError(error);
+  }
+}
+
+export async function proxyBackendOptionalJson(
+  request: Request,
+  path: string,
+  method: string,
+  status?: number
+) {
+  let body = {};
+  try {
+    body = await request.json();
+  } catch {
+    // Preserve routes that treated an empty or invalid body as an empty object.
+  }
+  return proxyBackend(path, {
+    method,
+    body: JSON.stringify(body),
+  }, status);
+}
+
+export async function publicBackendJson(
+  path: string,
+  options: RequestInit,
+  fallback: string,
+  errorKey: ErrorKey = "error",
+  tolerantJson = false
+) {
+  try {
+    const response = await fetchBackend(`${BACKEND_URL}${path}`, options);
+    const data = tolerantJson ? await response.json().catch(() => ({})) : await response.json();
+    return NextResponse.json(data, { status: response.status });
+  } catch (error: unknown) {
+    return NextResponse.json({ [errorKey]: getErrorMessage(error, fallback) }, { status: 500 });
+  }
+}
+
+export async function publicBackendPostJson(
+  request: Request,
+  path: string,
+  fallback: string,
+  errorKey: ErrorKey = "detail",
+  mapBody: JsonBodyMapper = (body) => body,
+  options: RequestInit = {},
+  tolerantJson = false
+) {
+  try {
+    const body = await request.json();
+    const headers = new Headers(options.headers);
+    headers.set("Content-Type", "application/json");
+    return publicBackendJson(
+      path,
+      {
+        ...options,
+        method: "POST",
+        headers,
+        body: JSON.stringify(mapBody(body)),
+      },
+      fallback,
+      errorKey,
+      tolerantJson
+    );
+  } catch (error: unknown) {
+    return NextResponse.json({ [errorKey]: getErrorMessage(error, fallback) }, { status: 500 });
+  }
+}
+
+export async function proxyBackendWithSessionCheck(path: string, options: RequestOptions = {}) {
+  try {
+    const context = await readSessionContext();
+    if (!context) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!context.session) {
+      return NextResponse.json({ error: "Session expired" }, { status: 401 });
+    }
+    const data = await backendFetch(path, options);
+    return NextResponse.json(data);
+  } catch (error: unknown) {
+    return handleApiError(error);
+  }
+}
+
+export function handleApiError(error: unknown) {
+  const message = getErrorMessage(error);
+  const isUnauthorized = message.includes("Unauthorized");
+  const status = getErrorStatus(error, isUnauthorized ? 401 : 500);
+  const response = NextResponse.json({ error: message }, { status });
+  if (isUnauthorized) {
+    response.cookies.delete("authclaw_session");
+  }
+  return response;
+}

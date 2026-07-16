@@ -1,11 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { Toaster } from "@/components/ui/sonner";
-import { Providers } from "@/components/providers";
 
 export const metadata: Metadata = {
-  title: "AuthClaw - AI Security & Governance Platform",
-  description: "Enterprise SaaS Platform for AI Security, Governance, Compliance, and Auditing.",
+  title: "AuthClaw",
+  description: "AI governance and compliance console",
 };
 
 export default function RootLayout({
@@ -14,16 +12,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className="h-full antialiased dark"
-    >
-      <body className="min-h-full flex flex-col">
-        <Providers>
-          {children}
-          <Toaster />
-        </Providers>
-      </body>
+    <html lang="en" className="h-full antialiased">
+      <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
 }

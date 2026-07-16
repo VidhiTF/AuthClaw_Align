@@ -13,6 +13,7 @@ class AuthState(TypedDict, total=False):
     provider: str
     provider_client: object
     provider_route_source: str
+    gateway_api_key: str
     model: str
     decision: str
     decision_reason: str

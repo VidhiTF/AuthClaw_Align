@@ -53,6 +53,7 @@ from services.enterprise_identity import (
     upsert_provider_config,
 )
 from services.tenant_context import auth_lookup_context, get_current_tenant_id, tenant_context
+from services.control_plane_auth import verify_control_plane_request
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO)
@@ -418,6 +419,10 @@ def decrypt_secret(encrypted_value: str) -> str:
     return SecretManager().decrypt_from_database(encrypted_value)
 
 def resolve_tenant(x_api_key: str, authorization: str = None) -> int:
+    context_tenant_id = get_current_tenant_id()
+    if context_tenant_id is not None:
+        return int(context_tenant_id)
+
     key_to_check = x_api_key
     if not key_to_check and authorization:
         if authorization.startswith("Bearer "):
@@ -463,6 +468,13 @@ def resolve_tenant(x_api_key: str, authorization: str = None) -> int:
         return tenant_id
 
 
+def require_tenant_context() -> int:
+    tenant_id = get_current_tenant_id()
+    if tenant_id is None:
+        raise HTTPException(status_code=401, detail="Authenticated tenant context required.")
+    return int(tenant_id)
+
+
 def resolve_tenant_from_authorization(authorization: str = None) -> int:
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization credentials missing.")
@@ -485,6 +497,22 @@ def get_current_user_from_authorization(authorization: str = Header(None)) -> di
     return payload
 
 def optional_user_from_request(request: Request) -> dict:
+    principal = getattr(request.state, "control_plane_principal", None)
+    if principal:
+        return principal
+    if request.headers.get("X-AuthClaw-Signature"):
+        verified = verify_control_plane_request(
+            request.headers,
+            request.method,
+            request.url.path,
+            os.getenv("AUTHCLAW_INTERNAL_SERVICE_SECRET", ""),
+        )
+        if verified:
+            return {
+                "external_tenant_id": verified.tenant_id,
+                "sub": verified.user_id,
+                "role": verified.role,
+            }
     auth_header = request.headers.get("Authorization")
     if not auth_header:
         return {}
@@ -509,6 +537,40 @@ def _is_public_or_auth_path(path: str) -> bool:
 
 
 def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
+    signature = request.headers.get("X-AuthClaw-Signature")
+    if signature:
+        principal = verify_control_plane_request(
+            request.headers,
+            request.method,
+            request.url.path,
+            os.getenv("AUTHCLAW_INTERNAL_SERVICE_SECRET", ""),
+        )
+        if not principal:
+            raise HTTPException(status_code=401, detail="Invalid control-plane signature.")
+        from database import engine
+        with auth_lookup_context(), engine.begin() as conn:
+            tenant_id = conn.execute(
+                text(
+                    """
+                    INSERT INTO tenants (name, status, control_plane_id)
+                    VALUES (:name, 'active', :control_plane_id)
+                    ON CONFLICT (control_plane_id) DO UPDATE SET status = 'active'
+                    RETURNING id
+                    """
+                ),
+                {
+                    "name": f"Control Plane {principal.tenant_id}",
+                    "control_plane_id": principal.tenant_id,
+                },
+            ).scalar_one()
+        request.state.control_plane_principal = {
+            "tenant_id": tenant_id,
+            "external_tenant_id": principal.tenant_id,
+            "sub": principal.user_id,
+            "role": principal.role,
+        }
+        return tenant_id
+
     authorization = request.headers.get("Authorization")
     x_api_key = request.headers.get("X-API-Key")
 
@@ -806,6 +868,8 @@ class RemediationScanRequest(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
 
 
 class AgentExecutionRequest(BaseModel):
@@ -1043,6 +1107,8 @@ def gateway_chat(
             session_id=request.session_id,
             x_api_key=x_api_key,
             authorization=authorization,
+            provider=request.provider or "AuthClaw Gateway",
+            model=request.model or "authclaw-gateway",
         )
         return service.format_chat_response(execution)
     except GatewayProviderConfigurationError as e:
@@ -1078,6 +1144,8 @@ def chat(
             session_id=request.session_id,
             x_api_key=x_api_key,
             authorization=authorization,
+            provider=request.provider or "AuthClaw Gateway",
+            model=request.model or "authclaw-gateway",
         )
         return service.format_chat_response(execution)
     except GatewayProviderConfigurationError as e:
@@ -1108,7 +1176,8 @@ class SessionCreate(BaseModel):
 @app.post("/chat/sessions")
 def create_chat_session(
     req: SessionCreate,
-    authorization: Optional[str] = Header(None)
+    authorization: Optional[str] = Header(None),
+    tenant_id: int = Depends(require_tenant_context),
 ):
     username = "admin_user"
     if authorization:
@@ -1125,26 +1194,15 @@ def create_chat_session(
 
     try:
         from database import engine, text
-        tenant_id = get_current_tenant_id()
         with engine.connect() as conn:
-            if tenant_id is not None:
-                conn.execute(
-                    text("""
-                    INSERT INTO chat_sessions (session_id, title, user_id, tenant_id, created_at, updated_at)
-                    VALUES (:session_id, :title, :user_id, :tenant_id, NOW(), NOW())
-                    ON CONFLICT (session_id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW()
-                    """),
-                    {"session_id": req.session_id, "title": req.title, "user_id": username, "tenant_id": int(tenant_id)}
-                )
-            else:
-                conn.execute(
-                    text("""
-                    INSERT INTO chat_sessions (session_id, title, user_id, created_at, updated_at)
-                    VALUES (:session_id, :title, :user_id, NOW(), NOW())
-                    ON CONFLICT (session_id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW()
-                    """),
-                    {"session_id": req.session_id, "title": req.title, "user_id": username}
-                )
+            conn.execute(
+                text("""
+                INSERT INTO chat_sessions (session_id, title, user_id, tenant_id, created_at, updated_at)
+                VALUES (:session_id, :title, :user_id, :tenant_id, NOW(), NOW())
+                ON CONFLICT (session_id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW()
+                """),
+                {"session_id": req.session_id, "title": req.title, "user_id": username, "tenant_id": tenant_id}
+            )
             conn.commit()
     except Exception as e:
         logger.error(f"Database error in create_chat_session: {e}", exc_info=True)
@@ -1153,7 +1211,10 @@ def create_chat_session(
 
 
 @app.get("/chat/sessions")
-def get_chat_sessions(authorization: Optional[str] = Header(None)):
+def get_chat_sessions(
+    authorization: Optional[str] = Header(None),
+    _tenant_id: int = Depends(require_tenant_context),
+):
     try:
         from database import engine, text
         with engine.connect() as conn:
@@ -1176,13 +1237,19 @@ def get_chat_sessions(authorization: Optional[str] = Header(None)):
 
 
 @app.get("/chat/sessions/{session_id}")
-def get_chat_session_messages(session_id: str):
+def get_chat_session_messages(
+    session_id: str,
+    _tenant_id: int = Depends(require_tenant_context),
+):
     from memory import get_history
     return get_history(session_id)
 
 
 @app.delete("/chat/sessions/{session_id}")
-def delete_chat_session(session_id: str):
+def delete_chat_session(
+    session_id: str,
+    _tenant_id: int = Depends(require_tenant_context),
+):
     try:
         from database import engine, text
         with engine.connect() as conn:
@@ -1201,33 +1268,22 @@ def delete_chat_session(session_id: str):
         return {"status": "error", "message": str(e)}
 
 @app.delete("/chat/sessions")
-def purge_all_sessions():
+def purge_all_sessions(tenant_id: int = Depends(require_tenant_context)):
     try:
         from database import engine, text
-        tenant_id = get_current_tenant_id()
         with engine.connect() as conn:
             conn.execute(text("DELETE FROM chat_messages"))
             conn.execute(text("DELETE FROM chat_sessions"))
             
             # Re-seed default session
-            if tenant_id is not None:
-                conn.execute(
-                    text("""
-                    INSERT INTO chat_sessions (session_id, title, user_id, tenant_id, created_at, updated_at)
-                    VALUES (:session_id, :title, :user_id, :tenant_id, NOW(), NOW())
-                    ON CONFLICT (session_id) DO NOTHING
-                    """),
-                    {"session_id": "default", "title": "Default Session", "user_id": "admin_user", "tenant_id": int(tenant_id)}
-                )
-            else:
-                conn.execute(
-                    text("""
-                    INSERT INTO chat_sessions (session_id, title, user_id, created_at, updated_at)
-                    VALUES (:session_id, :title, :user_id, NOW(), NOW())
-                    ON CONFLICT (session_id) DO NOTHING
-                    """),
-                    {"session_id": "default", "title": "Default Session", "user_id": "admin_user"}
-                )
+            conn.execute(
+                text("""
+                INSERT INTO chat_sessions (session_id, title, user_id, tenant_id, created_at, updated_at)
+                VALUES (:session_id, :title, :user_id, :tenant_id, NOW(), NOW())
+                ON CONFLICT (session_id) DO NOTHING
+                """),
+                {"session_id": "default", "title": "Default Session", "user_id": "admin_user", "tenant_id": tenant_id}
+            )
             conn.commit()
         return {"status": "success", "message": "All sessions purged and default session re-seeded."}
     except Exception as e:
@@ -1236,7 +1292,10 @@ def purge_all_sessions():
 
 @app.delete("/chat/sessions/{session_id}")
 @app.delete("/sessions/{session_id}")
-def delete_session(session_id: str):
+def delete_session(
+    session_id: str,
+    _tenant_id: int = Depends(require_tenant_context),
+):
     try:
         from database import engine
         from sqlalchemy import text
@@ -1254,31 +1313,21 @@ def delete_session(session_id: str):
 
 @app.delete("/chat/sessions")
 @app.delete("/sessions")
-def delete_all_sessions():
+def delete_all_sessions(tenant_id: int = Depends(require_tenant_context)):
     try:
         from database import engine
         from sqlalchemy import text
-        tenant_id = get_current_tenant_id()
         with engine.connect() as conn:
             conn.execute(text("DELETE FROM chat_messages"))
             conn.execute(text("DELETE FROM chat_sessions"))
-            if tenant_id is not None:
-                conn.execute(
-                    text("""
-                    INSERT INTO chat_sessions (session_id, title, user_id, tenant_id, created_at, updated_at)
-                    VALUES ('default', 'Default Session', 'admin_user', :tenant_id, NOW(), NOW())
-                    ON CONFLICT (session_id) DO NOTHING
-                    """),
-                    {"tenant_id": int(tenant_id)}
-                )
-            else:
-                conn.execute(
-                    text("""
-                    INSERT INTO chat_sessions (session_id, title, user_id, created_at, updated_at)
-                    VALUES ('default', 'Default Session', 'admin_user', NOW(), NOW())
-                    ON CONFLICT (session_id) DO NOTHING
-                    """)
-                )
+            conn.execute(
+                text("""
+                INSERT INTO chat_sessions (session_id, title, user_id, tenant_id, created_at, updated_at)
+                VALUES ('default', 'Default Session', 'admin_user', :tenant_id, NOW(), NOW())
+                ON CONFLICT (session_id) DO NOTHING
+                """),
+                {"tenant_id": tenant_id}
+            )
             conn.commit()
         return {"status": "success", "message": "All sessions deleted and default session seeded"}
     except Exception as e:
@@ -6932,6 +6981,9 @@ def auth_verify_domain(req: DomainVerifyRequest):
 # 11. API KEY LIFECYCLE MANAGEMENT ENDPOINTS
 
 def get_authenticated_tenant(authorization: str = Header(None)) -> int:
+    context_tenant_id = get_current_tenant_id()
+    if context_tenant_id is not None:
+        return int(context_tenant_id)
     return resolve_tenant_from_authorization(authorization)
 
 @app.get("/analytics/governance")
@@ -7505,4 +7557,3 @@ def get_gateway_approval_history(approval_id: str, tenant_id: int = Depends(get_
     if record is None or record.get("tenant_id") != tenant_id:
         raise HTTPException(status_code=404, detail="Approval ID not found")
     return get_approval_history(approval_id, tenant_id=tenant_id)
-
