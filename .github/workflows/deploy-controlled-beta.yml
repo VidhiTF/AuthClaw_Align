@@ -1,0 +1,249 @@
+name: Deploy Controlled Beta
+
+on:
+  workflow_run:
+    workflows: ["AuthClaw CI/CD Hard Gates"]
+    branches: [master]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  packages: read
+
+concurrency:
+  group: authclaw-controlled-beta
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Immutable Controlled-Beta Deployment
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      vars.CONTROLLED_BETA_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: controlled-beta
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      BETA_CERTIFICATE_ARN: ${{ vars.BETA_CERTIFICATE_ARN }}
+      BETA_DOMAIN_NAME: ${{ vars.BETA_DOMAIN_NAME }}
+      BETA_PRESIDIO_IMAGE: ${{ vars.BETA_PRESIDIO_IMAGE }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
+      TF_STATE_KMS_KEY_ID: ${{ vars.TF_STATE_KMS_KEY_ID }}
+      TF_VAR_certificate_arn: ${{ vars.BETA_CERTIFICATE_ARN }}
+      TF_VAR_domain_name: ${{ vars.BETA_DOMAIN_NAME }}
+      TF_VAR_primary_certificate_arn: ${{ vars.BETA_CERTIFICATE_ARN }}
+      TF_VAR_primary_region: ${{ vars.AWS_REGION }}
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Require controlled-beta configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AWS_REGION AWS_ROLE_ARN BETA_CERTIFICATE_ARN BETA_DOMAIN_NAME BETA_PRESIDIO_IMAGE TF_STATE_BUCKET TF_STATE_KMS_KEY_ID; do
+            [[ -n "${!name}" ]] || { echo "::error::Missing controlled-beta variable ${name}"; exit 1; }
+          done
+          [[ "$BETA_PRESIDIO_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::BETA_PRESIDIO_IMAGE must be pinned by sha256 digest"
+            exit 1
+          }
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.1
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: authclaw-acl-14
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.15.7
+          terraform_wrapper: false
+
+      - name: Initialize KMS-encrypted remote state
+        shell: bash
+        run: |
+          printf 'terraform {\n  backend "s3" {}\n}\n' > infra/terraform/backend.generated.tf
+          terraform -chdir=infra/terraform init -input=false \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="key=${TF_STATE_KEY:-authclaw/controlled-beta.tfstate}" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="encrypt=true" \
+            -backend-config="kms_key_id=$TF_STATE_KMS_KEY_ID" \
+            -backend-config="use_lockfile=true"
+
+      - name: Create encrypted immutable registries
+        shell: bash
+        run: |
+          jq -n '{
+            environment: "controlled-beta",
+            enable_secondary: false,
+            require_immutable_images: false,
+            container_images: {
+              backend: "bootstrap.invalid/backend:unused",
+              gateway: "bootstrap.invalid/gateway:unused",
+              console: "bootstrap.invalid/console:unused",
+              audit_consumer: "bootstrap.invalid/audit-consumer:unused",
+              opa: "bootstrap.invalid/opa:unused",
+              presidio: "bootstrap.invalid/presidio:unused"
+            },
+            tags: {Environment: "controlled-beta", Jira: "ACL-14"}
+          }' > infra/terraform/beta.auto.tfvars.json
+          terraform -chdir=infra/terraform apply -input=false -auto-approve \
+            -target=aws_ecr_repository.service
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote scanned images into encrypted ECR by digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          repositories="$(terraform -chdir=infra/terraform output -json ecr_repository_urls)"
+          registry="$(jq -r '.backend' <<<"$repositories" | cut -d/ -f1)"
+          aws ecr get-login-password --region "$AWS_REGION" |
+            docker login --username AWS --password-stdin "$registry"
+          repo="${GITHUB_REPOSITORY,,}"
+
+          promote() {
+            local key="$1" source="$2" destination repository digest
+            destination="$(jq -r --arg key "$key" '.[$key]' <<<"$repositories")"
+            repository="${destination#*/}"
+            digest="$(aws ecr describe-images --repository-name "$repository" \
+              --image-ids imageTag="$SOURCE_SHA" --query 'imageDetails[0].imageDigest' \
+              --output text 2>/dev/null || true)"
+            if [[ -z "$digest" || "$digest" == "None" ]]; then
+              docker pull "$source"
+              docker tag "$source" "$destination:$SOURCE_SHA"
+              docker push "$destination:$SOURCE_SHA"
+              digest="$(aws ecr describe-images --repository-name "$repository" \
+                --image-ids imageTag="$SOURCE_SHA" --query 'imageDetails[0].imageDigest' --output text)"
+            fi
+            printf '%s@%s' "$destination" "$digest"
+          }
+
+          backend="$(promote backend "ghcr.io/$repo/backend:ci-$SOURCE_SHA")"
+          gateway="$(promote gateway "ghcr.io/$repo/gateway:ci-$SOURCE_SHA")"
+          console="$(promote console "ghcr.io/$repo/console:ci-$SOURCE_SHA")"
+          audit_consumer="$(promote audit-consumer "ghcr.io/$repo/audit-consumer:ci-$SOURCE_SHA")"
+          opa="$(promote opa-bundle "ghcr.io/$repo/opa-bundle:ci-$SOURCE_SHA")"
+          presidio="$(promote presidio "$BETA_PRESIDIO_IMAGE")"
+
+          jq -n \
+            --arg backend "$backend" --arg gateway "$gateway" --arg console "$console" \
+            --arg audit_consumer "$audit_consumer" --arg opa "$opa" --arg presidio "$presidio" \
+            '{
+              environment: "controlled-beta",
+              authclaw_env: "staging",
+              desired_count_primary: 1,
+              enable_secondary: false,
+              require_immutable_images: true,
+              container_images: {
+                backend: $backend,
+                gateway: $gateway,
+                console: $console,
+                audit_consumer: $audit_consumer,
+                opa: $opa,
+                presidio: $presidio
+              },
+              tags: {Environment: "controlled-beta", Jira: "ACL-14"}
+            }' > infra/terraform/beta.auto.tfvars.json
+
+      - name: Capture rollback task definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cluster="authclaw-controlled-beta-primary-cluster"
+          : > previous-task-definitions.tsv
+          if [[ "$(aws ecs describe-clusters --clusters "$cluster" \
+            --query "clusters[?status=='ACTIVE'].clusterName" --output text)" == "$cluster" ]]; then
+            aws ecs list-services --cluster "$cluster" --query 'serviceArns[]' --output text |
+              tr '\t' '\n' |
+              while read -r service_arn; do
+                [[ -n "$service_arn" ]] || continue
+                service="${service_arn##*/}"
+                task_definition="$(aws ecs describe-services --cluster "$cluster" --services "$service" \
+                  --query 'services[0].taskDefinition' --output text)"
+                printf '%s\t%s\n' "$service" "$task_definition" >> previous-task-definitions.tsv
+              done
+          fi
+
+      - name: Apply controlled-beta infrastructure and immutable release
+        shell: bash
+        run: terraform -chdir=infra/terraform apply -input=false -auto-approve
+
+      - name: Wait for services and verify public health
+        shell: bash
+        run: |
+          set -euo pipefail
+          primary="$(terraform -chdir=infra/terraform output -json primary)"
+          cluster="$(jq -r '.ecs_cluster_name' <<<"$primary")"
+          mapfile -t services < <(jq -r '.ecs_service_names[]' <<<"$primary")
+          aws ecs wait services-stable --cluster "$cluster" --services "${services[@]}"
+          while read -r endpoint; do
+            curl --fail --silent --show-error --retry 5 --retry-all-errors "$endpoint" >/dev/null
+          done < <(jq -r '.public_endpoints[]' <<<"$primary")
+
+      - name: Reject active deployment alarms
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t alarms < <(terraform -chdir=infra/terraform output -json primary | jq -r '.alarm_names[]')
+          active="$(aws cloudwatch describe-alarms --alarm-names "${alarms[@]}" \
+            --query "MetricAlarms[?StateValue=='ALARM'].AlarmName" --output text)"
+          [[ -z "$active" ]] || { echo "::error::Active alarms: $active"; exit 1; }
+
+      - name: Record deployment evidence
+        if: always()
+        shell: bash
+        run: |
+          if terraform -chdir=infra/terraform output -json primary > primary-output.json 2>/dev/null; then
+            jq --arg sha "$SOURCE_SHA" '{
+              source_sha: $sha,
+              region,
+              alb_dns_name,
+              ecs_cluster_name,
+              ecs_service_names,
+              public_endpoints,
+              kms_key_arn,
+              alarm_names
+            }' primary-output.json > deployment-evidence.json
+          fi
+
+      - name: Roll back to previous task definitions
+        if: failure()
+        shell: bash
+        run: |
+          [[ -s previous-task-definitions.tsv ]] || exit 0
+          cluster="authclaw-controlled-beta-primary-cluster"
+          while IFS=$'\t' read -r service task_definition; do
+            aws ecs update-service --cluster "$cluster" --service "$service" \
+              --task-definition "$task_definition" --force-new-deployment >/dev/null
+          done < previous-task-definitions.tsv
+          mapfile -t services < <(cut -f1 previous-task-definitions.tsv)
+          aws ecs wait services-stable --cluster "$cluster" --services "${services[@]}"
+
+      - name: Upload deployment and rollback evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: acl-14-controlled-beta-${{ github.event.workflow_run.head_sha }}
+          path: |
+            deployment-evidence.json
+            previous-task-definitions.tsv
+          if-no-files-found: warn
+          retention-days: 30

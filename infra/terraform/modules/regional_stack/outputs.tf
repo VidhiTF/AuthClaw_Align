@@ -10,6 +10,29 @@ output "ecs_cluster_name" {
   value = aws_ecs_cluster.main.name
 }
 
+output "ecs_service_names" {
+  value = merge(
+    { for key, service in aws_ecs_service.public : key => service.name },
+    { for key, service in aws_ecs_service.private : key => service.name },
+    var.enable_audit_consumer ? { audit_consumer = aws_ecs_service.audit_consumer[0].name } : {},
+  )
+}
+
+output "public_endpoints" {
+  value = {
+    console = "${local.public_scheme}://${local.public_host}"
+    backend = "${local.api_base_url}/health"
+    gateway = "${local.gateway_base_url}/health"
+  }
+}
+
+output "alarm_names" {
+  value = concat(
+    values(aws_cloudwatch_metric_alarm.unhealthy_hosts)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_cpu)[*].alarm_name,
+  )
+}
+
 output "rds_endpoint" {
   value = local.db_address
 }

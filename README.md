@@ -23,10 +23,11 @@ It combines the strongest production-oriented parts of the three source reposito
 
 ## Local start
 
-Copy `.env.full.example` to `.env.full`, replace every `change-me` value, then run:
+Copy `.env.full.example` to `.env.full`, replace every `change-me` value, then run the
+canonical full-stack command:
 
 ```bash
-docker compose --env-file .env.full -f docker-compose.full.yml up --build
+docker compose --env-file .env.full -f docker-compose.full.yml up -d --build --wait
 ```
 
 Local endpoints:
@@ -39,6 +40,9 @@ Local endpoints:
 The checked-in defaults are for local development only. Production startup is designed
 to fail closed when required encryption, signing, SSO, or secret-manager settings are
 missing.
+
+CI validates this Compose model and starts the same full stack before running
+`scripts/smoke_test.py`. See `startup_guide.md` for verification and shutdown commands.
 
 ## Compliance positioning
 

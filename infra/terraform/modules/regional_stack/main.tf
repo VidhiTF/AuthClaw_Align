@@ -711,3 +711,47 @@ resource "aws_ecs_service" "audit_consumer" {
 
   tags = var.tags
 }
+
+resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
+  for_each = local.public_services
+
+  alarm_name          = "${var.name}-${each.key}-unhealthy-hosts"
+  alarm_description   = "AuthClaw ${each.key} has an unhealthy ALB target"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "UnHealthyHostCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "breaching"
+
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+    TargetGroup  = aws_lb_target_group.service[each.key].arn_suffix
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
+  for_each = local.service_configs
+
+  alarm_name          = "${var.name}-${each.key}-high-cpu"
+  alarm_description   = "AuthClaw ${each.key} ECS CPU is above 85 percent"
+  namespace           = "AWS/ECS"
+  metric_name         = "CPUUtilization"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  period              = 60
+  statistic           = "Average"
+  threshold           = 85
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = "${var.name}-${each.key}"
+  }
+
+  tags = var.tags
+}
