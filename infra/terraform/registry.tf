@@ -1,5 +1,6 @@
 locals {
   ecr_services = toset([
+    "agent",
     "audit-consumer",
     "backend",
     "console",

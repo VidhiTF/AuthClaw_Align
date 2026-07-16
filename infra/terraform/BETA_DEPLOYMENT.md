@@ -4,10 +4,11 @@ Merges to `master` run the hard-gate workflow. A successful run triggers
 `Deploy Controlled Beta`, which:
 
 1. obtains short-lived AWS credentials through GitHub OIDC;
-2. promotes the tested `ci-<commit>` images from GHCR into immutable,
-   KMS-encrypted ECR repositories;
+2. promotes the tested `ci-<commit>` images, including the ACL-11 agent, from GHCR into
+   immutable, KMS-encrypted ECR repositories;
 3. applies Terraform using KMS-encrypted, lock-protected S3 state;
-4. waits for ECS stability and verifies every public health endpoint;
+4. waits for ECS stability and the private agent readiness check, then verifies every
+   public health endpoint;
 5. rejects active CloudWatch alarms; and
 6. restores the previous ECS task definitions if deployment verification fails.
 

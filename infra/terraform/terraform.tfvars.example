@@ -4,6 +4,7 @@ primary_region   = "us-east-1"
 secondary_region = "us-west-2"
 
 container_images = {
+  agent          = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/agent@sha256:replace-with-64-lowercase-hex-characters"
   backend        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/backend@sha256:replace-with-64-lowercase-hex-characters"
   gateway        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/gateway@sha256:replace-with-64-lowercase-hex-characters"
   console        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/console@sha256:replace-with-64-lowercase-hex-characters"

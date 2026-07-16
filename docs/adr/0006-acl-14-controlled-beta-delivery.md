@@ -1,4 +1,4 @@
-# ADR-0005: ACL-14 controlled-beta delivery
+# ADR-0006: ACL-14 controlled-beta delivery
 
 - Jira: ACL-14 / F09
 - Status: Implemented for repository controls; live AWS and GitHub enforcement pending
@@ -16,7 +16,8 @@ The repository can implement and validate those controls without AWS access. It 
 claim a live deployment, DNS routing, or active GitHub branch protection until the
 required cloud resources, credentials, and repository-owner authentication exist.
 [ADR-0002](0002-aws-url-environment-boundary.md) remains the authority for the final AWS
-edge and DNS design; this ADR records the independent delivery baseline only.
+edge and DNS design. [ADR-0005](0005-acl-11-canonical-agent-api.md) defines the canonical
+agent contract consumed by this delivery baseline.
 
 ## Decision
 
@@ -38,14 +39,15 @@ edge and DNS design; this ADR records the independent delivery baseline only.
    `CONTROLLED_BETA_ENABLED` is exactly `true`; otherwise it is intentionally skipped.
 4. GitHub Actions obtains short-lived AWS credentials by OIDC. Long-lived AWS access
    keys are not stored in GitHub or the repository.
-5. Tested `ci-<commit>` images are promoted to KMS-encrypted ECR repositories with
-   immutable tags. Terraform requires every deployed runtime image to use an ECR digest
-   in the form `image@sha256:<digest>`.
+5. Tested `ci-<commit>` images, including ACL-11's private agent service, are promoted to
+   KMS-encrypted ECR repositories with immutable tags. Terraform requires every deployed
+   runtime image to use an ECR digest in the form `image@sha256:<digest>`.
 6. Terraform uses KMS-encrypted, lock-protected S3 state. Runtime secrets remain in AWS
    Secrets Manager, and the controlled-beta data, logs, caches, and registries use KMS
    encryption through the existing Terraform baseline.
-7. After each apply, the workflow waits for ECS stability, checks every published health
-   endpoint, and rejects active CloudWatch unhealthy-host or ECS CPU alarms.
+7. After each apply, the workflow waits for ECS stability and the private agent's
+   canonical readiness check, checks every published health endpoint, and rejects active
+   CloudWatch unhealthy-host or ECS CPU alarms.
 8. Before applying a release, the workflow records the current ECS task definition for
    every service. A failed apply or verification restores those task definitions, waits
    for stability, and retains deployment and rollback evidence for 30 days.

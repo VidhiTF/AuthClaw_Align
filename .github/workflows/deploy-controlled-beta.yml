@@ -90,6 +90,7 @@ jobs:
             enable_secondary: false,
             require_immutable_images: false,
             container_images: {
+              agent: "bootstrap.invalid/agent:unused",
               backend: "bootstrap.invalid/backend:unused",
               gateway: "bootstrap.invalid/gateway:unused",
               console: "bootstrap.invalid/console:unused",
@@ -136,6 +137,7 @@ jobs:
             printf '%s@%s' "$destination" "$digest"
           }
 
+          agent="$(promote agent "ghcr.io/$repo/agent:ci-$SOURCE_SHA")"
           backend="$(promote backend "ghcr.io/$repo/backend:ci-$SOURCE_SHA")"
           gateway="$(promote gateway "ghcr.io/$repo/gateway:ci-$SOURCE_SHA")"
           console="$(promote console "ghcr.io/$repo/console:ci-$SOURCE_SHA")"
@@ -144,7 +146,7 @@ jobs:
           presidio="$(promote presidio "$BETA_PRESIDIO_IMAGE")"
 
           jq -n \
-            --arg backend "$backend" --arg gateway "$gateway" --arg console "$console" \
+            --arg agent "$agent" --arg backend "$backend" --arg gateway "$gateway" --arg console "$console" \
             --arg audit_consumer "$audit_consumer" --arg opa "$opa" --arg presidio "$presidio" \
             '{
               environment: "controlled-beta",
@@ -153,6 +155,7 @@ jobs:
               enable_secondary: false,
               require_immutable_images: true,
               container_images: {
+                agent: $agent,
                 backend: $backend,
                 gateway: $gateway,
                 console: $console,

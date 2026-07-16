@@ -8,6 +8,7 @@ CI = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 DEPLOY = (ROOT / ".github/workflows/deploy-controlled-beta.yml").read_text(encoding="utf-8")
 REGISTRY = (ROOT / "infra/terraform/registry.tf").read_text(encoding="utf-8")
 VARIABLES = (ROOT / "infra/terraform/variables.tf").read_text(encoding="utf-8")
+REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_text(encoding="utf-8")
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
@@ -25,6 +26,10 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("@sha256:[0-9a-f]{64}", VARIABLES)
         self.assertIn('image_tag_mutability = "IMMUTABLE"', REGISTRY)
         self.assertIn('encryption_type = "KMS"', REGISTRY)
+        self.assertIn('agent="$(promote agent ', DEPLOY)
+        self.assertIn('agent = {', REGIONAL_STACK)
+        self.assertIn('/api/v1/agent/health/ready', REGIONAL_STACK)
+        self.assertIn('AUTHCLAW_INTERNAL_SERVICE_SECRET', REGIONAL_STACK)
         self.assertIn("Roll back to previous task definitions", DEPLOY)
         self.assertIn("Reject active deployment alarms", DEPLOY)
 
@@ -35,6 +40,10 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertTrue(protection["required_pull_request_reviews"]["require_code_owner_reviews"])
         self.assertFalse(protection["allow_force_pushes"])
         self.assertFalse(protection["allow_deletions"])
+
+    def test_adr_numbers_are_unique(self):
+        numbers = [path.name.split("-", 1)[0] for path in (ROOT / "docs/adr").glob("*.md")]
+        self.assertEqual(len(numbers), len(set(numbers)))
 
 
 if __name__ == "__main__":

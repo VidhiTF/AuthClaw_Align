@@ -66,6 +66,10 @@ output "secret_arns" {
   value = {
     backend_database_url = aws_secretsmanager_secret.backend_database_url.arn
     app_database_url     = aws_secretsmanager_secret.app_database_url.arn
+    agent_database_url   = aws_secretsmanager_secret.agent_database_url.arn
+    agent_encryption     = aws_secretsmanager_secret.agent_encryption.arn
+    agent_redaction      = aws_secretsmanager_secret.agent_redaction.arn
+    internal_service     = aws_secretsmanager_secret.internal_service.arn
     jwt                  = aws_secretsmanager_secret.jwt.arn
     session              = aws_secretsmanager_secret.session.arn
     envelope             = aws_secretsmanager_secret.envelope.arn

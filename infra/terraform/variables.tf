@@ -53,6 +53,7 @@ variable "secondary_availability_zones" {
 variable "container_images" {
   description = "Container images for AuthClaw runtime services."
   type = object({
+    agent          = string
     backend        = string
     gateway        = string
     console        = string

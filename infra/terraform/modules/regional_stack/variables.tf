@@ -27,6 +27,7 @@ variable "availability_zones" {
 
 variable "container_images" {
   type = object({
+    agent          = string
     backend        = string
     gateway        = string
     console        = string

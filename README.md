@@ -59,7 +59,7 @@ state and managed runtime secrets, verify ECS health and CloudWatch alarms, and 
 the previous task definitions if verification fails. A skipped workflow is not live
 deployment evidence.
 
-See `docs/adr/0005-acl-14-controlled-beta-delivery.md` for the decision and
+See `docs/adr/0006-acl-14-controlled-beta-delivery.md` for the decision and
 `infra/terraform/BETA_DEPLOYMENT.md` for enablement, branch protection, and rollback.
 
 ## Compliance positioning
