@@ -8,6 +8,7 @@ class AuthState(TypedDict, total=False):
 
     session_id: str
     request_id: str
+    correlation_id: str
     route_id: str
     provider: str
     provider_client: object

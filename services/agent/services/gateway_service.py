@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional
 from database import engine
 from memory import add_message
 from sqlalchemy import text
+from services.canonical_agent_service import build_agent_execution_context
 from services.registrar_service import RegistrarService
 from verify_audit import (
     clear_agent_event_context,
@@ -64,10 +65,17 @@ class GatewayService:
         route_id: Optional[str] = None,
         provider: str = "AuthClaw Gateway",
         model: str = "authclaw-gateway",
+        correlation_id: Optional[str] = None,
     ) -> GatewayExecution:
         tenant_id = self.resolve_tenant(x_api_key, authorization)
         request_id = f"req-{uuid.uuid4()}"
-        resolved_session_id = session_id or f"session-{uuid.uuid4()}"
+        execution_context = build_agent_execution_context(
+            tenant_id=tenant_id,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            session_id=session_id,
+        )
+        resolved_session_id = execution_context["session_id"]
         resolved_username = username or self._username_from_authorization(authorization)
 
         start = time.perf_counter()
@@ -76,10 +84,8 @@ class GatewayService:
             result = self.graph.invoke(
                 {
                     "message": message,
-                    "session_id": resolved_session_id,
                     "username": resolved_username,
-                    "tenant_id": tenant_id,
-                    "request_id": request_id,
+                    **execution_context,
                     "route_id": route_id,
                     "provider": provider,
                     "model": model,
