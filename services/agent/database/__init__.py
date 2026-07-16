@@ -9,8 +9,17 @@ from services.tenant_context import (
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:vidhi@localhost:5432/authclaw")
+MIGRATION_DATABASE_URL = os.getenv("MIGRATION_DATABASE_URL", DATABASE_URL)
+RUNTIME_DATABASE_ROLE = os.getenv("AUTHCLAW_RUNTIME_DB_ROLE", "").strip()
 
 engine = create_engine(DATABASE_URL)
+migration_engine = create_engine(MIGRATION_DATABASE_URL)
+
+
+def _quoted_runtime_role() -> str:
+    if not RUNTIME_DATABASE_ROLE.replace("_", "").isalnum() or RUNTIME_DATABASE_ROLE[0].isdigit():
+        raise RuntimeError("AUTHCLAW_RUNTIME_DB_ROLE must be a simple PostgreSQL role name.")
+    return engine.dialect.identifier_preparer.quote(RUNTIME_DATABASE_ROLE)
 
 
 def _is_postgres() -> bool:
@@ -27,10 +36,13 @@ def _clear_tenant_context_on_checkout(dbapi_connection, connection_record, conne
         return
     cursor = dbapi_connection.cursor()
     try:
+        cursor.execute("RESET ROLE")
         _set_config(cursor, "app.tenant_id", "")
         _set_config(cursor, "app.current_tenant_id", "")
         _set_config(cursor, "app.request_id", "")
         _set_config(cursor, "app.auth_lookup", "")
+        if RUNTIME_DATABASE_ROLE:
+            cursor.execute(f"SET ROLE {_quoted_runtime_role()}")
     finally:
         cursor.close()
 

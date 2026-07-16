@@ -205,6 +205,7 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql://${AGENT_POSTGRES_USER:-authclaw_agent}:${AGENT_POSTGRES_PASSWORD:-change-me-agent-local}@agent-postgres:5432/${AGENT_POSTGRES_DB:-authclaw_agent}
+      AUTHCLAW_RUNTIME_DB_ROLE: ${AGENT_RUNTIME_DB_ROLE:-authclaw_agent_runtime}
       REDIS_URL: redis://redis:6379
       AUTHCLAW_ENV: demo
       AUTHCLAW_ALLOWED_ORIGINS: http://localhost:3001

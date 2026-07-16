@@ -1,10 +1,39 @@
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from sqlalchemy import text
-from database import engine
+from database import migration_engine
 
 logger = logging.getLogger("authclaw.database.migrations")
+
+
+def _configure_runtime_role(conn) -> None:
+    role = os.getenv("AUTHCLAW_RUNTIME_DB_ROLE", "").strip()
+    if not role:
+        return
+    if not role.replace("_", "").isalnum() or role[0].isdigit():
+        raise RuntimeError("AUTHCLAW_RUNTIME_DB_ROLE must be a simple PostgreSQL role name.")
+
+    quote = conn.dialect.identifier_preparer.quote
+    quoted_role = quote(role)
+    migration_user = conn.execute(text("SELECT session_user")).scalar_one()
+    if role == migration_user:
+        raise RuntimeError("The Agent runtime role must differ from the migration role.")
+
+    exists = conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname = :role"), {"role": role}).fetchone()
+    if not exists:
+        conn.execute(text(f"CREATE ROLE {quoted_role} NOLOGIN NOSUPERUSER NOBYPASSRLS"))
+    else:
+        conn.execute(text(f"ALTER ROLE {quoted_role} NOLOGIN NOSUPERUSER NOBYPASSRLS"))
+
+    quoted_migration_user = quote(migration_user)
+    conn.execute(text(f"GRANT {quoted_role} TO {quoted_migration_user}"))
+    conn.execute(text(f"GRANT USAGE ON SCHEMA public TO {quoted_role}"))
+    conn.execute(text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {quoted_role}"))
+    conn.execute(text(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {quoted_role}"))
+    conn.execute(text(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quoted_migration_user} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {quoted_role}"))
+    conn.execute(text(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quoted_migration_user} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {quoted_role}"))
 
 def run_startup_migrations():
     """
@@ -928,6 +957,38 @@ def run_startup_migrations():
       AND m.tenant_id IS NULL
       AND s.tenant_id IS NOT NULL;
 
+    DELETE FROM chat_messages WHERE tenant_id IS NULL;
+    DELETE FROM chat_sessions WHERE tenant_id IS NULL;
+    ALTER TABLE chat_messages DROP CONSTRAINT IF EXISTS fk_session;
+    ALTER TABLE chat_sessions DROP CONSTRAINT IF EXISTS chat_sessions_session_id_key;
+    ALTER TABLE chat_sessions ALTER COLUMN tenant_id SET NOT NULL;
+    ALTER TABLE chat_messages ALTER COLUMN tenant_id SET NOT NULL;
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'uq_chat_sessions_tenant_session'
+              AND conrelid = 'chat_sessions'::regclass
+        ) THEN
+            ALTER TABLE chat_sessions
+                ADD CONSTRAINT uq_chat_sessions_tenant_session UNIQUE (tenant_id, session_id);
+        END IF;
+    END $$;
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'fk_chat_messages_tenant_session'
+              AND conrelid = 'chat_messages'::regclass
+        ) THEN
+            ALTER TABLE chat_messages
+                ADD CONSTRAINT fk_chat_messages_tenant_session
+                FOREIGN KEY (tenant_id, session_id)
+                REFERENCES chat_sessions(tenant_id, session_id)
+                ON DELETE CASCADE;
+        END IF;
+    END $$;
+
     -- New Document Security & Compliance Engine Tables
     CREATE TABLE IF NOT EXISTS documents (
         id SERIAL PRIMARY KEY,
@@ -1443,7 +1504,7 @@ def run_startup_migrations():
     ALTER TABLE remediation_worker_audit_events FORCE ROW LEVEL SECURITY;
     """
     try:
-        with engine.connect() as conn:
+        with migration_engine.connect() as conn:
             conn.execute(text(migration_sql))
             conn.execute(text(rls_sql))
             conn.execute(text(force_rls_sql))
@@ -1470,6 +1531,7 @@ def run_startup_migrations():
                   AND password_hash IS NOT NULL
                 ON CONFLICT (email) DO NOTHING
             """))
+            _configure_runtime_role(conn)
             conn.commit()
             
         seed_data()
