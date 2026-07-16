@@ -20,6 +20,7 @@ It combines the strongest production-oriented parts of the three source reposito
 | `infra/` | Kunal | Terraform, OPA, PostgreSQL and ClickHouse infrastructure |
 | `services/agent/` | Vidhi | LangGraph, RAG, document intelligence, HITL, redaction and risk |
 | `console/` | Ravi | Next.js/Shadcn operator console |
+| `sdk/python/` | AgentsArchitects | Install-free Python client for the provider gateway |
 
 ## Local start
 
@@ -44,6 +45,23 @@ missing.
 CI validates this Compose model and starts the same full stack before running
 `scripts/smoke_test.py`. See `startup_guide.md` for verification and shutdown commands.
 
+## Delivery and controlled beta
+
+CI exposes `ACL-14 Required Checks`, one aggregate status that succeeds only after the
+build, test, secret, dependency, compliance, integration, benchmark, and image-scan jobs
+pass. A successful hard-gate run on `master` triggers the controlled-beta workflow, but
+its deployment job runs only when the `controlled-beta` environment variable
+`CONTROLLED_BETA_ENABLED` is `true` and every required AWS/DNS input exists.
+
+Enabled releases use GitHub OIDC for short-lived AWS access, promote tested images to
+KMS-encrypted ECR repositories, deploy containers by digest, use encrypted Terraform
+state and managed runtime secrets, verify ECS health and CloudWatch alarms, and restore
+the previous task definitions if verification fails. A skipped workflow is not live
+deployment evidence.
+
+See `docs/adr/0005-acl-14-controlled-beta-delivery.md` for the decision and
+`infra/terraform/BETA_DEPLOYMENT.md` for enablement, branch protection, and rollback.
+
 ## Compliance positioning
 
 The product includes technical controls and evidence generation for GDPR and SOC 2,
@@ -57,13 +75,17 @@ See `docs/COMPLIANCE_BOUNDARY.md`, `docs/ARCHITECTURE.md`, and
 
 ## Branch workflow
 
-- `master` — protected release branch; only the repository owner can merge.
+- `master` — release integration branch; required protection is defined in
+  `.github/branch-protection-master.json`.
 - `dev/kunal` — gateway, backend, audit, infrastructure and CI work.
 - `dev/vidhi` — `services/agent/**` work.
 - `dev/ravi` — `console/**` and console contract-adapter work.
 
-All changes reach `master` through pull requests, passing required CI checks and owner
-review. Jira issue keys use the `ACL-` prefix and should appear in branch names and PRs.
+Changes reach `master` through pull requests, passing required CI checks and owner
+review. Feature branches use `feat|fix|chore/<area>/<JIRA-KEY>-slug`, for example
+`feat/infra/ACL-14-encrypted-beta`. The repository owner must apply the checked-in
+protection payload after `ACL-14 Required Checks` has run on `master`; `CODEOWNERS` alone
+does not enforce these rules.
 
 ## Provenance
 
