@@ -18,6 +18,8 @@ import {
 } from "lucide-react";
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
+import { TrustSummary } from "@/components/trust-summary";
+import type { TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
 import { readinessLabel } from "@/lib/ui-format";
 
 type FrameworkId = "SOC2" | "GDPR" | "HIPAA";
@@ -90,6 +92,7 @@ interface ComplianceScoreState {
   readiness_level: string;
   frameworks: FrameworkScore[];
   generated_at: string;
+  trust_summary?: TrustSummaryData;
 }
 
 interface ScoreHistoryItem {
@@ -426,6 +429,8 @@ export default function FrameworksPage() {
           );
         })}
       </div>
+
+      <TrustSummary summary={scores?.trust_summary} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-4">

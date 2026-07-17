@@ -11,6 +11,8 @@ import {
   ShieldCheck,
   Upload,
 } from "lucide-react";
+import { TrustSummary } from "@/components/trust-summary";
+import type { TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
 
 interface ControlScore {
   id: string;
@@ -52,6 +54,7 @@ interface TrustCenterPackage {
     readiness_level: string;
     frameworks: FrameworkScore[];
     generated_at: string;
+    trust_summary?: TrustSummaryData;
   };
   signing_key: {
     algorithm: string;
@@ -331,6 +334,8 @@ export default function TrustCenterPage() {
             </button>
           ))}
         </section>
+
+        <TrustSummary summary={data.scores.trust_summary} dark />
 
         {activeFramework && (
           <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">

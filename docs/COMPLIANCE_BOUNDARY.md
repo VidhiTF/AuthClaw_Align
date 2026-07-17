@@ -8,6 +8,18 @@ It must not be marketed as "SOC 2 Type II certified" or "SOC 3 certified." SOC r
 are issued by an independent CPA firm after examination; Type II also evaluates control
 operation over a defined period.
 
+## Trust Summary
+
+The Trust Summary groups existing control scores for presentation. **Verified** represents
+controls currently meeting AuthClaw's automated framework-scoring criteria. **In Progress**
+represents controls with the existing `partial` status, and **Planned** represents controls
+with the existing `non_compliant` status.
+
+These labels do not change the underlying control status or evidence lifecycle. The Trust
+Summary is not an independent SOC 2 Type II report or a SOC 3 report, and it does not imply
+certification. Existing control details, evidence signals, gaps and traceability remain the
+supporting readiness information.
+
 ## Built-in technical controls
 
 - Tenant-scoped RBAC, API keys and configurable OIDC SSO.

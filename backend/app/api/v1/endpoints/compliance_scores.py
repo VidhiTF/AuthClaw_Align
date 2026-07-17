@@ -35,11 +35,34 @@ class FrameworkScoreResponse(BaseModel):
     generated_at: str
 
 
+class TrustSummaryCountsResponse(BaseModel):
+    verified: int
+    in_progress: int
+    planned: int
+
+
+class TrustSummaryControlResponse(BaseModel):
+    framework: str
+    id: str
+    name: str
+    score: float
+    status: str
+
+
+class TrustSummaryResponse(BaseModel):
+    generated_at: str
+    counts: TrustSummaryCountsResponse
+    verified: list[TrustSummaryControlResponse]
+    in_progress: list[TrustSummaryControlResponse]
+    planned: list[TrustSummaryControlResponse]
+
+
 class ComplianceScoreResponse(BaseModel):
     overall_score: float
     readiness_level: str
     frameworks: list[FrameworkScoreResponse]
     generated_at: str
+    trust_summary: TrustSummaryResponse | None = None
 
 
 @router.get("", response_model=ComplianceScoreResponse, dependencies=[require_scopes(["read"])])

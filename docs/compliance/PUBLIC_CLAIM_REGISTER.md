@@ -39,6 +39,7 @@ recorded. Product features alone do not establish organizational compliance.
 | CLM-011 | “AuthClaw has passed an external penetration test.” | Externally attested | Prohibited | A real, current vendor report and retest must be verified. `compliance_hardening_evidence.example.json` is a template, not proof. | Kunal / Binod |
 | CLM-012 | “AuthClaw has zero vulnerabilities” or “is completely secure.” | Audit-ready | Prohibited | Use time-bound, severity-specific scan results with scope and date; never guarantee absence of vulnerabilities. | Kunal / Ravi |
 | CLM-013 | “AuthClaw guarantees audit readiness.” | Audit-ready | Prohibited | Audit readiness is release-, scope-, period-, and evidence-dependent. Use CLM-005 only after its conditions are satisfied. | Binod / Ravi |
+| CLM-014 | "Verified in the AuthClaw Trust Summary" | Built-in | Approved | Means the control currently meets AuthClaw's automated framework-scoring criteria. It does not imply an independent SOC 2 Type II report, a SOC 3 report, or certification. | Binod / Ravi |
 
 ## Publication workflow
 

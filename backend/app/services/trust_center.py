@@ -312,6 +312,13 @@ def build_public_package(
     scores = compliance_scoring.score_all_frameworks(db, str(share.tenant_id), persist=False)
     allowed = set(share.frameworks or DEFAULT_FRAMEWORKS)
     scores["frameworks"] = [item for item in scores["frameworks"] if item["framework"] in allowed]
+    trust_summary = scores.get("trust_summary")
+    if trust_summary:
+        for bucket in ("verified", "in_progress", "planned"):
+            trust_summary[bucket] = [item for item in trust_summary[bucket] if item["framework"] in allowed]
+        trust_summary["counts"] = {
+            bucket: len(trust_summary[bucket]) for bucket in ("verified", "in_progress", "planned")
+        }
     if scores["frameworks"]:
         scores["overall_score"] = round(sum(item["score"] for item in scores["frameworks"]) / len(scores["frameworks"]), 1)
         scores["readiness_level"] = compliance_scoring.readiness_level(scores["overall_score"])

@@ -98,3 +98,60 @@ def test_verify_artifact_wraps_audit_export_verifier(monkeypatch):
     )
 
     assert trust_center.verify_artifact({"ok": True}) == {"verified": True}
+
+
+def test_public_package_filters_trust_summary_and_recalculates_counts(monkeypatch):
+    tenant_id = uuid4()
+    tenant = SimpleNamespace(id=tenant_id, name="Example", tier="enterprise")
+    share = SimpleNamespace(
+        id=uuid4(), tenant_id=tenant_id, label="Review", auditor_email=None,
+        frameworks=["SOC2"], permissions=["view_scores"], status="active",
+        expires_at=None, created_at=None, last_accessed_at=None, access_count=0,
+    )
+
+    class Query:
+        def filter(self, *_args):
+            return self
+
+        def first(self):
+            return tenant
+
+    class Database:
+        def query(self, *_args):
+            return Query()
+
+    scores = {
+        "overall_score": 80.0,
+        "readiness_level": "monitor",
+        "generated_at": "2026-07-16T00:00:00+00:00",
+        "frameworks": [
+            {"framework": "SOC2", "score": 90.0},
+            {"framework": "GDPR", "score": 70.0},
+        ],
+        "trust_summary": {
+            "generated_at": "2026-07-16T00:00:00+00:00",
+            "counts": {"verified": 2, "in_progress": 1, "planned": 0},
+            "verified": [
+                {"framework": "SOC2", "id": "one"},
+                {"framework": "GDPR", "id": "two"},
+            ],
+            "in_progress": [{"framework": "GDPR", "id": "three"}],
+            "planned": [],
+        },
+    }
+    monkeypatch.setattr(trust_center.compliance_scoring, "score_all_frameworks", lambda *_args, **_kwargs: scores)
+    monkeypatch.setattr(
+        trust_center,
+        "signing_key_metadata",
+        lambda: {"public_key": "public-key", "key_id": "key-id", "algorithm": "Ed25519"},
+    )
+
+    package = trust_center.build_public_package(Database(), share)
+
+    assert [item["framework"] for item in package["scores"]["frameworks"]] == ["SOC2"]
+    assert package["scores"]["trust_summary"]["counts"] == {
+        "verified": 1,
+        "in_progress": 0,
+        "planned": 0,
+    }
+    assert package["scores"]["trust_summary"]["verified"][0]["id"] == "one"
