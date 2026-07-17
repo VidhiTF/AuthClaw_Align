@@ -16,8 +16,9 @@ does not own users, tenants, policy, audit, evidence or workflow records.
   the canonical application.
 - Approval decisions reuse the canonical workflow approval endpoints and retain backend
   scope and MFA enforcement.
-- The static files under `console/public/` are public marketing content, not a second
-  authenticated application.
+- `/`, `/product`, `/pricing`, `/security`, and `/company` are public App Router routes
+  in the canonical Next.js application. Legacy `console/public/*.html` pages remain only
+  for rollback parity and permanently redirect to their canonical routes.
 
 ## Runtime boundary
 
