@@ -8,8 +8,17 @@ const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
+  const requestId = request.headers.get("x-request-id") || "";
   const cookieStore = await cookies();
   const stateCookie = cookieStore.get("authclaw_oidc_state")?.value;
+  const auditStateFailure = () => console.warn(JSON.stringify({
+    tenant_id: "",
+    actor_id: "",
+    action: "auth:state_validation_failed",
+    result: "failure",
+    reason: "state_validation_failed",
+    request_correlation_id: requestId,
+  }));
   const fail = (message: string) => {
     const response = NextResponse.redirect(`${url.origin}/login?sso_error=${encodeURIComponent(message)}`);
     response.cookies.delete("authclaw_oidc_state");
@@ -19,20 +28,28 @@ export async function GET(request: Request) {
   if (url.searchParams.get("error")) {
     return fail(url.searchParams.get("error_description") || url.searchParams.get("error") || "SSO failed");
   }
-  if (!stateCookie) return fail("SSO state expired. Try again.");
+  if (!stateCookie) {
+    auditStateFailure();
+    return fail("SSO state expired. Try again.");
+  }
 
   let expected: OidcState;
   try {
     expected = openOidcState(stateCookie);
   } catch {
+    auditStateFailure();
     return fail("Invalid SSO state");
   }
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
-  if (!code || state !== expected.state) return fail("Invalid SSO callback state");
+  if (!code || state !== expected.state) {
+    auditStateFailure();
+    return fail("Invalid SSO callback state");
+  }
   try {
     consumeOidcState(stateCookie);
   } catch {
+    auditStateFailure();
     return fail("Invalid SSO state");
   }
 

@@ -139,6 +139,14 @@ export class SessionStore {
     // Check TTL (e.g. 24 hours)
     const oneDay = 24 * 60 * 60 * 1000;
     if (Date.now() - session.createdAt > oneDay) {
+      console.warn(JSON.stringify({
+        tenant_id: session.tenantId,
+        actor_id: session.userId,
+        action: "auth:session_expired",
+        result: "failure",
+        reason: "expired_session",
+        request_correlation_id: "",
+      }));
       sessions.delete(sessionId);
       this.writeSessions(sessions);
       return undefined;

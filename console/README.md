@@ -53,6 +53,18 @@ by default through `amr=mfa` or a tenant-configured accepted `acr`, with `auth_t
 limited to 43,200 seconds. These values can be changed per tenant in Settings without
 changing the existing application TOTP policy for sensitive actions.
 
+### OIDC audit events
+
+OIDC backend decisions reuse the existing `audit.events` pipeline and structured
+application logs. Pre-authentication state rejection and console session expiry use
+the existing structured application logs because those decisions occur before a
+trusted backend principal exists. Categorical events cover successful login and
+rejected token, issuer, audience, signature, nonce, redirect URI, tenant, MFA, state,
+and expired-session decisions. Events contain tenant and validated actor identifiers,
+the action, categorical reason, result status, and request correlation identifier
+only. Authorization codes, tokens, nonce, state, client secrets, cookies, and raw
+claims are never included.
+
 ## Deployment and rollback
 
 `console/Dockerfile.demo` is built by the root Compose definitions and by the required

@@ -24,9 +24,17 @@ ROLE_RANK = {role: index for index, role in enumerate(VALID_ROLES)}
 class OIDCAuthenticationError(ValueError):
     """The identity provider response could not be authenticated."""
 
+    def __init__(self, reason_code: str = "invalid_token"):
+        super().__init__("OIDC authentication failed")
+        self.reason_code = reason_code
+
 
 class OIDCAuthorizationError(PermissionError):
     """The authenticated identity does not satisfy tenant policy."""
+
+    def __init__(self, message: str, reason_code: str = "authorization_failed"):
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def now_utc() -> datetime:
@@ -299,11 +307,11 @@ def validate_id_token(config: dict[str, Any] | TenantOIDCConfig, id_token: str, 
     )
     audience = claims.get("aud")
     if isinstance(audience, list) and len(audience) > 1 and claims.get("azp") != client_id:
-        raise OIDCAuthenticationError("OIDC authentication failed")
+        raise OIDCAuthenticationError("audience_validation_failed")
     if claims.get("nonce") != nonce:
-        raise OIDCAuthenticationError("OIDC authentication failed")
+        raise OIDCAuthenticationError("nonce_validation_failed")
     if claims.get("email_verified") is False:
-        raise OIDCAuthenticationError("OIDC authentication failed")
+        raise OIDCAuthenticationError("invalid_token")
     validate_identity_context(config, claims)
     return claims
 
@@ -316,7 +324,7 @@ def validate_identity_context(config: dict[str, Any] | TenantOIDCConfig, claims:
     tenant_claim = str(_config_value(config, "tenant_claim", "tenant_id"))
     expected_tenant = str(_config_value(config, "tenant_claim_value", "") or "")
     if not expected_tenant or str(claims.get(tenant_claim) or "") != expected_tenant:
-        raise OIDCAuthorizationError("OIDC identity is not authorized for this tenant")
+        raise OIDCAuthorizationError("OIDC identity is not authorized for this tenant", "wrong_tenant")
 
     if not bool(_config_value(config, "require_mfa", True)):
         return
@@ -328,12 +336,12 @@ def validate_identity_context(config: dict[str, Any] | TenantOIDCConfig, claims:
     mfa_satisfied = bool(accepted_amr.intersection(str(value) for value in amr))
     mfa_satisfied = mfa_satisfied or str(claims.get("acr") or "") in accepted_acr
     if not mfa_satisfied:
-        raise OIDCAuthorizationError("Required OIDC MFA context is missing")
+        raise OIDCAuthorizationError("Required OIDC MFA context is missing", "missing_mfa")
 
     max_age = int(_config_value(config, "max_auth_age_seconds", 43200))
     auth_time = claims.get("auth_time")
     if max_age and (not isinstance(auth_time, (int, float)) or now_utc().timestamp() - auth_time > max_age or auth_time > now_utc().timestamp() + 60):
-        raise OIDCAuthorizationError("Required OIDC MFA context is missing")
+        raise OIDCAuthorizationError("Required OIDC MFA context is missing", "missing_mfa")
 
 
 def role_from_claims(config: dict[str, Any] | TenantOIDCConfig, claims: dict[str, Any]) -> str:
