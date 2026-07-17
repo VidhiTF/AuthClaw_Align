@@ -345,11 +345,6 @@ def sanitize_finding_metadata(findings: List[Dict[str, object]], detector: Optio
     sanitized = []
     for finding in findings:
         item = dict(finding)
-        if str(item.get("matched_pattern", "")).lower() == "passport":
-            item.setdefault("confidence", 0.8)
-            item.setdefault("action", "redact")
-            sanitized.append(item)
-            continue
         raw_value = str(item.get("redacted_value", ""))
         if raw_value and not raw_value.startswith("tok_") and raw_value not in {"N/A", "[REDACTED]"}:
             entity_type = str(item.get("matched_pattern") or item.get("policy_type") or "sensitive").lower().replace(" ", "_")

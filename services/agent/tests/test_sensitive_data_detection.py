@@ -1,6 +1,41 @@
+import pytest
+
 from redaction import redact_sensitive_data_rich
 from services.security_agent import SecurityAgent
-from services.sensitive_data_detection import SensitiveDataDetector
+from services.sensitive_data_detection import SensitiveDataDetector, sanitize_finding_metadata
+
+
+@pytest.fixture(autouse=True)
+def configure_test_redaction_salt(monkeypatch):
+    monkeypatch.setenv(
+        "AUTHCLAW_REDACTION_SALT",
+        "acl15-test-only-redaction-salt-0001",
+    )
+
+
+def test_sanitizer_does_not_preserve_raw_passport_value():
+    raw_passport = "A1234567"
+    findings = [
+        {
+            "policy_name": "GDPR protection",
+            "policy_type": "GDPR",
+            "matched_pattern": "passport",
+            "redacted_value": raw_passport,
+            "username": "tester",
+        }
+    ]
+
+    sanitized = sanitize_finding_metadata(
+        findings,
+        detector=SensitiveDataDetector(use_presidio=False),
+    )
+
+    assert raw_passport not in repr(sanitized)
+    assert sanitized[0]["redacted_value"].startswith("tok_passport_")
+    assert sanitized[0]["token_id"].startswith("tok_passport_")
+    assert sanitized[0]["value_hash"]
+    assert sanitized[0]["confidence"] == 0.8
+    assert sanitized[0]["action"] == "redact"
 
 
 def test_detector_catches_india_identifiers_with_confidence_and_token_metadata():
@@ -9,7 +44,11 @@ def test_detector_catches_india_identifiers_with_confidence_and_token_metadata()
         "PAN is ABCDE1234F, GSTIN is 27ABCDE1234F1Z5."
     )
 
-    redacted, findings = SensitiveDataDetector().redact(text, username="tester")
+    redacted, findings = SensitiveDataDetector(use_presidio=False).redact(
+        text,
+        username="tester",
+        use_presidio=False,
+    )
 
     assert "priya@example.com" not in redacted
     assert "1234 5678 9012" not in redacted
@@ -36,7 +75,11 @@ def test_detector_blocks_common_secrets_without_storing_raw_secret():
         "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature."
     )
 
-    redacted, findings = SensitiveDataDetector().redact(text, username="tester")
+    redacted, findings = SensitiveDataDetector(use_presidio=False).redact(
+        text,
+        username="tester",
+        use_presidio=False,
+    )
 
     assert "sk-live-secret1234567890" not in redacted
     assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature" not in redacted
@@ -51,7 +94,11 @@ def test_detector_blocks_common_secrets_without_storing_raw_secret():
 def test_redaction_pipeline_sanitizes_legacy_metadata_values():
     raw_text = "My phone is 9876543210 and my SSN is 123-45-6789."
 
-    redacted, findings = redact_sensitive_data_rich(raw_text, username="tester")
+    redacted, findings = redact_sensitive_data_rich(
+        raw_text,
+        username="tester",
+        use_presidio=False,
+    )
 
     assert "9876543210" not in redacted
     assert "123-45-6789" not in redacted
@@ -62,7 +109,13 @@ def test_redaction_pipeline_sanitizes_legacy_metadata_values():
     assert all("action" in finding for finding in findings)
 
 
-def test_security_agent_blocks_secret_findings_before_provider():
+def test_security_agent_blocks_secret_findings_before_provider(monkeypatch):
+    detector = SensitiveDataDetector(use_presidio=False)
+    monkeypatch.setattr(
+        "redaction.get_sensitive_data_detector",
+        lambda tenant_id=None, use_presidio=None: detector,
+    )
+
     result = SecurityAgent().inspect_input(
         "Please call the model with AWS key AKIA1234567890ABCDEF.",
         username="tester",

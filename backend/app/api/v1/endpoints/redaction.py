@@ -8,6 +8,7 @@ from app.db.models import RedactionToken
 from app.schemas.models import RedactionTokenMapResponse
 from app.core.auth import get_tenant_db, require_scopes
 from app.core.crypto import decrypt_deterministic
+from app.services.privacy_lifecycle import purge_expired_redaction_mappings
 
 router = APIRouter()
 
@@ -79,12 +80,16 @@ def purge_expired_redaction_tokens(
             detail="Forbidden: Cross-tenant access is not allowed"
         )
 
-    deleted = (
-        db.query(RedactionToken)
-        .filter(RedactionToken.tenant_id == tenant_id)
-        .filter(RedactionToken.expires_at.isnot(None))
-        .filter(RedactionToken.expires_at <= func.now())
-        .delete(synchronize_session=False)
+    result = purge_expired_redaction_mappings(
+        db,
+        tenant_id=tenant_id,
+        request_id=request.headers.get("x-request-id", ""),
+        actor_id=getattr(request.state, "user_id", None),
     )
-    db.commit()
-    return {"purged": deleted}
+    return {
+        "purged": result.deleted_count,
+        "audit_record_id": result.audit_record_id,
+        "request_id": result.request_id,
+        "duration_ms": result.duration_ms,
+        "status": result.status,
+    }
