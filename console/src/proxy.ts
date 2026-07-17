@@ -4,6 +4,11 @@ import type { NextRequest } from "next/server";
 export function proxy(request: NextRequest) {
   const path = request.nextUrl.pathname;
   const publicMarketingFiles = new Set([
+    "/",
+    "/product",
+    "/pricing",
+    "/security",
+    "/company",
     "/index.html",
     "/product.html",
     "/pricing.html",
@@ -11,12 +16,16 @@ export function proxy(request: NextRequest) {
     "/company.html",
     "/styles.css",
     "/app.js",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/opengraph-image",
   ]);
 
   // 1. Define public and asset paths
   const isPublicPath =
-    path === "/" ||
     publicMarketingFiles.has(path) ||
+    path.startsWith("/opengraph-image") ||
+    path.startsWith("/twitter-image") ||
     path === "/login" ||
     path === "/signup" ||
     path.startsWith("/trust/shared") ||
