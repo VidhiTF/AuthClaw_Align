@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 from uuid import uuid4
 
 from app.db.models import Tenant, User, APIKey, Policy
+from tests.db_safety import destructive_test_urls
 
 _owner_engine = None
 _app_engine = None
@@ -20,11 +21,7 @@ _TestingSessionLocal = None
 def _engines():
     global _owner_engine, _app_engine, _TestingSessionLocal
     if _owner_engine is None or _app_engine is None or _TestingSessionLocal is None:
-        from app.core.config import settings
-        owner_db_url = os.getenv("OWNER_DATABASE_URL", settings.DATABASE_URL)
-        app_user = os.getenv("POSTGRES_APP_USER", "authclaw_app")
-        app_password = os.getenv("POSTGRES_APP_PASSWORD", "authclaw_app")
-        db_url = settings.DATABASE_URL.replace("authclaw:authclaw@", f"{app_user}:{app_password}@")
+        owner_db_url, db_url = destructive_test_urls()
         _owner_engine = create_engine(owner_db_url, echo=False, poolclass=StaticPool)
         _app_engine = create_engine(db_url, echo=False, poolclass=StaticPool)
         _TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_app_engine, expire_on_commit=False)

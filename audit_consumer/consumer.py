@@ -206,8 +206,8 @@ def normalise_event(payload: dict) -> dict:
         "frameworks_affected": payload.get("frameworks_affected") or [],
         "execution_trace": json.dumps(payload.get("execution_trace") or []),
         "request_id": payload.get("request_id", ""),
-        "prior_hash": "",     # filled in by _process_message
-        "integrity_hash": "", # filled in by _process_message
+        "prior_hash": payload.get("prior_hash", ""),
+        "integrity_hash": payload.get("integrity_hash", ""),
     }
 
 
@@ -364,10 +364,16 @@ def _process_message(ch_client, payload: dict) -> None:
             prior_hash = get_prior_hash(ch_client, tenant_id)
             logger.debug("Cache miss for tenant %s. Fetched prior_hash from ClickHouse: %s", tenant_id, prior_hash)
 
-        row["prior_hash"] = prior_hash
-
-        # Compute integrity hash over data fields + prior hash.
-        row["integrity_hash"] = compute_integrity_hash(row, prior_hash)
+        supplied_prior = row["prior_hash"]
+        supplied_integrity = row["integrity_hash"]
+        if supplied_prior and supplied_integrity:
+            if supplied_prior != prior_hash:
+                raise ValueError("PostgreSQL and ClickHouse audit chain tails differ")
+            if compute_integrity_hash(row, supplied_prior) != supplied_integrity:
+                raise ValueError("Publisher supplied an invalid audit integrity hash")
+        else:
+            row["prior_hash"] = prior_hash
+            row["integrity_hash"] = compute_integrity_hash(row, prior_hash)
 
         inserted = insert_audit_event(ch_client, row)
         if not inserted:

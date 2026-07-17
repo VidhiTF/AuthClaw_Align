@@ -132,8 +132,43 @@ class TestNormaliseEvent:
         assert row["prior_hash"] == ""
         assert row["integrity_hash"] == ""
 
+    def test_publisher_chain_fields_are_preserved(self):
+        payload = gateway_payload()
+        payload["prior_hash"] = GENESIS_HASH
+        payload["integrity_hash"] = "signed"
+        row = normalise_event(payload)
+        assert row["prior_hash"] == GENESIS_HASH
+        assert row["integrity_hash"] == "signed"
+
 
 class TestProcessMessage:
+    @patch("consumer.get_prior_hash", return_value=GENESIS_HASH)
+    @patch("consumer.insert_audit_event")
+    def test_accepts_valid_publisher_hash_chain(self, mock_insert, mock_prior):
+        payload = gateway_payload(tenant_id="tenant-xyz")
+        row = normalise_event(payload)
+        payload["prior_hash"] = GENESIS_HASH
+        payload["integrity_hash"] = compute_integrity_hash(row, GENESIS_HASH)
+
+        _process_message(MagicMock(), payload)
+
+        inserted_row = mock_insert.call_args[0][1]
+        assert inserted_row["prior_hash"] == GENESIS_HASH
+        assert inserted_row["integrity_hash"] == payload["integrity_hash"]
+
+    @patch("consumer.get_prior_hash", return_value="different-tail")
+    @patch("consumer.insert_audit_event")
+    def test_rejects_publisher_chain_tail_mismatch(self, mock_insert, mock_prior):
+        payload = gateway_payload(tenant_id="tenant-xyz")
+        row = normalise_event(payload)
+        payload["prior_hash"] = GENESIS_HASH
+        payload["integrity_hash"] = compute_integrity_hash(row, GENESIS_HASH)
+
+        with pytest.raises(ValueError, match="chain tails differ"):
+            _process_message(MagicMock(), payload)
+
+        mock_insert.assert_not_called()
+
     @patch("consumer.get_prior_hash", return_value=GENESIS_HASH)
     @patch("consumer.insert_audit_event")
     def test_inserts_record_with_hash_chain(self, mock_insert, mock_prior):

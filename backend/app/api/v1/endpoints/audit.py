@@ -22,6 +22,7 @@ from app.db.models import AuditLogMetadata
 from app.services.audit_store import (
     build_consistency_report,
     clickhouse_configured,
+    recover_clickhouse_to_postgres,
     replay_postgres_to_clickhouse,
 )
 from app.services.audit_export import (
@@ -85,6 +86,10 @@ class AuditStoreStatusResponse(BaseModel):
 
 class AuditReplayRequest(BaseModel):
     dry_run: bool = False
+
+
+class AuditRecoveryRequest(BaseModel):
+    dry_run: bool = True
 
 
 class SignedAuditExportRequest(BaseModel):
@@ -202,9 +207,6 @@ def get_audit_logs(
     - Set integrity_check=true to verify the SHA-256 hash chain.
     """
     tenant_id: str = str(request.state.tenant_id)
-    if integrity_check:
-        return _query_postgres(db, tenant_id, limit, offset, action, integrity_check)
-
     # ── ClickHouse path ────────────────────────────────────────────────────────
     host = os.getenv("CLICKHOUSE_HOST")
     if host:
@@ -336,6 +338,22 @@ def replay_audit_store(
 # ──────────────────────────────────────────────────────────────────────────────
 # ClickHouse query
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+@router.post(
+    "/store/recover",
+    dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])],
+)
+def recover_audit_store(
+    request: Request,
+    recovery: AuditRecoveryRequest,
+    db: Session = Depends(get_tenant_db),
+):
+    ch = _get_clickhouse_client()
+    if ch is None:
+        raise HTTPException(status_code=503, detail="ClickHouse is not configured")
+    tenant_id = str(request.state.tenant_id)
+    return recover_clickhouse_to_postgres(db, ch, tenant_id, dry_run=recovery.dry_run)
 
 
 def _query_clickhouse(

@@ -421,7 +421,7 @@ class ApprovalAudit(Base):
 
 
 class AuditLogMetadata(Base):
-    """Metadata reference table for ClickHouse audit logs (actual logs stored in ClickHouse)"""
+    """Authoritative PostgreSQL audit chain mirrored to ClickHouse for analytics."""
     __tablename__ = "audit_log_metadata"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

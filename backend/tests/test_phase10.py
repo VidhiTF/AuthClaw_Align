@@ -14,13 +14,10 @@ from main import app
 from app.db.dependencies import get_db
 from app.db.models import Tenant, User, APIKey, PendingApproval, ApprovalAudit
 from app.core.auth import hash_key
-from app.core.config import settings
 from app.api.v1.endpoints.workflows import _verify_mfa_if_enabled
+from tests.db_safety import destructive_test_urls
 
-owner_db_url = os.getenv("OWNER_DATABASE_URL", settings.DATABASE_URL)
-app_user = os.getenv("POSTGRES_APP_USER", "authclaw_app")
-app_password = os.getenv("POSTGRES_APP_PASSWORD", "authclaw_app")
-db_url = settings.DATABASE_URL.replace("authclaw:authclaw@", f"{app_user}:{app_password}@")
+owner_db_url, db_url = destructive_test_urls()
 owner_engine = create_engine(owner_db_url, echo=False, poolclass=StaticPool)
 engine = create_engine(db_url, echo=False, poolclass=StaticPool)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)

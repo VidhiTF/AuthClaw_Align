@@ -36,6 +36,8 @@ type AuditEvent struct {
 	DurationMs         int64     `json:"duration_ms"`
 	FrameworksAffected []string  `json:"frameworks_affected,omitempty"`
 	ExecutionTrace     []string  `json:"execution_trace,omitempty"`
+	PriorHash          string    `json:"prior_hash,omitempty"`
+	IntegrityHash      string    `json:"integrity_hash,omitempty"`
 }
 
 var (
@@ -254,11 +256,14 @@ func persistAuditMetadata(event *AuditEvent) error {
 			chainTimestamp = time.Now().UTC()
 		}
 		if priorCreatedAt.Valid && !chainTimestamp.After(priorCreatedAt.Time) {
-			chainTimestamp = priorCreatedAt.Time.Add(time.Microsecond)
+			chainTimestamp = priorCreatedAt.Time.Add(time.Millisecond)
 		}
 		eventForHash := *event
 		eventForHash.Timestamp = chainTimestamp
 		integrityHash := hashAuditEvent(&eventForHash, priorHash)
+		event.Timestamp = chainTimestamp
+		event.PriorHash = priorHash
+		event.IntegrityHash = integrityHash
 		executionTrace := "[]"
 		if len(event.ExecutionTrace) > 0 {
 			if traceBytes, traceErr := json.Marshal(event.ExecutionTrace); traceErr == nil {
