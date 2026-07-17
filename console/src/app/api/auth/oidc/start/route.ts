@@ -1,6 +1,7 @@
 import { randomBytes } from "crypto";
 import { NextResponse } from "next/server";
 import { sessionCookieOptions } from "@/lib/cookie-options";
+import { registerOidcState, sealOidcState } from "@/lib/oidc-state";
 
 const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
 
@@ -20,12 +21,15 @@ export async function GET(request: Request) {
   }
 
   const response = NextResponse.redirect(data.authorization_url);
-  response.cookies.set("authclaw_oidc_state", JSON.stringify({
+  const sealedState = sealOidcState({
     state,
     nonce,
     tenantName,
     redirectUri: data.redirect_uri,
-  }), {
+    issuedAt: Date.now(),
+  });
+  registerOidcState(sealedState);
+  response.cookies.set("authclaw_oidc_state", sealedState, {
     ...sessionCookieOptions(600),
     httpOnly: true,
   });

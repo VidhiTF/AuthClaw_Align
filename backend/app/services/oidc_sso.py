@@ -21,6 +21,22 @@ VALID_ROLES = ("owner", "admin", "developer", "operator", "viewer")
 ROLE_RANK = {role: index for index, role in enumerate(VALID_ROLES)}
 
 
+class OIDCAuthenticationError(ValueError):
+    """The identity provider response could not be authenticated."""
+
+    def __init__(self, reason_code: str = "invalid_token"):
+        super().__init__("OIDC authentication failed")
+        self.reason_code = reason_code
+
+
+class OIDCAuthorizationError(PermissionError):
+    """The authenticated identity does not satisfy tenant policy."""
+
+    def __init__(self, message: str, reason_code: str = "authorization_failed"):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -45,9 +61,15 @@ def env_config() -> dict[str, Any] | None:
         "jwks_uri": os.getenv("OIDC_JWKS_URI", f"{issuer}/.well-known/jwks.json"),
         "email_claim": os.getenv("OIDC_EMAIL_CLAIM", "email"),
         "groups_claim": os.getenv("OIDC_GROUPS_CLAIM", "groups"),
+        "tenant_claim": os.getenv("OIDC_TENANT_CLAIM", "tenant_id"),
+        "tenant_claim_value": os.getenv("OIDC_TENANT_CLAIM_VALUE", ""),
         "role_mapping": _parse_role_mapping(os.getenv("OIDC_GROUP_ROLE_MAPPING", "")),
         "default_role": _clean_role(os.getenv("OIDC_DEFAULT_ROLE", "viewer")),
         "auto_provision": os.getenv("OIDC_AUTO_PROVISION", "false").lower() == "true",
+        "require_mfa": os.getenv("OIDC_REQUIRE_MFA", "true").lower() == "true",
+        "accepted_amr": [value for value in os.getenv("OIDC_ACCEPTED_AMR", "mfa").split(",") if value],
+        "accepted_acr": [value for value in os.getenv("OIDC_ACCEPTED_ACR", "").split(",") if value],
+        "max_auth_age_seconds": int(os.getenv("OIDC_MAX_AUTH_AGE_SECONDS", "43200")),
         "status": "active",
     }
 
@@ -99,9 +121,15 @@ def serialize_config(config: TenantOIDCConfig | None) -> dict[str, Any]:
             "jwks_uri": "",
             "email_claim": "email",
             "groups_claim": "groups",
+            "tenant_claim": "tenant_id",
+            "tenant_claim_value": "",
             "role_mapping": {},
             "default_role": "viewer",
             "auto_provision": False,
+            "require_mfa": True,
+            "accepted_amr": ["mfa"],
+            "accepted_acr": [],
+            "max_auth_age_seconds": 43200,
             "has_client_secret": False,
             "last_tested_at": None,
             "last_error": None,
@@ -117,9 +145,15 @@ def serialize_config(config: TenantOIDCConfig | None) -> dict[str, Any]:
         **endpoints,
         "email_claim": config.email_claim,
         "groups_claim": config.groups_claim,
+        "tenant_claim": config.tenant_claim,
+        "tenant_claim_value": config.tenant_claim_value or "",
         "role_mapping": config.role_mapping or {},
         "default_role": config.default_role,
         "auto_provision": config.auto_provision,
+        "require_mfa": config.require_mfa,
+        "accepted_amr": config.accepted_amr or ["mfa"],
+        "accepted_acr": config.accepted_acr or [],
+        "max_auth_age_seconds": config.max_auth_age_seconds,
         "has_client_secret": bool(config.encrypted_client_secret),
         "last_tested_at": config.last_tested_at.isoformat() if config.last_tested_at else None,
         "last_error": config.last_error,
@@ -165,6 +199,13 @@ def upsert_config(db: Session, tenant_id: Any, user_id: Any, payload: dict[str, 
         raise ValueError("OIDC issuer and redirect URI must use https")
     if not client_id:
         raise ValueError("OIDC client_id is required")
+    tenant_claim = str(payload.get("tenant_claim") or "tenant_id").strip()
+    tenant_claim_value = str(payload.get("tenant_claim_value") or "").strip()
+    if payload.get("enabled") and (not tenant_claim or not tenant_claim_value):
+        raise ValueError("Active OIDC configuration requires tenant claim and claim value")
+    max_auth_age_seconds = int(payload.get("max_auth_age_seconds", 43200))
+    if max_auth_age_seconds < 0:
+        raise ValueError("OIDC max_auth_age_seconds cannot be negative")
     scopes = payload.get("scopes") or ["openid", "email", "profile"]
     if "openid" not in scopes:
         scopes = ["openid", *scopes]
@@ -192,9 +233,15 @@ def upsert_config(db: Session, tenant_id: Any, user_id: Any, payload: dict[str, 
     config.jwks_uri = str(payload.get("jwks_uri") or "").strip() or None
     config.email_claim = str(payload.get("email_claim") or "email").strip()
     config.groups_claim = str(payload.get("groups_claim") or "groups").strip()
+    config.tenant_claim = tenant_claim
+    config.tenant_claim_value = tenant_claim_value or None
     config.role_mapping = role_mapping
     config.default_role = _clean_role(payload.get("default_role"))
     config.auto_provision = bool(payload.get("auto_provision"))
+    config.require_mfa = bool(payload.get("require_mfa", True))
+    config.accepted_amr = [str(value) for value in payload.get("accepted_amr", ["mfa"]) if str(value)]
+    config.accepted_acr = [str(value) for value in payload.get("accepted_acr", []) if str(value)]
+    config.max_auth_age_seconds = max_auth_age_seconds
     config.status = status
     config.updated_by = user_id
     config.updated_at = now_utc()
@@ -258,11 +305,43 @@ def validate_id_token(config: dict[str, Any] | TenantOIDCConfig, id_token: str, 
         issuer=issuer,
         options={"require": ["exp", "iat", "iss", "aud", "sub"]},
     )
+    audience = claims.get("aud")
+    if isinstance(audience, list) and len(audience) > 1 and claims.get("azp") != client_id:
+        raise OIDCAuthenticationError("audience_validation_failed")
     if claims.get("nonce") != nonce:
-        raise ValueError("OIDC nonce mismatch")
+        raise OIDCAuthenticationError("nonce_validation_failed")
     if claims.get("email_verified") is False:
-        raise ValueError("OIDC email is not verified")
+        raise OIDCAuthenticationError("invalid_token")
+    validate_identity_context(config, claims)
     return claims
+
+
+def _config_value(config: dict[str, Any] | TenantOIDCConfig, name: str, default: Any = None) -> Any:
+    return config.get(name, default) if isinstance(config, dict) else getattr(config, name, default)
+
+
+def validate_identity_context(config: dict[str, Any] | TenantOIDCConfig, claims: dict[str, Any]) -> None:
+    tenant_claim = str(_config_value(config, "tenant_claim", "tenant_id"))
+    expected_tenant = str(_config_value(config, "tenant_claim_value", "") or "")
+    if not expected_tenant or str(claims.get(tenant_claim) or "") != expected_tenant:
+        raise OIDCAuthorizationError("OIDC identity is not authorized for this tenant", "wrong_tenant")
+
+    if not bool(_config_value(config, "require_mfa", True)):
+        return
+    amr = claims.get("amr") or []
+    if isinstance(amr, str):
+        amr = [amr]
+    accepted_amr = set(_config_value(config, "accepted_amr", ["mfa"]) or [])
+    accepted_acr = set(_config_value(config, "accepted_acr", []) or [])
+    mfa_satisfied = bool(accepted_amr.intersection(str(value) for value in amr))
+    mfa_satisfied = mfa_satisfied or str(claims.get("acr") or "") in accepted_acr
+    if not mfa_satisfied:
+        raise OIDCAuthorizationError("Required OIDC MFA context is missing", "missing_mfa")
+
+    max_age = int(_config_value(config, "max_auth_age_seconds", 43200))
+    auth_time = claims.get("auth_time")
+    if max_age and (not isinstance(auth_time, (int, float)) or now_utc().timestamp() - auth_time > max_age or auth_time > now_utc().timestamp() + 60):
+        raise OIDCAuthorizationError("Required OIDC MFA context is missing", "missing_mfa")
 
 
 def role_from_claims(config: dict[str, Any] | TenantOIDCConfig, claims: dict[str, Any]) -> str:

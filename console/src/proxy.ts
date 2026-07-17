@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { authenticateSessionCookie } from "@/lib/session-auth";
 
 export function proxy(request: NextRequest) {
   const path = request.nextUrl.pathname;
@@ -33,36 +34,31 @@ export function proxy(request: NextRequest) {
 
   // 2. Extract session cookie
   const sessionCookie = request.cookies.get("authclaw_session")?.value;
-  let sessionRole = "viewer";
-  if (sessionCookie) {
-    try {
-      sessionRole = (JSON.parse(sessionCookie).role || "viewer").toLowerCase();
-    } catch {
-      sessionRole = "viewer";
-    }
-  }
+  const session = authenticateSessionCookie(sessionCookie);
+  const sessionRole = session?.role.toLowerCase() || "viewer";
 
   // 3. Handle redirects
-  if (!sessionCookie && !isPublicPath) {
-    // Redirect unauthenticated user to login
-    return NextResponse.redirect(new URL("/login", request.url));
+  if (!session && !isPublicPath) {
+    return new NextResponse("Unauthorized", { status: 401 });
   }
 
-  if (sessionCookie && path === "/login") {
+  if (session && path === "/login") {
     // Redirect authenticated user away from login to the demo onboarding flow
     return NextResponse.redirect(new URL("/connect", request.url));
   }
 
-  if (sessionCookie && path === "/signup") {
+  if (session && path === "/signup") {
     return NextResponse.redirect(new URL("/connect", request.url));
   }
 
   const readOnlyRoles = new Set(["viewer", "developer", "operator"]);
   const readOnlyBlockedPaths = ["/connect", "/gateway", "/policies", "/aws", "/settings"];
   if (
-    sessionCookie &&
+    session &&
     readOnlyRoles.has(sessionRole) &&
-    readOnlyBlockedPaths.some((blockedPath) => path === blockedPath || path.startsWith(`${blockedPath}/`))
+    readOnlyBlockedPaths.some(
+      (blockedPath) => path === blockedPath || path.startsWith(`${blockedPath}/`),
+    )
   ) {
     return NextResponse.redirect(new URL("/overview", request.url));
   }
