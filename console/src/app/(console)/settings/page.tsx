@@ -2034,6 +2034,8 @@ export default function SettingsPage() {
                   className="w-full px-3 py-2 rounded-lg bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-indigo-500/80 transition"
                 >
                   <option value="viewer">Viewer (Overview & audit)</option>
+                  <option value="developer">Developer (Read-only technical view)</option>
+                  <option value="operator">Operator (Read-only operational view)</option>
                   <option value="admin">Admin (Policies & provider keys)</option>
                   <option value="owner">Owner (Tenant control)</option>
                 </select>

@@ -57,11 +57,12 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL("/connect", request.url));
   }
 
-  const viewerBlockedPaths = ["/connect", "/gateway", "/policies", "/aws", "/settings"];
+  const readOnlyRoles = new Set(["viewer", "developer", "operator"]);
+  const readOnlyBlockedPaths = ["/connect", "/gateway", "/policies", "/aws", "/settings"];
   if (
     sessionCookie &&
-    sessionRole === "viewer" &&
-    viewerBlockedPaths.some((blockedPath) => path === blockedPath || path.startsWith(`${blockedPath}/`))
+    readOnlyRoles.has(sessionRole) &&
+    readOnlyBlockedPaths.some((blockedPath) => path === blockedPath || path.startsWith(`${blockedPath}/`))
   ) {
     return NextResponse.redirect(new URL("/overview", request.url));
   }

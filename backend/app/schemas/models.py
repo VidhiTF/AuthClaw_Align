@@ -33,13 +33,13 @@ class UserCreate(BaseModel):
     """Schema for creating a user"""
     email: EmailStr
     password: str = Field(..., min_length=12)
-    role: str = Field(default="viewer", pattern="^(owner|admin|viewer)$")
+    role: str = Field(default="viewer", pattern="^(owner|admin|developer|operator|viewer)$")
 
 
 class UserInviteRequest(BaseModel):
     """Invite a user into the current tenant with email OTP verification."""
     email: EmailStr
-    role: str = Field(default="viewer", pattern="^(owner|admin|viewer)$")
+    role: str = Field(default="viewer", pattern="^(owner|admin|developer|operator|viewer)$")
 
 
 class UserInviteResponse(BaseModel):

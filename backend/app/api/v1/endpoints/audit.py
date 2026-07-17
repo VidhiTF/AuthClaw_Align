@@ -319,7 +319,7 @@ def get_audit_store_consistency(
 
 @router.post(
     "/store/replay",
-    dependencies=[require_roles(["owner", "admin"])],
+    dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])],
 )
 def replay_audit_store(
     request: Request,

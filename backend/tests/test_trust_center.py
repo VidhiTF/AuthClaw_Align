@@ -58,6 +58,36 @@ def test_build_share_export_enforces_framework_scope(monkeypatch):
     assert calls == [(str(tenant_id), "SOC2")]
     with pytest.raises(ValueError, match="not allowed"):
         trust_center.build_share_export(object(), share, framework="HIPAA")
+    with pytest.raises(ValueError, match="Full export"):
+        trust_center.build_share_export(object(), share)
+
+
+def test_auditor_otp_binds_access_to_email_and_share(monkeypatch):
+    monkeypatch.setenv("SESSION_SECRET", "test-trust-center-secret-32-bytes!")
+    delivered = {}
+
+    def fake_send(email, otp, tenant_name, *, purpose):
+        delivered.update(email=email, otp=otp, tenant_name=tenant_name, purpose=purpose)
+        return SimpleNamespace(method="smtp")
+
+    monkeypatch.setattr(trust_center, "send_otp_email", fake_send)
+    db = SimpleNamespace(commit=lambda: None)
+    share_token = "tc_demo_secret"
+    share = SimpleNamespace(
+        id=uuid4(),
+        tenant_id=uuid4(),
+        auditor_email="auditor@example.com",
+        metadata_json={},
+    )
+
+    issued = trust_center.issue_auditor_otp(db, share, "Acme")
+    verified = trust_center.verify_auditor_otp(db, share, share_token, delivered["otp"])
+
+    assert issued["email"] == "au*****@example.com"
+    assert delivered["email"] == "auditor@example.com"
+    trust_center.verify_auditor_access(share, share_token, verified["access_token"])
+    with pytest.raises(ValueError, match="does not match"):
+        trust_center.verify_auditor_access(share, "tc_other_secret", verified["access_token"])
 
 
 def test_verify_artifact_wraps_audit_export_verifier(monkeypatch):

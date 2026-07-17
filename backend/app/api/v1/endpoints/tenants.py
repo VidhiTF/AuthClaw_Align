@@ -11,7 +11,7 @@ from app.core.auth import get_tenant_db, require_roles, require_scopes
 router = APIRouter()
 
 
-@router.post("", response_model=TenantResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_scopes(["admin"])])
+@router.post("", response_model=TenantResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_roles(["owner"]), require_scopes(["admin"])])
 def create_tenant(tenant_in: TenantCreate, db: Session = Depends(get_db)):
     """Create a new tenant (Admin only)"""
     # Check if tenant name already exists
@@ -49,7 +49,7 @@ def create_tenant(tenant_in: TenantCreate, db: Session = Depends(get_db)):
         db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
 
 
-@router.get("/current", response_model=TenantResponse, dependencies=[require_roles(["owner", "admin", "viewer"])])
+@router.get("/current", response_model=TenantResponse, dependencies=[require_roles(["owner", "admin", "developer", "operator", "viewer"])])
 def get_current_tenant(request: Request, db: Session = Depends(get_tenant_db)):
     """Return the active tenant profile."""
     tenant_id = request.state.tenant_id
@@ -59,7 +59,7 @@ def get_current_tenant(request: Request, db: Session = Depends(get_tenant_db)):
     return tenant
 
 
-@router.patch("/current/status", response_model=TenantResponse, dependencies=[require_roles(["owner"])])
+@router.patch("/current/status", response_model=TenantResponse, dependencies=[require_roles(["owner"]), require_scopes(["admin"])])
 def update_current_tenant_status(
     status_in: TenantStatusUpdate,
     request: Request,

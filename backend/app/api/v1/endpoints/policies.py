@@ -125,7 +125,7 @@ def simulate_policy_decision(
     )
 
 
-@router.post("", response_model=PolicyResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_roles(["owner", "admin"])])
+@router.post("", response_model=PolicyResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def upload_policy(
     request: Request,
     policy_in: PolicyCreate,
@@ -208,7 +208,7 @@ def get_active_policy(
     return policy
 
 
-@router.post("/rollback", response_model=PolicyDetailResponse, dependencies=[require_roles(["owner", "admin"])])
+@router.post("/rollback", response_model=PolicyDetailResponse, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def rollback_policy(
     request: Request,
     rollback: PolicyRollbackRequest,
@@ -239,7 +239,7 @@ def rollback_policy(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to rollback policy: {exc}")
 
 
-@router.post("/{policy_id}/activate", response_model=PolicyDetailResponse, dependencies=[require_roles(["owner", "admin"])])
+@router.post("/{policy_id}/activate", response_model=PolicyDetailResponse, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def activate_policy(
     request: Request,
     policy_id: UUID,

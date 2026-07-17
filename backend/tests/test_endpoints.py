@@ -131,10 +131,10 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     db_session.add(tenant_b)
     db_session.commit()
 
-    # Seed Admin User & System API Key with 'admin' scope for Tenant A to call POST /tenants
+    # Seed Owner User & System API Key with 'admin' scope for Tenant A to call POST /tenants
     admin_user_id = uuid4()
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
-    admin_user = User(id=admin_user_id, tenant_id=tenant_a_id, email="admin@tenantA.com", role="admin", is_active=True)
+    admin_user = User(id=admin_user_id, tenant_id=tenant_a_id, email="admin@tenantA.com", role="owner", is_active=True)
     db_session.add(admin_user)
     db_session.commit()
 
@@ -186,7 +186,7 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     response = client.post("/v1/tenants", json={"name": "Tenant C", "tier": "starter"}, headers=headers_b)
     assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    # Request as Tenant A admin (admin scope) -> 201 Created
+    # Request as Tenant A owner (admin scope) -> 201 Created
     response = client.post("/v1/tenants", json={"name": "Tenant C", "tier": "pro"}, headers=headers_admin)
     assert response.status_code == status.HTTP_201_CREATED
     assert response.json()["name"] == "Tenant C"

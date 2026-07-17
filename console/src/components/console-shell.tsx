@@ -30,18 +30,20 @@ interface ConsoleShellProps {
   userRole: string;
 }
 
+const readRoles = ["owner", "admin", "developer", "operator", "viewer"];
+
 const navigation = [
-  { name: "Overview", href: "/overview", icon: LayoutDashboard, roles: ["owner", "admin", "viewer"] },
+  { name: "Overview", href: "/overview", icon: LayoutDashboard, roles: readRoles },
   { name: "Gateway", href: "/gateway", icon: Cpu, roles: ["owner", "admin"] },
-  { name: "Compliance", href: "/compliance", icon: ShieldCheck, roles: ["owner", "admin", "viewer"] },
-  { name: "Approvals", href: "/approvals", icon: ClipboardCheck, roles: ["owner", "admin", "viewer"] },
-  { name: "Audit", href: "/audit", icon: ScrollText, roles: ["owner", "admin", "viewer"] },
-  { name: "Agent & Remediation", href: "/agent", icon: MessageSquare, roles: ["owner", "admin", "viewer"] },
+  { name: "Compliance", href: "/compliance", icon: ShieldCheck, roles: readRoles },
+  { name: "Approvals", href: "/approvals", icon: ClipboardCheck, roles: readRoles },
+  { name: "Audit", href: "/audit", icon: ScrollText, roles: readRoles },
+  { name: "Agent & Remediation", href: "/agent", icon: MessageSquare, roles: readRoles },
   { name: "Integrations", href: "/connect", icon: Cable, roles: ["owner", "admin"] },
   { name: "Policies & Guardrails", href: "/policies", icon: ShieldAlert, roles: ["owner", "admin"] },
-  { name: "Risk & Red Teaming", href: "/risk", icon: ShieldAlert, roles: ["owner", "admin", "viewer"] },
-  { name: "Evidence", href: "/evidence", icon: ScrollText, roles: ["owner", "admin", "viewer"] },
-  { name: "Findings", href: "/findings", icon: ShieldAlert, roles: ["owner", "admin", "viewer"] },
+  { name: "Risk & Red Teaming", href: "/risk", icon: ShieldAlert, roles: readRoles },
+  { name: "Evidence", href: "/evidence", icon: ScrollText, roles: readRoles },
+  { name: "Findings", href: "/findings", icon: ShieldAlert, roles: readRoles },
   { name: "Cloud", href: "/aws", icon: Cloud, roles: ["owner", "admin"] },
   { name: "Settings", href: "/settings", icon: Settings, roles: ["owner", "admin"] },
 ];

@@ -104,10 +104,12 @@ function FindingDrawer({
   finding,
   onClose,
   onStatusChange,
+  canManage,
 }: {
   finding: Finding;
   onClose: () => void;
   onStatusChange: (findingId: string, newStatus: string) => void;
+  canManage: boolean;
 }) {
   const sev = severityConfig(finding.severity);
   const st = statusConfig(finding.status);
@@ -278,6 +280,7 @@ function FindingDrawer({
               <select
                 value={finding.status}
                 onChange={(e) => onStatusChange(finding.id, e.target.value)}
+                disabled={!canManage}
                 className="bg-[#F5F7FA] border border-[#E6E9F0] text-[#475069] text-sm rounded-lg px-3 py-2 outline-none focus:border-indigo-500/50"
               >
                 {STATUS_OPTIONS.slice(1).map(s => (
@@ -303,6 +306,7 @@ export default function FindingsDashboard() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [canManage, setCanManage] = useState(false);
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
 
@@ -315,6 +319,13 @@ export default function FindingsDashboard() {
   const [status, setStatus] = useState("");
 
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/session")
+      .then((response) => response.json())
+      .then((session) => setCanManage(["owner", "admin"].includes(String(session.role || "").toLowerCase())))
+      .catch(() => setCanManage(false));
+  }, []);
 
   const fetchSummary = useCallback(async () => {
     try {
@@ -616,6 +627,7 @@ export default function FindingsDashboard() {
           finding={selectedFinding}
           onClose={() => setSelectedFinding(null)}
           onStatusChange={handleStatusChange}
+          canManage={canManage}
         />
       )}
     </div>

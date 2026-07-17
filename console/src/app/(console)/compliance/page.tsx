@@ -195,6 +195,7 @@ export default function FrameworksPage() {
   const [trustShares, setTrustShares] = useState<TrustCenterShare[]>([]);
   const [shareMessage, setShareMessage] = useState<string | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
+  const [canManageShares, setCanManageShares] = useState(false);
   const [createdShare, setCreatedShare] = useState<CreatedTrustCenterShare | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [shareForm, setShareForm] = useState({
@@ -257,8 +258,11 @@ export default function FrameworksPage() {
   }, [fetchScores]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void fetchTrustShares();
+    const timer = window.setTimeout(async () => {
+      const session = await fetch("/api/auth/session").then((response) => response.json()).catch(() => ({}));
+      const allowed = ["owner", "admin"].includes(String(session.role || "").toLowerCase());
+      setCanManageShares(allowed);
+      if (allowed) void fetchTrustShares();
     }, 0);
     return () => window.clearTimeout(timer);
   }, [fetchTrustShares]);
@@ -609,7 +613,7 @@ export default function FrameworksPage() {
             )}
           </div>
 
-          <div className="rounded-[20px] border border-[#E6E9F0] bg-white p-5 shadow-xl space-y-4 relative overflow-hidden">
+          {canManageShares && <div className="rounded-[20px] border border-[#E6E9F0] bg-white p-5 shadow-xl space-y-4 relative overflow-hidden">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-xs font-bold uppercase tracking-wider text-[#6B7488] flex items-center gap-1.5">
@@ -642,6 +646,7 @@ export default function FrameworksPage() {
                 Auditor Email
                 <input
                   type="email"
+                  required
                   value={shareForm.auditorEmail}
                   placeholder="auditor@example.com"
                   onChange={(event) => setShareForm((current) => ({ ...current, auditorEmail: event.target.value }))}
@@ -685,7 +690,7 @@ export default function FrameworksPage() {
 
             <button
               onClick={handleCreateTrustShare}
-              disabled={shareBusy}
+              disabled={shareBusy || !shareForm.auditorEmail}
               className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-lg transition active:scale-[0.98] disabled:bg-[#EEF1F6] disabled:text-[#8A94A6]"
             >
               <Link2 className="w-4 h-4" />
@@ -756,7 +761,7 @@ export default function FrameworksPage() {
                 ))
               )}
             </div>
-          </div>
+          </div>}
         </div>
       </div>
     </div>
