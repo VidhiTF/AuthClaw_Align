@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -88,9 +89,13 @@ type cachedPolicyDecision struct {
 }
 
 var (
-	policyCache         = make(map[string]CachedPolicy)
-	policyCacheMu       sync.RWMutex
-	policyDecisionCache sync.Map
+	policyCache           = make(map[string]CachedPolicy)
+	policyCacheMu         sync.RWMutex
+	policyDecisionCache   sync.Map
+	policyBlockTotal      atomic.Uint64
+	policyWarnTotal       atomic.Uint64
+	policyRedactTotal     atomic.Uint64
+	policyFailClosedTotal atomic.Uint64
 )
 
 func GetCachedPolicy(tenantID string) (*PolicyConfig, string, bool) {
@@ -169,7 +174,7 @@ func ValidatePolicyYAML(yamlStr string) (*PolicyConfig, error) {
 		}
 		action := strings.ToLower(strings.TrimSpace(rule.Action))
 		switch action {
-		case "", "redact", "require_approval", "block":
+		case "", "redact", "warn", "require_approval", "block":
 		default:
 			return nil, fmt.Errorf("invalid regex rule action '%s' for rule '%s'", rule.Action, rule.Name)
 		}
@@ -238,6 +243,85 @@ func FindApprovalRuleMatch(config *PolicyConfig, prompts []string) (*ApprovalRul
 
 func FindBlockingRuleMatch(config *PolicyConfig, prompts []string) (*ApprovalRuleMatch, error) {
 	return FindRegexRuleMatchByAction(config, prompts, "block")
+}
+
+func FindWarningRuleMatch(config *PolicyConfig, prompts []string) (*ApprovalRuleMatch, error) {
+	return FindRegexRuleMatchByAction(config, prompts, "warn")
+}
+
+func RedactionRulesForEgress(config *PolicyConfig) []RegexRule {
+	if config == nil {
+		return nil
+	}
+	rules := make([]RegexRule, 0, len(config.RegexRules))
+	for _, rule := range config.RegexRules {
+		switch rule.normalizedAction() {
+		case "redact", "warn", "require_approval":
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
+
+func safePolicyAuditLabel(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var normalized strings.Builder
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z':
+			normalized.WriteRune(char)
+		case char >= '0' && char <= '9':
+			normalized.WriteRune(char)
+		case char == '-' || char == '_':
+			normalized.WriteRune(char)
+		case char == ' ':
+			normalized.WriteByte('_')
+		}
+		if normalized.Len() >= 64 {
+			break
+		}
+	}
+	if normalized.Len() == 0 {
+		return "sensitive"
+	}
+	return normalized.String()
+}
+
+func PolicyRuleAuditTrace(match *ApprovalRuleMatch, action string) []string {
+	if match == nil {
+		return []string{"action=" + safePolicyAuditLabel(action)}
+	}
+	entity := match.Rule.Entity
+	if strings.TrimSpace(entity) == "" {
+		entity = match.Rule.Name
+	}
+	return []string{
+		"action=" + safePolicyAuditLabel(action),
+		"entity=" + safePolicyAuditLabel(entity),
+		"match_sha256=" + match.MatchHash,
+	}
+}
+
+func RecordPolicyAction(action string) {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "block":
+		policyBlockTotal.Add(1)
+	case "warn":
+		policyWarnTotal.Add(1)
+	case "redact":
+		policyRedactTotal.Add(1)
+	case "fail_closed":
+		policyFailClosedTotal.Add(1)
+	}
+}
+
+func PolicyActionMetricsSnapshot() map[string]uint64 {
+	return map[string]uint64{
+		"authclaw_gateway_policy_block_total":       policyBlockTotal.Load(),
+		"authclaw_gateway_policy_warn_total":        policyWarnTotal.Load(),
+		"authclaw_gateway_policy_redact_total":      policyRedactTotal.Load(),
+		"authclaw_gateway_policy_fail_closed_total": policyFailClosedTotal.Load(),
+	}
 }
 
 func PolicyRuleDecisionReason(match *ApprovalRuleMatch, action string) string {
