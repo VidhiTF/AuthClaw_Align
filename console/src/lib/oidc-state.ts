@@ -6,7 +6,7 @@ const STATES_FILE = process.env.AUTHCLAW_OIDC_STATE_STORE_PATH || path.join(/* t
 
 function readPendingStates(): Record<string, number> {
   try {
-    return JSON.parse(fs.readFileSync(STATES_FILE, "utf8"));
+    return JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ STATES_FILE, "utf8"));
   } catch {
     return {};
   }

@@ -88,8 +88,8 @@ function fromStoredSession(session: StoredSessionData | SessionData): { session:
 export class SessionStore {
   private readSessions(): { sessions: Map<string, SessionData>; needsRewrite: boolean } {
     try {
-      if (fs.existsSync(SESSIONS_FILE)) {
-        const content = fs.readFileSync(SESSIONS_FILE, "utf-8");
+      if (fs.existsSync(/* turbopackIgnore: true */ SESSIONS_FILE)) {
+        const content = fs.readFileSync(/* turbopackIgnore: true */ SESSIONS_FILE, "utf-8");
         const obj = JSON.parse(content) as SessionFileData;
         let needsRewrite = false;
         const sessions = new Map<string, SessionData>();
