@@ -387,13 +387,17 @@ class PendingApproval(Base):
     action_type = Column(String(50), nullable=False)  # remediation, configuration_change, etc.
     action_description = Column(Text, nullable=False)
     action_payload = Column(JSON, nullable=False)  # Full action details
-    status = Column(String(50), nullable=False, default="PENDING")  # PENDING, APPROVED, REJECTED, EXPIRED
+    action_hash = Column(String(64), nullable=True)
+    status = Column(String(50), nullable=False, default="PENDING")  # PENDING, APPROVED, REJECTED, EXPIRED, CONSUMED
     requester_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     approver_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     mfa_verified = Column(Boolean, default=False)
     mfa_timestamp = Column(DateTime(timezone=True), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)  # 30 min from creation
     approved_at = Column(DateTime(timezone=True), nullable=True)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    consumed_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    resolution_reason = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -404,6 +408,7 @@ class PendingApproval(Base):
         Index("idx_approval_tenant", "tenant_id"),
         Index("idx_approval_status", "status"),
         Index("idx_approval_expires", "expires_at"),
+        Index("idx_approval_tenant_action_hash", "tenant_id", "action_hash"),
     )
 
 
@@ -416,6 +421,9 @@ class ApprovalAudit(Base):
     approval_id = Column(UUID(as_uuid=True), ForeignKey("pending_approvals.id"), nullable=False)
     actor_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     action = Column(String(50), nullable=False)  # APPROVED, REJECTED, EXPIRED
+    action_hash = Column(String(64), nullable=True)
+    reason = Column(Text, nullable=True)
+    details = Column(JSON, nullable=True)
     mfa_verified = Column(Boolean, default=False)
     mfa_timestamp = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)

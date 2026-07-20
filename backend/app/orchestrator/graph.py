@@ -292,6 +292,21 @@ def generate_remediation_plan(state: ComplianceState) -> ComplianceState:
                 "Overwrite the approved S3 target through the audited remediation connector",
                 "Verify before/after sensitive-entity counts",
             ],
+            "proposed_change": {
+                "summary": f"Redact sensitive data in S3 object ({finding['evidence']})",
+                "target": connector_plan.get("target", {}),
+                "preview": connector_plan.get("diff", {}).get("preview", []),
+            },
+            "risk": {
+                "level": "high",
+                "destructive": True,
+                "impact": "The approved S3 object will be overwritten with a redacted copy.",
+            },
+            "rollback": {
+                "strategy": "Restore the pre-change S3 backup created before mutation.",
+                "trigger": "Verification failure or an operator-requested rollback.",
+                "evidence": "The backup reference and restore verification are recorded in the audit trace.",
+            },
         })
         
         store_finding_fn = state.get("_store_finding")
