@@ -254,6 +254,10 @@ class OnboardingSignupRequest(BaseModel):
     """Start Lite self-service onboarding by sending an email OTP."""
     email: EmailStr
     tenant_name: str = Field(..., min_length=2, max_length=255)
+    terms_accepted: bool
+    terms_version: str = Field(..., min_length=1, max_length=32)
+    privacy_notice_acknowledged: bool
+    privacy_notice_version: str = Field(..., min_length=1, max_length=32)
 
 
 class OnboardingSignupResponse(BaseModel):
@@ -287,6 +291,10 @@ class OnboardingVerifyRequest(BaseModel):
     signup_id: UUID
     otp: str = Field(..., min_length=6, max_length=6)
     password: str = Field(..., min_length=12, max_length=256)
+    terms_accepted: bool
+    terms_version: str = Field(..., min_length=1, max_length=32)
+    privacy_notice_acknowledged: bool
+    privacy_notice_version: str = Field(..., min_length=1, max_length=32)
 
 
 class OnboardingChecklistResponse(BaseModel):
