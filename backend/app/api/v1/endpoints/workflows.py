@@ -23,6 +23,7 @@ from app.core.startup_checks import is_production
 from app.db.models import PendingApproval, ComplianceWorkflow, User, ApprovalAudit, Tenant
 from app.orchestrator.runner import ComplianceWorkflowRunner
 from app.services.notifications import create_notification
+from app.services.remediation_approval import build_action_payload, compute_action_hash
 from app.services.worker_throttle import check_worker_throttle
 from datetime import datetime, timedelta, timezone
 
@@ -75,6 +76,8 @@ class GatewayApprovalResponse(BaseModel):
     status: str
     requester_id: str
     approver_id: Optional[str] = None
+    action_hash: Optional[str] = None
+    consumed_at: Optional[str] = None
     expires_at: str
     created_at: str
 
@@ -89,6 +92,8 @@ def _approval_response(approval: PendingApproval) -> GatewayApprovalResponse:
         status=approval.status,
         requester_id=str(approval.requester_id),
         approver_id=str(approval.approver_id) if approval.approver_id else None,
+        action_hash=approval.action_hash,
+        consumed_at=approval.consumed_at.isoformat() if approval.consumed_at else None,
         expires_at=approval.expires_at.isoformat(),
         created_at=approval.created_at.isoformat(),
     )
@@ -144,7 +149,7 @@ def resume_workflow(
 
     try:
         runner = ComplianceWorkflowRunner(db)
-        result = runner.resume(workflow_id, tenant_id)
+        result = runner.resume(workflow_id, tenant_id, actor_id=str(request.state.user_id))
         return WorkflowResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -177,6 +182,9 @@ def _auto_expire_stale(db: Session, tenant_id: str, actor_id: uuid.UUID) -> None
             approval_id=approval.id,
             actor_id=actor_id,
             action="EXPIRED",
+            action_hash=approval.action_hash,
+            reason="Approval expired before a human decision",
+            details={"action_id": approval.action_id, "status": "EXPIRED"},
             mfa_verified=False,
             mfa_timestamp=None,
         )
@@ -463,7 +471,10 @@ def approve_workflow(
         raise HTTPException(status_code=400, detail="No approval associated with this workflow")
 
     approval = db.query(PendingApproval).filter(
+        PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
+        PendingApproval.action_id == workflow_id,
+        PendingApproval.action_type == "remediation",
     ).first()
     
     if not approval:
@@ -474,6 +485,36 @@ def approve_workflow(
             status_code=400,
             detail=f"Approval request is already resolved (status={approval.status})",
         )
+
+    wf = db.query(ComplianceWorkflow).filter(
+        ComplianceWorkflow.workflow_id == workflow_id,
+        ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
+    ).first()
+    expected_payload = build_action_payload(workflow_id, (wf.remediation_plan if wf else []) or [])
+    expected_hash = compute_action_hash(
+        tenant_id=tenant_id,
+        action_payload=approval.action_payload or {},
+        expires_at=approval.expires_at,
+    )
+    if approval.action_payload != expected_payload or approval.action_hash != expected_hash:
+        approval.status = "ALTERED"
+        approval.resolution_reason = "Remediation plan or approval binding changed before approval"
+        db.add(
+            ApprovalAudit(
+                id=uuid.uuid4(),
+                tenant_id=uuid.UUID(tenant_id),
+                approval_id=approval.id,
+                actor_id=user_id,
+                action="ALTERED_REJECTED",
+                action_hash=approval.action_hash,
+                reason=approval.resolution_reason,
+                details={"workflow_id": workflow_id},
+                mfa_verified=False,
+                mfa_timestamp=None,
+            )
+        )
+        db.commit()
+        raise HTTPException(status_code=409, detail="Approval action binding is invalid")
 
     # Validate MFA if enabled on user (uses shared helper)
     user = db.query(User).filter(
@@ -497,7 +538,8 @@ def approve_workflow(
 
     # Sync workflow status
     wf = db.query(ComplianceWorkflow).filter(
-        ComplianceWorkflow.workflow_id == workflow_id
+        ComplianceWorkflow.workflow_id == workflow_id,
+        ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
     ).first()
     if wf:
         wf.approval_status = "APPROVED"
@@ -509,6 +551,9 @@ def approve_workflow(
         approval_id=approval.id,
         actor_id=user_id,
         action="APPROVED",
+        action_hash=approval.action_hash,
+        reason="Human approver authorized the immutable remediation plan",
+        details={"workflow_id": workflow_id, "expires_at": approval.expires_at.isoformat()},
         mfa_verified=mfa_verified,
         mfa_timestamp=mfa_timestamp,
     )
@@ -520,7 +565,7 @@ def approve_workflow(
 
     # Resume workflow execution
     try:
-        result = runner.resume(workflow_id, tenant_id)
+        result = runner.resume(workflow_id, tenant_id, actor_id=str(user_id))
         remediation_state = str(result.get("remediation_state") or "")
         if remediation_state in {"SUCCEEDED", "FAILED", "PARTIAL_FAILED", "ROLLBACK_FAILED"}:
             failed = remediation_state != "SUCCEEDED"
@@ -567,7 +612,10 @@ def reject_workflow(
         raise HTTPException(status_code=400, detail="No approval associated with this workflow")
 
     approval = db.query(PendingApproval).filter(
+        PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
+        PendingApproval.action_id == workflow_id,
+        PendingApproval.action_type == "remediation",
     ).first()
 
     if not approval:
@@ -586,7 +634,8 @@ def reject_workflow(
 
     # Sync workflow status
     wf = db.query(ComplianceWorkflow).filter(
-        ComplianceWorkflow.workflow_id == workflow_id
+        ComplianceWorkflow.workflow_id == workflow_id,
+        ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
     ).first()
     if wf:
         wf.approval_status = "REJECTED"
@@ -598,6 +647,9 @@ def reject_workflow(
         approval_id=approval.id,
         actor_id=user_id,
         action="REJECTED",
+        action_hash=approval.action_hash,
+        reason="Human approver rejected the remediation plan",
+        details={"workflow_id": workflow_id},
         mfa_verified=False,
         mfa_timestamp=None,
     )
@@ -606,7 +658,7 @@ def reject_workflow(
 
     # Resume workflow (which wraps up since it's rejected)
     try:
-        result = runner.resume(workflow_id, tenant_id)
+        result = runner.resume(workflow_id, tenant_id, actor_id=str(user_id))
         return WorkflowResponse(**result)
     except Exception as exc:
         logger.error("Failed to reject/resume workflow: %s", exc)
@@ -649,7 +701,13 @@ def remediate_workflow(
 
     # Dynamically create pending approval
     from app.orchestrator.runner import _create_approval_in_db, emit_audit_event
-    approval_id = _create_approval_in_db(db, tenant_id, workflow_id, wf.remediation_plan)
+    approval_id = _create_approval_in_db(
+        db,
+        tenant_id,
+        workflow_id,
+        wf.remediation_plan,
+        requester_id=str(request.state.user_id),
+    )
 
     # Transition workflow to PAUSED/AWAITING_APPROVAL
     wf.execution_status = "PAUSED"

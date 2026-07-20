@@ -472,7 +472,9 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     db_app_final = db_session.query(PendingApproval).filter(
         PendingApproval.id == uuid.UUID(approval_id)
     ).first()
-    assert db_app_final.status == "APPROVED"
+    assert db_app_final.status == "CONSUMED"
     assert db_app_final.approved_at is not None
     assert db_app_final.approver_id == user_id
+    assert db_app_final.consumed_at is not None
+    assert db_app_final.consumed_by_id == user_id
     db_session.execute(text("SET app.current_tenant_id = ''"))
