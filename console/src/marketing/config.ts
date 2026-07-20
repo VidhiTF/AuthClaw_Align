@@ -4,6 +4,11 @@ export const marketingRoutes = {
   pricing: "/pricing",
   security: "/security",
   company: "/company",
+  privacy: "/privacy",
+  terms: "/terms",
+  cookies: "/cookies",
+  subprocessors: "/subprocessors",
+  dpa: "/dpa",
   login: "/login",
   trial: "/signup",
   demo: "/signup",
@@ -45,6 +50,16 @@ export const marketingFooterGroups = [
       { href: marketingRoutes.careers, label: "Careers" },
       { href: marketingRoutes.contact, label: "Contact" },
       { href: marketingRoutes.security, label: "Responsible AI" },
+    ],
+  },
+  {
+    heading: "Legal",
+    links: [
+      { href: marketingRoutes.privacy, label: "Privacy Notice" },
+      { href: marketingRoutes.terms, label: "Terms of Use" },
+      { href: marketingRoutes.cookies, label: "Cookies" },
+      { href: marketingRoutes.subprocessors, label: "Subprocessors" },
+      { href: marketingRoutes.dpa, label: "DPA requests" },
     ],
   },
 ] as const;

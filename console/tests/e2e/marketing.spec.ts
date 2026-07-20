@@ -6,6 +6,11 @@ const canonicalPages = [
   { path: "/pricing", title: "Pricing — AuthClaw" },
   { path: "/security", title: "Security & Trust — AuthClaw" },
   { path: "/company", title: "Company — AuthClaw" },
+  { path: "/privacy", title: "Privacy Notice — AuthClaw" },
+  { path: "/terms", title: "Terms of Use — AuthClaw" },
+  { path: "/cookies", title: "Cookie & Analytics Disclosure — AuthClaw" },
+  { path: "/subprocessors", title: "Subprocessors — AuthClaw" },
+  { path: "/dpa", title: "DPA Requests — AuthClaw" },
 ];
 
 const legacyRedirects = [
@@ -159,5 +164,20 @@ test.describe("F25 public marketing routes", () => {
         await page.locator("table th:not([scope])").count()
       ).toBe(0);
     }
+  });
+
+  test("signup requires versioned legal-notice acceptance", async ({ page }) => {
+    await page.goto("/signup");
+    const acceptance = page.getByRole("checkbox");
+    await expect(acceptance).toBeVisible();
+    await expect(acceptance).toHaveAttribute("required", "");
+    await expect(page.getByRole("link", { name: "Terms of Use" })).toHaveAttribute(
+      "href",
+      "/terms"
+    );
+    await expect(page.getByRole("link", { name: "Privacy Notice" })).toHaveAttribute(
+      "href",
+      "/privacy"
+    );
   });
 });

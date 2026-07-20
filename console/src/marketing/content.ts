@@ -73,14 +73,14 @@ export const homeContent = `
   <div class="wrap">
     <div class="reveal">
       <span class="eyebrow" style="color:var(--violet-300)">Posture tools prove yesterday</span>
-      <h2>Most compliance tools tell you what happened. <span class="kv">AuthClaw acts on every request</span>, right now.</h2>
-      <p class="lead">Dashboards and audits describe your posture after the fact. AuthClaw is the enforcement point: it inspects each call to a model, strips what should never leave, and blocks what breaks your rules, before anything reaches an external provider.</p>
+      <h2>Most compliance tools tell you what happened. <span class="kv">AuthClaw acts on configured AI traffic</span>, right now.</h2>
+      <p class="lead">Dashboards and audits describe your posture after the fact. For traffic routed through the AuthClaw gateway, configured policies can inspect model calls, redact matching sensitive values, and block requests that violate those policies before provider egress.</p>
     </div>
     <div class="stat-grid reveal">
-      <div class="stat"><div class="n">&lt;50<span class="u">ms</span></div><div class="l">added latency per request</div></div>
-      <div class="stat"><div class="n">99.99<span class="u">%</span></div><div class="l">uptime target, multi-region</div></div>
-      <div class="stat"><div class="n">100<span class="u">%</span></div><div class="l">of prompts and responses inspected</div></div>
-      <div class="stat"><div class="n">1<span class="u">-click</span></div><div class="l">verifiable audit export</div></div>
+      <div class="stat"><div class="n">P95/P99<span class="u"> evidence</span></div><div class="l">environment-specific gateway benchmarks</div></div>
+      <div class="stat"><div class="n">CI<span class="u"> measured</span></div><div class="l">gateway overhead evidence</div></div>
+      <div class="stat"><div class="n">Policy<span class="u"> scoped</span></div><div class="l">configured traffic inspection</div></div>
+      <div class="stat"><div class="n">Signed<span class="u"> export</span></div><div class="l">verifiable evidence bundle</div></div>
     </div>
   </div>
 </section>
@@ -106,14 +106,14 @@ export const homeContent = `
         <div class="pnum">02 / Agent</div>
         <div class="picon">◈</div>
         <h3>The remediation agent</h3>
-        <p>An AI agent scans your cloud, explains in plain language where you fall short of GDPR, HIPAA, and SOC 2, and prepares the fix. Nothing risky runs until a person approves it, with a security check.</p>
+        <p>An AI agent scans configured cloud integrations, explains readiness gaps for GDPR, the HIPAA Security Rule, and SOC 2, and prepares a proposed fix. Configured high-risk remediation requires recorded human approval and a security check.</p>
       </div>
       <div class="pcard reveal">
         <div class="top-accent"></div>
         <div class="pnum">03 / Audit</div>
         <div class="picon">⛭</div>
         <h3>The audit recorder</h3>
-        <p>Every request, decision, and approval is written to a tamper-evident, hash-chained log. Export verifiable evidence for auditors and customers, or publish a live trust page, in one click.</p>
+        <p>Configured gateway requests, policy decisions, and approvals produce tenant-scoped audit evidence. Export a signed bundle for authorized auditors and customers, or publish an access-controlled trust page.</p>
       </div>
     </div>
   </div>
@@ -306,7 +306,7 @@ export const homeContent = `
         <div class="pfeat-label">Everything in Growth, plus</div>
         <ul class="feat">
           <li><span class="ck">✓</span> Unlimited frameworks &amp; volume</li>
-          <li><span class="ck">✓</span> 99.99% SLA, multi-region / VPC</li>
+          <li><span class="ck">✓</span> Contract-specific availability and deployment terms</li>
           <li><span class="ck">✓</span> SSO/SAML, dedicated support</li>
         </ul>
       </div>
@@ -333,7 +333,7 @@ export const homeContent = `
         <tr><td>Sensitive data</td><td class="them">Reviewed after the fact</td><td class="us">Removed in real time, before egress</td></tr>
         <tr><td>Compliance gaps</td><td class="them">Flagged in a report</td><td class="us">Fixed with human approval</td></tr>
         <tr><td>Audit evidence</td><td class="them">Assembled by hand</td><td class="us">Recorded automatically, tamper-evident</td></tr>
-        <tr><td>AI traffic</td><td class="them">Outside their view</td><td class="us">Inspected on every request</td></tr>
+        <tr><td>AI traffic</td><td class="them">Outside their view</td><td class="us">Inspected when routed through configured gateway policies</td></tr>
         <tr><td>Human role</td><td class="them">Doing the work</td><td class="us">Approving the decisions</td></tr>
       </tbody>
     </table>
@@ -608,7 +608,7 @@ export const pricingContent = `
         <ul class="feat">
           <li><span class="ck">✓</span> Unlimited frameworks + custom controls</li>
           <li><span class="ck">✓</span> Custom / uncapped protected volume</li>
-          <li><span class="ck">✓</span> 99.99% SLA · multi-region active-active</li>
+          <li><span class="ck">✓</span> Contract-specific availability · multi-region options</li>
           <li><span class="ck">✓</span> Single-tenant, VPC, or air-gapped deployment</li>
           <li><span class="ck">✓</span> Unlimited seats &amp; environments</li>
           <li><span class="ck">✓</span> Dedicated CSM, SOC 2 support, custom DPA</li>
@@ -661,7 +661,7 @@ export const pricingContent = `
         <p>When AI traffic runs through the critical path, procurement asks hard questions. Enterprise answers them: your own tenancy, your region, your SLA, and evidence your auditors can verify cryptographically.</p>
         <ul class="ent-list">
           <li><span class="tk">◆</span> Single-tenant, VPC &amp; air-gapped options</li>
-          <li><span class="tk">◆</span> 99.99% uptime SLA, multi-region</li>
+          <li><span class="tk">◆</span> Negotiated availability terms and multi-region options</li>
           <li><span class="tk">◆</span> SSO/SAML, SCIM, granular RBAC</li>
           <li><span class="tk">◆</span> Custom DPA, BAA &amp; subprocessor terms</li>
           <li><span class="tk">◆</span> Volume-based, committed-use pricing</li>
@@ -701,7 +701,7 @@ export const pricingContent = `
           <tr><td>Streaming, token-by-token filtering</td><td>✓</td><td class="hi">✓</td><td>✓</td></tr>
           <tr><td>Policy-as-code (YAML + OPA)</td><td>Standard</td><td class="hi">Advanced</td><td>Custom</td></tr>
           <tr><td>Protected calls / month</td><td>5M</td><td class="hi">25M</td><td>Custom</td></tr>
-          <tr><td>Added latency target</td><td>&lt;50ms</td><td class="hi">&lt;50ms</td><td>&lt;50ms</td></tr>
+          <tr><td>Gateway overhead</td><td>Measured by environment</td><td class="hi">Measured by environment</td><td>Contract-specific benchmark</td></tr>
 
           <tr class="grouprow"><td colspan="4">Agentic remediation</td></tr>
           <tr><td>Cloud &amp; SCM scanning</td><td class="no">—</td><td class="hi">✓</td><td>✓</td></tr>
@@ -721,7 +721,7 @@ export const pricingContent = `
           <tr><td>Seats included</td><td>5</td><td class="hi">25</td><td>Unlimited</td></tr>
           <tr><td>SSO / SAML &amp; SCIM</td><td class="no">—</td><td class="hi">✓</td><td>✓</td></tr>
           <tr><td>Deployment</td><td>Multi-tenant</td><td class="hi">Multi-tenant</td><td>VPC / air-gapped</td></tr>
-          <tr><td>Uptime SLA</td><td>99.9%</td><td class="hi">99.95%</td><td>99.99%</td></tr>
+          <tr><td>Availability terms</td><td>Beta terms</td><td class="hi">Plan-specific</td><td>Negotiated</td></tr>
           <tr><td>Support</td><td>Email</td><td class="hi">Priority</td><td>Dedicated CSM</td></tr>
           <tr><td>Custom DPA / BAA</td><td class="no">—</td><td class="hi">Add-on</td><td>✓</td></tr>
         </tbody>
@@ -809,7 +809,7 @@ export const securityContent = `
       <p class="sub" style="margin-left:auto;margin-right:auto">Layered controls reduce the impact of individual component failures.</p>
     </div>
     <div class="fgrid">
-      <div class="fcard reveal"><div class="ico">⛨</div><h3>Zero-trust by default</h3><p>Every service authenticates every call. No implicit trust between components, networks, or tenants.</p></div>
+      <div class="fcard reveal"><div class="ico">⛨</div><h3>Zero-trust foundations</h3><p>Canonical service paths require authenticated calls and tenant context; deployment validation must confirm the configured boundary.</p></div>
       <div class="fcard reveal"><div class="ico">🔑</div><h3>Envelope encryption</h3><p>Provider credentials and secrets are wrapped with AES-256-GCM via AWS KMS or HashiCorp Vault, encrypted at rest and in transit.</p></div>
       <div class="fcard reveal"><div class="ico">▦</div><h3>Strict tenant isolation</h3><p>Row-level security and, on Enterprise, physical isolation. Automated tests validate tenant-isolation boundaries.</p></div>
       <div class="fcard reveal"><div class="ico">◆</div><h3>Data minimization</h3><p>Sensitive data is redacted before egress. The least necessary context reaches any model — often nothing sensitive at all.</p></div>
@@ -817,7 +817,7 @@ export const securityContent = `
       <div class="fcard reveal"><div class="ico">⛭</div><h3>Tamper-evident audit</h3><p>A hash-chained, append-only log makes every action verifiable and any modification detectable.</p></div>
       <div class="fcard reveal"><div class="ico">◎</div><h3>Human-gated changes</h3><p>Consequential actions require a fresh MFA challenge bound to the specific action and approver — non-transferable, single-use.</p></div>
       <div class="fcard reveal"><div class="ico">↻</div><h3>Continuous red-teaming</h3><p>Adversarial probes for prompt injection, data disclosure, and harmful content run continuously against a vulnerability register.</p></div>
-      <div class="fcard reveal"><div class="ico">◇</div><h3>Resilient by design</h3><p>Multi-region active-active with a 99.99% uptime target and regular failover and chaos testing.</p></div>
+      <div class="fcard reveal"><div class="ico">◇</div><h3>Resilience controls</h3><p>Multi-region deployment options, failover controls, and recovery evidence are evaluated for the selected environment.</p></div>
     </div>
   </div>
 </section>
@@ -845,7 +845,7 @@ export const securityContent = `
     </table>
     <div class="callout reveal">
       <span class="eyebrow">Deployment options</span>
-      <p style="color:var(--slate);font-size:16px;margin-top:8px">Enterprise customers can run AuthClaw single-tenant inside their own VPC, in a chosen region, or fully air-gapped — so request data can remain within their perimeter. Multi-tenant cloud, with strict logical isolation, is the default for Team and Growth.</p>
+      <p style="color:var(--slate);font-size:16px;margin-top:8px">Enterprise deployment options can include single-tenant, customer-VPC, chosen-region, or isolated configurations, subject to technical validation and the signed agreement. Multi-tenant cloud uses logical tenant isolation for Team and Growth.</p>
     </div>
   </div>
 </section>
@@ -856,12 +856,23 @@ export const securityContent = `
     <div class="reveal">
       <span class="eyebrow">Responsible AI</span>
       <h3 style="font-size:24px;font-weight:600;margin-top:12px">Consequential changes require human approval.</h3>
-      <p style="color:var(--slate);font-size:16px;margin-top:14px">The remediation agent can propose and explain, but it cannot make consequential changes on its own. Every destructive action is gated behind an explicit, expiring, MFA-backed human approval — and everything the agent reasons or does is written to the audit trail.</p>
+      <p style="color:var(--slate);font-size:16px;margin-top:14px">The remediation agent can propose and explain. Configured destructive actions are gated behind an explicit, expiring, MFA-backed human approval; approval decisions and execution outcomes are recorded in the audit trail.</p>
     </div>
     <div class="reveal">
       <span class="eyebrow">Transparency</span>
       <h3 style="font-size:24px;font-weight:600;margin-top:12px">Subprocessors &amp; disclosure.</h3>
-      <p style="color:var(--slate);font-size:16px;margin-top:14px">AuthClaw generates tamper-evident audit records and signed evidence exports.</p>
+      <p style="color:var(--slate);font-size:16px;margin-top:14px">Review the current <a href="/subprocessors">subprocessor list</a>, use the <a href="/dpa">DPA request path</a>, and request environment-scoped readiness evidence. No independent SOC report is currently offered.</p>
+    </div>
+  </div>
+</section>
+
+<!-- SECURITY CONTACT -->
+<section class="band-tight" id="security-contact">
+  <div class="wrap">
+    <div class="callout reveal">
+      <span class="eyebrow">Security contact</span>
+      <h3 style="font-size:24px;font-weight:600">Report a suspected vulnerability responsibly.</h3>
+      <p style="color:var(--slate);font-size:16px;margin-top:12px">Email <a href="mailto:security@authclaw.ai">security@authclaw.ai</a> with affected components, reproduction steps, and impact. Do not include production credentials, exploit unrelated systems, or access another tenant's data.</p>
     </div>
   </div>
 </section>
@@ -901,8 +912,8 @@ export const companyContent = `
     <div class="stat-grid reveal">
       <div class="stat"><div class="n">2026</div><div class="l">founded, from the AgentsArchitects studio</div></div>
       <div class="stat"><div class="n">3</div><div class="l">coupled pillars: gateway, agent, audit</div></div>
-      <div class="stat"><div class="n">&lt;50<span class="u">ms</span></div><div class="l">the latency budget we hold ourselves to</div></div>
-      <div class="stat"><div class="n">100<span class="u">%</span></div><div class="l">human-approved consequential changes</div></div>
+      <div class="stat"><div class="n">CI<span class="u"> benchmark</span></div><div class="l">gateway performance evidence</div></div>
+      <div class="stat"><div class="n">Explicit<span class="u"> approval</span></div><div class="l">for configured consequential actions</div></div>
     </div>
   </div>
 </section>
@@ -915,7 +926,7 @@ export const companyContent = `
       <h2>Principles we build on.</h2>
     </div>
     <div class="vgrid">
-      <div class="vcard reveal"><div class="vn">01</div><h3>In the path, not the report</h3><p>Value comes from acting on every request in real time — not from describing what already happened. We earn our place in the critical path by being fast and safe.</p></div>
+      <div class="vcard reveal"><div class="vn">01</div><h3>In the path, not the report</h3><p>Value comes from applying configured controls to gateway traffic in real time — not from describing what already happened. We earn our place in the critical path through measured performance and safety evidence.</p></div>
       <div class="vcard reveal"><div class="vn">02</div><h3>A human always decides</h3><p>Agents propose and explain; people approve. We design for accountable autonomy, never unattended risk.</p></div>
       <div class="vcard reveal"><div class="vn">03</div><h3>Proof over promises</h3><p>Trust should be verifiable. Everything we do leaves tamper-evident evidence a customer or auditor can check themselves.</p></div>
       <div class="vcard reveal"><div class="vn">04</div><h3>Security is the product</h3><p>Zero-trust, least privilege, and encryption are not hardening we add later — they are the starting point of every design.</p></div>

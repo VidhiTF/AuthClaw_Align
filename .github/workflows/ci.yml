@@ -395,6 +395,10 @@ jobs:
         working-directory: console
         run: npm run lint
 
+      - name: Enforce approved public claims
+        working-directory: console
+        run: npm run test:claims
+
       - name: Typecheck
         working-directory: console
         run: npx tsc --noEmit --pretty false

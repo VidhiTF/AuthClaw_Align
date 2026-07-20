@@ -15,6 +15,10 @@ import {
 } from "lucide-react";
 import { flashCopy } from "@/lib/clipboard";
 import { apiErrorMessage, getErrorMessage } from "@/lib/errors";
+import {
+  PRIVACY_NOTICE_VERSION,
+  TERMS_VERSION,
+} from "@/marketing/legal-config";
 
 interface SignupResponse {
   signup_id: string;
@@ -64,6 +68,7 @@ function SignupPageContent() {
   const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [legalAccepted, setLegalAccepted] = useState(false);
 
   const step = useMemo(() => {
     if (verified) return 3;
@@ -99,7 +104,14 @@ function SignupPageContent() {
       const response = await fetch("/api/onboarding/signup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, tenant_name: tenantName }),
+        body: JSON.stringify({
+          email,
+          tenant_name: tenantName,
+          terms_accepted: legalAccepted,
+          terms_version: TERMS_VERSION,
+          privacy_notice_acknowledged: legalAccepted,
+          privacy_notice_version: PRIVACY_NOTICE_VERSION,
+        }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -136,7 +148,15 @@ function SignupPageContent() {
       const response = await fetch("/api/onboarding/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ signup_id: signupId, otp, password }),
+        body: JSON.stringify({
+          signup_id: signupId,
+          otp,
+          password,
+          terms_accepted: legalAccepted,
+          terms_version: TERMS_VERSION,
+          privacy_notice_acknowledged: legalAccepted,
+          privacy_notice_version: PRIVACY_NOTICE_VERSION,
+        }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -318,6 +338,27 @@ function SignupPageContent() {
                   </div>
                 </label>
 
+                <label className="flex items-start gap-3 rounded-[10px] border border-[#E6E9F0] bg-[#F5F7FA] p-3 text-xs text-[#475069]">
+                  <input
+                    type="checkbox"
+                    required
+                    checked={legalAccepted}
+                    onChange={(event) => setLegalAccepted(event.target.checked)}
+                    className="mt-0.5 h-4 w-4 accent-[#6D28D9]"
+                  />
+                  <span>
+                    I agree to the{" "}
+                    <Link className="font-semibold text-[#6D28D9] underline" href="/terms" target="_blank">
+                      Terms of Use
+                    </Link>{" "}
+                    (version {TERMS_VERSION}) and acknowledge the{" "}
+                    <Link className="font-semibold text-[#6D28D9] underline" href="/privacy" target="_blank">
+                      Privacy Notice
+                    </Link>{" "}
+                    (version {PRIVACY_NOTICE_VERSION}).
+                  </span>
+                </label>
+
                 <button
                   type="submit"
                   disabled={loading}
@@ -375,6 +416,26 @@ function SignupPageContent() {
                         className="w-full rounded-[10px] border border-[#E6E9F0] bg-[#F5F7FA] px-4 py-2.5 text-sm text-[#0E1726] outline-none focus:border-[#6D28D9] focus:ring-2 focus:ring-[#F1ECFE]"
                         placeholder="Repeat password"
                       />
+                    </label>
+                    <label className="flex items-start gap-3 rounded-[10px] border border-[#E6E9F0] bg-[#F5F7FA] p-3 text-xs text-[#475069]">
+                      <input
+                        type="checkbox"
+                        required
+                        checked={legalAccepted}
+                        onChange={(event) => setLegalAccepted(event.target.checked)}
+                        className="mt-0.5 h-4 w-4 accent-[#6D28D9]"
+                      />
+                      <span>
+                        I agree to the{" "}
+                        <Link className="font-semibold text-[#6D28D9] underline" href="/terms" target="_blank">
+                          Terms of Use
+                        </Link>{" "}
+                        and acknowledge the{" "}
+                        <Link className="font-semibold text-[#6D28D9] underline" href="/privacy" target="_blank">
+                          Privacy Notice
+                        </Link>
+                        .
+                      </span>
                     </label>
                   </>
                 )}

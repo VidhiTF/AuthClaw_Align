@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AuthClaw — The runtime layer for AI compliance</title>
-<meta name="description" content="AuthClaw is the in-line gateway for AI compliance. Redact PII and PHI in real time, remediate gaps with human approval, and prove it with a tamper-proof audit trail." />
+<meta name="description" content="AuthClaw is an in-line gateway with configured redaction, human approval, and tamper-evident audit controls." />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -13,7 +13,7 @@
 <body>
 
 <div class="topstrip">
-  <b>New</b> — AuthClaw is now SOC 2 Type II certified
+  <b>Controlled beta</b> — Technical controls support GDPR obligations and SOC 2 readiness
   <span class="dot">•</span> <a href="security.html">Read the security overview →</a>
 </div>
 
@@ -49,7 +49,7 @@
     <div class="h-copy">
       <span class="eyebrow">The runtime layer for AI compliance</span>
       <h1>Stop sensitive data <span class="hl">before</span> it reaches the model.</h1>
-      <p class="sub">AuthClaw sits in the live path between your applications and AI. It removes PII and PHI in real time, fixes compliance gaps with human approval, and keeps a tamper-proof record your auditors can trust.</p>
+      <p class="sub">For configured traffic, AuthClaw can detect and redact matching sensitive-data patterns, gate consequential remediation behind human approval, and create tamper-evident audit records.</p>
       <div class="cta-row">
       <a class="btn btn-primary" href="/signup">Start free trial</a>
         <a class="btn btn-ghost" href="#how">See how it works</a>
@@ -119,7 +119,7 @@
     </div>
     <div class="stat-grid reveal">
       <div class="stat"><div class="n">&lt;50<span class="u">ms</span></div><div class="l">added latency per request</div></div>
-      <div class="stat"><div class="n">99.99<span class="u">%</span></div><div class="l">uptime target, multi-region</div></div>
+      <div class="stat"><div class="n">Evidence<span class="u"> scoped</span></div><div class="l">availability validated by environment</div></div>
       <div class="stat"><div class="n">100<span class="u">%</span></div><div class="l">of prompts and responses inspected</div></div>
       <div class="stat"><div class="n">1<span class="u">-click</span></div><div class="l">verifiable audit export</div></div>
     </div>
@@ -147,14 +147,14 @@
         <div class="pnum">02 / Agent</div>
         <div class="picon">◈</div>
         <h3>The remediation agent</h3>
-        <p>An AI agent scans your cloud, explains in plain language where you fall short of GDPR, HIPAA, and SOC 2, and prepares the fix. Nothing risky runs until a person approves it, with a security check.</p>
+        <p>An AI agent scans configured cloud integrations, explains readiness gaps for GDPR, the HIPAA Security Rule, and SOC 2, and prepares a proposed fix. Configured high-risk remediation requires recorded human approval and a security check.</p>
       </div>
       <div class="pcard reveal">
         <div class="top-accent"></div>
         <div class="pnum">03 / Audit</div>
         <div class="picon">⛭</div>
         <h3>The audit recorder</h3>
-        <p>Every request, decision, and approval is written to a tamper-proof, hash-chained log. Export verifiable evidence for auditors and customers, or publish a live trust page, in one click.</p>
+        <p>Configured gateway requests, decisions, and approvals create tenant-scoped, tamper-evident audit records and signed evidence exports.</p>
       </div>
     </div>
   </div>
@@ -347,7 +347,7 @@
         <div class="pfeat-label">Everything in Growth, plus</div>
         <ul class="feat">
           <li><span class="ck">✓</span> Unlimited frameworks &amp; volume</li>
-          <li><span class="ck">✓</span> 99.99% SLA, multi-region / VPC</li>
+          <li><span class="ck">✓</span> Contract-specific availability and deployment terms</li>
           <li><span class="ck">✓</span> SSO/SAML, dedicated support</li>
         </ul>
       </div>
@@ -373,7 +373,7 @@
       <tbody>
         <tr><td>Sensitive data</td><td class="them">Reviewed after the fact</td><td class="us">Removed in real time, before egress</td></tr>
         <tr><td>Compliance gaps</td><td class="them">Flagged in a report</td><td class="us">Fixed with human approval</td></tr>
-        <tr><td>Audit evidence</td><td class="them">Assembled by hand</td><td class="us">Recorded automatically, tamper-proof</td></tr>
+        <tr><td>Audit evidence</td><td class="them">Assembled by hand</td><td class="us">Recorded automatically, tamper-evident</td></tr>
         <tr><td>AI traffic</td><td class="them">Outside their view</td><td class="us">Inspected on every request</td></tr>
         <tr><td>Human role</td><td class="them">Doing the work</td><td class="us">Approving the decisions</td></tr>
       </tbody>
@@ -414,7 +414,7 @@
     <div class="ft-grid">
       <div>
         <div class="brand"><span class="mark"></span>AuthClaw<span class="ai">.ai</span></div>
-        <p class="desc">The runtime layer for AI compliance. Redact in real time, remediate with human approval, and prove it with a tamper-proof trail.</p>
+        <p class="desc">The runtime layer for AI compliance. Apply configured redaction, human approval, and tamper-evident audit controls.</p>
       </div>
       <div><h5>Product</h5><ul>
         <li><a href="product.html">In-line gateway</a></li>

@@ -34,6 +34,7 @@ from app.schemas.models import (
     OnboardingVerifyResponse,
 )
 from app.services.email_service import EmailDeliveryError, demo_otp_visible, send_otp_email
+from app.services.legal_acceptance import validate_legal_acceptance
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -240,6 +241,15 @@ def signup(payload: OnboardingSignupRequest, request: Request):
     email = payload.email.strip().lower()
     tenant_name = payload.tenant_name.strip()
     now = datetime.now(timezone.utc)
+    try:
+        validate_legal_acceptance(
+            terms_accepted=payload.terms_accepted,
+            terms_version=payload.terms_version,
+            privacy_notice_acknowledged=payload.privacy_notice_acknowledged,
+            privacy_notice_version=payload.privacy_notice_version,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     email_hash = _rate_limit_hash(email)
     ip_hash = _rate_limit_hash(_client_ip(request))
     _enforce_onboarding_rate_limit(
@@ -273,6 +283,10 @@ def signup(payload: OnboardingSignupRequest, request: Request):
             otp_hash=_otp_hash(email, otp),
             expires_at=expires_at,
             sent_at=now,
+            terms_version=payload.terms_version,
+            terms_accepted_at=now,
+            privacy_notice_version=payload.privacy_notice_version,
+            privacy_notice_acknowledged_at=now,
         )
         db.add(signup_row)
 
@@ -367,6 +381,15 @@ def resend(payload: OnboardingResendRequest, request: Request):
 @router.post("/verify", response_model=OnboardingVerifyResponse)
 def verify(payload: OnboardingVerifyRequest, request: Request):
     now = datetime.now(timezone.utc)
+    try:
+        validate_legal_acceptance(
+            terms_accepted=payload.terms_accepted,
+            terms_version=payload.terms_version,
+            privacy_notice_acknowledged=payload.privacy_notice_acknowledged,
+            privacy_notice_version=payload.privacy_notice_version,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     gateway_url = os.getenv("PUBLIC_GATEWAY_URL") or os.getenv("NEXT_PUBLIC_GATEWAY_URL") or "http://localhost:18080"
     ip_hash = _rate_limit_hash(_client_ip(request))
     _enforce_onboarding_rate_limit(
@@ -386,6 +409,12 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
         signup_row = db.query(OnboardingEmailOTP).filter(OnboardingEmailOTP.id == payload.signup_id).first()
         if not signup_row:
             raise HTTPException(status_code=404, detail="Signup request not found")
+        if not signup_row.terms_accepted_at:
+            signup_row.terms_version = payload.terms_version
+            signup_row.terms_accepted_at = now
+        if not signup_row.privacy_notice_acknowledged_at:
+            signup_row.privacy_notice_version = payload.privacy_notice_version
+            signup_row.privacy_notice_acknowledged_at = now
         if signup_row.status == "verified":
             raise HTTPException(status_code=409, detail="Signup request already verified")
         if signup_row.status != "pending":

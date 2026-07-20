@@ -13,7 +13,7 @@
 <body>
 
 <div class="topstrip">
-  <b>New</b> — AuthClaw is now SOC 2 Type II certified
+  <b>Controlled beta</b> — Technical controls support GDPR obligations and SOC 2 readiness
   <span class="dot">•</span> <a href="security.html">Read the security overview →</a>
 </div>
 
@@ -46,7 +46,7 @@
   <div class="wrap">
     <span class="eyebrow">The platform</span>
     <h1>One service in the path. <br>Enforcement, remediation, and proof.</h1>
-    <p class="sub">AuthClaw is a single, low-latency service that sits between your applications and every model you call. It redacts sensitive data before egress, remediates the gaps it finds under human approval, and records tamper-proof evidence of both.</p>
+    <p class="sub">AuthClaw is an in-line service for configured model traffic. It can redact matching sensitive-data patterns before egress, gate remediation behind human approval, and record tamper-evident evidence.</p>
     <div class="cta-row">
       <a class="btn btn-primary" href="/signup">Start free trial</a>
       <a class="btn btn-ghost" href="#architecture">See the architecture</a>
@@ -69,7 +69,7 @@
       <div class="fcard reveal"><div class="ico">⌘</div><h4>Policy-as-code</h4><p>YAML policies validated by Open Policy Agent. Block topics, patterns, and prompt-injection classes before egress.</p></div>
       <div class="fcard reveal"><div class="ico">◈</div><h4>Agentic remediation</h4><p>A LangGraph orchestrator scans your cloud, explains gaps via RAG over the regulations, and drafts the exact fix.</p></div>
       <div class="fcard reveal"><div class="ico">⛨</div><h4>Human-in-the-loop</h4><p>Consequential changes wait in an approval state, expire after 30 minutes, and require a fresh MFA challenge to run.</p></div>
-      <div class="fcard reveal"><div class="ico">⛭</div><h4>Tamper-proof audit</h4><p>An append-only, SHA-256 hash-chained log of every request, decision, and approval — verifiable end to end.</p></div>
+      <div class="fcard reveal"><div class="ico">⛭</div><h4>Tamper-evident audit</h4><p>Tenant-scoped audit records use hash-chain verification and signed export evidence.</p></div>
       <div class="fcard reveal"><div class="ico">◎</div><h4>Framework scoring</h4><p>Live SOC 2, GDPR, and HIPAA readiness scored from real signals, with control-by-control evidence links.</p></div>
       <div class="fcard reveal"><div class="ico">✦</div><h4>Trust center</h4><p>Publish a live, always-current trust page and export signed evidence bundles for auditors and buyers in one click.</p></div>
     </div>
@@ -158,7 +158,7 @@
         <tr><td>Sensitive-data detection</td><td>Microsoft Presidio + custom NER</td></tr>
         <tr><td>Policy engine</td><td>Open Policy Agent (OPA) + YAML policy-as-code</td></tr>
         <tr><td>Relational store</td><td>PostgreSQL · tenant config, RBAC, app state</td></tr>
-        <tr><td>Audit store</td><td>ClickHouse · immutable hash-chained traces</td></tr>
+        <tr><td>Audit store</td><td>ClickHouse · tamper-evident hash-chained traces</td></tr>
         <tr><td>Event backbone</td><td>Apache Kafka</td></tr>
         <tr><td>Secrets / KMS</td><td>AWS KMS or HashiCorp Vault · AES-256-GCM envelope</td></tr>
         <tr><td>Console</td><td>Next.js 15 admin experience</td></tr>
@@ -217,7 +217,7 @@
     <div class="ft-grid">
       <div>
         <div class="brand"><span class="mark"></span>AuthClaw<span class="ai">.ai</span></div>
-        <p class="desc">The runtime layer for AI compliance. Redact in real time, remediate with human approval, and prove it with a tamper-proof trail.</p>
+        <p class="desc">The runtime layer for AI compliance. Apply configured redaction, human approval, and tamper-evident audit controls.</p>
       </div>
       <div><h5>Product</h5><ul>
         <li><a href="product.html">In-line gateway</a></li>

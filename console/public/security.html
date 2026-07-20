@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Security &amp; Trust — AuthClaw</title>
-<meta name="description" content="How AuthClaw secures your data: zero-trust architecture, envelope encryption, strict multi-tenant isolation, and a tamper-proof audit trail. SOC 2, HIPAA, GDPR, ISO 42001." />
+<meta name="description" content="AuthClaw technical controls supporting security, tenant isolation, GDPR obligations, and SOC 2 readiness." />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -13,7 +13,7 @@
 <body>
 
 <div class="topstrip">
-  <b>New</b> — AuthClaw is now SOC 2 Type II certified
+  <b>Controlled beta</b> — Technical controls support GDPR obligations and SOC 2 readiness
   <span class="dot">•</span> <a href="security.html">Read the security overview →</a>
 </div>
 
@@ -59,11 +59,11 @@
   <div class="wrap">
     <div class="sec-head center reveal" style="margin:0 auto">
       <span class="eyebrow">Attestations</span>
-      <h2>Independently audited, continuously monitored.</h2>
+      <h2>Evidence-backed readiness, continuously monitored.</h2>
     </div>
     <div class="badges">
-      <div class="cbadge reveal"><div class="ring"><span>SOC 2</span></div><h5>SOC 2 Type II</h5><p>Audited controls</p></div>
-      <div class="cbadge reveal"><div class="ring"><span>HIPAA</span></div><h5>HIPAA</h5><p>BAA available</p></div>
+      <div class="cbadge reveal"><div class="ring"><span>SOC 2</span></div><h5>SOC 2 readiness</h5><p>Supporting controls</p></div>
+      <div class="cbadge reveal"><div class="ring"><span>HIPAA</span></div><h5>HIPAA Security Rule</h5><p>Readiness mapping; contract review required</p></div>
       <div class="cbadge reveal"><div class="ring"><span>GDPR</span></div><h5>GDPR</h5><p>EU data residency</p></div>
       <div class="cbadge reveal"><div class="ring"><span>ISO</span></div><h5>ISO 42001</h5><p>AI management</p></div>
     </div>
@@ -87,7 +87,7 @@
       <div class="fcard reveal"><div class="ico">⛭</div><h4>Tamper-evident audit</h4><p>A hash-chained, append-only log makes every action verifiable and any modification detectable.</p></div>
       <div class="fcard reveal"><div class="ico">◎</div><h4>Human-gated changes</h4><p>Consequential actions require a fresh MFA challenge bound to the specific action and approver — non-transferable, single-use.</p></div>
       <div class="fcard reveal"><div class="ico">↻</div><h4>Continuous red-teaming</h4><p>Adversarial probes for prompt injection, data disclosure, and harmful content run continuously against a vulnerability register.</p></div>
-      <div class="fcard reveal"><div class="ico">◇</div><h4>Resilient by design</h4><p>Multi-region active-active with a 99.99% uptime target and regular failover and chaos testing.</p></div>
+      <div class="fcard reveal"><div class="ico">◇</div><h4>Resilience controls</h4><p>Availability, failover, and recovery evidence are evaluated for the selected deployment.</p></div>
     </div>
   </div>
 </section>
@@ -108,7 +108,7 @@
         <tr><td>PII / PHI in prompts</td><td>Detected and masked, salt-hashed, or synthetically replaced before egress</td><td class="code">never stored raw</td></tr>
         <tr><td>Model prompts &amp; responses</td><td>Inspected in memory; only redacted metadata is retained for audit</td><td class="code">redacted only</td></tr>
         <tr><td>Provider API keys</td><td>Envelope-encrypted with per-tenant keys; decrypted only in the data plane</td><td class="code">AES-256-GCM</td></tr>
-        <tr><td>Audit records</td><td>Append-only, hash-chained; integrity verifiable on export</td><td class="code">immutable</td></tr>
+        <tr><td>Audit records</td><td>Append-only, hash-chained; integrity verifiable on export</td><td class="code">tamper-evident</td></tr>
         <tr><td>Cloud scan results</td><td>Gathered by ephemeral workers with read-only scoped tokens</td><td class="code">tenant-isolated</td></tr>
         <tr><td>User &amp; tenant config</td><td>Stored with row-level security and RBAC</td><td class="code">encrypted</td></tr>
       </tbody>
@@ -131,7 +131,7 @@
     <div class="reveal">
       <span class="eyebrow">Transparency</span>
       <h3 style="font-size:24px;font-weight:600;margin-top:12px">Subprocessors &amp; disclosure.</h3>
-      <p style="color:var(--slate);font-size:16px;margin-top:14px">We maintain a current subprocessor list and a coordinated vulnerability-disclosure program. Customers on any plan can request our latest SOC 2 report, penetration-test summary, and architecture overview under NDA.</p>
+      <p style="color:var(--slate);font-size:16px;margin-top:14px">Review the current subprocessor list and request environment-scoped readiness or architecture evidence. AuthClaw does not currently offer an independently issued SOC report.</p>
     </div>
   </div>
 </section>
@@ -141,7 +141,7 @@
   <div class="wrap">
     <span class="eyebrow" style="color:var(--gold)">Trust center</span>
     <h2>Bring us to your security review.</h2>
-    <p>Request the trust report — SOC 2, penetration-test summary, subprocessors, and architecture — and see how AuthClaw answers procurement before it asks.</p>
+    <p>Request the trust summary, subprocessor list, and environment-scoped architecture evidence for authorized procurement review.</p>
     <div class="cta-row">
       <a class="btn btn-gold" href="/signup">Request the trust report</a>
       <a class="btn btn-light" href="/signup">Talk to sales</a>
@@ -154,7 +154,7 @@
     <div class="ft-grid">
       <div>
         <div class="brand"><span class="mark"></span>AuthClaw<span class="ai">.ai</span></div>
-        <p class="desc">The runtime layer for AI compliance. Redact in real time, remediate with human approval, and prove it with a tamper-proof trail.</p>
+        <p class="desc">The runtime layer for AI compliance. Apply configured redaction, human approval, and tamper-evident audit controls.</p>
       </div>
       <div><h5>Product</h5><ul>
         <li><a href="product.html">In-line gateway</a></li>
