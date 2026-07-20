@@ -123,13 +123,16 @@ export default function TrustCenterPage() {
 
   useEffect(() => {
     if (!token) return;
-    const savedAccess = sessionStorage.getItem(`trust-center:${token}`) || "";
-    if (savedAccess) {
-      setAccessToken(savedAccess);
-      void loadPackage(savedAccess);
-    } else {
-      setLoading(false);
-    }
+    const initialize = window.setTimeout(() => {
+      const savedAccess = sessionStorage.getItem(`trust-center:${token}`) || "";
+      if (savedAccess) {
+        setAccessToken(savedAccess);
+        void loadPackage(savedAccess);
+      } else {
+        setLoading(false);
+      }
+    }, 0);
+    return () => window.clearTimeout(initialize);
   }, [loadPackage, token]);
 
   const requestAccess = async () => {

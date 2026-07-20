@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.14.3-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -6,8 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt
 RUN addgroup --system authclaw && adduser --system --ingroup authclaw authclaw
 RUN mkdir -p /app/.authclaw && chown -R authclaw:authclaw /app/.authclaw
 

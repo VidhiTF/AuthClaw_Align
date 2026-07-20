@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS backend
+FROM python:3.14.3-slim AS backend
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -14,9 +14,8 @@ RUN apt-get update \
         tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && python -m spacy download en_core_web_sm
+COPY requirements.txt requirements-model.txt ./
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt -r requirements-model.txt
 
 COPY . .
 

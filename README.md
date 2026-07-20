@@ -45,6 +45,22 @@ missing.
 CI validates this Compose model and starts the same full stack before running
 `scripts/smoke_test.py`. See `startup_guide.md` for verification and shutdown commands.
 
+## Python dependency locks
+
+Python 3.14.3 dependencies are declared in each `requirements.in` file and compiled into
+hash-locked `requirements.txt` files. Install and run the pinned compiler inside the
+Linux production base image:
+
+```bash
+python -m pip install --require-hashes -r requirements-tooling.txt
+pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking requirements.in
+```
+
+Run the second command from `backend`, `audit_consumer`, or `services/agent`; compile
+each `requirements-test.in` the same way. Commit both the edited input and generated
+lock. CI rejects stale locks, and production installs reject packages whose hashes do
+not match.
+
 ## Delivery and controlled beta
 
 CI exposes `ACL-14 Required Checks`, one aggregate status that succeeds only after the

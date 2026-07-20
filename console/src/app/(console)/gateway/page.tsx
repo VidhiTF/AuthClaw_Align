@@ -46,6 +46,7 @@ export default function GatewayPage() {
   const [trafficSource, setTrafficSource] = useState("");
   const [loading, setLoading] = useState(true);
   const [trafficLoading, setTrafficLoading] = useState(true);
+  const [trafficIsFresh, setTrafficIsFresh] = useState(false);
   const [activeTab, setActiveTab] = useState<"routes" | "inspector">("routes");
   const [error, setError] = useState<string | null>(null);
   const [trafficError, setTrafficError] = useState<string | null>(null);
@@ -84,7 +85,12 @@ export default function GatewayPage() {
     try {
       const data = await fetchJson<{ records?: AuditLog[]; source?: string }>("/api/audit?limit=20", { fallback: "Failed to fetch audit traffic", preferApiError: false });
       if (!data) return;
-      setTraffic(data.records || []);
+      const records = data.records || [];
+      setTraffic(records);
+      setTrafficIsFresh(
+        Boolean(records[0]?.timestamp) &&
+          Date.now() - new Date(records[0].timestamp).getTime() < 60_000
+      );
       setTrafficSource(data.source || "");
       setTrafficError(null);
     } catch (err: unknown) {
@@ -109,10 +115,6 @@ export default function GatewayPage() {
   }, []);
 
   const latestTrafficAt = traffic[0]?.timestamp ? new Date(traffic[0].timestamp) : null;
-  const trafficIsFresh = latestTrafficAt
-    ? Date.now() - latestTrafficAt.getTime() < 60_000
-    : false;
-
   const openAddModal = () => {
     setName("");
     setProvider("openai");

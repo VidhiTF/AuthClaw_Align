@@ -143,11 +143,13 @@ def use_deterministic_gateway_provider(monkeypatch, request):
 def setup_test_db():
     yield
     # Dispose of engines to prevent connection pool block during drop database
-    from database import engine
+    from database import engine, migration_engine
     engine.dispose()
+    migration_engine.dispose()
     
     # Drop database
     postgres_url = "postgresql://postgres:vidhi@localhost:5432/postgres"
     postgres_engine = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
     with postgres_engine.connect() as conn:
-        conn.execute(text("DROP DATABASE IF EXISTS authclaw_test"))
+        conn.execute(text("DROP DATABASE IF EXISTS authclaw_test WITH (FORCE)"))
+    postgres_engine.dispose()
