@@ -248,15 +248,18 @@ jobs:
           tests/test_audit_export.py
           tests/test_audit_store.py
           tests/test_auth_baseline.py
+          tests/test_authorization_matrix.py
           tests/test_compliance_scoring.py
           tests/test_ephemeral_workers.py
           tests/test_endpoints.py::test_authentication_gates
           tests/test_event_backbone.py
+          tests/test_onboarding_invitations.py
           tests/test_phase10.py::test_phase10_production_approval_requires_mfa_enrollment
           tests/test_policy_engine.py
           tests/test_rag_service.py
           tests/test_secret_crypto.py
           tests/test_trust_center.py
+          tests/test_user_invitation_lifecycle.py
 
   audit-consumer-tests:
     name: Audit Consumer Tests

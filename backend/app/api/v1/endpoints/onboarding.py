@@ -17,10 +17,8 @@ from app.core.auth import get_tenant_db, hash_key, require_scopes
 from app.core.passwords import hash_password, validate_password
 from app.db.models import (
     APIKey,
-    GatewayConfig,
     OnboardingEmailOTP,
     OnboardingStatus,
-    Policy,
     Tenant,
     User,
 )
@@ -34,14 +32,15 @@ from app.schemas.models import (
     OnboardingVerifyResponse,
 )
 from app.services.email_service import EmailDeliveryError, demo_otp_visible, send_otp_email
+from app.services import event_backbone
 from app.services.legal_acceptance import validate_legal_acceptance
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+_invitation_kafka_producer = None
 
 DEFAULT_PROVIDER = "gemini"
 DEFAULT_MODEL = "gemini-2.5-flash-lite"
-DEFAULT_ENDPOINT = "https://generativelanguage.googleapis.com"
 OTP_TTL_MINUTES = 15
 OTP_RESEND_COOLDOWN_SECONDS = 60
 OTP_MAX_RESENDS = 3
@@ -49,40 +48,58 @@ OTP_MAX_ATTEMPTS = 5
 ONBOARDING_SIGNUP_EMAIL_PER_HOUR = int(os.getenv("ONBOARDING_SIGNUP_EMAIL_PER_HOUR", "3"))
 ONBOARDING_SIGNUP_IP_PER_DAY = int(os.getenv("ONBOARDING_SIGNUP_IP_PER_DAY", "10"))
 ONBOARDING_VERIFY_IP_PER_HOUR = int(os.getenv("ONBOARDING_VERIFY_IP_PER_HOUR", "30"))
+INVALID_INVITATION_DETAIL = "Invitation is invalid or unavailable"
 
 _redis_client: redis.Redis | None = None
 
-STARTER_POLICY = r'''regex_rules:
-  - name: customer_email
-    pattern: "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
-    reason: "Email addresses are redacted before model egress."
-    severity: medium
-    action: redact
 
-  - name: patient_health_data
-    pattern: "(?i)\\b(patient|diagnosis|prescription|medical record)\\b"
-    reason: "Health context requires human approval before model egress."
-    severity: high
-    action: require_approval
-    hitl_timeout_seconds: 1800
+def _emit_invitation_audit(
+    invitation: OnboardingEmailOTP | None,
+    action: str,
+    reason: str,
+    request_id: str,
+    response_status: int,
+) -> None:
+    if not invitation or invitation.purpose != "invite" or not invitation.tenant_id:
+        event_backbone.increment_metric(f"invitation_{action}_total")
+        logger.info(
+            "[INVITATION_AUDIT] action=%s reason=%s request_id=%s result=failure response_status=%s",
+            action,
+            reason,
+            request_id,
+            response_status,
+        )
+        return
+    global _invitation_kafka_producer
+    event = event_backbone.audit_event(
+        event_type="invitation",
+        tenant_id=str(invitation.tenant_id),
+        subject_id=str(invitation.id),
+        identity_action=f"{action}:{request_id or uuid.uuid4()}",
+        action=f"invitation:{action}",
+        reason=reason,
+        provider="onboarding",
+        request_id=request_id,
+    )
+    event["actor_id"] = ""
+    event["result"] = "success" if response_status < 400 else "failure"
+    event["response_status"] = response_status
+    event_backbone.increment_metric(f"invitation_{action}_total")
+    if _invitation_kafka_producer is None:
+        try:
+            _invitation_kafka_producer = event_backbone.make_kafka_producer()
+        except Exception:
+            logger.warning("Invitation audit Kafka producer unavailable")
+    if exc := event_backbone.publish_audit_event(
+        _invitation_kafka_producer,
+        str(invitation.tenant_id),
+        event,
+    ):
+        logger.warning("Failed to publish invitation audit event: action=%s", action)
 
-  - name: ssn_block
-    pattern: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
-    reason: "SSNs are blocked in the Lite starter policy."
-    severity: critical
-    action: block
 
-model_rules:
-  whitelist:
-    - gpt-4o-mini
-    - gemini-2.5-flash-lite
-  blacklist: []
-
-topic_rules: []
-
-rate_limits:
-  requests_per_minute: 60
-'''
+def _invalid_invitation() -> HTTPException:
+    return HTTPException(status_code=400, detail=INVALID_INVITATION_DETAIL)
 
 
 def _normalize_database_url(url: str) -> str:
@@ -238,80 +255,10 @@ Invoke-WebRequest `
 
 @router.post("/signup", response_model=OnboardingSignupResponse, status_code=status.HTTP_202_ACCEPTED)
 def signup(payload: OnboardingSignupRequest, request: Request):
-    email = payload.email.strip().lower()
-    tenant_name = payload.tenant_name.strip()
-    now = datetime.now(timezone.utc)
-    try:
-        validate_legal_acceptance(
-            terms_accepted=payload.terms_accepted,
-            terms_version=payload.terms_version,
-            privacy_notice_acknowledged=payload.privacy_notice_acknowledged,
-            privacy_notice_version=payload.privacy_notice_version,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    email_hash = _rate_limit_hash(email)
-    ip_hash = _rate_limit_hash(_client_ip(request))
-    _enforce_onboarding_rate_limit(
-        f"onboarding:signup:email:{email_hash}:{now.strftime('%Y%m%d%H')}",
-        ONBOARDING_SIGNUP_EMAIL_PER_HOUR,
-        3700,
-        "Too many signup codes requested for this email. Try again later.",
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="An approved tenant invitation is required",
     )
-    _enforce_onboarding_rate_limit(
-        f"onboarding:signup:ip:{ip_hash}:{now.strftime('%Y%m%d')}",
-        ONBOARDING_SIGNUP_IP_PER_DAY,
-        90000,
-        "Too many signup attempts from this network today.",
-    )
-    otp = _generate_otp()
-    expires_at = now + timedelta(minutes=OTP_TTL_MINUTES)
-
-    db = OwnerSessionLocal()
-    try:
-        existing_user = db.query(User).filter(User.email == email, User.is_active == True).first()
-        if existing_user:
-            raise HTTPException(status_code=409, detail="An active user already exists for this email")
-
-        existing_tenant = db.query(Tenant).filter(Tenant.name == tenant_name).first()
-        if existing_tenant:
-            raise HTTPException(status_code=409, detail="Tenant name is already taken")
-
-        signup_row = OnboardingEmailOTP(
-            email=email,
-            tenant_name=tenant_name,
-            otp_hash=_otp_hash(email, otp),
-            expires_at=expires_at,
-            sent_at=now,
-            terms_version=payload.terms_version,
-            terms_accepted_at=now,
-            privacy_notice_version=payload.privacy_notice_version,
-            privacy_notice_acknowledged_at=now,
-        )
-        db.add(signup_row)
-
-        delivery, dev_otp = _deliver_otp(email, otp, tenant_name)
-        signup_row.last_delivery = delivery
-        signup_row.delivery_error = None
-        db.commit()
-        db.refresh(signup_row)
-        return OnboardingSignupResponse(
-            signup_id=signup_row.id,
-            email=email,
-            tenant_name=tenant_name,
-            expires_at=expires_at,
-            delivery=delivery,
-            next_resend_at=_next_resend_at(signup_row.sent_at),
-            dev_otp=dev_otp,
-        )
-    except EmailDeliveryError as exc:
-        db.rollback()
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except HTTPException:
-        db.rollback()
-        raise
-    finally:
-        db.close()
 
 
 @router.post("/resend", response_model=OnboardingResendResponse)
@@ -319,14 +266,34 @@ def resend(payload: OnboardingResendRequest, request: Request):
     now = datetime.now(timezone.utc)
     otp = _generate_otp()
     expires_at = now + timedelta(minutes=OTP_TTL_MINUTES)
+    request_id = request.headers.get("x-request-id", "")
 
     db = OwnerSessionLocal()
     try:
-        signup_row = db.query(OnboardingEmailOTP).filter(OnboardingEmailOTP.id == payload.signup_id).first()
+        signup_row = (
+            db.query(OnboardingEmailOTP)
+            .filter(OnboardingEmailOTP.id == payload.signup_id)
+            .with_for_update()
+            .first()
+        )
         if not signup_row:
-            raise HTTPException(status_code=404, detail="Signup request not found")
+            _emit_invitation_audit(
+                None,
+                "InviteRedemptionFailed",
+                "invitation_not_found",
+                request_id,
+                400,
+            )
+            raise _invalid_invitation()
         if signup_row.status != "pending":
-            raise HTTPException(status_code=400, detail="Signup request is not pending")
+            _emit_invitation_audit(
+                signup_row,
+                "InviteRedemptionFailed",
+                "invitation_not_pending",
+                request_id,
+                400,
+            )
+            raise _invalid_invitation()
 
         email_hash = _rate_limit_hash(signup_row.email)
         ip_hash = _rate_limit_hash(_client_ip(request))
@@ -360,6 +327,13 @@ def resend(payload: OnboardingResendRequest, request: Request):
         signup_row.delivery_error = None
         db.commit()
         db.refresh(signup_row)
+        _emit_invitation_audit(
+            signup_row,
+            "InviteDeliverySucceeded",
+            "delivery_succeeded",
+            request_id,
+            200,
+        )
         return OnboardingResendResponse(
             signup_id=signup_row.id,
             email=signup_row.email,
@@ -370,7 +344,15 @@ def resend(payload: OnboardingResendRequest, request: Request):
         )
     except EmailDeliveryError as exc:
         db.rollback()
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if "signup_row" in locals() and signup_row:
+            _emit_invitation_audit(
+                signup_row,
+                "InviteDeliveryFailed",
+                "delivery_failed",
+                request_id,
+                503,
+            )
+        raise HTTPException(status_code=503, detail="Invitation delivery is temporarily unavailable") from exc
     except HTTPException:
         db.rollback()
         raise
@@ -381,6 +363,7 @@ def resend(payload: OnboardingResendRequest, request: Request):
 @router.post("/verify", response_model=OnboardingVerifyResponse)
 def verify(payload: OnboardingVerifyRequest, request: Request):
     now = datetime.now(timezone.utc)
+    request_id = request.headers.get("x-request-id", "")
     try:
         validate_legal_acceptance(
             terms_accepted=payload.terms_accepted,
@@ -406,9 +389,21 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        signup_row = db.query(OnboardingEmailOTP).filter(OnboardingEmailOTP.id == payload.signup_id).first()
+        signup_row = (
+            db.query(OnboardingEmailOTP)
+            .filter(OnboardingEmailOTP.id == payload.signup_id)
+            .with_for_update()
+            .first()
+        )
         if not signup_row:
-            raise HTTPException(status_code=404, detail="Signup request not found")
+            _emit_invitation_audit(
+                None,
+                "InviteRedemptionFailed",
+                "invitation_not_found",
+                request_id,
+                400,
+            )
+            raise _invalid_invitation()
         if not signup_row.terms_accepted_at:
             signup_row.terms_version = payload.terms_version
             signup_row.terms_accepted_at = now
@@ -416,36 +411,93 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
             signup_row.privacy_notice_version = payload.privacy_notice_version
             signup_row.privacy_notice_acknowledged_at = now
         if signup_row.status == "verified":
-            raise HTTPException(status_code=409, detail="Signup request already verified")
+            _emit_invitation_audit(
+                signup_row,
+                "InviteRedemptionFailed",
+                "invitation_already_redeemed",
+                request_id,
+                400,
+            )
+            raise _invalid_invitation()
         if signup_row.status != "pending":
-            raise HTTPException(status_code=400, detail="Signup request is not pending")
+            _emit_invitation_audit(
+                signup_row,
+                "InviteRedemptionFailed",
+                "invitation_not_pending",
+                request_id,
+                400,
+            )
+            raise _invalid_invitation()
         expires_at = signup_row.expires_at
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at < now:
             signup_row.status = "expired"
             db.commit()
-            raise HTTPException(status_code=400, detail="Verification code expired")
+            _emit_invitation_audit(signup_row, "InviteExpired", "invitation_expired", request_id, 400)
+            _emit_invitation_audit(
+                signup_row,
+                "InviteRedemptionFailed",
+                "invitation_expired",
+                request_id,
+                400,
+            )
+            raise _invalid_invitation()
         if signup_row.attempts >= OTP_MAX_ATTEMPTS:
-            raise HTTPException(status_code=429, detail="Too many verification attempts")
+            _emit_invitation_audit(
+                signup_row,
+                "InviteRedemptionFailed",
+                "attempt_limit_exceeded",
+                request_id,
+                429,
+            )
+            raise HTTPException(status_code=429, detail=INVALID_INVITATION_DETAIL)
 
         signup_row.attempts += 1
         if signup_row.otp_hash != _otp_hash(signup_row.email, payload.otp):
             db.commit()
-            raise HTTPException(status_code=400, detail="Invalid verification code")
+            _emit_invitation_audit(
+                signup_row,
+                "InviteRedemptionFailed",
+                "invalid_verification_code",
+                request_id,
+                400,
+            )
+            raise _invalid_invitation()
 
         if getattr(signup_row, "purpose", "signup") == "invite":
             if not signup_row.tenant_id:
-                raise HTTPException(status_code=400, detail="Invite is missing tenant context")
+                _emit_invitation_audit(
+                    signup_row,
+                    "InviteRedemptionFailed",
+                    "invitation_tenant_unavailable",
+                    request_id,
+                    400,
+                )
+                raise _invalid_invitation()
             tenant = db.query(Tenant).filter(Tenant.id == signup_row.tenant_id).first()
             if not tenant or tenant.status != "active":
-                raise HTTPException(status_code=400, detail="Invite tenant is not active")
+                _emit_invitation_audit(
+                    signup_row,
+                    "InviteRedemptionFailed",
+                    "invitation_tenant_unavailable",
+                    request_id,
+                    400,
+                )
+                raise _invalid_invitation()
             if db.query(User).filter(
                 User.tenant_id == tenant.id,
                 User.email == signup_row.email,
                 User.is_active == True,
             ).first():
-                raise HTTPException(status_code=409, detail="An active user already exists for this tenant")
+                _emit_invitation_audit(
+                    signup_row,
+                    "InviteRedemptionFailed",
+                    "invitation_cannot_be_redeemed",
+                    request_id,
+                    400,
+                )
+                raise _invalid_invitation()
 
             db.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(tenant.id)})
             invited_role = signup_row.invited_role or "viewer"
@@ -487,6 +539,7 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
             signup_row.verified_at = now
             signup_row.api_key_id = api_key.id
             db.commit()
+            _emit_invitation_audit(signup_row, "InviteRedeemed", "invitation_redeemed", request_id, 200)
 
             status_row = db.query(OnboardingStatus).filter(OnboardingStatus.tenant_id == tenant.id).first()
             if not status_row:
@@ -520,103 +573,20 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
                 curl_snippet=curl,
             )
 
-        if db.query(User).filter(User.email == signup_row.email, User.is_active == True).first():
-            raise HTTPException(status_code=409, detail="An active user already exists for this email")
-        if db.query(Tenant).filter(Tenant.name == signup_row.tenant_name).first():
-            raise HTTPException(status_code=409, detail="Tenant name is already taken")
-
-        tenant = Tenant(name=signup_row.tenant_name, tier="starter", status="active")
-        db.add(tenant)
-        db.flush()
-        db.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(tenant.id)})
-
-        user = User(
-            tenant_id=tenant.id,
-            email=signup_row.email,
-            password_hash=hash_password(payload.password),
-            role="owner",
-            mfa_enabled=False,
-            is_active=True,
-        )
-        db.add(user)
-        db.flush()
-
-        raw_api_key = _generate_gateway_key()
-        api_key = APIKey(
-            tenant_id=tenant.id,
-            key_hash=_api_key_hash(raw_api_key),
-            name="Default Gateway Key",
-            description="Issued during AuthClaw Lite onboarding",
-            scopes=["admin", "read", "write"],
-            is_active=True,
-            expires_at=now + timedelta(days=90),
-            created_by=user.id,
-        )
-        db.add(api_key)
-
-        gateway = GatewayConfig(
-            tenant_id=tenant.id,
-            name="Default Gemini Route",
-            provider=DEFAULT_PROVIDER,
-            endpoint=DEFAULT_ENDPOINT,
-            model_whitelist=[DEFAULT_MODEL],
-            redaction_strategy="mask",
-            redaction_token_retention_days=90,
-            is_active=True,
-        )
-        db.add(gateway)
-
-        policy = Policy(
-            tenant_id=tenant.id,
-            name="AuthClaw Lite Starter Policy",
-            description="Starter policy with redact, HITL, and block actions.",
-            policy_yaml=STARTER_POLICY,
-            version=1,
-            is_active=True,
-            created_by=user.id,
-        )
-        db.add(policy)
-        db.flush()
-
-        status_row = OnboardingStatus(
-            tenant_id=tenant.id,
-            user_id=user.id,
-            signup_id=signup_row.id,
-            email_verified=True,
-            tenant_created=True,
-            api_key_issued=True,
-            provider_key_saved=False,
-            route_created=True,
-            policy_created=True,
-            current_step="connect_provider",
-        )
-        db.add(status_row)
-
-        signup_row.status = "verified"
-        signup_row.verified_at = now
-        signup_row.tenant_id = tenant.id
-        signup_row.api_key_id = api_key.id
-        db.commit()
-        db.refresh(status_row)
-
-        powershell, curl = _snippets(raw_api_key, gateway_url)
-        return OnboardingVerifyResponse(
-            tenant_id=tenant.id,
-            tenant_name=tenant.name,
-            user_id=user.id,
-            email=user.email,
-            role=user.role,
-            api_key=raw_api_key,
-            gateway_url=gateway_url,
-            provider=DEFAULT_PROVIDER,
-            model=DEFAULT_MODEL,
-            checklist=_checklist(status_row),
-            powershell_snippet=powershell,
-            curl_snippet=curl,
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="An approved tenant invitation is required",
         )
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail="Tenant or user already exists") from exc
+        _emit_invitation_audit(
+            signup_row if "signup_row" in locals() else None,
+            "InviteRedemptionFailed",
+            "invitation_transaction_conflict",
+            request_id,
+            400,
+        )
+        raise _invalid_invitation() from exc
     except HTTPException:
         db.rollback()
         raise

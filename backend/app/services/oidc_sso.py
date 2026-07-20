@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.endpoints.onboarding import _scopes_for_role
 from app.core.auth import hash_key
 from app.core.crypto import decrypt_secret, encrypt_secret
-from app.db.models import APIKey, Tenant, TenantOIDCConfig, User
+from app.db.models import APIKey, OnboardingEmailOTP, Tenant, TenantOIDCConfig, User
 
 VALID_ROLES = ("owner", "admin", "developer", "operator", "viewer")
 ROLE_RANK = {role: index for index, role in enumerate(VALID_ROLES)}
@@ -382,16 +382,18 @@ def map_user(db: Session, tenant: Tenant, config: dict[str, Any] | TenantOIDCCon
     email = str(claims.get(email_claim) or "").strip().lower()
     if not email or "@" not in email:
         raise ValueError(f"OIDC claim {email_claim} did not contain an email address")
-    role = role_from_claims(config, claims)
     user = db.query(User).filter(User.tenant_id == tenant.id, User.email == email).first()
-    auto_provision = bool(config.get("auto_provision") if isinstance(config, dict) else config.auto_provision)
     if not user:
-        if not auto_provision:
-            raise PermissionError("SSO user is not provisioned in this tenant")
-        user = User(id=uuid.uuid4(), tenant_id=tenant.id, email=email, role=role, is_active=True)
-        db.add(user)
+        raise PermissionError("SSO user is not provisioned in this tenant")
     if not user.is_active:
         raise PermissionError("SSO user is disabled")
-    if user.role != "owner" or role == "owner":
+    invited = db.query(OnboardingEmailOTP.id).filter(
+        OnboardingEmailOTP.tenant_id == tenant.id,
+        OnboardingEmailOTP.email == email,
+        OnboardingEmailOTP.purpose == "invite",
+        OnboardingEmailOTP.status == "verified",
+    ).first()
+    role = _clean_role(user.role) if invited else role_from_claims(config, claims)
+    if not invited and (user.role != "owner" or role == "owner"):
         user.role = role
     return user, _clean_role(user.role)

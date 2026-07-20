@@ -166,8 +166,18 @@ test.describe("F25 public marketing routes", () => {
     }
   });
 
-  test("signup requires versioned legal-notice acceptance", async ({ page }) => {
+  test("public signup requires an approved invitation", async ({ page }) => {
     await page.goto("/signup");
+    await expect(page.getByRole("heading", { name: "Invitation required" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Request early access" })).toHaveAttribute(
+      "href",
+      "/early-access"
+    );
+    await expect(page.getByRole("button", { name: "Send Verification Code" })).toHaveCount(0);
+  });
+
+  test("invitation redemption requires versioned legal-notice acceptance", async ({ page }) => {
+    await page.goto("/signup?invite=00000000-0000-4000-8000-000000000001");
     const acceptance = page.getByRole("checkbox");
     await expect(acceptance).toBeVisible();
     await expect(acceptance).toHaveAttribute("required", "");
@@ -179,5 +189,42 @@ test.describe("F25 public marketing routes", () => {
       "href",
       "/privacy"
     );
+  });
+
+  for (const lifecycleState of ["expired", "revoked", "invalid"]) {
+    test(`${lifecycleState} invitation uses generic recovery guidance`, async ({ page }) => {
+      await page.route("**/api/onboarding/verify", (route) =>
+        route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: `Invitation is ${lifecycleState}` }),
+        })
+      );
+      await page.goto("/signup?invite=00000000-0000-4000-8000-000000000001");
+      await page.locator('input[name="authclaw_invite_password"]').fill("StrongPassword!234");
+      await page.locator('input[name="authclaw_invite_confirm_password"]').fill("StrongPassword!234");
+      await page.getByRole("checkbox").check();
+      await page.locator('input[name="authclaw_signup_otp"]').fill("123456");
+      await page.getByRole("button", { name: "Verify and Join Tenant" }).click();
+
+      await expect(page.getByText("Invitation is invalid or unavailable.", { exact: false })).toBeVisible();
+      await expect(page.getByText("Please contact your tenant administrator or support if you believe this is an error.", { exact: false })).toBeVisible();
+      if (lifecycleState !== "invalid") {
+        await expect(page.locator("body")).not.toContainText(lifecycleState);
+      }
+    });
+  }
+
+  test("malformed invitation uses the same generic recovery guidance", async ({ page }) => {
+    await page.goto("/signup?invite=malformed");
+    await page.locator('input[name="authclaw_invite_password"]').fill("StrongPassword!234");
+    await page.locator('input[name="authclaw_invite_confirm_password"]').fill("StrongPassword!234");
+    await page.getByRole("checkbox").check();
+    await page.locator('input[name="authclaw_signup_otp"]').fill("123456");
+    await page.getByRole("button", { name: "Verify and Join Tenant" }).click();
+
+    await expect(page.getByText("Invitation is invalid or unavailable.", { exact: false })).toBeVisible();
+    await expect(page.getByText("Please contact your tenant administrator or support if you believe this is an error.", { exact: false })).toBeVisible();
+    await expect(page.locator("body")).not.toContainText("incomplete");
   });
 });

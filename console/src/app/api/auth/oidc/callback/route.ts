@@ -5,6 +5,7 @@ import { sessionStore } from "@/lib/session-store";
 import { consumeOidcState, openOidcState, type OidcState } from "@/lib/oidc-state";
 
 const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
+const GENERIC_AUTH_FAILURE = "Authentication failed";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -26,7 +27,7 @@ export async function GET(request: Request) {
   };
 
   if (url.searchParams.get("error")) {
-    return fail(url.searchParams.get("error_description") || url.searchParams.get("error") || "SSO failed");
+    return fail(GENERIC_AUTH_FAILURE);
   }
   if (!stateCookie) {
     auditStateFailure();
@@ -66,7 +67,7 @@ export async function GET(request: Request) {
   });
   const data = await backendResponse.json().catch(() => ({}));
   if (!backendResponse.ok) {
-    return fail(data.detail || data.message || "SSO callback failed");
+    return fail(GENERIC_AUTH_FAILURE);
   }
 
   const session = sessionStore.createSession({

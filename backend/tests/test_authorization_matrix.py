@@ -12,6 +12,7 @@ from starlette.responses import Response
 
 from app.core import auth
 from app.api.v1.endpoints import apikeys as apikey_endpoints
+from app.api.v1.endpoints import onboarding as onboarding_endpoints
 from app.api.v1.endpoints import tenants as tenant_endpoints
 from app.api.v1.endpoints import users as user_endpoints
 from app.api.v1.endpoints.apikeys import router as apikeys_router
@@ -27,6 +28,7 @@ from app.schemas.models import (
     TenantStatusUpdate,
     UserCreate,
     UserInviteRequest,
+    OnboardingSignupRequest,
 )
 
 
@@ -98,6 +100,35 @@ def test_only_owner_can_create_tenant():
 @pytest.mark.parametrize("role", ["developer", "operator"])
 def test_read_only_roles_can_be_invited(role):
     assert UserInviteRequest(email=f"{role}@example.com", role=role).role == role
+
+
+def test_public_signup_requires_approved_invitation():
+    payload = OnboardingSignupRequest(
+        email="applicant@example.com",
+        tenant_name="Applicant",
+        terms_accepted=True,
+        terms_version="2026-07-20",
+        privacy_notice_acknowledged=True,
+        privacy_notice_version="2026-07-20",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        onboarding_endpoints.signup(payload, MagicMock())
+
+    assert exc.value.status_code == 403
+
+
+def test_direct_user_creation_requires_approved_invitation():
+    payload = UserCreate(
+        email="applicant@example.com",
+        password="CorrectHorse!234",
+        role="viewer",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        user_endpoints.create_user(MagicMock(), payload, MagicMock())
+
+    assert exc.value.status_code == 403
 
 
 @pytest.mark.parametrize("role", ["owner", "admin"])
