@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 AUDIT_EVENTS_TOPIC = "audit.events"
@@ -90,105 +90,91 @@ def publish_audit_event(producer: Any, tenant_id: str, event: dict[str, Any]) ->
         return exc
     if not producer:
         return None
-    try:
-        future = producer.send(AUDIT_EVENTS_TOPIC, key=tenant_key(tenant_id), value=event)
-        future.get(timeout=5)
-    except Exception as exc:
-        increment_metric("backend_audit_publish_failures_total")
-        return exc
-    return None
+    return publish_pending_audit_events(producer, tenant_id)
 
 
-def persist_audit_event(event: dict[str, Any]) -> Exception | None:
-    """Persist the authoritative hash-chained row before publishing analytics."""
-    from sqlalchemy import text
-
-    from app.db.models import AuditLogMetadata
+def publish_pending_audit_events(
+    producer: Any,
+    tenant_id: str,
+    *,
+    limit: int = 100,
+) -> Exception | None:
+    """Publish committed outbox rows in tenant sequence order."""
+    from app.db.models import AuditOutbox
     from app.db.session import SessionLocal
-    from app.services.audit_store import GENESIS_HASH, compute_integrity_hash
 
     db = SessionLocal()
     try:
-        tenant_id = str(event["tenant_id"])
-        record_id = uuid.UUID(str(event["id"]))
         db.info["tenant_id"] = tenant_id
-        db.execute(
-            text("SELECT pg_advisory_xact_lock(hashtextextended(:tenant_id, 0))"),
-            {"tenant_id": tenant_id},
-        )
-        existing = (
-            db.query(AuditLogMetadata)
-            .filter(AuditLogMetadata.record_id == record_id)
-            .first()
-        )
-        if existing:
-            event["prior_hash"] = existing.prior_hash or GENESIS_HASH
-            event["integrity_hash"] = existing.integrity_hash or ""
-            return None
-
-        last = (
-            db.query(AuditLogMetadata)
-            .filter(AuditLogMetadata.tenant_id == uuid.UUID(tenant_id))
-            .order_by(AuditLogMetadata.created_at.desc(), AuditLogMetadata.record_id.desc())
-            .first()
-        )
-        prior_hash = last.integrity_hash if last and last.integrity_hash else GENESIS_HASH
-        timestamp = datetime.fromisoformat(str(event["timestamp"]).replace("Z", "+00:00"))
-        if last and last.created_at and timestamp <= last.created_at:
-            timestamp = last.created_at + timedelta(milliseconds=1)
-            event["timestamp"] = timestamp.isoformat()
-        execution_trace = json.dumps(event.get("execution_trace") or [])
-        actor_type = str(event.get("actor_type") or "backend")
-        record = {
-            "record_id": str(record_id),
-            "tenant_id": tenant_id,
-            "timestamp": timestamp,
-            "actor_id": str(event.get("actor_id") or ""),
-            "actor_type": actor_type,
-            "action": str(event.get("action") or ""),
-            "policy_id": str(event.get("policy_id") or ""),
-            "provider": str(event.get("provider") or ""),
-            "model": str(event.get("model") or ""),
-            "reason": str(event.get("reason") or ""),
-            "prompt_count": int(event.get("prompt_count") or 0),
-            "request_size": int(event.get("request_size") or 0),
-            "response_status": int(event.get("response_status") or 0),
-            "duration_ms": int(event.get("duration_ms") or 0),
-            "frameworks_affected": event.get("frameworks_affected") or [],
-            "execution_trace": execution_trace,
-            "request_id": str(event.get("request_id") or ""),
-        }
-        integrity_hash = compute_integrity_hash(record, prior_hash)
-        db.add(
-            AuditLogMetadata(
-                tenant_id=uuid.UUID(tenant_id),
-                record_id=record_id,
-                actor_id=uuid.UUID(record["actor_id"]) if record["actor_id"] else None,
-                actor_type=actor_type,
-                action=record["action"],
-                request_id=record["request_id"],
-                policy_id=uuid.UUID(record["policy_id"]) if record["policy_id"] else None,
-                provider=record["provider"],
-                model=record["model"],
-                reason=record["reason"],
-                prompt_count=record["prompt_count"],
-                request_size=record["request_size"],
-                response_status=record["response_status"],
-                duration_ms=record["duration_ms"],
-                frameworks_affected=record["frameworks_affected"],
-                execution_trace=execution_trace,
-                prior_hash=prior_hash,
-                integrity_hash=integrity_hash,
-                created_at=timestamp,
+        pending = (
+            db.query(AuditOutbox)
+            .filter(
+                AuditOutbox.tenant_id == uuid.UUID(tenant_id),
+                AuditOutbox.published_at.is_(None),
             )
+            .order_by(AuditOutbox.tenant_sequence.asc())
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+            .all()
         )
+        _metrics["backend_audit_outbox_backlog"] = len(pending)
+        _metrics["backend_audit_outbox_oldest_age_seconds"] = (
+            max(
+                0,
+                int(
+                    (
+                        datetime.now(tz=timezone.utc)
+                        - pending[0].created_at.replace(tzinfo=timezone.utc)
+                        if pending[0].created_at.tzinfo is None
+                        else datetime.now(tz=timezone.utc) - pending[0].created_at
+                    ).total_seconds()
+                ),
+            )
+            if pending
+            else 0
+        )
+        for row in pending:
+            try:
+                future = producer.send(
+                    AUDIT_EVENTS_TOPIC,
+                    key=tenant_key(tenant_id),
+                    value=row.event_payload,
+                )
+                future.get(timeout=5)
+                row.published_at = datetime.now(tz=timezone.utc)
+                row.publish_attempts += 1
+                row.last_error = None
+            except Exception as exc:
+                row.publish_attempts += 1
+                row.last_error = str(exc)[:2000]
+                db.commit()
+                increment_metric("backend_audit_publish_failures_total")
+                return exc
         db.commit()
-        event["actor_type"] = actor_type
-        event["prior_hash"] = prior_hash
-        event["integrity_hash"] = integrity_hash
+        _metrics["backend_audit_outbox_published_total"] += len(pending)
         return None
     except Exception as exc:
         db.rollback()
+        increment_metric("backend_audit_publish_failures_total")
+        return exc
+    finally:
+        db.close()
+
+
+def persist_audit_event(event: dict[str, Any]) -> Exception | None:
+    """Append through PostgreSQL and commit its transactional outbox row."""
+    from app.db.session import SessionLocal
+    from app.services.audit_store import append_audit_event
+
+    db = SessionLocal()
+    try:
+        append_audit_event(db, event)
+        db.commit()
+        return None
+    except Exception as exc:
+        db.rollback()
+        if "idempotency-key collision" in str(exc):
+            increment_metric("backend_audit_idempotency_collisions_total")
         return exc
     finally:
         db.close()

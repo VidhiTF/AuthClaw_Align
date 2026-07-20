@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from sqlalchemy import (
     Column, String, UUID, DateTime, Boolean, ForeignKey,
-    Integer, Text, ARRAY, JSON, Index, Float, create_engine
+    Integer, BigInteger, SmallInteger, Text, ARRAY, JSON, Index, Float, create_engine
 )
 from app.db.base import Base
 from sqlalchemy.orm import relationship
@@ -441,6 +441,10 @@ class AuditLogMetadata(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     record_id = Column(UUID(as_uuid=True), nullable=False, unique=True)  # Matches ClickHouse record_id
+    tenant_sequence = Column(BigInteger, nullable=False)
+    idempotency_key = Column(Text, nullable=False)
+    chain_version = Column(SmallInteger, nullable=False, default=2)
+    canonical_payload = Column(Text, nullable=False)
     actor_id = Column(UUID(as_uuid=True), nullable=True)
     actor_type = Column(String(100), nullable=False, default="gateway")
     action = Column(String(255), nullable=False)
@@ -463,6 +467,29 @@ class AuditLogMetadata(Base):
         Index("idx_audit_metadata_tenant", "tenant_id"),
         Index("idx_audit_metadata_record", "record_id"),
         Index("idx_audit_metadata_created", "created_at"),
+        UniqueConstraint("tenant_id", "tenant_sequence", name="uq_audit_log_tenant_sequence"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_audit_log_tenant_idempotency"),
+    )
+
+
+class AuditOutbox(Base):
+    """Transactional Kafka publication queue for immutable audit records."""
+
+    __tablename__ = "audit_outbox"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    record_id = Column(UUID(as_uuid=True), ForeignKey("audit_log_metadata.record_id"), nullable=False, unique=True)
+    tenant_sequence = Column(BigInteger, nullable=False)
+    event_payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    publish_attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_audit_outbox_pending", "published_at", "created_at"),
+        UniqueConstraint("tenant_id", "tenant_sequence", name="uq_audit_outbox_tenant_sequence"),
     )
 
 

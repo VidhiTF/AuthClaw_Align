@@ -316,6 +316,10 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
         id=uuid4(),
         tenant_id=tenant_a_id,
         record_id=uuid4(),
+        tenant_sequence=1,
+        idempotency_key="test:audit-endpoint",
+        chain_version=2,
+        canonical_payload="{}",
         actor_id=admin_user_id,
         action="policy_block",
         frameworks_affected=["GDPR", "SOC2"]

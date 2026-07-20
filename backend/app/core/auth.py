@@ -36,6 +36,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Bypass authentication for public routes
         public_paths = {
             "/health",
+            "/metrics",
             "/docs",
             "/openapi.json",
             "/redoc",

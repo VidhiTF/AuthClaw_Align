@@ -29,23 +29,19 @@ def test_backend_event_topic_names_match_backbone_contract():
 def test_publish_persists_before_kafka(monkeypatch):
     order = []
 
-    class Future:
-        def get(self, timeout):
-            assert timeout == 5
-
-    class Producer:
-        def send(self, *_args, **_kwargs):
-            order.append("kafka")
-            return Future()
-
     monkeypatch.setattr(
         event_backbone,
         "persist_audit_event",
         lambda _event: order.append("postgres"),
     )
+    monkeypatch.setattr(
+        event_backbone,
+        "publish_pending_audit_events",
+        lambda _producer, _tenant: order.append("outbox"),
+    )
 
-    assert event_backbone.publish_audit_event(Producer(), "tenant-1", {}) is None
-    assert order == ["postgres", "kafka"]
+    assert event_backbone.publish_audit_event(object(), "tenant-1", {}) is None
+    assert order == ["postgres", "outbox"]
 
 
 def test_publish_stops_when_postgres_fails(monkeypatch):

@@ -14,9 +14,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.db.models import AuditLogMetadata, Tenant
+from app.db.models import AuditLogMetadata
 from app.services.audit_utils import (
     canonical_audit_record,
     standardize_timestamp,
@@ -28,6 +29,10 @@ GENESIS_HASH = "GENESIS"
 CLICKHOUSE_COLUMNS = [
     "record_id",
     "tenant_id",
+    "tenant_sequence",
+    "idempotency_key",
+    "chain_version",
+    "canonical_payload",
     "timestamp",
     "actor_id",
     "actor_type",
@@ -89,7 +94,87 @@ def canonical_json(record: dict[str, Any]) -> str:
 
 
 def compute_integrity_hash(record: dict[str, Any], prior_hash: str) -> str:
-    return hashlib.sha256((canonical_json(record) + prior_hash).encode("utf-8")).hexdigest()
+    payload = (
+        record.get("canonical_payload")
+        if int(record.get("chain_version") or 1) >= 2
+        else None
+    ) or canonical_json(record)
+    return hashlib.sha256((str(payload) + prior_hash).encode("utf-8")).hexdigest()
+
+
+def append_audit_event(db: Session, event: dict[str, Any]) -> dict[str, Any]:
+    """Call the only authoritative audit append implementation."""
+    tenant_id = str(event["tenant_id"])
+    record_id = str(event.get("id") or event.get("record_id") or uuid.uuid4())
+    idempotency_key = str(event.get("idempotency_key") or record_id)
+    db.info["tenant_id"] = tenant_id
+    trace = event.get("execution_trace") or []
+    if isinstance(trace, str):
+        trace = json.loads(trace)
+    timestamp = event.get("timestamp")
+    if not timestamp:
+        raise ValueError("audit event timestamp is required")
+
+    result = db.execute(
+        text(
+            """
+            SELECT *
+            FROM append_audit_event_v2(
+                CAST(:tenant_id AS uuid),
+                CAST(:record_id AS uuid),
+                :idempotency_key,
+                CAST(:occurred_at AS timestamptz),
+                CAST(NULLIF(:actor_id, '') AS uuid),
+                :actor_type,
+                :action,
+                :request_id,
+                CAST(NULLIF(:policy_id, '') AS uuid),
+                :provider,
+                :model,
+                :reason,
+                :prompt_count,
+                :request_size,
+                :response_status,
+                :duration_ms,
+                CAST(:frameworks AS text[]),
+                CAST(:execution_trace AS jsonb)
+            )
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "record_id": record_id,
+            "idempotency_key": idempotency_key,
+            "occurred_at": timestamp,
+            "actor_id": str(event.get("actor_id") or ""),
+            "actor_type": str(event.get("actor_type") or "backend"),
+            "action": str(event.get("action") or ""),
+            "request_id": str(event.get("request_id") or ""),
+            "policy_id": str(event.get("policy_id") or ""),
+            "provider": str(event.get("provider") or ""),
+            "model": str(event.get("model") or ""),
+            "reason": str(event.get("reason") or ""),
+            "prompt_count": int(event.get("prompt_count") or 0),
+            "request_size": int(event.get("request_size") or 0),
+            "response_status": int(event.get("response_status") or 0),
+            "duration_ms": int(event.get("duration_ms") or 0),
+            "frameworks": list(event.get("frameworks_affected") or []),
+            "execution_trace": json.dumps(trace, sort_keys=True, separators=(",", ":")),
+        },
+    ).mappings().one()
+    appended = dict(result)
+    event.update(
+        {
+            "id": str(appended["record_id"]),
+            "idempotency_key": idempotency_key,
+            "tenant_sequence": int(appended["tenant_sequence"]),
+            "chain_version": 2,
+            "prior_hash": appended["prior_hash"],
+            "integrity_hash": appended["integrity_hash"],
+            "canonical_payload": appended["canonical_payload"],
+        }
+    )
+    return appended
 
 
 def postgres_audit_row(log: AuditLogMetadata) -> dict[str, Any]:
@@ -100,6 +185,10 @@ def postgres_audit_row(log: AuditLogMetadata) -> dict[str, Any]:
     return {
         "record_id": str(log.record_id),
         "tenant_id": str(log.tenant_id),
+        "tenant_sequence": int(getattr(log, "tenant_sequence", 0) or 0),
+        "idempotency_key": str(getattr(log, "idempotency_key", "") or ""),
+        "chain_version": int(getattr(log, "chain_version", 1) or 1),
+        "canonical_payload": str(getattr(log, "canonical_payload", "") or ""),
         "timestamp": log.created_at,
         "actor_id": str(log.actor_id) if log.actor_id else "",
         "actor_type": actor_type,
@@ -124,6 +213,10 @@ def normalize_clickhouse_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized = {key: row.get(key) for key in CLICKHOUSE_COLUMNS}
     normalized["record_id"] = standardize_uuid(normalized.get("record_id"))
     normalized["tenant_id"] = standardize_uuid(normalized.get("tenant_id"))
+    normalized["tenant_sequence"] = int(normalized.get("tenant_sequence") or 0)
+    normalized["idempotency_key"] = str(normalized.get("idempotency_key") or "")
+    normalized["chain_version"] = int(normalized.get("chain_version") or 1)
+    normalized["canonical_payload"] = str(normalized.get("canonical_payload") or "")
     normalized["actor_id"] = str(normalized.get("actor_id") or "")
     normalized["actor_type"] = str(normalized.get("actor_type") or "")
     normalized["policy_id"] = str(normalized.get("policy_id") or "")
@@ -145,13 +238,18 @@ def normalize_clickhouse_row(row: dict[str, Any]) -> dict[str, Any]:
 
 def _chain_valid(records: Iterable[dict[str, Any]]) -> bool:
     prior_hash = GENESIS_HASH
+    prior_sequence = 0
     for record in records:
+        sequence = int(record.get("tenant_sequence") or prior_sequence + 1)
+        if prior_sequence and sequence != prior_sequence + 1:
+            return False
         expected = compute_integrity_hash(record, record.get("prior_hash") or GENESIS_HASH)
         if record.get("prior_hash") != prior_hash:
             return False
         if record.get("integrity_hash") != expected:
             return False
         prior_hash = record.get("integrity_hash") or expected
+        prior_sequence = sequence
     return True
 
 
@@ -159,7 +257,7 @@ def get_postgres_records(db: Session, tenant_id: str) -> list[dict[str, Any]]:
     logs = (
         db.query(AuditLogMetadata)
         .filter(AuditLogMetadata.tenant_id == tenant_id)
-        .order_by(AuditLogMetadata.created_at.asc(), AuditLogMetadata.record_id.asc())
+        .order_by(AuditLogMetadata.tenant_sequence.asc())
         .all()
     )
     return [postgres_audit_row(log) for log in logs]
@@ -171,6 +269,10 @@ def fetch_clickhouse_records(ch: Any, tenant_id: str) -> list[dict[str, Any]]:
         SELECT
             toString(record_id) AS record_id,
             toString(tenant_id) AS tenant_id,
+            tenant_sequence,
+            idempotency_key,
+            chain_version,
+            canonical_payload,
             timestamp,
             actor_id,
             actor_type,
@@ -190,7 +292,7 @@ def fetch_clickhouse_records(ch: Any, tenant_id: str) -> list[dict[str, Any]]:
             integrity_hash
         FROM authclaw.audit_events AS ae
         WHERE ae.tenant_id = {tenant_id:UUID}
-        ORDER BY timestamp ASC, record_id ASC
+        ORDER BY tenant_sequence ASC
         """,
         parameters={"tenant_id": tenant_id},
     )
@@ -259,65 +361,11 @@ def replay_postgres_to_clickhouse(db: Session, ch: Any, tenant_id: str, *, dry_r
 
 
 def recover_clickhouse_to_postgres(db: Session, ch: Any, tenant_id: str, *, dry_run: bool = True) -> dict[str, Any]:
-    """Restore missing chain-of-record rows without changing existing records."""
-    db.info["tenant_id"] = tenant_id
-    tenant_uuid = uuid.UUID(tenant_id)
-    if not db.query(Tenant.id).filter(Tenant.id == tenant_uuid).first():
-        raise ValueError(f"Tenant {tenant_id} must exist before audit recovery")
-    clickhouse_records = fetch_clickhouse_records(ch, tenant_id)
-    existing = {
-        str(record_id)
-        for (record_id,) in (
-            db.query(AuditLogMetadata.record_id)
-            .filter(AuditLogMetadata.tenant_id == tenant_uuid)
-            .all()
-        )
-    }
-    rows = [record for record in clickhouse_records if record["record_id"] not in existing]
-
-    if not dry_run and rows:
-        def optional_uuid(value: Any) -> uuid.UUID | None:
-            return uuid.UUID(str(value)) if value else None
-
-        db.add_all(
-            [
-                AuditLogMetadata(
-                    tenant_id=tenant_uuid,
-                    record_id=uuid.UUID(record["record_id"]),
-                    actor_id=optional_uuid(record.get("actor_id")),
-                    actor_type=record.get("actor_type") or "gateway",
-                    action=record["action"],
-                    request_id=record.get("request_id") or "",
-                    policy_id=optional_uuid(record.get("policy_id")),
-                    provider=record.get("provider") or "",
-                    model=record.get("model") or "",
-                    reason=record.get("reason") or "",
-                    prompt_count=record.get("prompt_count") or 0,
-                    request_size=record.get("request_size") or 0,
-                    response_status=record.get("response_status") or 0,
-                    duration_ms=record.get("duration_ms") or 0,
-                    frameworks_affected=record.get("frameworks_affected") or [],
-                    execution_trace=record.get("execution_trace") or "[]",
-                    prior_hash=record.get("prior_hash") or GENESIS_HASH,
-                    integrity_hash=record.get("integrity_hash") or "",
-                    created_at=record["timestamp"],
-                )
-                for record in rows
-            ]
-        )
-        db.commit()
-
-    return {
-        "tenant_id": tenant_id,
-        "source": "clickhouse",
-        "target": "postgres",
-        "dry_run": dry_run,
-        "clickhouse_count": len(clickhouse_records),
-        "already_present": len({record["record_id"] for record in clickhouse_records} & existing),
-        "inserted": 0 if dry_run else len(rows),
-        "would_insert": len(rows),
-        "record_ids": [row["record_id"] for row in rows],
-    }
+    """Reject reverse recovery: ClickHouse is never an audit authority."""
+    del db, ch, tenant_id, dry_run
+    raise RuntimeError(
+        "ClickHouse-to-PostgreSQL recovery is disabled; replay PostgreSQL to ClickHouse"
+    )
 
 
 def clickhouse_configured() -> bool:

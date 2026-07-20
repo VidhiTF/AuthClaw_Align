@@ -34,7 +34,7 @@ def canonical_json(record: dict[str, Any]) -> str:
 
 def compute_integrity_hash(record: dict[str, Any], prior_hash: str) -> str:
     """Compute SHA-256(canonical_json + prior_hash)."""
-    data = canonical_json(record) + prior_hash
+    data = str(record.get("canonical_payload") or canonical_json(record)) + prior_hash
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 

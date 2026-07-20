@@ -7,6 +7,10 @@ CREATE TABLE IF NOT EXISTS authclaw.audit_events
 (
     record_id          UUID,
     tenant_id          UUID,
+    tenant_sequence    UInt64,
+    idempotency_key    String,
+    chain_version      UInt16,
+    canonical_payload  String,
     timestamp          DateTime64(3, 'UTC'),
     actor_id           String,
     actor_type         String,
@@ -27,7 +31,7 @@ CREATE TABLE IF NOT EXISTS authclaw.audit_events
     created_at         DateTime DEFAULT now()
 )
 ENGINE = MergeTree()
-ORDER BY (tenant_id, timestamp, record_id)
+ORDER BY (tenant_id, tenant_sequence)
 SETTINGS index_granularity = 8192;
 
 -- Materialized view for per-tenant event counts (analytics convenience)

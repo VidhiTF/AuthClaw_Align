@@ -293,7 +293,7 @@ def verification_guide(public_key: str, key_id: str) -> list[dict[str, str]]:
         },
         {
             "title": "Verify offline",
-            "body": "Run python backend/scripts/verify_audit_export.py <export.json>. A zero exit code means the signature, digest, counts, and chain anchors are valid.",
+            "body": "Pin the published key in trusted-keys.json, then run python backend/scripts/verify_audit_export.py --trusted-keys trusted-keys.json <export.json>. A zero exit code means the trusted signature, digest, counts, sequences, and chain anchors are valid.",
         },
         {
             "title": "Public key pin",

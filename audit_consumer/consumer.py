@@ -1,11 +1,12 @@
-"""Kafka consumer for audit events, hash-chain integrity, ClickHouse, and DLQ writes."""
+"""Validate PostgreSQL audit events and mirror them to ClickHouse."""
 
+import hashlib
 import json
 import logging
 import os
-import redis
 import signal
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,9 +14,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dotenv import load_dotenv
 from kafka import KafkaConsumer, KafkaProducer
 
-from clickhouse_writer import audit_event_exists, get_client, get_prior_hash, insert_audit_event
+from clickhouse_writer import audit_event_exists, get_client, get_tenant_tail, insert_audit_event
 from event_backbone import AUDIT_DLQ_TOPIC, DEFAULT_CONSUMER_TOPICS
-from hash_chain import GENESIS_HASH, compute_integrity_hash, standardize_uuid, standardize_timestamp
+from hash_chain import standardize_uuid, standardize_timestamp
 from metrics import metrics
 
 load_dotenv()
@@ -35,7 +36,6 @@ KAFKA_TOPICS = [
 # Consumer group — all replicas of this service share offset progress.
 KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "authclaw-audit-consumer")
 KAFKA_DLQ_TOPIC = os.getenv("KAFKA_DLQ_TOPIC", AUDIT_DLQ_TOPIC)
-IDEMPOTENCY_TTL_SECONDS = int(os.getenv("AUDIT_IDEMPOTENCY_TTL_SECONDS", str(30 * 24 * 60 * 60)))
 METRICS_PORT = int(os.getenv("AUDIT_CONSUMER_METRICS_PORT", "9108"))
 
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
@@ -44,16 +44,16 @@ CLICKHOUSE_DB = os.getenv("CLICKHOUSE_DB", "authclaw")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "authclaw")
 CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "authclaw")
 
-REDIS_HOST = os.getenv("REDIS_HOST")
-if not REDIS_HOST:
-    if CLICKHOUSE_HOST == "clickhouse":
-        REDIS_HOST = "redis"
-    else:
-        REDIS_HOST = "localhost"
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+class SequenceGapError(RuntimeError):
+    """The mirror must wait for an earlier tenant sequence."""
 
-logger.info("Initializing Redis tail-hash cache at %s:%s", REDIS_HOST, REDIS_PORT)
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+class RetryableMirrorError(RuntimeError):
+    """Kafka offset must remain uncommitted until infrastructure recovers."""
+
+
+class InvalidAuditEvent(ValueError):
+    """The immutable PostgreSQL proof is malformed or inconsistent."""
 
 
 class _MetricsHandler(BaseHTTPRequestHandler):
@@ -191,6 +191,10 @@ def normalise_event(payload: dict) -> dict:
     return {
         "record_id": stable_record_id(payload),
         "tenant_id": payload.get("tenant_id", ""),
+        "tenant_sequence": int(payload.get("tenant_sequence", 0)),
+        "idempotency_key": payload.get("idempotency_key", ""),
+        "chain_version": int(payload.get("chain_version", 0)),
+        "canonical_payload": payload.get("canonical_payload", ""),
         "timestamp": _parse_timestamp(payload.get("timestamp")),
         "actor_id": payload.get("actor_id", ""),
         "actor_type": payload.get("actor_type", "gateway"),
@@ -204,49 +208,15 @@ def normalise_event(payload: dict) -> dict:
         "response_status": int(payload.get("response_status", 0)),
         "duration_ms": int(payload.get("duration_ms", 0)),
         "frameworks_affected": payload.get("frameworks_affected") or [],
-        "execution_trace": json.dumps(payload.get("execution_trace") or []),
+        "execution_trace": (
+            payload.get("execution_trace")
+            if isinstance(payload.get("execution_trace"), str)
+            else json.dumps(payload.get("execution_trace") or [])
+        ),
         "request_id": payload.get("request_id", ""),
         "prior_hash": payload.get("prior_hash", ""),
         "integrity_hash": payload.get("integrity_hash", ""),
     }
-
-
-def _event_idempotency_key(record_id: str) -> str:
-    return f"audit_event:{record_id}"
-
-
-def _claim_event(record_id: str) -> bool:
-    """Claim an event before insert. False means another consumer already owns it."""
-    try:
-        claimed = redis_client.set(
-            _event_idempotency_key(record_id),
-            "processing",
-            nx=True,
-            ex=IDEMPOTENCY_TTL_SECONDS,
-        )
-        return bool(claimed)
-    except Exception as redis_exc:
-        logger.warning("Redis idempotency claim failed, continuing with ClickHouse guard: %s", redis_exc)
-        return True
-
-
-def _mark_event_persisted(record_id: str) -> None:
-    try:
-        redis_client.set(
-            _event_idempotency_key(record_id),
-            "persisted",
-            ex=IDEMPOTENCY_TTL_SECONDS,
-        )
-    except Exception as redis_exc:
-        logger.warning("Redis idempotency mark failed: %s", redis_exc)
-
-
-def _release_event_claim(record_id: str) -> None:
-    try:
-        redis_client.delete(_event_idempotency_key(record_id))
-    except Exception as redis_exc:
-        logger.warning("Redis idempotency release failed: %s", redis_exc)
-
 
 def _observe_consumer_lag(consumer: KafkaConsumer, records) -> None:
     try:
@@ -306,11 +276,17 @@ def main():
         # Poll with a 1-second timeout so SIGTERM is handled promptly.
         records = consumer.poll(timeout_ms=1000)
         _observe_consumer_lag(consumer, records)
-        for _tp, messages in records.items():
+        for topic_partition, messages in records.items():
             for message in messages:
                 try:
                     _process_message(ch_client, message.value)
                     consumer.commit()
+                except (SequenceGapError, RetryableMirrorError) as exc:
+                    logger.warning("Deferring audit mirror offset %s: %s", message.offset, exc)
+                    consumer.seek(topic_partition, message.offset)
+                    metrics.increment("audit_consumer_retries_total")
+                    time.sleep(0.25)
+                    break
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Failed to process message: %s", exc)
                     publish_to_dlq(dlq_producer, message.value or {}, str(exc))
@@ -325,7 +301,7 @@ def main():
 
 
 def _process_message(ch_client, payload: dict) -> None:
-    """Normalise, chain-hash, and insert a single audit event."""
+    """Validate PostgreSQL proof data and insert a deterministic mirror row."""
     metrics.increment("audit_consumer_messages_seen_total")
     row = normalise_event(payload)
     row["record_id"] = standardize_uuid(row["record_id"])
@@ -334,64 +310,65 @@ def _process_message(ch_client, payload: dict) -> None:
     record_id = row["record_id"]
     tenant_id = row["tenant_id"]
 
-    if not tenant_id:
-        logger.warning("Skipping event with empty tenant_id: %s", payload.get("id"))
-        metrics.increment("audit_consumer_events_skipped_total")
-        return
+    if not tenant_id or not record_id:
+        raise InvalidAuditEvent("tenant_id and record_id are required")
+    if row["chain_version"] != 2 or row["tenant_sequence"] <= 0:
+        raise InvalidAuditEvent("chain_version=2 and a positive tenant_sequence are required")
+    if not row["canonical_payload"] or not row["prior_hash"] or not row["integrity_hash"]:
+        raise InvalidAuditEvent("canonical payload and PostgreSQL proof hashes are required")
 
-    if audit_event_exists(ch_client, record_id):
-        _mark_event_persisted(record_id)
+    try:
+        canonical = json.loads(row["canonical_payload"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise InvalidAuditEvent("canonical_payload is not valid JSON") from exc
+    if (
+        canonical.get("tenant_id") != tenant_id
+        or canonical.get("record_id") != record_id
+        or int(canonical.get("tenant_sequence", 0)) != row["tenant_sequence"]
+    ):
+        raise InvalidAuditEvent("canonical payload identity does not match its envelope")
+    expected = hashlib.sha256(
+        (row["canonical_payload"] + row["prior_hash"]).encode("utf-8")
+    ).hexdigest()
+    if expected != row["integrity_hash"]:
+        metrics.increment("audit_consumer_verification_failures_total")
+        raise InvalidAuditEvent("PostgreSQL supplied an invalid audit integrity hash")
+
+    try:
+        exists = audit_event_exists(ch_client, record_id)
+    except Exception as exc:
+        raise RetryableMirrorError(f"ClickHouse duplicate check failed: {exc}") from exc
+    if exists:
         metrics.increment("audit_consumer_duplicate_events_total")
         logger.info("Skipping duplicate audit event already in ClickHouse: record_id=%s", record_id)
         return
 
-    if not _claim_event(record_id):
-        metrics.increment("audit_consumer_duplicate_events_total")
-        logger.info("Skipping duplicate audit event already claimed: record_id=%s", record_id)
-        return
+    try:
+        tail_sequence, tail_hash = get_tenant_tail(ch_client, tenant_id)
+    except Exception as exc:
+        raise RetryableMirrorError(f"ClickHouse tail query failed: {exc}") from exc
+    if row["tenant_sequence"] > tail_sequence + 1:
+        metrics.increment("audit_consumer_sequence_gaps_total")
+        raise SequenceGapError(
+            f"tenant {tenant_id} expects sequence {tail_sequence + 1}, "
+            f"received {row['tenant_sequence']}"
+        )
+    if row["tenant_sequence"] <= tail_sequence:
+        raise InvalidAuditEvent("duplicate sequence has a different record_id")
+    if row["prior_hash"] != tail_hash:
+        metrics.increment("audit_consumer_mirror_drift_total")
+        raise InvalidAuditEvent("PostgreSQL and ClickHouse audit chain tails differ")
 
     try:
-        # Check Redis cache first to avoid ClickHouse consistency issues.
-        redis_key = f"audit_chain:{tenant_id}"
-        prior_hash = None
-        try:
-            prior_hash = redis_client.get(redis_key)
-        except Exception as redis_exc:
-            logger.warning("Redis lookup failed, falling back to ClickHouse: %s", redis_exc)
-
-        # Fallback to ClickHouse if cache miss or Redis error.
-        if not prior_hash:
-            prior_hash = get_prior_hash(ch_client, tenant_id)
-            logger.debug("Cache miss for tenant %s. Fetched prior_hash from ClickHouse: %s", tenant_id, prior_hash)
-
-        supplied_prior = row["prior_hash"]
-        supplied_integrity = row["integrity_hash"]
-        if supplied_prior and supplied_integrity:
-            if supplied_prior != prior_hash:
-                raise ValueError("PostgreSQL and ClickHouse audit chain tails differ")
-            if compute_integrity_hash(row, supplied_prior) != supplied_integrity:
-                raise ValueError("Publisher supplied an invalid audit integrity hash")
-        else:
-            row["prior_hash"] = prior_hash
-            row["integrity_hash"] = compute_integrity_hash(row, prior_hash)
-
         inserted = insert_audit_event(ch_client, row)
         if not inserted:
-            _mark_event_persisted(record_id)
             metrics.increment("audit_consumer_duplicate_events_total")
             return
 
-        # Update Redis cache with the new tail hash.
-        try:
-            redis_client.set(redis_key, row["integrity_hash"])
-        except Exception as redis_exc:
-            logger.warning("Failed to update Redis cache: %s", redis_exc)
-        _mark_event_persisted(record_id)
         metrics.increment("audit_consumer_clickhouse_inserts_total")
-    except Exception:
-        _release_event_claim(record_id)
+    except Exception as exc:
         metrics.increment("audit_consumer_clickhouse_insert_failures_total")
-        raise
+        raise RetryableMirrorError(f"ClickHouse insert failed: {exc}") from exc
 
     logger.info(
         "Audit event persisted: record_id=%s tenant=%s action=%s request_id=%s integrity=%s prior=%s",
