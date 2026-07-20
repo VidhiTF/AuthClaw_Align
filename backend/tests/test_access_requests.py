@@ -528,7 +528,7 @@ def test_migration_matches_access_request_model(monkeypatch):
         Path(__file__).parents[1]
         / "alembic"
         / "versions"
-        / "027_add_access_requests.py"
+        / "029_add_access_requests.py"
     )
     spec = importlib.util.spec_from_file_location("migration_027", path)
     migration = importlib.util.module_from_spec(spec)
@@ -560,7 +560,7 @@ def test_history_migration_matches_model_and_grants_app_role(monkeypatch):
         Path(__file__).parents[1]
         / "alembic"
         / "versions"
-        / "028_add_access_request_history.py"
+        / "030_add_access_request_history.py"
     )
     spec = importlib.util.spec_from_file_location("migration_028", path)
     migration = importlib.util.module_from_spec(spec)
@@ -607,7 +607,7 @@ def test_onboarding_lookup_migration_is_symmetric(monkeypatch):
         Path(__file__).parents[1]
         / "alembic"
         / "versions"
-        / "030_add_access_request_onboarding_lookup.py"
+        / "032_add_access_request_onboarding_lookup.py"
     )
     spec = importlib.util.spec_from_file_location("migration_030", path)
     migration = importlib.util.module_from_spec(spec)

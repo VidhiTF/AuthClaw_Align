@@ -373,7 +373,7 @@ def test_authentication_middleware_exposes_platform_role(monkeypatch):
 
 def test_platform_role_migration_is_symmetric(monkeypatch):
     path = (
-        Path(__file__).parents[1] / "alembic" / "versions" / "029_add_platform_role.py"
+        Path(__file__).parents[1] / "alembic" / "versions" / "031_add_platform_role.py"
     )
     spec = importlib.util.spec_from_file_location("migration_029", path)
     migration = importlib.util.module_from_spec(spec)
