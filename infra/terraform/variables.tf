@@ -53,6 +53,7 @@ variable "secondary_availability_zones" {
 variable "container_images" {
   description = "Container images for AuthClaw runtime services."
   type = object({
+    agent          = string
     backend        = string
     gateway        = string
     console        = string
@@ -60,6 +61,19 @@ variable "container_images" {
     opa            = string
     presidio       = string
   })
+}
+
+variable "require_immutable_images" {
+  description = "Require every runtime image to use an immutable sha256 digest. Enable for controlled-beta deployments."
+  type        = bool
+  default     = false
+
+  validation {
+    condition = !var.require_immutable_images || alltrue([
+      for image in values(var.container_images) : can(regex("@sha256:[0-9a-f]{64}$", image))
+    ])
+    error_message = "Controlled-beta container_images must all end in @sha256:<64 lowercase hex characters>."
+  }
 }
 
 variable "authclaw_env" {

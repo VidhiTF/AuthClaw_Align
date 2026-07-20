@@ -3,6 +3,9 @@ output "primary" {
     region            = var.primary_region
     alb_dns_name      = module.primary.alb_dns_name
     ecs_cluster_name  = module.primary.ecs_cluster_name
+    ecs_service_names = module.primary.ecs_service_names
+    public_endpoints  = module.primary.public_endpoints
+    alarm_names       = module.primary.alarm_names
     rds_endpoint      = module.primary.rds_endpoint
     rds_instance_arn  = module.primary.rds_instance_arn
     rds_role          = module.primary.rds_role
@@ -18,6 +21,9 @@ output "secondary" {
     region                = var.secondary_region
     alb_dns_name          = module.secondary[0].alb_dns_name
     ecs_cluster_name      = module.secondary[0].ecs_cluster_name
+    ecs_service_names     = module.secondary[0].ecs_service_names
+    public_endpoints      = module.secondary[0].public_endpoints
+    alarm_names           = module.secondary[0].alarm_names
     rds_endpoint          = module.secondary[0].rds_endpoint
     rds_instance_arn      = module.secondary[0].rds_instance_arn
     rds_role              = module.secondary[0].rds_role
@@ -31,4 +37,12 @@ output "secondary" {
 
 output "console_failover_domain" {
   value = var.domain_name != "" ? var.domain_name : null
+}
+
+output "ecr_repository_urls" {
+  value = { for key, repository in aws_ecr_repository.service : key => repository.repository_url }
+}
+
+output "ecr_kms_key_arn" {
+  value = aws_kms_key.registry.arn
 }

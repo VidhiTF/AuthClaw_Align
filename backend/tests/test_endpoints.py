@@ -16,13 +16,9 @@ os.environ.pop("CLICKHOUSE_HOST", None)
 from app.db.dependencies import get_db
 from app.db.models import Tenant, User, APIKey, Policy, GatewayConfig, RedactionToken, AuditLogMetadata
 from app.core.auth import hash_key
-from app.core.config import settings
+from tests.db_safety import destructive_test_urls
 
-# Force using authclaw_app (RLS-restricted user) for database interactions in tests.
-owner_db_url = os.getenv("OWNER_DATABASE_URL", settings.DATABASE_URL)
-app_user = os.getenv("POSTGRES_APP_USER", "authclaw_app")
-app_password = os.getenv("POSTGRES_APP_PASSWORD", "authclaw_app")
-db_url = settings.DATABASE_URL.replace("authclaw:authclaw@", f"{app_user}:{app_password}@")
+owner_db_url, db_url = destructive_test_urls()
 owner_engine = create_engine(owner_db_url, echo=False, poolclass=StaticPool)
 engine = create_engine(db_url, echo=False, poolclass=StaticPool)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
@@ -131,10 +127,10 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     db_session.add(tenant_b)
     db_session.commit()
 
-    # Seed Admin User & System API Key with 'admin' scope for Tenant A to call POST /tenants
+    # Seed Owner User & System API Key with 'admin' scope for Tenant A to call POST /tenants
     admin_user_id = uuid4()
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
-    admin_user = User(id=admin_user_id, tenant_id=tenant_a_id, email="admin@tenantA.com", role="admin", is_active=True)
+    admin_user = User(id=admin_user_id, tenant_id=tenant_a_id, email="admin@tenantA.com", role="owner", is_active=True)
     db_session.add(admin_user)
     db_session.commit()
 
@@ -186,7 +182,7 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     response = client.post("/v1/tenants", json={"name": "Tenant C", "tier": "starter"}, headers=headers_b)
     assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    # Request as Tenant A admin (admin scope) -> 201 Created
+    # Request as Tenant A owner (admin scope) -> 201 Created
     response = client.post("/v1/tenants", json={"name": "Tenant C", "tier": "pro"}, headers=headers_admin)
     assert response.status_code == status.HTTP_201_CREATED
     assert response.json()["name"] == "Tenant C"

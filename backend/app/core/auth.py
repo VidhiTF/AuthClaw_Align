@@ -161,18 +161,11 @@ def get_tenant_db(request: Request, db: Session = Depends(get_db)) -> Generator[
     """
     tenant_id = getattr(request.state, "tenant_id", None)
     if tenant_id:
-        db.execute(
-            text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"),
-            {"tenant_id": str(tenant_id)},
-        )
+        db.info["tenant_id"] = str(tenant_id)
     try:
         yield db
     finally:
-        # Reset the tenant context parameter
-        try:
-            db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
-        except Exception:
-            db.rollback()
+        db.info.pop("tenant_id", None)
 
 
 def require_scopes(required_scopes: List[str]):

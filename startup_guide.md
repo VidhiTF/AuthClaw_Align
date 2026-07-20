@@ -1,111 +1,35 @@
-# AuthClaw Local Startup Guide
+# AuthClaw local startup
 
-To run AuthClaw properly from a fresh state, you need to start its core infrastructure, the backend API, the Go gateway proxy, and the Next.js frontend.
-
-Follow these steps in order using separate terminal windows (or tabs) from the root of the project (`c:\Users\WIN10\Desktop\0_AuthClaw`).
-
-## IMPORTANT
-
-Make sure Docker Desktop is running before starting these steps.
-
-## Local Compose Modes
-
-AuthClaw now has two local compose modes:
-
-- Lite demo: `docker-compose.demo.yml` starts the smaller onboarding-focused stack with demo UI mode enabled.
-- Full local: `docker-compose.full.yml` starts backend, gateway, console, Postgres, Redis, OPA, Presidio, Kafka, ClickHouse, and the audit consumer with `NEXT_PUBLIC_AUTHCLAW_DEMO_MODE=false`.
-
-Use full local mode for serious feature testing and SRS gap closure:
+Docker Desktop and Docker Compose are the only host prerequisites for the full local
+stack. From the repository root, copy the environment template once, replace every
+`change-me` value, and start the product with the canonical command:
 
 ```powershell
-docker compose -f docker-compose.demo.yml down
-docker compose -f docker-compose.full.yml up -d --build
+Copy-Item .env.full.example .env.full
+docker compose --env-file .env.full -f docker-compose.full.yml up -d --build --wait
 ```
 
-The full local UI is available at `http://localhost:3001`, with the backend at `http://localhost:8000` and gateway at `http://localhost:8080`.
+The Compose project starts the console, control plane, agent, gateway, PostgreSQL,
+Redis, OPA, Presidio, Kafka, ClickHouse, and the audit consumer. Do not start those
+services separately; doing so bypasses the dependency and health ordering proven by CI.
 
-## 1. Start Infrastructure (Docker)
+Local endpoints:
 
-AuthClaw relies on several containers for its databases, message brokers, and policy engines.
+- Console: `http://localhost:3001`
+- Control-plane API: `http://localhost:8000`
+- Agent API: `http://localhost:8001`
+- Provider gateway: `http://localhost:8080`
 
-1. Open a terminal in `0_AuthClaw`.
-2. Run the following command to start all services in the background:
+Verify the running stack with:
 
 ```powershell
-docker-compose up -d
+python scripts/smoke_test.py
 ```
 
-> **NOTE**
->
-> This starts PostgreSQL, Redis, ClickHouse, Kafka, OPA (Port 8181), and Presidio (Port 3000).
-
-## 2. Start the Backend API (Python)
-
-The backend manages the orchestration, database interactions, and compliance workflows.
-
-1. Open a new terminal and navigate to the backend folder:
+Stop it without deleting local data:
 
 ```powershell
-cd backend
+docker compose --env-file .env.full -f docker-compose.full.yml down
 ```
 
-2. Activate the virtual environment:
-
-```powershell
-.venv\Scripts\activate
-```
-
-3. Start the FastAPI server:
-
-```powershell
-python -m uvicorn main:app --port 8000 --reload
-```
-
-## 3. Start the Gateway Proxy (Go)
-
-The Go Gateway acts as the reverse proxy for LLM requests, applying HITL and Redaction (Presidio) policies.
-
-1. Open a new terminal and navigate to the gateway folder:
-
-```powershell
-cd gateway
-```
-
-2. Start the Go server:
-
-```powershell
-go run .
-```
-
-Alternatively, you can run the Python wrapper script from the project root:
-
-```powershell
-python run_gateway.py
-```
-
-## 4. Start the Console UI (Next.js)
-
-The console is the web dashboard where you manage tenants, chat with the AI, and view compliance scans.
-
-1. Open a new terminal and navigate to the console folder:
-
-```powershell
-cd console
-```
-
-2. Start the Next.js development server:
-
-```powershell
-npm run dev
-```
-
-## Verification
-
-Once everything is running, you should be able to access:
-
-- **AuthClaw UI:** http://localhost:3000  
-  > Note: Next.js defaults to port 3000, but if Presidio took port 3000, Next.js might launch on port 3001. Check your terminal output.
-
-- **Backend API Docs:** http://localhost:8000/docs
-
-- **Gateway:** Listens on http://localhost:8080
+Add `-v` only when you intentionally want to delete the local databases and queues.

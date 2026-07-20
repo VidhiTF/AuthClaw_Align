@@ -12,6 +12,7 @@ locals {
   public_host           = var.domain_name != "" ? var.domain_name : aws_lb.main.dns_name
   api_base_url          = "${local.public_scheme}://${local.public_host}:8000"
   gateway_base_url      = "${local.public_scheme}://${local.public_host}:8080"
+  internal_agent_url    = "http://agent.${local.namespace_name}:8001"
   internal_opa_url      = "http://opa.${local.namespace_name}:8181"
   internal_presidio_url = "http://presidio.${local.namespace_name}:3000"
   db_password           = var.db_password != "" ? var.db_password : random_password.db.result
@@ -43,6 +44,11 @@ locals {
   }
 
   private_services = {
+    agent = {
+      image          = var.container_images.agent
+      container_port = 8001
+      command        = null
+    }
     opa = {
       image          = var.container_images.opa
       container_port = 8181
@@ -64,6 +70,10 @@ locals {
     { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379" },
     { name = "OPA_URL", value = local.internal_opa_url },
     { name = "PRESIDIO_URL", value = local.internal_presidio_url },
+    { name = "AGENT_INTERNAL_URL", value = local.internal_agent_url },
+    { name = "AUTHCLAW_GO_GATEWAY_URL", value = "http://gateway.${local.namespace_name}:8080" },
+    { name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" },
+    { name = "AUTHCLAW_DISABLE_BACKGROUND_MONITOR", value = "true" },
     { name = "PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
     { name = "GATEWAY_INTERNAL_URL", value = "http://gateway.${local.namespace_name}:8080" },
     { name = "NEXT_PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
@@ -269,6 +279,11 @@ resource "random_password" "db" {
   special = false
 }
 
+resource "random_password" "agent_db" {
+  length  = 32
+  special = false
+}
+
 resource "random_password" "jwt" {
   length  = 48
   special = false
@@ -280,6 +295,20 @@ resource "random_password" "session" {
 }
 
 resource "random_password" "envelope" {
+  length  = 48
+  special = false
+}
+
+resource "random_password" "internal_service" {
+  length  = 48
+  special = false
+}
+
+resource "random_id" "agent_encryption" {
+  byte_length = 32
+}
+
+resource "random_password" "agent_redaction" {
   length  = 48
   special = false
 }
@@ -326,6 +355,26 @@ resource "aws_db_instance" "postgres_replica" {
   deletion_protection    = false
   skip_final_snapshot    = true
   tags                   = merge(var.tags, { Role = "cross-region-read-replica" })
+}
+
+resource "aws_db_instance" "agent" {
+  identifier              = "${var.name}-agent-postgres"
+  engine                  = "postgres"
+  engine_version          = var.db_engine_version
+  instance_class          = var.db_instance_class
+  allocated_storage       = var.db_allocated_storage
+  db_name                 = "authclaw_agent"
+  username                = "authclaw_agent"
+  password                = random_password.agent_db.result
+  db_subnet_group_name    = aws_db_subnet_group.main.name
+  vpc_security_group_ids  = [aws_security_group.data.id]
+  storage_encrypted       = true
+  kms_key_id              = aws_kms_key.main.arn
+  multi_az                = var.is_primary
+  backup_retention_period = 14
+  deletion_protection     = var.is_primary
+  skip_final_snapshot     = !var.is_primary
+  tags                    = merge(var.tags, { Service = "agent" })
 }
 
 resource "aws_elasticache_subnet_group" "main" {
@@ -401,6 +450,50 @@ resource "aws_secretsmanager_secret" "app_database_url" {
 resource "aws_secretsmanager_secret_version" "app_database_url" {
   secret_id     = aws_secretsmanager_secret.app_database_url.id
   secret_string = "postgresql://authclaw:${local.db_password}@${local.db_address}:5432/authclaw?sslmode=require"
+}
+
+resource "aws_secretsmanager_secret" "agent_database_url" {
+  name       = "${var.name}/agent-database-url"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "agent_database_url" {
+  secret_id     = aws_secretsmanager_secret.agent_database_url.id
+  secret_string = "postgresql://authclaw_agent:${random_password.agent_db.result}@${aws_db_instance.agent.address}:5432/authclaw_agent?sslmode=require"
+}
+
+resource "aws_secretsmanager_secret" "internal_service" {
+  name       = "${var.name}/internal-service-secret"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "internal_service" {
+  secret_id     = aws_secretsmanager_secret.internal_service.id
+  secret_string = random_password.internal_service.result
+}
+
+resource "aws_secretsmanager_secret" "agent_encryption" {
+  name       = "${var.name}/agent-encryption-key"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "agent_encryption" {
+  secret_id     = aws_secretsmanager_secret.agent_encryption.id
+  secret_string = replace(replace(random_id.agent_encryption.b64_std, "+", "-"), "/", "_")
+}
+
+resource "aws_secretsmanager_secret" "agent_redaction" {
+  name       = "${var.name}/agent-redaction-salt"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "agent_redaction" {
+  secret_id     = aws_secretsmanager_secret.agent_redaction.id
+  secret_string = random_password.agent_redaction.result
 }
 
 resource "aws_secretsmanager_secret" "clickhouse_password" {
@@ -502,6 +595,10 @@ resource "aws_iam_role_policy" "task_secrets" {
           aws_secretsmanager_secret.envelope.arn,
           aws_secretsmanager_secret.backend_database_url.arn,
           aws_secretsmanager_secret.app_database_url.arn,
+          aws_secretsmanager_secret.agent_database_url.arn,
+          aws_secretsmanager_secret.internal_service.arn,
+          aws_secretsmanager_secret.agent_encryption.arn,
+          aws_secretsmanager_secret.agent_redaction.arn,
           aws_kms_key.main.arn
         ], var.clickhouse_password != "" ? [aws_secretsmanager_secret.clickhouse_password[0].arn] : [])
       }
@@ -576,12 +673,23 @@ resource "aws_ecs_task_definition" "service" {
         protocol      = "tcp"
       }]
       environment = local.common_environment
-      secrets = contains(["backend", "gateway", "console"], each.key) ? [
-        { name = "DATABASE_URL", valueFrom = each.key == "backend" ? aws_secretsmanager_secret.backend_database_url.arn : aws_secretsmanager_secret.app_database_url.arn },
-        { name = "JWT_SECRET", valueFrom = aws_secretsmanager_secret.jwt.arn },
-        { name = "SESSION_SECRET", valueFrom = aws_secretsmanager_secret.session.arn },
-        { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn }
-      ] : []
+      secrets = concat(
+        contains(["backend", "gateway", "console"], each.key) ? [
+          { name = "DATABASE_URL", valueFrom = each.key == "backend" ? aws_secretsmanager_secret.backend_database_url.arn : aws_secretsmanager_secret.app_database_url.arn },
+          { name = "JWT_SECRET", valueFrom = aws_secretsmanager_secret.jwt.arn },
+          { name = "SESSION_SECRET", valueFrom = aws_secretsmanager_secret.session.arn },
+          { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn }
+        ] : [],
+        contains(["console", "agent"], each.key) ? [
+          { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn }
+        ] : [],
+        each.key == "agent" ? [
+          { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn },
+          { name = "JWT_SECRET", valueFrom = aws_secretsmanager_secret.jwt.arn },
+          { name = "AUTHCLAW_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.agent_encryption.arn },
+          { name = "AUTHCLAW_REDACTION_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
+        ] : []
+      )
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -590,7 +698,18 @@ resource "aws_ecs_task_definition" "service" {
           awslogs-stream-prefix = each.key
         }
       }
-    }, each.value.command == null ? {} : { command = each.value.command })
+      },
+      each.value.command == null ? {} : { command = each.value.command },
+      each.key == "agent" ? {
+        healthCheck = {
+          command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/agent/health/ready', timeout=3)\""]
+          interval    = 30
+          timeout     = 5
+          retries     = 3
+          startPeriod = 30
+        }
+      } : {}
+    )
   ])
 
   tags = var.tags
@@ -707,6 +826,50 @@ resource "aws_ecs_service" "audit_consumer" {
     subnets          = values(aws_subnet.private)[*].id
     security_groups  = [aws_security_group.app.id]
     assign_public_ip = false
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
+  for_each = local.public_services
+
+  alarm_name          = "${var.name}-${each.key}-unhealthy-hosts"
+  alarm_description   = "AuthClaw ${each.key} has an unhealthy ALB target"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "UnHealthyHostCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "breaching"
+
+  dimensions = {
+    LoadBalancer = aws_lb.main.arn_suffix
+    TargetGroup  = aws_lb_target_group.service[each.key].arn_suffix
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
+  for_each = local.service_configs
+
+  alarm_name          = "${var.name}-${each.key}-high-cpu"
+  alarm_description   = "AuthClaw ${each.key} ECS CPU is above 85 percent"
+  namespace           = "AWS/ECS"
+  metric_name         = "CPUUtilization"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  period              = 60
+  statistic           = "Average"
+  threshold           = 85
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = "${var.name}-${each.key}"
   }
 
   tags = var.tags

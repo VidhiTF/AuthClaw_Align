@@ -237,9 +237,15 @@ class TenantOIDCConfig(Base):
     jwks_uri = Column(String(512), nullable=True)
     email_claim = Column(String(100), nullable=False, default="email")
     groups_claim = Column(String(100), nullable=False, default="groups")
+    tenant_claim = Column(String(100), nullable=False, default="tenant_id")
+    tenant_claim_value = Column(String(255), nullable=True)
     role_mapping = Column(JSON, nullable=False, default=dict)
     default_role = Column(String(50), nullable=False, default="viewer")
     auto_provision = Column(Boolean, nullable=False, default=False)
+    require_mfa = Column(Boolean, nullable=False, default=True)
+    accepted_amr = Column(ARRAY(String), nullable=False, default=["mfa"])
+    accepted_acr = Column(ARRAY(String), nullable=False, default=list)
+    max_auth_age_seconds = Column(Integer, nullable=False, default=43200)
     status = Column(String(50), nullable=False, default="disabled")
     last_tested_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
@@ -421,7 +427,7 @@ class ApprovalAudit(Base):
 
 
 class AuditLogMetadata(Base):
-    """Metadata reference table for ClickHouse audit logs (actual logs stored in ClickHouse)"""
+    """Authoritative PostgreSQL audit chain mirrored to ClickHouse for analytics."""
     __tablename__ = "audit_log_metadata"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -43,8 +43,10 @@ interface AuditLog {
 export default function GatewayPage() {
   const [routes, setRoutes] = useState<GatewayRoute[]>([]);
   const [traffic, setTraffic] = useState<AuditLog[]>([]);
+  const [trafficSource, setTrafficSource] = useState("");
   const [loading, setLoading] = useState(true);
   const [trafficLoading, setTrafficLoading] = useState(true);
+  const [trafficIsFresh, setTrafficIsFresh] = useState(false);
   const [activeTab, setActiveTab] = useState<"routes" | "inspector">("routes");
   const [error, setError] = useState<string | null>(null);
   const [trafficError, setTrafficError] = useState<string | null>(null);
@@ -81,9 +83,15 @@ export default function GatewayPage() {
 
   const fetchTraffic = async () => {
     try {
-      const data = await fetchJson<{ records?: AuditLog[] }>("/api/audit?limit=20", { fallback: "Failed to fetch audit traffic", preferApiError: false });
+      const data = await fetchJson<{ records?: AuditLog[]; source?: string }>("/api/audit?limit=20", { fallback: "Failed to fetch audit traffic", preferApiError: false });
       if (!data) return;
-      setTraffic(data.records || []);
+      const records = data.records || [];
+      setTraffic(records);
+      setTrafficIsFresh(
+        Boolean(records[0]?.timestamp) &&
+          Date.now() - new Date(records[0].timestamp).getTime() < 60_000
+      );
+      setTrafficSource(data.source || "");
       setTrafficError(null);
     } catch (err: unknown) {
       const message = getErrorMessage(err, "Failed to load live traffic logs");
@@ -106,6 +114,7 @@ export default function GatewayPage() {
     };
   }, []);
 
+  const latestTrafficAt = traffic[0]?.timestamp ? new Date(traffic[0].timestamp) : null;
   const openAddModal = () => {
     setName("");
     setProvider("openai");
@@ -367,7 +376,15 @@ export default function GatewayPage() {
               <Activity className="w-4 h-4 text-emerald-400" />
               Live Ingress Traffic
             </h3>
-            <span className="text-[10px] text-[#6B7488] font-semibold">Updates every 5s</span>
+            <div className="flex items-center gap-2 text-[10px] font-semibold">
+              {latestTrafficAt && (
+                <span className={trafficIsFresh ? "text-emerald-600" : "text-amber-600"}>
+                  {trafficIsFresh ? "Live" : "Stale"} · last event {latestTrafficAt.toLocaleString()}
+                </span>
+              )}
+              {trafficSource && <span className="text-[#6B7488]">Source: {trafficSource}</span>}
+              <span className="text-[#6B7488]">Updates every 5s</span>
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -407,7 +424,7 @@ export default function GatewayPage() {
                     return (
                       <tr key={log.record_id} className="hover:bg-[#F5F7FA]/10 transition-colors">
                         <td className="px-6 py-4 text-[#6B7488] font-mono">
-                          {new Date(log.timestamp).toLocaleTimeString()}
+                          {new Date(log.timestamp).toLocaleString()}
                         </td>
                         <td className="px-6 py-4">
                           <div className="font-semibold text-[#0E1726] capitalize">{log.provider}</div>

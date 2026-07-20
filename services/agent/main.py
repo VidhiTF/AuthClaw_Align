@@ -28,7 +28,7 @@ from approval_store import (
     append_approval_audit,
     remaining_seconds,
 )
-from memory import get_history, add_message
+from memory import add_message, delete_session_history, get_history, list_sessions, purge_session_history
 
 from database.migrations import run_startup_migrations
 from startup.validation import validate_environment
@@ -1199,7 +1199,7 @@ def create_chat_session(
                 text("""
                 INSERT INTO chat_sessions (session_id, title, user_id, tenant_id, created_at, updated_at)
                 VALUES (:session_id, :title, :user_id, :tenant_id, NOW(), NOW())
-                ON CONFLICT (session_id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW()
+                ON CONFLICT (tenant_id, session_id) DO UPDATE SET title = EXCLUDED.title, updated_at = NOW()
                 """),
                 {"session_id": req.session_id, "title": req.title, "user_id": username, "tenant_id": tenant_id}
             )
@@ -1213,24 +1213,19 @@ def create_chat_session(
 @app.get("/chat/sessions")
 def get_chat_sessions(
     authorization: Optional[str] = Header(None),
-    _tenant_id: int = Depends(require_tenant_context),
+    tenant_id: int = Depends(require_tenant_context),
 ):
     try:
-        from database import engine, text
-        with engine.connect() as conn:
-            res = conn.execute(
-                text("SELECT session_id, title, created_at, updated_at, user_id FROM chat_sessions ORDER BY updated_at DESC")
-            )
-            sessions_list = []
-            for row in res:
-                sessions_list.append({
-                    "session_id": row[0],
-                    "title": row[1],
-                    "created_at": row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2]),
-                    "updated_at": row[3].isoformat() if hasattr(row[3], "isoformat") else str(row[3]),
-                    "user_id": row[4]
-                })
-            return sessions_list
+        return [
+            {
+                "session_id": row[0],
+                "title": row[1],
+                "created_at": row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2]),
+                "updated_at": row[3].isoformat() if hasattr(row[3], "isoformat") else str(row[3]),
+                "user_id": row[4],
+            }
+            for row in list_sessions(tenant_id)
+        ]
     except Exception as e:
         logger.error(f"Database error in get_chat_sessions: {e}", exc_info=True)
         return []
@@ -1239,100 +1234,33 @@ def get_chat_sessions(
 @app.get("/chat/sessions/{session_id}")
 def get_chat_session_messages(
     session_id: str,
-    _tenant_id: int = Depends(require_tenant_context),
+    tenant_id: int = Depends(require_tenant_context),
 ):
-    from memory import get_history
-    return get_history(session_id)
+    return get_history(session_id, tenant_id)
 
 
 @app.delete("/chat/sessions/{session_id}")
+@app.delete("/sessions/{session_id}")
 def delete_chat_session(
     session_id: str,
-    _tenant_id: int = Depends(require_tenant_context),
+    tenant_id: int = Depends(require_tenant_context),
 ):
     try:
-        from database import engine, text
-        with engine.connect() as conn:
-            conn.execute(
-                text("DELETE FROM chat_messages WHERE session_id = :session_id"),
-                {"session_id": session_id}
-            )
-            conn.execute(
-                text("DELETE FROM chat_sessions WHERE session_id = :session_id"),
-                {"session_id": session_id}
-            )
-            conn.commit()
+        delete_session_history(session_id, tenant_id)
         return {"status": "success", "message": f"Session {session_id} deleted."}
     except Exception as e:
         logger.error(f"Database error in delete_chat_session: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
 
 @app.delete("/chat/sessions")
+@app.delete("/sessions")
 def purge_all_sessions(tenant_id: int = Depends(require_tenant_context)):
     try:
-        from database import engine, text
-        with engine.connect() as conn:
-            conn.execute(text("DELETE FROM chat_messages"))
-            conn.execute(text("DELETE FROM chat_sessions"))
-            
-            # Re-seed default session
-            conn.execute(
-                text("""
-                INSERT INTO chat_sessions (session_id, title, user_id, tenant_id, created_at, updated_at)
-                VALUES (:session_id, :title, :user_id, :tenant_id, NOW(), NOW())
-                ON CONFLICT (session_id) DO NOTHING
-                """),
-                {"session_id": "default", "title": "Default Session", "user_id": "admin_user", "tenant_id": tenant_id}
-            )
-            conn.commit()
-        return {"status": "success", "message": "All sessions purged and default session re-seeded."}
+        purge_session_history(tenant_id)
+        return {"status": "success", "message": "Tenant sessions purged."}
     except Exception as e:
         logger.error(f"Database error in purge_all_sessions: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
-
-@app.delete("/chat/sessions/{session_id}")
-@app.delete("/sessions/{session_id}")
-def delete_session(
-    session_id: str,
-    _tenant_id: int = Depends(require_tenant_context),
-):
-    try:
-        from database import engine
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(
-                text("DELETE FROM chat_sessions WHERE session_id = :session_id"),
-                {"session_id": session_id}
-            )
-            conn.commit()
-        return {"status": "success", "message": f"Session {session_id} deleted successfully"}
-    except Exception as e:
-        logger.error(f"Database error in delete_session: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/chat/sessions")
-@app.delete("/sessions")
-def delete_all_sessions(tenant_id: int = Depends(require_tenant_context)):
-    try:
-        from database import engine
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(text("DELETE FROM chat_messages"))
-            conn.execute(text("DELETE FROM chat_sessions"))
-            conn.execute(
-                text("""
-                INSERT INTO chat_sessions (session_id, title, user_id, tenant_id, created_at, updated_at)
-                VALUES ('default', 'Default Session', 'admin_user', :tenant_id, NOW(), NOW())
-                ON CONFLICT (session_id) DO NOTHING
-                """),
-                {"tenant_id": tenant_id}
-            )
-            conn.commit()
-        return {"status": "success", "message": "All sessions deleted and default session seeded"}
-    except Exception as e:
-        logger.error(f"Database error in delete_all_sessions: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/policies/redact")

@@ -4,13 +4,16 @@ primary_region   = "us-east-1"
 secondary_region = "us-west-2"
 
 container_images = {
-  backend        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-backend:latest"
-  gateway        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-gateway:latest"
-  console        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-console:latest"
-  audit_consumer = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-audit-consumer:latest"
-  opa            = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-opa:latest"
-  presidio       = "mcr.microsoft.com/presidio-analyzer:latest"
+  agent          = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/agent@sha256:replace-with-64-lowercase-hex-characters"
+  backend        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/backend@sha256:replace-with-64-lowercase-hex-characters"
+  gateway        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/gateway@sha256:replace-with-64-lowercase-hex-characters"
+  console        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/console@sha256:replace-with-64-lowercase-hex-characters"
+  audit_consumer = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/audit-consumer@sha256:replace-with-64-lowercase-hex-characters"
+  opa            = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/opa-bundle@sha256:replace-with-64-lowercase-hex-characters"
+  presidio       = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/presidio@sha256:replace-with-64-lowercase-hex-characters"
 }
+
+require_immutable_images = true
 
 # Use "production" only after regional ACM certificates, SMTP, and HTTPS DNS are configured.
 authclaw_env = "staging"

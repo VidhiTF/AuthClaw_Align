@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.11"
-  NODE_VERSION: "22"
+  PYTHON_VERSION: "3.14.3"
+  NODE_VERSION: "22.23.1"
   GO_VERSION_FILE: gateway/go.mod
   REGISTRY: ghcr.io
 
@@ -120,10 +120,22 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
+      - name: Install pinned Python tooling
+        run: python -m pip install --require-hashes -r requirements-tooling.txt
+
+      - name: Verify Python dependency locks
+        run: |
+          pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements-tooling.txt requirements-tooling.in
+          (cd backend && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements.txt requirements.in)
+          (cd audit_consumer && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements.txt requirements.in)
+          (cd audit_consumer && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements-test.txt requirements-test.in)
+          (cd services/agent && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements.txt requirements.in)
+          (cd services/agent && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements-model.txt requirements-model.in)
+          (cd services/agent && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements-test.txt requirements-test.in)
+          git diff --exit-code -- requirements-tooling.txt backend/requirements.txt audit_consumer/requirements.txt audit_consumer/requirements-test.txt services/agent/requirements.txt services/agent/requirements-model.txt services/agent/requirements-test.txt
+
       - name: Python dependency audit
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pip-audit
           pip-audit -r backend/requirements.txt -r audit_consumer/requirements.txt -r services/agent/requirements.txt --strict
 
       - name: Set up Node.js
@@ -221,9 +233,7 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: python -m pip install --require-hashes -r requirements.txt
 
       - name: Apply migrations and restricted app role
         working-directory: backend
@@ -259,14 +269,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
       - name: Install audit consumer dependencies
         working-directory: audit_consumer
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+        run: python -m pip install --require-hashes -r requirements-test.txt
 
       - name: Run audit consumer tests
         working-directory: audit_consumer
@@ -283,14 +291,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
       - name: Install agent dependencies
         working-directory: services/agent
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: python -m pip install --require-hashes -r requirements.txt -r requirements-model.txt
 
       - name: Compile agent service
         working-directory: services/agent
@@ -464,8 +470,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Validate canonical full-stack Compose model
+        run: docker compose --env-file .env.full.example -f docker-compose.full.yml config --quiet
+
       - name: Start full stack with CI mock provider
-        run: docker compose --profile ci -f docker-compose.full.yml up -d --build
+        run: docker compose --env-file .env.full.example --profile ci -f docker-compose.full.yml up -d --build --wait
 
       - name: Seed full-stack tenant and gateway key
         run: docker compose -f docker-compose.full.yml exec -T backend sh -c 'cd /app && AUTHCLAW_LITE_POLICY_REQUESTS_PER_MINUTE=0 DATABASE_URL="$OWNER_DATABASE_URL" PYTHONPATH=/app python scripts/seed_authclaw_lite.py'
@@ -521,11 +530,11 @@ jobs:
 
       - name: Dump Compose logs on failure
         if: failure()
-        run: docker compose -f docker-compose.full.yml logs --no-color
+        run: docker compose --env-file .env.full.example -f docker-compose.full.yml logs --no-color
 
       - name: Stop full stack
         if: always()
-        run: docker compose --profile ci -f docker-compose.full.yml down -v
+        run: docker compose --env-file .env.full.example --profile ci -f docker-compose.full.yml down -v
 
   compliance-hardening-proof:
     name: Compliance Hardening Proof Gate
@@ -552,6 +561,7 @@ jobs:
           scripts/test_compliance_hardening_evidence.py
           scripts/test_no_credential_proof.py
           scripts/test_acl10_cryptography_controls.py
+          scripts/test_acl14_delivery_controls.py
 
       - name: Validate sample compliance hardening evidence
         run: |
@@ -671,3 +681,28 @@ jobs:
             NEXT_PUBLIC_API_URL=http://localhost:18000/api/v1
             NEXT_PUBLIC_GATEWAY_URL=http://localhost:18080
             NEXT_PUBLIC_AUTHCLAW_DEMO_MODE=true
+
+  required-checks:
+    name: ACL-14 Required Checks
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - line-budget
+      - sast-codeql
+      - dependency-and-secret-scan
+      - backend-tests
+      - audit-consumer-tests
+      - agent-tests
+      - gateway-tests
+      - sdk-tests
+      - ha-failover-proof
+      - console-tests
+      - integration-and-benchmark
+      - compliance-hardening-proof
+      - docker-build-push
+    env:
+      CHECK_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - name: Require every build, test, secret, and dependency gate
+        run: echo "$CHECK_RESULTS" | jq -e 'all(.[]; .result == "success")'

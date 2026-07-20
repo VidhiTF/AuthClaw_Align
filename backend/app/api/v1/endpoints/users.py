@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from app.db.models import OnboardingEmailOTP, Tenant, User
 from app.schemas.models import UserCreate, UserInviteRequest, UserInviteResponse, UserResponse
-from app.core.auth import get_tenant_db, require_roles
+from app.core.auth import get_tenant_db, require_roles, require_scopes
 from app.core.passwords import hash_password
 from app.api.v1.endpoints.onboarding import (
     OTP_TTL_MINUTES,
@@ -163,7 +163,7 @@ def list_pending_invites(request: Request, db: Session = Depends(get_tenant_db))
     ]
 
 
-@router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_roles(["owner"])])
+@router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_roles(["owner"]), require_scopes(["admin"])])
 def create_user(
     request: Request,
     user_in: UserCreate,
@@ -205,7 +205,7 @@ def create_user(
         )
 
 
-@router.post("/invite", response_model=UserInviteResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[require_roles(["owner"])])
+@router.post("/invite", response_model=UserInviteResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[require_roles(["owner"]), require_scopes(["admin"])])
 def invite_user(
     request: Request,
     invite_in: UserInviteRequest,
@@ -298,7 +298,7 @@ def invite_user(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
 
-@router.delete("/invites/{id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner"])])
+@router.delete("/invites/{id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner"]), require_scopes(["admin"])])
 def cancel_invite(
     id: UUID,
     request: Request,
@@ -319,7 +319,7 @@ def cancel_invite(
     db.commit()
 
 
-@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner"])])
+@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner"]), require_scopes(["admin"])])
 def delete_user(
     id: UUID,
     request: Request,

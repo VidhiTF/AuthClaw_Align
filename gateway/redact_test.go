@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -774,19 +775,16 @@ func TestRedactEngine(t *testing.T) {
 		// The test environment runs RLS checks. Let's see if we can query redaction_tokens without setting context.
 
 		dbURL := os.Getenv("DATABASE_URL")
-		if dbURL == "" || strings.Contains(dbURL, "authclaw:authclaw") {
-			appPassword := os.Getenv("POSTGRES_APP_PASSWORD")
-			if appPassword == "" {
-				appPassword = "authclaw_app"
-			}
-			dbURL = "postgresql://authclaw_app:" + appPassword + "@localhost:5432/authclaw?sslmode=disable"
-		} else {
-			appPassword := os.Getenv("POSTGRES_APP_PASSWORD")
-			if appPassword == "" {
-				appPassword = "authclaw_app"
-			}
-			dbURL = strings.Replace(dbURL, "authclaw:authclaw@", "authclaw_app:"+appPassword+"@", 1)
+		parsedURL, err := url.Parse(dbURL)
+		if err != nil {
+			t.Fatalf("Invalid DATABASE_URL: %v", err)
 		}
+		appPassword := os.Getenv("POSTGRES_APP_PASSWORD")
+		if appPassword == "" {
+			appPassword = "authclaw_app"
+		}
+		parsedURL.User = url.UserPassword("authclaw_app", appPassword)
+		dbURL = parsedURL.String()
 		appDB, err := sql.Open("postgres", dbURL)
 		if err != nil {
 			t.Fatalf("Failed to connect to DB via authclaw_app: %v", err)

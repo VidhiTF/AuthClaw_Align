@@ -27,7 +27,7 @@ def list_red_team_runs(
     return red_team.list_runs(db, tenant_id)
 
 
-@router.post("/runs", status_code=201, dependencies=[require_roles(["owner", "admin"])])
+@router.post("/runs", status_code=201, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def run_red_team(
     payload: RedTeamRunRequest,
     request: Request,

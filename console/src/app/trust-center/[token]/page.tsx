@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import {
   AlertTriangle,
@@ -9,9 +9,10 @@ import {
   FileCheck,
   KeyRound,
   ShieldCheck,
-  ShieldAlert,
   Upload,
 } from "lucide-react";
+import { TrustSummary } from "@/components/trust-summary";
+import type { TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
 
 interface ControlScore {
   id: string;
@@ -53,6 +54,7 @@ interface TrustCenterPackage {
     readiness_level: string;
     frameworks: FrameworkScore[];
     generated_at: string;
+    trust_summary?: TrustSummaryData;
   };
   signing_key: {
     algorithm: string;
@@ -92,26 +94,83 @@ export default function TrustCenterPage() {
   const [exporting, setExporting] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
+  const [accessToken, setAccessToken] = useState("");
+  const [otpSentTo, setOtpSentTo] = useState("");
+  const [otp, setOtp] = useState("");
+  const [accessBusy, setAccessBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
+  const loadPackage = useCallback(async (verifiedAccess: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/trust-center/public/${encodeURIComponent(token)}`, {
+        headers: { "X-Trust-Center-Access": verifiedAccess },
+      });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload.detail || payload.error || "Trust Center link is unavailable");
+      setData(payload);
+      setSelectedFramework(payload.share?.frameworks?.[0] || "");
+    } catch (err: unknown) {
+      sessionStorage.removeItem(`trust-center:${token}`);
+      setAccessToken("");
+      setData(null);
+      setError(err instanceof Error ? err.message : "Trust Center link is unavailable");
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
   useEffect(() => {
-    const load = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetch(`/api/trust-center/public/${encodeURIComponent(token)}`);
-        const payload = await res.json();
-        if (!res.ok) throw new Error(payload.detail || payload.error || "Trust Center link is unavailable");
-        setData(payload);
-        setSelectedFramework(payload.share?.frameworks?.[0] || "");
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : "Trust Center link is unavailable");
-      } finally {
+    if (!token) return;
+    const initialize = window.setTimeout(() => {
+      const savedAccess = sessionStorage.getItem(`trust-center:${token}`) || "";
+      if (savedAccess) {
+        setAccessToken(savedAccess);
+        void loadPackage(savedAccess);
+      } else {
         setLoading(false);
       }
-    };
-    if (token) void load();
-  }, [token]);
+    }, 0);
+    return () => window.clearTimeout(initialize);
+  }, [loadPackage, token]);
+
+  const requestAccess = async () => {
+    setAccessBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/trust-center/public/${encodeURIComponent(token)}/request-access`, { method: "POST" });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload.detail || payload.error || "Could not send verification code");
+      setOtpSentTo(payload.email || "the configured auditor email");
+      if (payload.dev_otp) setOtp(payload.dev_otp);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not send verification code");
+    } finally {
+      setAccessBusy(false);
+    }
+  };
+
+  const verifyAccess = async () => {
+    setAccessBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/trust-center/public/${encodeURIComponent(token)}/verify-access`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ otp }),
+      });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload.detail || payload.error || "Could not verify auditor email");
+      sessionStorage.setItem(`trust-center:${token}`, payload.access_token);
+      setAccessToken(payload.access_token);
+      await loadPackage(payload.access_token);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Could not verify auditor email");
+    } finally {
+      setAccessBusy(false);
+    }
+  };
 
   const activeFramework = useMemo(
     () => data?.scores.frameworks.find((framework) => framework.framework === selectedFramework) || data?.scores.frameworks[0],
@@ -123,7 +182,9 @@ export default function TrustCenterPage() {
     setError(null);
     try {
       const query = framework ? `?framework=${encodeURIComponent(framework)}` : "";
-      const res = await fetch(`/api/trust-center/public/${encodeURIComponent(token)}/signed-export${query}`);
+      const res = await fetch(`/api/trust-center/public/${encodeURIComponent(token)}/signed-export${query}`, {
+        headers: { "X-Trust-Center-Access": accessToken },
+      });
       const artifact = await res.json();
       if (!res.ok) throw new Error(artifact.detail || artifact.error || "Signed export failed");
       const dataStr = "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(artifact, null, 2));
@@ -170,13 +231,51 @@ export default function TrustCenterPage() {
     );
   }
 
-  if (error && !data) {
+  if (!data) {
     return (
       <main className="min-h-screen bg-[#050508] text-white flex items-center justify-center p-6">
-        <div className="max-w-md rounded-2xl border border-red-500/20 bg-red-500/10 p-6 text-center">
-          <ShieldAlert className="mx-auto mb-3 h-10 w-10 text-red-300" />
-          <h1 className="text-xl font-bold">Trust Center unavailable</h1>
-          <p className="mt-2 text-sm text-red-100/80">{error}</p>
+        <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-[#09090d] p-6">
+          <KeyRound className="mb-3 h-10 w-10 text-indigo-300" />
+          <h1 className="text-xl font-bold">Verify auditor email</h1>
+          <p className="mt-2 text-sm text-slate-400">
+            This Trust Center link is email-bound. Request the six-digit code sent to its configured auditor.
+          </p>
+          {error && <div className="mt-4 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-100">{error}</div>}
+          {otpSentTo ? (
+            <div className="mt-5 space-y-3">
+              <p className="text-xs text-slate-400">Code sent to {otpSentTo}</p>
+              <input
+                value={otp}
+                onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="000000"
+                className="w-full rounded-lg border border-slate-700 bg-[#050508] px-3 py-2 text-center font-mono text-lg tracking-[0.4em] outline-none focus:border-indigo-500"
+              />
+              <button
+                onClick={() => void verifyAccess()}
+                disabled={accessBusy || otp.length !== 6}
+                className="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {accessBusy ? "Verifying..." : "Verify and open"}
+              </button>
+              <button
+                onClick={() => void requestAccess()}
+                disabled={accessBusy}
+                className="w-full text-xs text-slate-400 hover:text-white disabled:opacity-50"
+              >
+                Send another code
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => void requestAccess()}
+              disabled={accessBusy}
+              className="mt-5 w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold hover:bg-indigo-500 disabled:opacity-50"
+            >
+              {accessBusy ? "Sending..." : "Send verification code"}
+            </button>
+          )}
         </div>
       </main>
     );
@@ -239,6 +338,8 @@ export default function TrustCenterPage() {
           ))}
         </section>
 
+        <TrustSummary summary={data.scores.trust_summary} dark />
+
         {activeFramework && (
           <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
             <div className="rounded-2xl border border-slate-800 bg-[#09090d] overflow-hidden">
@@ -299,13 +400,15 @@ export default function TrustCenterPage() {
                   >
                     {exporting ? "Signing..." : `Download ${activeFramework.framework} Export`}
                   </button>
-                  <button
-                    onClick={() => downloadSignedExport()}
-                    disabled={exporting}
-                    className="rounded-lg border border-slate-700 px-4 py-2 text-xs font-bold text-slate-200 hover:bg-slate-800 disabled:opacity-50"
-                  >
-                    Download Full Export
-                  </button>
+                  {["SOC2", "GDPR", "HIPAA"].every((framework) => data.share.frameworks.includes(framework)) && (
+                    <button
+                      onClick={() => downloadSignedExport()}
+                      disabled={exporting}
+                      className="rounded-lg border border-slate-700 px-4 py-2 text-xs font-bold text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      Download Full Export
+                    </button>
+                  )}
                 </div>
               </div>
 

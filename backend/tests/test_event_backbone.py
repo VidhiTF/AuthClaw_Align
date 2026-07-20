@@ -24,3 +24,32 @@ def test_backend_event_topic_names_match_backbone_contract():
     assert event_backbone.GATEWAY_TRAFFIC_TOPIC == "gateway.traffic"
     assert event_backbone.AUDIT_EVENTS_TOPIC == "audit.events"
     assert event_backbone.AUDIT_DLQ_TOPIC == "audit.deadletter"
+
+
+def test_publish_persists_before_kafka(monkeypatch):
+    order = []
+
+    class Future:
+        def get(self, timeout):
+            assert timeout == 5
+
+    class Producer:
+        def send(self, *_args, **_kwargs):
+            order.append("kafka")
+            return Future()
+
+    monkeypatch.setattr(
+        event_backbone,
+        "persist_audit_event",
+        lambda _event: order.append("postgres"),
+    )
+
+    assert event_backbone.publish_audit_event(Producer(), "tenant-1", {}) is None
+    assert order == ["postgres", "kafka"]
+
+
+def test_publish_stops_when_postgres_fails(monkeypatch):
+    failure = RuntimeError("postgres unavailable")
+    monkeypatch.setattr(event_backbone, "persist_audit_event", lambda _event: failure)
+
+    assert event_backbone.publish_audit_event(object(), "tenant-1", {}) is failure

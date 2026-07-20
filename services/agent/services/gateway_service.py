@@ -10,6 +10,7 @@ from memory import add_message
 from sqlalchemy import text
 from services.canonical_agent_service import build_agent_execution_context
 from services.registrar_service import RegistrarService
+from services.tenant_context import get_current_tenant_id
 from verify_audit import (
     clear_agent_event_context,
     log_agent_event,
@@ -355,15 +356,18 @@ class GatewayService:
     def persist_latest_message_trace(self, session_id: str, trace: list) -> None:
         trace_json = json.dumps(trace)
         try:
+            tenant_id = get_current_tenant_id()
+            if tenant_id is None:
+                raise RuntimeError("Chat trace persistence requires an authenticated tenant context.")
             with engine.connect() as conn:
                 last_msg = conn.execute(
-                    text("SELECT id FROM chat_messages WHERE session_id = :sid ORDER BY id DESC LIMIT 1"),
-                    {"sid": session_id},
+                    text("SELECT id FROM chat_messages WHERE session_id = :sid AND tenant_id = :tid ORDER BY id DESC LIMIT 1"),
+                    {"sid": session_id, "tid": int(tenant_id)},
                 ).fetchone()
                 if last_msg:
                     conn.execute(
-                        text("UPDATE chat_messages SET trace = :trace WHERE id = :id"),
-                        {"trace": trace_json, "id": last_msg[0]},
+                        text("UPDATE chat_messages SET trace = :trace WHERE id = :id AND tenant_id = :tid"),
+                        {"trace": trace_json, "id": last_msg[0], "tid": int(tenant_id)},
                     )
                     conn.commit()
         except Exception as ex:

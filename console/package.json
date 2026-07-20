@@ -8,7 +8,7 @@
     "start": "next start -p 3001",
     "lint": "eslint",
     "test:session-store": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/session-store.test.mts",
-    "test:unit": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/session-store.test.mts tests/ui-format.test.mts",
+    "test:unit": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/oidc-state.test.mts tests/session-auth.test.mts tests/session-store.test.mts tests/trust-summary.test.mts tests/ui-format.test.mts",
     "postinstall": "node scripts/patch-next-picomatch.mjs"
   },
   "dependencies": {

@@ -10,12 +10,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
-from app.db.models import AuditLogMetadata
+from app.db.models import AuditLogMetadata, Tenant
 from app.services.audit_utils import (
     canonical_audit_record,
     standardize_timestamp,
@@ -187,8 +188,8 @@ def fetch_clickhouse_records(ch: Any, tenant_id: str) -> list[dict[str, Any]]:
             request_id,
             prior_hash,
             integrity_hash
-        FROM authclaw.audit_events
-        WHERE tenant_id = {tenant_id:UUID}
+        FROM authclaw.audit_events AS ae
+        WHERE ae.tenant_id = {tenant_id:UUID}
         ORDER BY timestamp ASC, record_id ASC
         """,
         parameters={"tenant_id": tenant_id},
@@ -251,6 +252,68 @@ def replay_postgres_to_clickhouse(db: Session, ch: Any, tenant_id: str, *, dry_r
         "postgres_count": len(postgres_records),
         "already_present": len(clickhouse_existing),
         "skipped": len(clickhouse_existing),
+        "inserted": 0 if dry_run else len(rows),
+        "would_insert": len(rows),
+        "record_ids": [row["record_id"] for row in rows],
+    }
+
+
+def recover_clickhouse_to_postgres(db: Session, ch: Any, tenant_id: str, *, dry_run: bool = True) -> dict[str, Any]:
+    """Restore missing chain-of-record rows without changing existing records."""
+    db.info["tenant_id"] = tenant_id
+    tenant_uuid = uuid.UUID(tenant_id)
+    if not db.query(Tenant.id).filter(Tenant.id == tenant_uuid).first():
+        raise ValueError(f"Tenant {tenant_id} must exist before audit recovery")
+    clickhouse_records = fetch_clickhouse_records(ch, tenant_id)
+    existing = {
+        str(record_id)
+        for (record_id,) in (
+            db.query(AuditLogMetadata.record_id)
+            .filter(AuditLogMetadata.tenant_id == tenant_uuid)
+            .all()
+        )
+    }
+    rows = [record for record in clickhouse_records if record["record_id"] not in existing]
+
+    if not dry_run and rows:
+        def optional_uuid(value: Any) -> uuid.UUID | None:
+            return uuid.UUID(str(value)) if value else None
+
+        db.add_all(
+            [
+                AuditLogMetadata(
+                    tenant_id=tenant_uuid,
+                    record_id=uuid.UUID(record["record_id"]),
+                    actor_id=optional_uuid(record.get("actor_id")),
+                    actor_type=record.get("actor_type") or "gateway",
+                    action=record["action"],
+                    request_id=record.get("request_id") or "",
+                    policy_id=optional_uuid(record.get("policy_id")),
+                    provider=record.get("provider") or "",
+                    model=record.get("model") or "",
+                    reason=record.get("reason") or "",
+                    prompt_count=record.get("prompt_count") or 0,
+                    request_size=record.get("request_size") or 0,
+                    response_status=record.get("response_status") or 0,
+                    duration_ms=record.get("duration_ms") or 0,
+                    frameworks_affected=record.get("frameworks_affected") or [],
+                    execution_trace=record.get("execution_trace") or "[]",
+                    prior_hash=record.get("prior_hash") or GENESIS_HASH,
+                    integrity_hash=record.get("integrity_hash") or "",
+                    created_at=record["timestamp"],
+                )
+                for record in rows
+            ]
+        )
+        db.commit()
+
+    return {
+        "tenant_id": tenant_id,
+        "source": "clickhouse",
+        "target": "postgres",
+        "dry_run": dry_run,
+        "clickhouse_count": len(clickhouse_records),
+        "already_present": len({record["record_id"] for record in clickhouse_records} & existing),
         "inserted": 0 if dry_run else len(rows),
         "would_insert": len(rows),
         "record_ids": [row["record_id"] for row in rows],

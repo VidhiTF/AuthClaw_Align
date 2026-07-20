@@ -16,8 +16,9 @@ does not own users, tenants, policy, audit, evidence or workflow records.
   the canonical application.
 - Approval decisions reuse the canonical workflow approval endpoints and retain backend
   scope and MFA enforcement.
-- The static files under `console/public/` are public marketing content, not a second
-  authenticated application.
+- `/`, `/product`, `/pricing`, `/security`, and `/company` are public App Router routes
+  in the canonical Next.js application. Legacy `console/public/*.html` pages remain only
+  for rollback parity and permanently redirect to their canonical routes.
 
 ## Runtime boundary
 
@@ -46,6 +47,19 @@ does not own users, tenants, policy, audit, evidence or workflow records.
 - Trust Center shares, public reports, signed exports and verification.
 - Agent session creation, history and chat through the authenticated agent boundary.
 - AWS status/usage/S3 and ephemeral cloud-connector operations through backend routes.
+
+## Compliance Trust Summary contract
+
+`GET /v1/compliance-scores` retains its existing score fields and adds an optional
+`trust_summary` object with `generated_at`, bucket `counts`, and `verified`, `in_progress`
+and `planned` control arrays. Each entry contains the existing framework, control ID, name,
+score and status. Existing statuses are unchanged: the summary presents `compliant` as
+Verified, `partial` as In Progress and `non_compliant` as Planned.
+
+The backend compliance-scoring service is the only classification source. Console and Trust
+Center clients render the returned buckets without deriving status. Public Trust Center
+packages filter the generated arrays to the share's allowed frameworks and recalculate only
+their counts. Missing `trust_summary` remains supported during rolling deployment.
 
 ## Verification evidence
 

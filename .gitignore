@@ -72,6 +72,7 @@ tfplan
 *.tfplan
 *.tfvars
 !*.tfvars.example
+backend.generated.tf
 
 # OS files
 .DS_Store

@@ -64,7 +64,7 @@ services:
       - "${PRESIDIO_PORT:-3000}:3000"
 
   mock-provider:
-    image: python:3.12-slim
+    image: python:3.14.3-slim
     container_name: authclaw-demo-mock-provider
     profiles: ["ci"]
     working_dir: /app
@@ -84,6 +84,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile.demo
     container_name: authclaw-demo-backend
+    env_file:
+      - .env.local
     depends_on:
       postgres:
         condition: service_healthy
@@ -118,13 +120,6 @@ services:
       DEMO_OTP_VISIBLE: ${DEMO_OTP_VISIBLE:-false}
       AUTHCLAW_EMAIL_OUTBOX_PATH: ${AUTHCLAW_EMAIL_OUTBOX_PATH:-/app/.authclaw/email-outbox.jsonl}
       AUTHCLAW_LITE_DEMO_PASSWORD: ${AUTHCLAW_LITE_DEMO_PASSWORD:-AuthClawDemo!234}
-      SMTP_HOST: ${SMTP_HOST:-}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_USER: ${SMTP_USER:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      SMTP_FROM: ${SMTP_FROM:-}
-      EMAIL_FROM: ${EMAIL_FROM:-}
-      SMTP_TLS: ${SMTP_TLS:-true}
       PUBLIC_GATEWAY_URL: ${PUBLIC_GATEWAY_URL:-http://localhost:18080}
       ONBOARDING_SIGNUP_EMAIL_PER_HOUR: ${ONBOARDING_SIGNUP_EMAIL_PER_HOUR:-3}
       ONBOARDING_SIGNUP_IP_PER_DAY: ${ONBOARDING_SIGNUP_IP_PER_DAY:-10}
@@ -205,6 +200,7 @@ services:
         condition: service_started
     environment:
       DATABASE_URL: postgresql://${AGENT_POSTGRES_USER:-authclaw_agent}:${AGENT_POSTGRES_PASSWORD:-change-me-agent-local}@agent-postgres:5432/${AGENT_POSTGRES_DB:-authclaw_agent}
+      AUTHCLAW_RUNTIME_DB_ROLE: ${AGENT_RUNTIME_DB_ROLE:-authclaw_agent_runtime}
       REDIS_URL: redis://redis:6379
       AUTHCLAW_ENV: demo
       AUTHCLAW_ALLOWED_ORIGINS: http://localhost:3001
@@ -231,6 +227,7 @@ services:
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:18000/api/v1}
         NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:18080}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3001}
         NEXT_PUBLIC_AUTHCLAW_DEMO_MODE: ${NEXT_PUBLIC_AUTHCLAW_DEMO_MODE:-true}
         NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: ${NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES:-false}
     container_name: authclaw-demo-console
@@ -250,6 +247,7 @@ services:
       AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-demo-internal-service-secret-change-me}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:18000/api/v1}
       NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:18080}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3001}
       NEXT_PUBLIC_AUTHCLAW_DEMO_MODE: ${NEXT_PUBLIC_AUTHCLAW_DEMO_MODE:-true}
       NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: ${NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES:-false}
       AUTHCLAW_COOKIE_SECURE: ${AUTHCLAW_COOKIE_SECURE:-false}

@@ -104,32 +104,34 @@ def sanitize_trace(trace):
     return sanitized
 
 
+def _chat_tenant_id(tenant_id=None) -> int:
+    resolved = tenant_id if tenant_id is not None else get_current_tenant_id()
+    if resolved is None:
+        raise RuntimeError("Chat operations require an authenticated tenant context.")
+    return int(resolved)
+
+
 def ensure_session_exists(session_id: str, tenant_id=None):
     """
     Ensures that a chat session exists in the database.
     """
     try:
+        tenant_id = _chat_tenant_id(tenant_id)
         with engine.connect() as conn:
             res = conn.execute(
-                text("SELECT id FROM chat_sessions WHERE session_id = :session_id"),
-                {"session_id": session_id}
+                text("SELECT id FROM chat_sessions WHERE session_id = :session_id AND tenant_id = :tenant_id"),
+                {"session_id": session_id, "tenant_id": tenant_id}
             ).fetchone()
             if not res:
-                if tenant_id is not None:
-                    conn.execute(
-                        text(
-                            """
-                            INSERT INTO chat_sessions (session_id, title, user_id, tenant_id)
-                            VALUES (:session_id, 'New Chat', 'admin_user', :tenant_id)
-                            """
-                        ),
-                        {"session_id": session_id, "tenant_id": int(tenant_id)}
-                    )
-                else:
-                    conn.execute(
-                        text("INSERT INTO chat_sessions (session_id, title, user_id) VALUES (:session_id, 'New Chat', 'admin_user')"),
-                        {"session_id": session_id}
-                    )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO chat_sessions (session_id, title, user_id, tenant_id)
+                        VALUES (:session_id, 'New Chat', 'admin_user', :tenant_id)
+                        """
+                    ),
+                    {"session_id": session_id, "tenant_id": tenant_id}
+                )
                 conn.commit()
     except Exception as e:
         import logging
@@ -139,33 +141,27 @@ def ensure_session_exists(session_id: str, tenant_id=None):
 
 def add_message(session_id, role, content, trace=None):
     try:
-        tenant_id = get_current_tenant_id()
+        tenant_id = _chat_tenant_id()
         ensure_session_exists(session_id, tenant_id=tenant_id)
         with engine.connect() as conn:
-            if tenant_id is not None:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO chat_messages (session_id, role, content, trace, tenant_id)
-                        VALUES (:session_id, :role, :content, :trace, :tenant_id)
-                        """
-                    ),
-                    {
-                        "session_id": session_id,
-                        "role": role,
-                        "content": content,
-                        "trace": trace,
-                        "tenant_id": int(tenant_id),
-                    }
-                )
-            else:
-                conn.execute(
-                    text("INSERT INTO chat_messages (session_id, role, content, trace) VALUES (:session_id, :role, :content, :trace)"),
-                    {"session_id": session_id, "role": role, "content": content, "trace": trace}
-                )
             conn.execute(
-                text("UPDATE chat_sessions SET updated_at = NOW() WHERE session_id = :session_id"),
-                {"session_id": session_id}
+                text(
+                    """
+                    INSERT INTO chat_messages (session_id, role, content, trace, tenant_id)
+                    VALUES (:session_id, :role, :content, :trace, :tenant_id)
+                    """
+                ),
+                {
+                    "session_id": session_id,
+                    "role": role,
+                    "content": content,
+                    "trace": trace,
+                    "tenant_id": tenant_id,
+                }
+            )
+            conn.execute(
+                text("UPDATE chat_sessions SET updated_at = NOW() WHERE session_id = :session_id AND tenant_id = :tenant_id"),
+                {"session_id": session_id, "tenant_id": tenant_id}
             )
             conn.commit()
     except Exception as e:
@@ -174,12 +170,13 @@ def add_message(session_id, role, content, trace=None):
         logger.error(f"Database error in add_message: {e}", exc_info=True)
 
 
-def get_history(session_id):
+def get_history(session_id, tenant_id=None):
     try:
+        tenant_id = _chat_tenant_id(tenant_id)
         with engine.connect() as conn:
             res = conn.execute(
-                text("SELECT role, content, trace, created_at FROM chat_messages WHERE session_id = :session_id ORDER BY id ASC"),
-                {"session_id": session_id}
+                text("SELECT role, content, trace, created_at FROM chat_messages WHERE session_id = :session_id AND tenant_id = :tenant_id ORDER BY id ASC"),
+                {"session_id": session_id, "tenant_id": tenant_id}
             )
             history = []
             for row in res:
@@ -217,3 +214,41 @@ def get_history(session_id):
         logger = logging.getLogger("authclaw.memory")
         logger.error(f"Database error in get_history: {e}", exc_info=True)
         return []
+
+
+def list_sessions(tenant_id=None):
+    tenant_id = _chat_tenant_id(tenant_id)
+    with engine.connect() as conn:
+        return conn.execute(
+            text(
+                """
+                SELECT session_id, title, created_at, updated_at, user_id
+                FROM chat_sessions
+                WHERE tenant_id = :tenant_id
+                ORDER BY updated_at DESC
+                """
+            ),
+            {"tenant_id": tenant_id},
+        ).fetchall()
+
+
+def delete_session_history(session_id, tenant_id=None) -> None:
+    tenant_id = _chat_tenant_id(tenant_id)
+    with engine.connect() as conn:
+        conn.execute(
+            text("DELETE FROM chat_messages WHERE session_id = :session_id AND tenant_id = :tenant_id"),
+            {"session_id": session_id, "tenant_id": tenant_id},
+        )
+        conn.execute(
+            text("DELETE FROM chat_sessions WHERE session_id = :session_id AND tenant_id = :tenant_id"),
+            {"session_id": session_id, "tenant_id": tenant_id},
+        )
+        conn.commit()
+
+
+def purge_session_history(tenant_id=None) -> None:
+    tenant_id = _chat_tenant_id(tenant_id)
+    with engine.connect() as conn:
+        conn.execute(text("DELETE FROM chat_messages WHERE tenant_id = :tenant_id"), {"tenant_id": tenant_id})
+        conn.execute(text("DELETE FROM chat_sessions WHERE tenant_id = :tenant_id"), {"tenant_id": tenant_id})
+        conn.commit()

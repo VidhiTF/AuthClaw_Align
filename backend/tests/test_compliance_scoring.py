@@ -68,3 +68,41 @@ def test_readiness_levels_are_stable():
     assert compliance_scoring.readiness_level(80) == "monitor"
     assert compliance_scoring.readiness_level(65) == "needs_attention"
     assert compliance_scoring.readiness_level(20) == "insufficient_evidence"
+
+
+def test_trust_summary_maps_existing_control_statuses_once():
+    frameworks = [
+        {
+            "framework": "SOC2",
+            "controls": [
+                {"id": "one", "name": "One", "score": 90.0, "status": "compliant"},
+                {"id": "two", "name": "Two", "score": 70.0, "status": "partial"},
+                {"id": "three", "name": "Three", "score": 40.0, "status": "non_compliant"},
+            ],
+        }
+    ]
+
+    summary = compliance_scoring._build_trust_summary(frameworks)
+
+    assert summary["counts"] == {"verified": 1, "in_progress": 1, "planned": 1}
+    assert summary["verified"][0]["id"] == "one"
+    assert summary["in_progress"][0]["id"] == "two"
+    assert summary["planned"][0]["id"] == "three"
+    control_ids = [item["id"] for bucket in ("verified", "in_progress", "planned") for item in summary[bucket]]
+    assert sorted(control_ids) == ["one", "three", "two"]
+    assert len(control_ids) == len(set(control_ids))
+
+
+def test_trust_summary_does_not_modify_existing_control_fields():
+    control = {"id": "one", "name": "One", "score": 90.0, "status": "compliant", "evidence": ["signal"]}
+    frameworks = [{"framework": "SOC2", "controls": [control]}]
+
+    compliance_scoring._build_trust_summary(frameworks)
+
+    assert control == {
+        "id": "one",
+        "name": "One",
+        "score": 90.0,
+        "status": "compliant",
+        "evidence": ["signal"],
+    }

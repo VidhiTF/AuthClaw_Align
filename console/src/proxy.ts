@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { authenticateSessionCookie } from "@/lib/session-auth";
 
 export function proxy(request: NextRequest) {
   const path = request.nextUrl.pathname;
   const publicMarketingFiles = new Set([
+    "/",
+    "/product",
+    "/pricing",
+    "/security",
+    "/company",
     "/index.html",
     "/product.html",
     "/pricing.html",
@@ -11,12 +17,16 @@ export function proxy(request: NextRequest) {
     "/company.html",
     "/styles.css",
     "/app.js",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/opengraph-image",
   ]);
 
   // 1. Define public and asset paths
   const isPublicPath =
-    path === "/" ||
     publicMarketingFiles.has(path) ||
+    path.startsWith("/opengraph-image") ||
+    path.startsWith("/twitter-image") ||
     path === "/login" ||
     path === "/signup" ||
     path.startsWith("/trust/shared") ||
@@ -33,35 +43,31 @@ export function proxy(request: NextRequest) {
 
   // 2. Extract session cookie
   const sessionCookie = request.cookies.get("authclaw_session")?.value;
-  let sessionRole = "viewer";
-  if (sessionCookie) {
-    try {
-      sessionRole = (JSON.parse(sessionCookie).role || "viewer").toLowerCase();
-    } catch {
-      sessionRole = "viewer";
-    }
-  }
+  const session = authenticateSessionCookie(sessionCookie);
+  const sessionRole = session?.role.toLowerCase() || "viewer";
 
   // 3. Handle redirects
-  if (!sessionCookie && !isPublicPath) {
-    // Redirect unauthenticated user to login
-    return NextResponse.redirect(new URL("/login", request.url));
+  if (!session && !isPublicPath) {
+    return new NextResponse("Unauthorized", { status: 401 });
   }
 
-  if (sessionCookie && path === "/login") {
+  if (session && path === "/login") {
     // Redirect authenticated user away from login to the demo onboarding flow
     return NextResponse.redirect(new URL("/connect", request.url));
   }
 
-  if (sessionCookie && path === "/signup") {
+  if (session && path === "/signup") {
     return NextResponse.redirect(new URL("/connect", request.url));
   }
 
-  const viewerBlockedPaths = ["/connect", "/gateway", "/policies", "/aws", "/settings"];
+  const readOnlyRoles = new Set(["viewer", "developer", "operator"]);
+  const readOnlyBlockedPaths = ["/connect", "/gateway", "/policies", "/aws", "/settings"];
   if (
-    sessionCookie &&
-    sessionRole === "viewer" &&
-    viewerBlockedPaths.some((blockedPath) => path === blockedPath || path.startsWith(`${blockedPath}/`))
+    session &&
+    readOnlyRoles.has(sessionRole) &&
+    readOnlyBlockedPaths.some(
+      (blockedPath) => path === blockedPath || path.startsWith(`${blockedPath}/`),
+    )
   ) {
     return NextResponse.redirect(new URL("/overview", request.url));
   }

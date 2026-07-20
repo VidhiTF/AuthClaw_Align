@@ -16,7 +16,8 @@
 - Dismiss stale approvals after new commits.
 - Require all conversations to be resolved.
 - Require signed commits where the GitHub plan supports it.
-- Require the CI, dependency/secret scan, backend, gateway, agent and console checks.
+- Require `ACL-14 Required Checks`, the stable aggregate for every build, test,
+  dependency/secret scan, integration, compliance and image-scan gate.
 - Do not allow branch deletion.
 
 ## Required GitHub rules for `dev/*`
@@ -32,3 +33,5 @@ Developers branch from their assigned `dev/*` branch and use
 owner opens or approves the release PR from `dev/*` to `master`.
 
 `CODEOWNERS` supports review routing; it does not replace branch protection.
+The API-ready protection payload and owner command are documented in
+`infra/terraform/BETA_DEPLOYMENT.md`.

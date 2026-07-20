@@ -1,9 +1,9 @@
-FROM python:3.14-slim
+FROM python:3.14.3-slim
 
 WORKDIR /app
 
 COPY audit_consumer/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt
 RUN addgroup --system authclaw && adduser --system --ingroup authclaw authclaw
 
 COPY --chown=authclaw:authclaw audit_consumer/ .
