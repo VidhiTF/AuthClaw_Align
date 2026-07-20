@@ -51,6 +51,9 @@ function isUuid(value: string | null): value is string {
   );
 }
 
+const INVITATION_FAILURE_MESSAGE = "Invitation is invalid or unavailable.";
+const INVITATION_RECOVERY_GUIDANCE = "Please contact your tenant administrator or support if you believe this is an error.";
+
 function SignupPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -139,7 +142,7 @@ function SignupPageContent() {
       return;
     }
     if (isInviteMode && !isUuid(inviteId)) {
-      setError("Invite link is incomplete or invalid. Ask the owner to copy the full invite link again.");
+      setError(INVITATION_FAILURE_MESSAGE);
       return;
     }
     setLoading(true);
@@ -171,7 +174,7 @@ function SignupPageContent() {
         router.push("/connect?onboarding=1");
       }
     } catch (err: unknown) {
-      setError(getErrorMessage(err, "Could not verify code"));
+      setError(isInviteMode ? INVITATION_FAILURE_MESSAGE : getErrorMessage(err, "Could not verify code"));
     } finally {
       setLoading(false);
     }
@@ -203,6 +206,30 @@ function SignupPageContent() {
   const copyText = async (label: string, value: string) => {
     await flashCopy(value, setCopied, label, null, 1600);
   };
+
+  if (!isInviteMode) {
+    return (
+      <main className="min-h-screen bg-[#FBFAF9] text-[#0E1726] font-sans">
+        <div className="mx-auto flex min-h-screen w-full max-w-xl items-center px-5 py-10">
+          <section className="w-full rounded-[14px] border border-[#E6E9F0] bg-white p-6 text-center shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
+            <ShieldCheck className="mx-auto h-8 w-8 text-[#6D28D9]" />
+            <h1 className="mt-4 text-xl font-bold">Invitation required</h1>
+            <p className="mt-2 text-sm text-[#6B7488]">
+              AuthClaw early access is available only through an approved tenant invitation.
+            </p>
+            <div className="mt-6 flex justify-center gap-3">
+              <Link href="/early-access" className="rounded-[10px] bg-[#6D28D9] px-4 py-2.5 text-sm font-semibold text-white">
+                Request early access
+              </Link>
+              <Link href="/login" className="rounded-[10px] border border-[#E6E9F0] px-4 py-2.5 text-sm font-semibold text-[#475069]">
+                Sign in
+              </Link>
+            </div>
+          </section>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-[#FBFAF9] text-[#0E1726] font-sans">
@@ -257,7 +284,7 @@ function SignupPageContent() {
             {error && (
               <div className="mb-5 flex items-center gap-3 rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-xs text-red-200">
                 <ShieldAlert className="h-4 w-4 text-red-300" />
-                {error}
+                {error} {isInviteMode && INVITATION_RECOVERY_GUIDANCE}
               </div>
             )}
 

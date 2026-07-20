@@ -4,6 +4,7 @@ import React, { useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Building2, Lock, Mail, ShieldAlert, ShieldCheck } from "lucide-react";
+import { marketingRoutes } from "@/marketing/config";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -345,9 +346,9 @@ export default function LoginPage() {
 
         <div className="mt-6 pt-5 border-t border-[#E6E9F0] text-center">
           <p className="text-xs text-[#6B7488]">
-            New to AuthClaw?{" "}
-            <Link href="/signup" className="font-semibold text-[#6D28D9] hover:text-[#7C3AED]">
-              Create a tenant
+            Interested in AuthClaw?{" "}
+            <Link href={marketingRoutes.earlyAccess} className="font-semibold text-[#6D28D9] hover:text-[#7C3AED]">
+              Request early access
             </Link>
           </p>
         </div>

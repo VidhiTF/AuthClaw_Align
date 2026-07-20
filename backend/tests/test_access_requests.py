@@ -644,3 +644,24 @@ def test_onboarding_lookup_migration_is_symmetric(monkeypatch):
             "access_request_onboarding_started(text, timestamptz)"
         ),
     ]
+
+
+def test_invite_onboarding_lookup_migration_preserves_f26_retention(monkeypatch):
+    path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "034_recognize_invite_onboarding.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_034", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    execute = MagicMock()
+    monkeypatch.setattr(migration.op, "execute", execute)
+
+    migration.upgrade()
+    assert "purpose IN ('signup', 'invite')" in execute.call_args.args[0]
+
+    execute.reset_mock()
+    migration.downgrade()
+    assert "purpose = 'signup'" in execute.call_args.args[0]

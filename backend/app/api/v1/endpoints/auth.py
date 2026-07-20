@@ -44,6 +44,7 @@ def _emit_oidc_audit(
     reason: str,
     request_id: str = "",
     response_status: int,
+    provider: str = "oidc",
 ) -> None:
     global _oidc_kafka_producer
     event = event_backbone.audit_event(
@@ -53,7 +54,7 @@ def _emit_oidc_audit(
         identity_action=action,
         action=f"auth:{action}",
         reason=reason,
-        provider="oidc",
+        provider=provider,
         request_id=request_id,
         trace=[],
     )
@@ -299,17 +300,18 @@ def oidc_callback(payload: OIDCCallbackRequest, request: Request):
             scopes=scopes,
             api_key=raw_key,
         )
-    except oidc_sso.OIDCAuthorizationError as exc:
+    except (oidc_sso.OIDCAuthorizationError, PermissionError) as exc:
         db.rollback()
+        reason = exc.reason_code if isinstance(exc, oidc_sso.OIDCAuthorizationError) else "authorization_failed"
         if tenant:
             _emit_oidc_audit(
                 tenant_id=str(tenant.id),
-                action=exc.reason_code,
-                reason=exc.reason_code,
+                action=reason,
+                reason=reason,
                 request_id=request_id,
                 response_status=403,
             )
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail="OIDC authorization failed") from exc
     except (oidc_sso.OIDCAuthenticationError, jwt.PyJWTError, jwt.PyJWKClientError, requests.HTTPError) as exc:
         db.rollback()
         if tenant:
@@ -397,6 +399,14 @@ def password_login(payload: PasswordLoginRequest):
         user.last_login = now
         db.add(api_key)
         db.commit()
+        _emit_oidc_audit(
+            tenant_id=str(tenant.id),
+            actor_id=str(user.id),
+            action="password_login_succeeded",
+            reason="success",
+            response_status=200,
+            provider="password",
+        )
 
         return PasswordLoginResponse(
             user_id=user.id,

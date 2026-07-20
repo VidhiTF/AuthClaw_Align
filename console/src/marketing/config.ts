@@ -10,12 +10,12 @@ export const marketingRoutes = {
   subprocessors: "/subprocessors",
   dpa: "/dpa",
   login: "/login",
-  trial: "/signup",
+  trial: "/early-access",
   demo: "/demo",
   earlyAccess: "/early-access",
-  contact: "/signup",
-  careers: "/signup",
-  trustReport: "/signup",
+  contact: "/early-access",
+  careers: "/early-access",
+  trustReport: "/early-access",
 } as const;
 
 export const marketingNavigation = [

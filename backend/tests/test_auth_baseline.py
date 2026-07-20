@@ -113,6 +113,138 @@ def test_oidc_group_role_mapping_uses_highest_privilege_group():
     assert role == "admin"
 
 
+@pytest.mark.parametrize("auto_provision", [False, True])
+def test_oidc_unknown_user_requires_tenant_invitation(auto_provision):
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    tenant = MagicMock()
+    tenant.id = "00000000-0000-4000-8000-000000000001"
+    config = {
+        "email_claim": "email",
+        "groups_claim": "groups",
+        "default_role": "viewer",
+        "role_mapping": {},
+        "auto_provision": auto_provision,
+    }
+
+    with pytest.raises(PermissionError, match="not provisioned"):
+        oidc_sso.map_user(
+            db,
+            tenant,
+            config,
+            {"email": "invited@example.com"},
+        )
+
+
+def test_oidc_existing_active_user_still_maps_to_tenant():
+    db = MagicMock()
+    user = MagicMock(is_active=True, role="viewer")
+    user_query = MagicMock()
+    user_query.filter.return_value.first.return_value = user
+    invite_query = MagicMock()
+    invite_query.filter.return_value.first.return_value = None
+    db.query.side_effect = [user_query, invite_query]
+    tenant = MagicMock()
+    config = {
+        "email_claim": "email",
+        "groups_claim": "groups",
+        "default_role": "viewer",
+        "role_mapping": {},
+    }
+
+    mapped_user, role = oidc_sso.map_user(
+        db,
+        tenant,
+        config,
+        {"email": "existing@example.com"},
+    )
+
+    assert mapped_user is user
+    assert role == "viewer"
+
+
+def test_oidc_legacy_user_still_synchronizes_role_from_idp():
+    db = MagicMock()
+    user = MagicMock(is_active=True, role="viewer")
+    user_query = MagicMock()
+    user_query.filter.return_value.first.return_value = user
+    invite_query = MagicMock()
+    invite_query.filter.return_value.first.return_value = None
+    db.query.side_effect = [user_query, invite_query]
+
+    mapped_user, role = oidc_sso.map_user(
+        db,
+        MagicMock(),
+        {
+            "email_claim": "email",
+            "groups_claim": "groups",
+            "default_role": "viewer",
+            "role_mapping": {"admins": "admin"},
+        },
+        {"email": "legacy@example.com", "groups": ["admins"]},
+    )
+
+    assert mapped_user is user
+    assert role == "admin"
+    assert user.role == "admin"
+
+
+def test_oidc_invited_user_keeps_persisted_role_instead_of_idp_escalation():
+    db = MagicMock()
+    user = MagicMock(is_active=True, role="viewer")
+    user_query = MagicMock()
+    user_query.filter.return_value.first.return_value = user
+    invite_query = MagicMock()
+    invite_query.filter.return_value.first.return_value = MagicMock()
+    db.query.side_effect = [user_query, invite_query]
+    tenant = MagicMock()
+    tenant.id = "00000000-0000-4000-8000-000000000001"
+
+    mapped_user, role = oidc_sso.map_user(
+        db,
+        tenant,
+        {
+            "email_claim": "email",
+            "groups_claim": "groups",
+            "default_role": "viewer",
+            "role_mapping": {"admins": "admin"},
+        },
+        {"email": "Invited@Example.com", "groups": ["admins"]},
+    )
+
+    assert mapped_user is user
+    assert role == "viewer"
+    assert user.role == "viewer"
+    invite_filters = invite_query.filter.call_args.args
+    assert invite_filters[0].right.value == tenant.id
+    assert invite_filters[1].right.value == "invited@example.com"
+
+
+def test_oidc_legacy_owner_protection_is_unchanged():
+    db = MagicMock()
+    user = MagicMock(is_active=True, role="owner")
+    user_query = MagicMock()
+    user_query.filter.return_value.first.return_value = user
+    invite_query = MagicMock()
+    invite_query.filter.return_value.first.return_value = None
+    db.query.side_effect = [user_query, invite_query]
+
+    _, role = oidc_sso.map_user(
+        db,
+        MagicMock(),
+        {
+            "email_claim": "email",
+            "groups_claim": "groups",
+            "default_role": "viewer",
+            "role_mapping": {},
+        },
+        {"email": "owner@example.com"},
+    )
+
+    assert role == "owner"
+    assert user.role == "owner"
+
+
 def _identity_policy():
     return {
         "tenant_claim": "tenant_id",
@@ -226,7 +358,63 @@ def test_oidc_policy_rejection_returns_403(monkeypatch, error, reason):
         )
 
     assert exc.value.status_code == 403
-    assert exc.value.detail == str(error)
+    assert exc.value.detail == "OIDC authorization failed"
+    emit.assert_called_once_with(
+        tenant_id=str(tenant.id),
+        action=reason,
+        reason=reason,
+        request_id="request-1",
+        response_status=403,
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (PermissionError("unknown user at Example IdP"), "authorization_failed"),
+        (PermissionError("inactive user at Example IdP"), "authorization_failed"),
+        (
+            oidc_sso.OIDCAuthorizationError(
+                "invitation tenant details",
+                "invitation_authorization_failed",
+            ),
+            "invitation_authorization_failed",
+        ),
+    ],
+)
+def test_oidc_user_authorization_failure_is_generic_and_rolled_back(monkeypatch, error, reason):
+    db = MagicMock()
+    tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    issue_console_key = MagicMock()
+    emit = MagicMock()
+    monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
+    monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
+    monkeypatch.setattr(oidc_sso, "exchange_code", lambda *_: {"id_token": "token"})
+    monkeypatch.setattr(oidc_sso, "validate_id_token", lambda *_: {"sub": "subject"})
+    monkeypatch.setattr(oidc_sso, "map_user", MagicMock(side_effect=error))
+    monkeypatch.setattr(oidc_sso, "issue_console_key", issue_console_key)
+    monkeypatch.setattr(auth_endpoints, "_emit_oidc_audit", emit)
+
+    with pytest.raises(HTTPException) as exc:
+        auth_endpoints.oidc_callback(
+            auth_endpoints.OIDCCallbackRequest(
+                code="code",
+                state="state",
+                nonce="nonce",
+                tenant_name="tenant",
+                redirect_uri=config["redirect_uri"],
+            ),
+            _request(),
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "OIDC authorization failed"
+    assert "Example IdP" not in exc.value.detail
+    assert "invitation" not in exc.value.detail.lower()
+    db.rollback.assert_called_once()
+    db.commit.assert_not_called()
+    issue_console_key.assert_not_called()
     emit.assert_called_once_with(
         tenant_id=str(tenant.id),
         action=reason,
@@ -344,6 +532,38 @@ def test_oidc_success_emits_actor_and_tenant_audit(monkeypatch):
         request_id="correlation-2",
         response_status=200,
     )
+
+
+def test_existing_password_login_still_succeeds(monkeypatch):
+    db = MagicMock()
+    tenant = MagicMock(
+        id="00000000-0000-4000-8000-000000000001",
+    )
+    tenant.name = "tenant"
+    user = MagicMock(
+        id="00000000-0000-4000-8000-000000000002",
+        email="user@example.com",
+        password_hash="password-hash",
+        role="owner",
+    )
+    monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
+    monkeypatch.setattr(auth_endpoints, "_active_users_for_email", lambda *_args: [(user, tenant)])
+    monkeypatch.setattr(auth_endpoints, "verify_password", lambda *_: True)
+
+    response = auth_endpoints.password_login(
+        auth_endpoints.PasswordLoginRequest(
+            email="user@example.com",
+            password="correct password",
+            tenant_name="tenant",
+        )
+    )
+
+    assert str(response.user_id) == user.id
+    assert str(response.tenant_id) == tenant.id
+    assert response.role == "owner"
+    assert response.api_key.startswith("acl_console_")
+    db.add.assert_called_once()
+    db.commit.assert_called_once()
 
 
 def test_oidc_audit_event_contains_no_sensitive_authentication_material(monkeypatch):

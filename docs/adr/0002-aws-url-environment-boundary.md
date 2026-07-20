@@ -177,6 +177,234 @@ ACL-30 and ACL-37 implement and test the controls before release:
 - Intake responses do not reveal whether an email, tenant or invitation already exists.
   Approval and invitation remain separate authenticated administrative actions.
 
+## F27 invite-only onboarding
+
+### Architecture Notes
+
+The canonical account-entry path is invite-only:
+
+1. A tenant owner or administrator creates an invitation through the authenticated
+   tenant user API. An administrator cannot invite an owner.
+2. The invitation is bound to one tenant, normalized email address and assigned tenant
+   role. Delivery uses the existing onboarding email transport.
+3. The public `/signup` page accepts an invitation identifier; it is not a public
+   registration page. The backend locks the invitation row while validating and
+   redeeming its one-time OTP.
+4. Successful redemption creates or activates the invited tenant user with the
+   invitation-assigned role and records the current Terms and Privacy Notice acceptance.
+5. Authentication continues through the canonical password or OIDC endpoints. The
+   console callback creates its existing server-side session only after the backend
+   authorizes the user.
+6. Revoking a redeemed invitation deactivates the corresponding tenant user and all
+   active API keys created by that user.
+
+Authentication and invitation responsibilities remain separate. Invitation redemption
+provisions tenant membership; password and OIDC login validate an existing active user
+and issue the existing console credential. Public demo and early-access intake remain
+request-only workflows and never provision users or sessions.
+
+Role authority is selected without changing the OIDC protocol:
+
+- **Legacy OIDC users:** the configured IdP group-to-role mapping remains authoritative.
+  `map_user()` continues synchronizing the persisted tenant role, while preserving the
+  existing owner protection.
+- **Invited users:** a verified tenant invitation for the same normalized email marks
+  the persisted invitation-assigned role as authoritative. IdP groups cannot promote or
+  replace that role.
+
+This conditional rule preserves the documented Enterprise SSO behavior for existing
+users while preventing an invited user's IdP group claims from overriding the role
+approved by the tenant owner or administrator. Tenant-claim validation, MFA-context
+validation, token validation and tenant isolation are unchanged.
+
+### Implementation Summary
+
+**Phase 1 — Security foundation**
+
+- Public `POST /v1/onboarding/signup` account creation is disabled and requires an
+  approved invitation.
+- Direct tenant-user creation through `POST /v1/users` is disabled.
+- OIDC login no longer auto-provisions an unknown identity, regardless of the legacy
+  `auto_provision` configuration value. Existing active users continue to authenticate.
+
+**Phase 2 — Invitation lifecycle**
+
+- Tenant owners and administrators can create invitations; existing RBAC and the
+  tenant-scoped database session enforce authorization and isolation.
+- Redemption uses a database row lock and one transaction for validation, user
+  provisioning, legal acceptance and invitation consumption. Expired, revoked,
+  redeemed, missing, mismatched and concurrently consumed invitations return the same
+  public failure.
+- Invitation OTPs are stored as hashes. Successful consumption changes the invitation
+  to `verified`, preventing replay.
+- Owners and administrators can revoke invitations immediately. Revoking a redeemed
+  invitation deactivates the invited user and that user's active API keys. Existing
+  owner and platform-administrator protections remain in force.
+- Creation, delivery, redemption, failure, expiration and revocation decisions use the
+  existing audit-event and metric infrastructure.
+
+**Phase 3 — Authentication integration**
+
+- `map_user()` rejects unknown and inactive identities. It retains IdP group
+  synchronization for legacy OIDC users and uses the persisted database role for users
+  identified by a verified invitation.
+- The OIDC callback converts authorization failures to one generic response, rolls back
+  its transaction and does not issue a console API key on failure.
+- The console callback consumes the existing state but does not create a session when
+  authentication fails. Its public error is generic and excludes provider, tenant,
+  email and invitation details.
+- The login page preserves password login, password reset and OIDC login while replacing
+  public tenant creation with the existing Early Access destination.
+
+### Telemetry Events
+
+F27 reuses `audit_event()`, `publish_audit_event()` and `increment_metric()`. Trusted
+events are published through the existing `audit.events` pipeline and also use
+structured application logging. A failure detected before a trusted invitation exists
+emits its metric and a redacted structured invitation-audit record without fabricating
+a tenant-scoped audit event.
+
+`LoginSucceeded` and `LoginFailed` below are operational categories, not additional
+event names. The emitted authentication actions are the action values shown in the
+table. Password-login rejection does not currently emit a backend authentication audit
+event; successful password login does.
+
+| Category/event | Emitted action | When and purpose | Included fields |
+| --- | --- | --- | --- |
+| `LoginSucceeded` | `auth:password_login_succeeded` | After an existing active user's password login succeeds; records the completed authentication decision. | Tenant ID, validated actor ID, action, categorical reason, provider `password`, result, HTTP status and request correlation ID. |
+| `LoginSucceeded` | `auth:oidc_login_succeeded` | After token, identity context and existing-user authorization succeed; records the completed OIDC decision. | Tenant ID, validated actor ID, action, categorical reason, provider `oidc`, result, HTTP status and request correlation ID. |
+| `LoginFailed` | `auth:<categorical_failure>` | When OIDC token or authorization processing rejects the login. Implemented categories include token, issuer, audience, signature, nonce, redirect, tenant, MFA and authorization failures. | Trusted tenant/actor identifiers when available, action, categorical reason, provider `oidc`, result, HTTP status and request correlation ID. |
+| `InviteCreated` | `invitation:InviteCreated` | After the invitation row is committed; records who initiated the invitation lifecycle without recording its secret. | Tenant ID, invitation ID as subject, action, categorical reason, provider `onboarding`, result, HTTP status and request correlation ID. |
+| `InviteDeliverySucceeded` | `invitation:InviteDeliverySucceeded` | After the existing email transport accepts invitation delivery. | The same invitation audit metadata; no delivery payload. |
+| `InviteDeliveryFailed` | `invitation:InviteDeliveryFailed` | When invitation email delivery fails; supports operations without exposing the provider exception publicly. | The same invitation audit metadata and categorical failure reason. |
+| `InviteRedeemed` | `invitation:InviteRedeemed` | After the locked invitation transaction successfully provisions/activates the invited user and consumes the invitation. | The same invitation audit metadata with a successful result. |
+| `InviteRedemptionFailed` | `invitation:InviteRedemptionFailed` | For rejected invitation validation or transaction failures; supports abuse and failure monitoring while the client receives one generic response. | Trusted invitation metadata when available; otherwise action, categorical reason, result, HTTP status and request correlation ID in the structured fallback record. |
+| `InviteRevoked` | `invitation:InviteRevoked` | After revocation, including deactivation of a redeemed user and that user's API keys. | The same invitation audit metadata with a successful result. |
+| `InviteExpired` | `invitation:InviteExpired` | When redemption encounters an expired invitation. This is detection during redemption, not a scheduled expiration event. | The same invitation audit metadata with a failure result. |
+
+Authentication and invitation telemetry intentionally excludes OTPs, OTP hashes,
+passwords, JWTs, authorization codes, cookies, OIDC state, nonce, raw claims, SMTP
+credentials and provider exception details. Public responses likewise do not expose
+provider errors or invitation lifecycle state.
+
+### Rollback Procedure
+
+F27 includes Alembic revision `034_recognize_invite_onboarding`. It replaces the existing
+`access_request_onboarding_started(p_email, p_after)` database function so that an access
+request is recognized as having started onboarding when the matching onboarding record
+has purpose `signup` or `invite`; revision `033` recognized only `signup`.
+
+Revision `034` is required because F27 replaces public signup with invitation redemption.
+Without it, the F26 retention lifecycle would not recognize invitation-based onboarding
+as started. The migration is backward compatible: it preserves the function name,
+arguments, return type, security context and existing `signup` behavior; it adds the
+`invite` predicate without changing tables, persisted rows, constraints or application
+contracts.
+
+Deploy `034` before the F27 application images and verify that Alembic reports it as the
+single head. The existing application remains compatible while the migration is applied.
+Rollback must not cross the Phase 1 security boundary and restore public signup, direct
+user creation or OIDC auto-provisioning.
+
+**Pre-checks**
+
+1. Record the current backend and console image digests, deployment configuration and
+   audit-pipeline health.
+2. Verify the current Alembic revision and confirm whether `034` is applied. Confirm that
+   no other migration depends on `034` before attempting a downgrade.
+3. Select a previously validated image that retains invite-only account creation. If no
+   such image exists, use a forward fix; do not deploy a pre-Phase-1 image.
+4. Confirm there is no in-flight invitation administration or redemption transaction,
+   and pause the access-request retention invocation if `034` will be downgraded.
+5. Record the invitation and user IDs needed for post-rollback verification without
+   copying OTPs, credentials or personal data into the deployment record.
+
+**Rollback steps**
+
+1. Restore the selected immutable backend and console image digests through the existing
+   ECS/static deployment rollback procedure in this ADR.
+2. Prefer leaving revision `034` applied because it is backward compatible and preserves
+   invitation-aware retention. If the approved rollback explicitly requires reverting
+   that retention behavior, downgrade from `034` to `033` only after the application
+   rollback is healthy and the retention invocation is paused.
+3. Do not change invitation, user, API-key or legal-acceptance rows. Downgrading `034`
+   restores the function predicate to `purpose = 'signup'`; it does not delete or update
+   persisted data.
+4. Keep the current OIDC tenant configuration, MFA requirements, session secrets and
+   host-only cookie configuration.
+5. Wait for healthy targets, verify the expected Alembic revision and function behavior,
+   then verify the audit producer and consumer before ending the previous tasks or
+   resuming retention.
+
+**Post-rollback verification**
+
+- Public signup and direct user creation remain disabled, and OIDC cannot provision an
+  unknown identity.
+- An unexpired approved invitation can still be redeemed exactly once.
+- Invited users retain their persisted invitation-assigned roles; legacy users retain
+  IdP group synchronization.
+- Previously revoked users remain inactive and their revoked API keys remain inactive.
+- Invitation and authentication audit events continue through `audit.events`.
+- Alembic reports the approved rollback revision. If `034` remains applied, both
+  `signup` and `invite` onboarding records satisfy
+  `access_request_onboarding_started`; if downgraded to `033`, only `signup` records do.
+- Generic invalid-invitation and authentication responses reveal no lifecycle or
+  provider details.
+
+### Operational Verification Checklist
+
+- [ ] Set `AUTHCLAW_COOKIE_SECURE=true` in production. Confirm the console session cookie
+      is host-only, `Secure`, `HttpOnly`, `SameSite=Lax` and `Path=/`.
+- [ ] Configure a production `SESSION_SECRET`; do not reuse staging or local values.
+- [ ] Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` and
+      `SMTP_TLS` through the approved secret/configuration stores.
+- [ ] Configure `PUBLIC_CONSOLE_URL` (or the supported console URL fallback) to the
+      canonical HTTPS console so invitation links resolve to `/signup?invite=...`.
+- [ ] Verify each enabled tenant's OIDC issuer, client ID/secret, exact redirect URI,
+      tenant claim/value, role mapping, accepted MFA context and maximum authentication
+      age. Wildcard redirects remain prohibited.
+- [ ] Verify `audit.events` accepts authentication and invitation events and that the
+      audit consumer persists them. Confirm audit-pipeline lag and authentication-failure
+      alarms are healthy.
+- [ ] Run the required repository CI jobs: dependency/secret/IaC scans, backend
+      migrations and tests, audit-consumer tests, console lint/typecheck/unit/build, and
+      the full-stack Playwright gate.
+- [ ] Include the focused F27 suites in release evidence:
+      `backend/tests/test_auth_baseline.py`,
+      `backend/tests/test_onboarding_invitations.py`,
+      `backend/tests/test_user_invitation_lifecycle.py`, and the console callback,
+      signup/login and marketing navigation tests.
+- [ ] Smoke-test owner/admin invitation, one successful redemption, replay rejection,
+      immediate revocation, password login, OIDC login, Early Access navigation and
+      generic public failure messaging in staging.
+
+### Release Notes
+
+**What changed:** AuthClaw account entry is invite-only. Owners and administrators can
+invite approved users into a specific tenant; invitations are one-time, expiring,
+revocable and bound to the intended tenant, email and role. Login now authorizes only
+existing active users, and the public login page directs new users to Early Access.
+
+**Security improvements:** public and direct account creation are disabled; OIDC
+auto-provisioning is disabled; invitation redemption is locked and atomic; replay and
+concurrent redemption are rejected; revocation deactivates redeemed users and their API
+keys; and public authentication/invitation failures are generic and audited without
+secrets.
+
+**Backward compatibility:** existing password users continue to authenticate. Existing
+Enterprise OIDC users retain IdP group-to-role synchronization. Only users carrying a
+verified tenant invitation use the persisted invitation-assigned role as the authority.
+The F26 demo and Early Access request workflow remains separate and unchanged.
+
+**Known limitations:** invitation expiration is recorded when an expired invitation is
+presented for redemption; F27 does not add a scheduled expiration processor. Platform
+operators must use the existing audit pipeline and deployment monitoring described
+above.
+
+**Previously identified future work:** dedicated scheduled invitation-expiration
+processing and multi-instance durable console state/session storage remain separate
+follow-up work; neither is implemented by F27.
+
 ### Cookies and CORS
 
 - Never set a cookie for the parent domain `.authclaw.ai`.

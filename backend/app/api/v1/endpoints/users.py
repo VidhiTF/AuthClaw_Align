@@ -9,13 +9,13 @@ import io
 import base64
 from pydantic import BaseModel
 
-from app.db.models import OnboardingEmailOTP, Tenant, User
+from app.db.models import APIKey, OnboardingEmailOTP, Tenant, User
 from app.schemas.models import UserCreate, UserInviteRequest, UserInviteResponse, UserResponse
 from app.core.auth import get_tenant_db, require_roles, require_scopes
-from app.core.passwords import hash_password
 from app.api.v1.endpoints.onboarding import (
     OTP_TTL_MINUTES,
     _deliver_otp,
+    _emit_invitation_audit,
     _generate_otp,
     _next_resend_at,
     _otp_hash,
@@ -138,7 +138,7 @@ def disable_my_mfa(request: Request, db: Session = Depends(get_tenant_db)):
     )
 
 
-@router.get("/invites", response_model=list[PendingInviteResponse], dependencies=[require_roles(["owner"])])
+@router.get("/invites", response_model=list[PendingInviteResponse], dependencies=[require_roles(["owner", "admin"])])
 def list_pending_invites(request: Request, db: Session = Depends(get_tenant_db)):
     """List pending tenant member invites."""
     tenant_id = request.state.tenant_id
@@ -169,43 +169,14 @@ def create_user(
     user_in: UserCreate,
     db: Session = Depends(get_tenant_db)
 ):
-    """Create a new user under the active tenant"""
-    tenant_id = request.state.tenant_id
-    
-    # Check if user with same email exists in this tenant
-    existing = db.query(User).filter(
-        User.tenant_id == tenant_id,
-        User.email == user_in.email
-    ).first()
-    
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User with this email already exists in this tenant"
-        )
-        
-    try:
-        user = User(
-            tenant_id=tenant_id,
-            email=user_in.email,
-            password_hash=hash_password(user_in.password),
-            role=user_in.role,
-            mfa_enabled=False,
-            is_active=True
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        return user
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create user: {str(e)}"
-        )
+    """Require tenant users to be provisioned through the invitation workflow."""
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="An approved tenant invitation is required",
+    )
 
 
-@router.post("/invite", response_model=UserInviteResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[require_roles(["owner"]), require_scopes(["admin"])])
+@router.post("/invite", response_model=UserInviteResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[require_roles(["owner", "admin"]), require_scopes(["admin"])])
 def invite_user(
     request: Request,
     invite_in: UserInviteRequest,
@@ -214,9 +185,15 @@ def invite_user(
     """Send an email OTP invite for adding a user to the active tenant."""
     tenant_id = request.state.tenant_id
     inviter_id = request.state.user_id
+    request_id = request.headers.get("x-request-id", "")
     email = invite_in.email.strip().lower()
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=OTP_TTL_MINUTES)
+    if request.state.user_role == "admin" and invite_in.role == "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrators cannot assign the owner role",
+        )
 
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
@@ -283,6 +260,14 @@ def invite_user(
         invite_row.delivery_error = None
         db.commit()
         db.refresh(invite_row)
+        _emit_invitation_audit(invite_row, "InviteCreated", "invitation_created", request_id, 202)
+        _emit_invitation_audit(
+            invite_row,
+            "InviteDeliverySucceeded",
+            "delivery_succeeded",
+            request_id,
+            202,
+        )
         return UserInviteResponse(
             signup_id=invite_row.id,
             email=email,
@@ -295,10 +280,17 @@ def invite_user(
         )
     except EmailDeliveryError as exc:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        _emit_invitation_audit(
+            invite_row,
+            "InviteDeliveryFailed",
+            "delivery_failed",
+            request_id,
+            503,
+        )
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Invitation delivery is temporarily unavailable") from exc
 
 
-@router.delete("/invites/{id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner"]), require_scopes(["admin"])])
+@router.delete("/invites/{id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner", "admin"]), require_scopes(["admin"])])
 def cancel_invite(
     id: UUID,
     request: Request,
@@ -306,17 +298,61 @@ def cancel_invite(
 ):
     """Cancel a pending tenant member invite."""
     tenant_id = request.state.tenant_id
-    invite = db.query(OnboardingEmailOTP).filter(
-        OnboardingEmailOTP.id == id,
-        OnboardingEmailOTP.tenant_id == tenant_id,
-        OnboardingEmailOTP.status == "pending",
-        OnboardingEmailOTP.purpose == "invite",
-    ).first()
+    request_id = request.headers.get("x-request-id", "")
+    now = datetime.now(timezone.utc)
+    invite = (
+        db.query(OnboardingEmailOTP)
+        .filter(
+            OnboardingEmailOTP.id == id,
+            OnboardingEmailOTP.tenant_id == tenant_id,
+            OnboardingEmailOTP.status.in_(("pending", "verified")),
+            OnboardingEmailOTP.purpose == "invite",
+        )
+        .with_for_update()
+        .first()
+    )
     if not invite:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending invite not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
 
-    invite.status = "cancelled"
+    if invite.status == "verified":
+        user = db.query(User).filter(
+            User.tenant_id == tenant_id,
+            User.email == invite.email,
+        ).with_for_update().first()
+        if user:
+            if str(user.platform_role).upper() != "NONE":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Platform identities require controlled operational management.",
+                )
+            if request.state.user_role == "admin" and user.role == "owner":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Administrators cannot revoke tenant owners",
+                )
+            if user.role == "owner":
+                active_owner_count = db.query(User).filter(
+                    User.tenant_id == tenant_id,
+                    User.role == "owner",
+                    User.is_active == True,
+                ).count()
+                if active_owner_count <= 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Cannot remove the last active owner",
+                    )
+            user.is_active = False
+            db.query(APIKey).filter(
+                APIKey.tenant_id == tenant_id,
+                APIKey.created_by == user.id,
+                APIKey.is_active == True,
+            ).update(
+                {"is_active": False, "revoked_at": now},
+                synchronize_session=False,
+            )
+    invite.status = "revoked"
     db.commit()
+    _emit_invitation_audit(invite, "InviteRevoked", "invitation_revoked", request_id, 204)
 
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner"]), require_scopes(["admin"])])
@@ -352,4 +388,12 @@ def delete_user(
             )
 
     user.is_active = False
+    db.query(APIKey).filter(
+        APIKey.tenant_id == tenant_id,
+        APIKey.created_by == user.id,
+        APIKey.is_active == True,
+    ).update(
+        {"is_active": False, "revoked_at": datetime.now(timezone.utc)},
+        synchronize_session=False,
+    )
     db.commit()
