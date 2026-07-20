@@ -32,6 +32,10 @@ def get_client(
 _COLUMNS = [
     "record_id",
     "tenant_id",
+    "tenant_sequence",
+    "idempotency_key",
+    "chain_version",
+    "canonical_payload",
     "timestamp",
     "actor_id",
     "actor_type",
@@ -128,7 +132,7 @@ def get_prior_hash(
         SELECT integrity_hash
         FROM authclaw.audit_events
         WHERE tenant_id = {tenant_id:UUID}
-        ORDER BY timestamp DESC, record_id DESC
+        ORDER BY tenant_sequence DESC
         LIMIT 1
         """,
         parameters={"tenant_id": tenant_id},
@@ -137,3 +141,24 @@ def get_prior_hash(
     if rows:
         return rows[0][0] or "GENESIS"
     return "GENESIS"
+
+
+def get_tenant_tail(
+    client: clickhouse_connect.driver.Client,
+    tenant_id: str,
+) -> tuple[int, str]:
+    """Return the deterministic sequence and hash at the ClickHouse tail."""
+    result = client.query(
+        """
+        SELECT tenant_sequence, integrity_hash
+        FROM authclaw.audit_events
+        WHERE tenant_id = {tenant_id:UUID}
+        ORDER BY tenant_sequence DESC
+        LIMIT 1
+        """,
+        parameters={"tenant_id": tenant_id},
+    )
+    rows = result.result_rows
+    if rows:
+        return int(rows[0][0]), rows[0][1] or "GENESIS"
+    return 0, "GENESIS"

@@ -134,71 +134,10 @@ def test_replay_dry_run_does_not_insert(monkeypatch):
     assert result["would_insert"] == 1
 
 
-def test_recovery_inserts_only_missing_clickhouse_rows(monkeypatch):
-    tenant_id = str(uuid4())
-    existing = _record(tenant_id=tenant_id)
-    missing = _record(tenant_id=tenant_id, prior_hash=existing["integrity_hash"])
-    monkeypatch.setattr(
-        audit_store,
-        "fetch_clickhouse_records",
-        lambda _ch, _tenant: [existing, missing],
-    )
-
-    class FakeQuery:
-        def filter(self, *_args):
-            return self
-
-        def first(self):
-            return (tenant_id,)
-
-        def all(self):
-            return [(existing["record_id"],)]
-
-    class FakeDB:
-        def __init__(self):
-            self.info = {}
-            self.rows = []
-            self.committed = False
-
-        def query(self, *_args):
-            return FakeQuery()
-
-        def add_all(self, rows):
-            self.rows.extend(rows)
-
-        def commit(self):
-            self.committed = True
-
-    db = FakeDB()
-    result = audit_store.recover_clickhouse_to_postgres(db, object(), tenant_id, dry_run=False)
-
-    assert result["inserted"] == 1
-    assert result["record_ids"] == [missing["record_id"]]
-    assert db.committed is True
-    assert str(db.rows[0].record_id) == missing["record_id"]
-    assert db.rows[0].prior_hash == missing["prior_hash"]
-    assert db.rows[0].integrity_hash == missing["integrity_hash"]
-
-
-def test_recovery_requires_existing_tenant(monkeypatch):
-    class MissingTenantQuery:
-        def filter(self, *_args):
-            return self
-
-        def first(self):
-            return None
-
-    class FakeDB:
-        info = {}
-
-        def query(self, *_args):
-            return MissingTenantQuery()
-
-    monkeypatch.setattr(
-        audit_store,
-        "fetch_clickhouse_records",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("unexpected ClickHouse read")),
-    )
-
-    with pytest.raises(ValueError, match="must exist"):
-        audit_store.recover_clickhouse_to_postgres(FakeDB(), object(), str(uuid4()))
+def test_reverse_recovery_is_rejected():
+    with pytest.raises(RuntimeError, match="ClickHouse-to-PostgreSQL"):
+        audit_store.recover_clickhouse_to_postgres(
+            object(),
+            object(),
+            str(uuid4()),
+        )

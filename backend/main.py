@@ -9,7 +9,7 @@ if os.path.exists(env_path):
 else:
     load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.startup_checks import validate_production_environment
@@ -131,6 +131,18 @@ def health_check():
         "service": "authclaw-backend",
         "secret_management": secret_management_status(),
     }
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics():
+    """Expose the dependency-free ACL-21 backend metrics registry."""
+    from app.services.event_backbone import metrics_snapshot
+
+    body = "\n".join(
+        f"# TYPE {name} gauge\n{name} {value}"
+        for name, value in sorted(metrics_snapshot().items())
+    )
+    return Response(content=body + "\n", media_type="text/plain")
 
 
 @app.on_event("startup")

@@ -2,15 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,16 +33,23 @@ type AuditEvent struct {
 	DurationMs         int64     `json:"duration_ms"`
 	FrameworksAffected []string  `json:"frameworks_affected,omitempty"`
 	ExecutionTrace     []string  `json:"execution_trace,omitempty"`
+	IdempotencyKey     string    `json:"idempotency_key,omitempty"`
+	TenantSequence     int64     `json:"tenant_sequence,omitempty"`
+	ChainVersion       int       `json:"chain_version,omitempty"`
+	CanonicalPayload   string    `json:"canonical_payload,omitempty"`
 	PriorHash          string    `json:"prior_hash,omitempty"`
 	IntegrityHash      string    `json:"integrity_hash,omitempty"`
 }
 
 var (
-	auditPostgresFailures   atomic.Uint64
-	auditOutboxWrites       atomic.Uint64
-	auditOutboxFailures     atomic.Uint64
-	auditFailClosedFailures atomic.Uint64
-	auditOutboxMu           sync.Mutex
+	auditPostgresFailures      atomic.Uint64
+	auditOutboxWrites          atomic.Uint64
+	auditOutboxFailures        atomic.Uint64
+	auditFailClosedFailures    atomic.Uint64
+	auditIdempotencyCollisions atomic.Uint64
+	auditOutboxBacklog         atomic.Uint64
+	auditOutboxOldestAge       atomic.Uint64
+	auditOutboxMu              sync.Mutex
 )
 
 type auditOutboxEnvelope struct {
@@ -103,24 +107,33 @@ func writeAuditOutbox(event *AuditEvent, reason error) error {
 	return nil
 }
 
-// EmitAuditEvent records the event in Postgres, queues to a local outbox when
-// Postgres is unavailable, then publishes to Kafka/stdout for analytics.
+// EmitAuditEvent appends in Postgres, then publishes committed outbox rows.
 func EmitAuditEvent(event *AuditEvent) error {
 	if err := persistAuditMetadata(event); err != nil {
 		auditPostgresFailures.Add(1)
+		if strings.Contains(err.Error(), "idempotency-key collision") {
+			auditIdempotencyCollisions.Add(1)
+		}
 		log.Printf("[AUDIT] Postgres metadata persistence failed: %v", err)
+		outboxAvailable := true
 		if outboxErr := writeAuditOutbox(event, err); outboxErr != nil {
+			outboxAvailable = false
 			auditOutboxFailures.Add(1)
 			log.Printf("[AUDIT] Durable outbox write failed: %v", outboxErr)
-			if auditFailClosedEnabled() {
-				auditFailClosedFailures.Add(1)
-				return fmt.Errorf("audit persistence failed and outbox unavailable: %w", outboxErr)
-			}
 		}
+		if auditFailClosedEnabled() {
+			auditFailClosedFailures.Add(1)
+			return fmt.Errorf(
+				"canonical audit append failed (local recovery copy available=%t): %w",
+				outboxAvailable,
+				err,
+			)
+		}
+		return nil
 	}
 
 	// Attempt Kafka publish first.
-	if err := PublishAuditEvent(event); err != nil {
+	if err := publishPendingAuditOutbox(event.TenantID, 100); err != nil {
 		log.Printf("[AUDIT] Kafka serialisation error: %v — falling back to stdout", err)
 		logToStdout(event)
 		return nil
@@ -157,60 +170,6 @@ func logToStdout(event *AuditEvent) {
 	log.Printf("[AUDIT] %s", string(eventBytes))
 }
 
-const auditGenesisHash = "GENESIS"
-
-func canonicalUUID(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) == 32 && !strings.Contains(value, "-") {
-		return strings.ToLower(value[0:8] + "-" + value[8:12] + "-" + value[12:16] + "-" + value[16:20] + "-" + value[20:32])
-	}
-	return strings.ToLower(value)
-}
-
-func standardizeAuditTimestamp(ts time.Time) string {
-	return ts.UTC().Format("2006-01-02T15:04:05.000Z")
-}
-
-func canonicalAuditJSON(event *AuditEvent) string {
-	frameworks := append([]string{}, event.FrameworksAffected...)
-	sort.Strings(frameworks)
-	executionTrace := "[]"
-	if len(event.ExecutionTrace) > 0 {
-		if traceBytes, err := json.Marshal(event.ExecutionTrace); err == nil {
-			executionTrace = string(traceBytes)
-		}
-	}
-	payload := map[string]interface{}{
-		"record_id":           canonicalUUID(event.ID),
-		"tenant_id":           canonicalUUID(event.TenantID),
-		"timestamp":           standardizeAuditTimestamp(event.Timestamp),
-		"actor_id":            "",
-		"actor_type":          "gateway",
-		"action":              event.Action,
-		"policy_id":           event.PolicyID,
-		"provider":            event.Provider,
-		"model":               event.Model,
-		"reason":              event.DecisionReason,
-		"prompt_count":        event.PromptCount,
-		"request_size":        event.RequestSize,
-		"response_status":     event.ResponseStatus,
-		"duration_ms":         event.DurationMs,
-		"frameworks_affected": frameworks,
-		"execution_trace":     executionTrace,
-		"request_id":          event.RequestID,
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return "{}"
-	}
-	return string(data)
-}
-
-func hashAuditEvent(event *AuditEvent, priorHash string) string {
-	sum := sha256.Sum256([]byte(canonicalAuditJSON(event) + priorHash))
-	return hex.EncodeToString(sum[:])
-}
-
 func persistAuditMetadata(event *AuditEvent) error {
 	if event == nil {
 		return fmt.Errorf("audit event is nil")
@@ -232,38 +191,12 @@ func persistAuditMetadata(event *AuditEvent) error {
 	defer cancel()
 
 	err := RunInTenantTx(ctx, event.TenantID, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", event.TenantID); err != nil {
-			return err
+		if event.Timestamp.IsZero() {
+			event.Timestamp = time.Now().UTC()
 		}
-
-		priorHash := auditGenesisHash
-		var priorCreatedAt sql.NullTime
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COALESCE(integrity_hash, ''), created_at
-			FROM audit_log_metadata
-			WHERE tenant_id = $1
-			  AND COALESCE(integrity_hash, '') <> ''
-			ORDER BY created_at DESC, record_id DESC
-			LIMIT 1
-		`, event.TenantID).Scan(&priorHash, &priorCreatedAt); err != nil && err != sql.ErrNoRows {
-			return err
+		if event.IdempotencyKey == "" {
+			event.IdempotencyKey = event.ID
 		}
-		if priorHash == "" {
-			priorHash = auditGenesisHash
-		}
-		chainTimestamp := event.Timestamp.UTC()
-		if chainTimestamp.IsZero() {
-			chainTimestamp = time.Now().UTC()
-		}
-		if priorCreatedAt.Valid && !chainTimestamp.After(priorCreatedAt.Time) {
-			chainTimestamp = priorCreatedAt.Time.Add(time.Millisecond)
-		}
-		eventForHash := *event
-		eventForHash.Timestamp = chainTimestamp
-		integrityHash := hashAuditEvent(&eventForHash, priorHash)
-		event.Timestamp = chainTimestamp
-		event.PriorHash = priorHash
-		event.IntegrityHash = integrityHash
 		executionTrace := "[]"
 		if len(event.ExecutionTrace) > 0 {
 			if traceBytes, traceErr := json.Marshal(event.ExecutionTrace); traceErr == nil {
@@ -271,21 +204,20 @@ func persistAuditMetadata(event *AuditEvent) error {
 			}
 		}
 
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO audit_log_metadata (
-				id, tenant_id, record_id, actor_id, action, request_id, policy_id,
-				provider, model, reason, prompt_count, request_size, response_status,
-				duration_ms, frameworks_affected, created_at, prior_hash, integrity_hash,
-				actor_type, execution_trace
+		var duplicate bool
+		return tx.QueryRowContext(ctx, `
+			SELECT record_id, tenant_sequence, prior_hash, integrity_hash,
+			       canonical_payload, duplicate
+			FROM append_audit_event_v2(
+				$1::uuid, $2::uuid, $3, $4, NULL, 'gateway', $5, $6,
+				NULLIF($7, '')::uuid, $8, $9, $10, $11, $12, $13, $14,
+				$15, $16::jsonb
 			)
-			VALUES (
-				gen_random_uuid(), $1, $2::uuid, NULL, $3, $4, NULLIF($5, '')::uuid,
-				$6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
-			)
-			ON CONFLICT (record_id) DO NOTHING
 		`,
 			event.TenantID,
 			event.ID,
+			event.IdempotencyKey,
+			event.Timestamp,
 			event.Action,
 			event.RequestID,
 			event.PolicyID,
@@ -297,13 +229,15 @@ func persistAuditMetadata(event *AuditEvent) error {
 			event.ResponseStatus,
 			event.DurationMs,
 			pq.Array(event.FrameworksAffected),
-			chainTimestamp,
-			priorHash,
-			integrityHash,
-			"gateway",
 			executionTrace,
+		).Scan(
+			&event.ID,
+			&event.TenantSequence,
+			&event.PriorHash,
+			&event.IntegrityHash,
+			&event.CanonicalPayload,
+			&duplicate,
 		)
-		return err
 	})
 	if err != nil {
 		return err
@@ -311,11 +245,86 @@ func persistAuditMetadata(event *AuditEvent) error {
 	return nil
 }
 
+func publishPendingAuditOutbox(tenantID string, limit int) error {
+	if kafkaWriter == nil || DB == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		var backlog int64
+		var oldestAge float64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT count(*),
+			       COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)
+			FROM audit_outbox
+			WHERE tenant_id = $1::uuid AND published_at IS NULL
+		`, tenantID).Scan(&backlog, &oldestAge); err != nil {
+			return err
+		}
+		auditOutboxBacklog.Store(uint64(backlog))
+		auditOutboxOldestAge.Store(uint64(max(oldestAge, 0)))
+		rows, err := tx.QueryContext(ctx, `
+			SELECT id, event_payload
+			FROM audit_outbox
+			WHERE tenant_id = $1::uuid AND published_at IS NULL
+			ORDER BY tenant_sequence
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		`, tenantID, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type pending struct {
+			id      int64
+			payload []byte
+		}
+		var events []pending
+		for rows.Next() {
+			var item pending
+			if err := rows.Scan(&item.id, &item.payload); err != nil {
+				return err
+			}
+			events = append(events, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, item := range events {
+			if err := PublishAuditOutboxPayload(tenantID, item.payload); err != nil {
+				_, _ = tx.ExecContext(ctx, `
+					UPDATE audit_outbox
+					SET publish_attempts = publish_attempts + 1, last_error = $2
+					WHERE id = $1
+				`, item.id, err.Error())
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE audit_outbox
+				SET published_at = now(), publish_attempts = publish_attempts + 1,
+				    last_error = NULL
+				WHERE id = $1
+			`, item.id); err != nil {
+				return err
+			}
+		}
+		auditOutboxBacklog.Store(uint64(max(backlog-int64(len(events)), 0)))
+		if backlog <= int64(len(events)) {
+			auditOutboxOldestAge.Store(0)
+		}
+		return nil
+	})
+}
+
 func AuditMetricsSnapshot() map[string]uint64 {
 	return map[string]uint64{
-		"authclaw_gateway_audit_postgres_failures_total":    auditPostgresFailures.Load(),
-		"authclaw_gateway_audit_outbox_writes_total":        auditOutboxWrites.Load(),
-		"authclaw_gateway_audit_outbox_failures_total":      auditOutboxFailures.Load(),
-		"authclaw_gateway_audit_fail_closed_failures_total": auditFailClosedFailures.Load(),
+		"authclaw_gateway_audit_postgres_failures_total":      auditPostgresFailures.Load(),
+		"authclaw_gateway_audit_outbox_writes_total":          auditOutboxWrites.Load(),
+		"authclaw_gateway_audit_outbox_failures_total":        auditOutboxFailures.Load(),
+		"authclaw_gateway_audit_fail_closed_failures_total":   auditFailClosedFailures.Load(),
+		"authclaw_gateway_audit_idempotency_collisions_total": auditIdempotencyCollisions.Load(),
+		"authclaw_gateway_audit_outbox_backlog":               auditOutboxBacklog.Load(),
+		"authclaw_gateway_audit_outbox_oldest_age_seconds":    auditOutboxOldestAge.Load(),
 	}
 }

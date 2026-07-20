@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import AuditLogMetadata, RedactionToken
 from app.services import event_backbone
-from app.services.audit_store import GENESIS_HASH, compute_integrity_hash
+from app.services.audit_store import append_audit_event
 
 
 PURGE_ACTION = "privacy:purge_expired"
@@ -44,21 +44,6 @@ def _add_purge_audit_record(
     deleted_count: int,
     duration_ms: int,
 ) -> AuditLogMetadata:
-    last = (
-        db.query(AuditLogMetadata)
-        .filter(AuditLogMetadata.tenant_id == tenant_id)
-        .order_by(
-            AuditLogMetadata.created_at.desc(),
-            AuditLogMetadata.record_id.desc(),
-        )
-        .first()
-    )
-    prior_hash = (
-        last.integrity_hash
-        if last and last.integrity_hash
-        else GENESIS_HASH
-    )
-
     created_at = _now_utc()
     record_id = uuid.uuid4()
     trace_items = [
@@ -67,28 +52,9 @@ def _add_purge_audit_record(
         "retention_state=expired",
     ]
 
-    log = AuditLogMetadata(
-        tenant_id=tenant_id,
-        record_id=record_id,
-        actor_id=actor_id,
-        actor_type="privacy_lifecycle",
-        action=PURGE_ACTION,
-        request_id=request_id,
-        provider="control-plane",
-        model="",
-        reason=f"Purged {deleted_count} expired redaction mappings",
-        prompt_count=0,
-        request_size=0,
-        response_status=200,
-        duration_ms=duration_ms,
-        frameworks_affected=["GDPR"],
-        execution_trace=json.dumps(trace_items),
-        prior_hash=prior_hash,
-        created_at=created_at,
-    )
-
-    hash_record = {
-        "record_id": str(record_id),
+    event = {
+        "id": str(record_id),
+        "idempotency_key": f"privacy-purge:{request_id or record_id}",
         "tenant_id": str(tenant_id),
         "timestamp": created_at,
         "actor_id": str(actor_id) if actor_id else "",
@@ -97,18 +63,40 @@ def _add_purge_audit_record(
         "policy_id": "",
         "provider": "control-plane",
         "model": "",
-        "reason": log.reason,
+        "reason": f"Purged {deleted_count} expired redaction mappings",
         "prompt_count": 0,
         "request_size": 0,
         "response_status": 200,
         "duration_ms": duration_ms,
         "frameworks_affected": ["GDPR"],
-        "execution_trace": log.execution_trace,
+        "execution_trace": trace_items,
         "request_id": request_id,
     }
-    log.integrity_hash = compute_integrity_hash(hash_record, prior_hash)
-    db.add(log)
-    return log
+    appended = append_audit_event(db, event)
+    return AuditLogMetadata(
+        tenant_id=tenant_id,
+        record_id=appended["record_id"],
+        tenant_sequence=appended["tenant_sequence"],
+        idempotency_key=event["idempotency_key"],
+        chain_version=2,
+        canonical_payload=appended["canonical_payload"],
+        actor_id=actor_id,
+        actor_type="privacy_lifecycle",
+        action=PURGE_ACTION,
+        request_id=request_id,
+        provider="control-plane",
+        model="",
+        reason=event["reason"],
+        prompt_count=0,
+        request_size=0,
+        response_status=200,
+        duration_ms=duration_ms,
+        frameworks_affected=["GDPR"],
+        execution_trace=json.dumps(trace_items),
+        prior_hash=appended["prior_hash"],
+        integrity_hash=appended["integrity_hash"],
+        created_at=created_at,
+    )
 
 
 def purge_expired_redaction_mappings(

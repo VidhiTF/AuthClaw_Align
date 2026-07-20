@@ -123,12 +123,35 @@ func TestPublishAuditEvent_IncrementsFailureMetric(t *testing.T) {
 	before := kafkaPublishFailures.Load()
 	defer func() { kafkaWriter = original }()
 
-	if err := PublishAuditEvent(testAuditEvent("evt-fail", "", "tenant-abc", "")); err != nil {
-		t.Fatalf("PublishAuditEvent returned serialization error: %v", err)
+	if err := PublishAuditEvent(testAuditEvent("evt-fail", "", "tenant-abc", "")); err == nil {
+		t.Fatal("PublishAuditEvent must return the broker failure so the outbox remains pending")
 	}
 
 	if kafkaPublishFailures.Load() <= before {
 		t.Fatalf("expected publish failure metric to increment")
+	}
+}
+
+func TestPublishAuditOutboxPayloadPreservesCommittedBytes(t *testing.T) {
+	original := kafkaWriter
+	writer := &fakeKafkaWriter{}
+	kafkaWriter = writer
+	defer func() { kafkaWriter = original }()
+	payload := []byte(`{"id":"evt-outbox","request_id":"req-outbox","execution_trace":"[\"db\"]"}`)
+
+	if err := PublishAuditOutboxPayload("tenant-outbox", payload); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(writer.messages) != 1 {
+		t.Fatalf("got %d messages, want 1", len(writer.messages))
+	}
+	message := writer.messages[0]
+	if string(message.Key) != "tenant-outbox" {
+		t.Fatalf("Kafka key = %q", message.Key)
+	}
+	if string(message.Value) != string(payload) {
+		t.Fatal("outbox payload bytes changed before Kafka publication")
 	}
 }
 

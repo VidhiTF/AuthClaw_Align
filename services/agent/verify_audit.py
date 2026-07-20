@@ -1,3 +1,11 @@
+"""Legacy agent audit compatibility.
+
+``audit_logs`` is retained as an operational compatibility ledger for integer
+agent tenant IDs. It is not part of the ACL-21 evidence chain. New compliance
+evidence is sequenced, hashed, exported, and mirrored only from the canonical
+``audit_log_metadata`` PostgreSQL append function.
+"""
+
 import hashlib
 import json
 import contextvars
@@ -74,6 +82,23 @@ def _export_signing_key_id() -> str:
     return f"authclaw-export-{digest[:16]}"
 
 
+def _trusted_export_keys() -> dict:
+    configured = os.getenv("AUTHCLAW_EXPORT_TRUSTED_KEYS_JSON", "").strip()
+    if configured:
+        registry = json.loads(configured)
+        if not isinstance(registry, dict):
+            raise ValueError("AUTHCLAW_EXPORT_TRUSTED_KEYS_JSON must be an object")
+        return registry
+    if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
+        return {}
+    return {
+        _export_signing_key_id(): {
+            "public_key_pem": _export_public_key_pem(),
+            "status": "active",
+        }
+    }
+
+
 def get_audit_hash_chain_root(tenant_id: int = None) -> str:
     with engine.connect() as conn:
         row = conn.execute(
@@ -124,7 +149,12 @@ def create_signed_export_package(
     return {"manifest": manifest, "payload": payload, "payload_b64": _b64url(payload_bytes)}
 
 
-def verify_signed_export_package(payload: dict = None, payload_b64: str = None, manifest: dict = None) -> dict:
+def verify_signed_export_package(
+    payload: dict = None,
+    payload_b64: str = None,
+    manifest: dict = None,
+    trusted_keys: dict = None,
+) -> dict:
     if not manifest or "signature" not in manifest:
         return {"valid": False, "reason": "missing signature manifest"}
     if payload is None and not payload_b64:
@@ -139,9 +169,19 @@ def verify_signed_export_package(payload: dict = None, payload_b64: str = None, 
         signature = _b64url_decode(manifest["signature"])
         unsigned_manifest = dict(manifest)
         unsigned_manifest.pop("signature", None)
-        public_key_pem = unsigned_manifest.get("public_key_pem")
+        key_id = str(unsigned_manifest.get("signing_key_id") or "")
+        entry = (trusted_keys if trusted_keys is not None else _trusted_export_keys()).get(key_id)
+        if not entry:
+            return {"valid": False, "reason": f"unknown trusted signing key: {key_id}"}
+        if isinstance(entry, str):
+            public_key_pem, status = entry, "active"
+        else:
+            public_key_pem = entry.get("public_key_pem")
+            status = str(entry.get("status", "active")).lower()
+        if status != "active":
+            return {"valid": False, "reason": f"signing key is {status}: {key_id}"}
         if not public_key_pem:
-            return {"valid": False, "reason": "missing public key"}
+            return {"valid": False, "reason": "trusted key has no public key"}
         public_key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
         public_key.verify(
             signature,
@@ -524,7 +564,7 @@ def create_audit_block(
     tenant_id: int = None
 ) -> int:
     """
-    Creates a new cryptographic audit block in PostgreSQL database and recalculates hashes.
+    Record a legacy agent diagnostic row without creating a competing chain.
     """
     from database import engine
     from startup.audit import log_audit_event
@@ -600,81 +640,19 @@ def create_audit_block(
         )
         row = res.fetchone()
         inserted_id = row[0]
-        db_created_at = row[1]
         conn.commit()
 
-        # Retrieve the integrity_hash of the latest record before the newly inserted one
-        prev_res = conn.execute(
-            text("""
-            SELECT integrity_hash
-            FROM audit_logs
-            WHERE id < :inserted_id
-              AND integrity_hash IS NOT NULL
-              AND (
-                (:tenant_id IS NULL AND tenant_id IS NULL)
-                OR tenant_id = :tenant_id
-              )
-            ORDER BY id DESC
-            LIMIT 1
-            """),
-            {"inserted_id": inserted_id, "tenant_id": tenant_id}
-        ).fetchone()
-        previous_hash = prev_res[0] if prev_res else GENESIS_HASH
-
-        # Calculate current record hash
-        record_dict = {
-            "record_id": inserted_id,
-            "user_query": query,
-            "response": response,
-            "allowed": allowed,
-            "created_at": db_created_at,
-            "risk_level": risk_level,
-            "approval_status": approval_status,
-        }
-        current_hash = calculate_record_hash(record_dict, previous_hash)
-
-        # Update the record with calculated hashes
-        conn.execute(
-            text("""
-            UPDATE audit_logs
-            SET integrity_hash = :integrity_hash, previous_hash = :previous_hash
-            WHERE id = :id
-            """),
-            {
-                "integrity_hash": current_hash,
-                "previous_hash": previous_hash,
-                "id": inserted_id
-            }
-        )
-        conn.commit()
-
-        # Log audit chain created event
+        # Keep the legacy row addressable while making the authority boundary
+        # explicit. The control-plane canonical append is the only evidence chain.
         log_audit_event(
-            event="audit_chain_created",
+            event="legacy_agent_audit_recorded",
             correlation_id=session_id,
             extra={
                 "record_id": inserted_id,
-                "integrity_hash": current_hash,
-                "previous_hash": previous_hash
+                "compatibility_boundary": "non-authoritative-audit_logs",
+                "canonical_chain": "backend.audit_log_metadata",
             }
         )
-        mirror_audit_event_to_clickhouse({
-            "event_type": "audit_block",
-            "record_id": inserted_id,
-            "tenant_id": tenant_id,
-            "session_id": session_id,
-            "approval_id": approval_id,
-            "username": username,
-            "risk_level": risk_level,
-            "allowed": allowed,
-            "approval_status": approval_status,
-            "policy_name": policy_name,
-            "policy_type": policy_type,
-            "matched_pattern": matched_pattern,
-            "integrity_hash": current_hash,
-            "previous_hash": previous_hash,
-            "created_at": db_created_at.isoformat() if hasattr(db_created_at, "isoformat") else str(db_created_at),
-        })
         return inserted_id
 
 def log_agent_event(

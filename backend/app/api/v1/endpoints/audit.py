@@ -22,7 +22,6 @@ from app.db.models import AuditLogMetadata
 from app.services.audit_store import (
     build_consistency_report,
     clickhouse_configured,
-    recover_clickhouse_to_postgres,
     replay_postgres_to_clickhouse,
 )
 from app.services.audit_export import (
@@ -86,10 +85,6 @@ class AuditStoreStatusResponse(BaseModel):
 
 class AuditReplayRequest(BaseModel):
     dry_run: bool = False
-
-
-class AuditRecoveryRequest(BaseModel):
-    dry_run: bool = True
 
 
 class SignedAuditExportRequest(BaseModel):
@@ -161,18 +156,35 @@ def _verify_chain(records: List[dict]) -> List[dict]:
     # Reverse records to go oldest -> newest for rolling verification
     asc_records = list(reversed(records))
     last_hash_by_tenant: Dict[str, str] = {}
+    last_sequence_by_tenant: Dict[str, int] = {}
 
     for record in asc_records:
         tenant_id = record.get("tenant_id", "")
         prior_hash = record.get("prior_hash") or _GENESIS_HASH
-        data = _canonical_json(record) + prior_hash
+        canonical = (
+            record.get("canonical_payload")
+            if int(record.get("chain_version") or 1) >= 2
+            else None
+        ) or _canonical_json(record)
+        data = str(canonical) + prior_hash
         expected = hashlib.sha256(data.encode("utf-8")).hexdigest()
         actual = record.get("integrity_hash", "")
         previous_hash = last_hash_by_tenant.get(tenant_id)
-        link_valid = previous_hash is None or prior_hash == previous_hash
+        sequence = int(record.get("tenant_sequence") or 0)
+        previous_sequence = last_sequence_by_tenant.get(tenant_id)
+        link_valid = (
+            (previous_hash is None or prior_hash == previous_hash)
+            and (
+                previous_sequence is None
+                or not sequence
+                or sequence == previous_sequence + 1
+            )
+        )
         record["chain_valid"] = bool(actual) and expected == actual and link_valid
         if actual:
             last_hash_by_tenant[tenant_id] = actual
+        if sequence:
+            last_sequence_by_tenant[tenant_id] = sequence
 
     # Reverse back to keep original order (newest first)
     return list(reversed(asc_records))
@@ -340,22 +352,6 @@ def replay_audit_store(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@router.post(
-    "/store/recover",
-    dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])],
-)
-def recover_audit_store(
-    request: Request,
-    recovery: AuditRecoveryRequest,
-    db: Session = Depends(get_tenant_db),
-):
-    ch = _get_clickhouse_client()
-    if ch is None:
-        raise HTTPException(status_code=503, detail="ClickHouse is not configured")
-    tenant_id = str(request.state.tenant_id)
-    return recover_clickhouse_to_postgres(db, ch, tenant_id, dry_run=recovery.dry_run)
-
-
 def _query_clickhouse(
     ch: Any,
     tenant_id: str,
@@ -373,6 +369,10 @@ def _query_clickhouse(
         SELECT
             toString(ae.record_id)    AS record_id,
             toString(ae.tenant_id)    AS tenant_id,
+            ae.tenant_sequence        AS tenant_sequence,
+            ae.idempotency_key        AS idempotency_key,
+            ae.chain_version          AS chain_version,
+            ae.canonical_payload      AS canonical_payload,
             ae.timestamp              AS timestamp,
             ae.actor_id               AS actor_id,
             ae.actor_type             AS actor_type,
@@ -393,7 +393,7 @@ def _query_clickhouse(
         FROM authclaw.audit_events AS ae
         WHERE ae.tenant_id = {{tenant_id:UUID}}
         {action_filter}
-        ORDER BY ae.timestamp DESC, ae.record_id DESC
+        ORDER BY ae.tenant_sequence DESC
         LIMIT {{limit:UInt32}}
         OFFSET {{offset:UInt32}}
     """
@@ -449,13 +449,17 @@ def _query_postgres(
             q = q.filter(AuditLogMetadata.action == action)
         
         total_count = q.count()
-        logs = q.order_by(AuditLogMetadata.created_at.desc(), AuditLogMetadata.record_id.desc()).offset(offset).limit(limit).all()
+        logs = q.order_by(AuditLogMetadata.tenant_sequence.desc()).offset(offset).limit(limit).all()
 
         records = [
             {
                 "id": str(log.id),
                 "record_id": str(log.record_id),
                 "tenant_id": str(log.tenant_id),
+                "tenant_sequence": log.tenant_sequence,
+                "idempotency_key": log.idempotency_key,
+                "chain_version": log.chain_version,
+                "canonical_payload": log.canonical_payload,
                 "timestamp": log.created_at.isoformat() if log.created_at else None,
                 "actor_id": str(log.actor_id) if log.actor_id else "",
                 "actor_type": getattr(log, "actor_type", None) or "gateway",
