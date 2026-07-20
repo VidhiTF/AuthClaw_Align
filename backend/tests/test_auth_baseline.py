@@ -28,6 +28,13 @@ def test_api_key_create_rejects_unknown_scope():
         raise AssertionError("unknown scope should be rejected")
 
 
+def test_tenant_api_key_schemas_reject_platform_scope():
+    with pytest.raises(ValueError, match="Unsupported API key scopes"):
+        APIKeyCreate(name="platform", scopes=["platform.admin"])
+    with pytest.raises(ValueError, match="Unsupported API key scopes"):
+        APIKeyRotate(scopes=["platform.admin"])
+
+
 def test_api_key_create_normalizes_scopes_and_expiry():
     key = APIKeyCreate(name="ci", scopes=["write", "read", "read"], expires_in_days=30)
 

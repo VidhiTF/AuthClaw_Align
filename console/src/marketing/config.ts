@@ -11,7 +11,8 @@ export const marketingRoutes = {
   dpa: "/dpa",
   login: "/login",
   trial: "/signup",
-  demo: "/signup",
+  demo: "/demo",
+  earlyAccess: "/early-access",
   contact: "/signup",
   careers: "/signup",
   trustReport: "/signup",
@@ -22,6 +23,7 @@ export const marketingNavigation = [
   { href: marketingRoutes.pricing, label: "Pricing" },
   { href: marketingRoutes.security, label: "Security" },
   { href: marketingRoutes.company, label: "Company" },
+  { href: marketingRoutes.earlyAccess, label: "Early Access" },
 ] as const;
 
 export const marketingFooterGroups = [

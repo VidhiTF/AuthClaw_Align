@@ -333,6 +333,11 @@ def delete_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
+    if str(user.platform_role).upper() != "NONE":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Platform identities require controlled operational management.",
+        )
 
     if user.role == "owner":
         active_owner_count = db.query(User).filter(

@@ -149,7 +149,7 @@ def _enforce_onboarding_rate_limit(key: str, limit: int, window_seconds: int, me
         if count == 1:
             client.expire(key, window_seconds)
     except redis.RedisError as exc:
-        logger.warning("Onboarding rate limiter unavailable: %s", exc)
+        logger.warning("Rate limiter unavailable")
         if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
             raise HTTPException(status_code=503, detail="Rate limiter unavailable. Request blocked for safety.") from exc
         return

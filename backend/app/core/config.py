@@ -1,5 +1,6 @@
 """Configuration settings for AuthClaw Backend"""
 from typing import List
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -26,6 +27,8 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
     API_KEY_HASH_SECRET: str = ""
+    PRIVACY_NOTICE_VERSION: str = Field(default="2026-07-20", min_length=1, max_length=50)
+    INTERNAL_LAUNCH_OWNER_EMAIL: str = ""
     
     # Session
     SESSION_SECRET: str = "dev-secret-change-in-production"

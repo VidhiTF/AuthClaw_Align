@@ -9,7 +9,10 @@ if os.path.exists(env_path):
 else:
     load_dotenv()
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.startup_checks import validate_production_environment
@@ -23,6 +26,13 @@ app = FastAPI(
     description="AI Governance & Compliance Platform Control Plane",
     version="0.1.0",
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def access_request_validation_error(request: Request, exc: RequestValidationError):
+    if request.url.path == "/api/public/v1/access-requests":
+        return JSONResponse(status_code=422, content={"detail": "Invalid request"})
+    return await request_validation_exception_handler(request, exc)
 
 # CORS middleware
 app.add_middleware(
@@ -59,6 +69,7 @@ from app.api.v1.endpoints.aws import router as aws_router
 from app.api.v1.endpoints.cloud import router as cloud_router
 from app.api.v1.endpoints.usage_limits import router as usage_limits_router
 from app.api.v1.endpoints.red_team import router as red_team_router
+from app.api.v1.endpoints.access_requests import router as access_requests_router
 # Phase 16 — Evidence Repository
 from app.api.v1.endpoints.evidence import router as evidence_router
 # Phase 17 — Findings Dashboard
@@ -90,6 +101,7 @@ app.include_router(cloud_router, prefix="/v1/cloud/connectors", tags=["cloud-con
 app.include_router(evidence_router, prefix="/v1/evidence", tags=["evidence"])
 # Phase 17 — Findings Dashboard
 app.include_router(findings_router, prefix="/v1/findings", tags=["findings"])
+app.include_router(access_requests_router, prefix="/api/public/v1/access-requests", tags=["public-access-requests"])
 
 # Ravi's imported console and existing client SDKs use `/api/v1`. Keep Kunal's
 # `/v1` routes canonical while exposing a compatibility alias during migration.
