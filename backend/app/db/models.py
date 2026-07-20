@@ -15,6 +15,49 @@ def default_api_key_expiry():
     return datetime.now(timezone.utc) + timedelta(days=90)
 
 
+class AccessRequest(Base):
+    """Public demo and early-access intake request."""
+    __tablename__ = "access_requests"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reference = Column(String(35), nullable=False)
+    name = Column(String(255), nullable=False)
+    business_email = Column(String(255), nullable=False)
+    company = Column(String(255), nullable=False)
+    role = Column(String(100), nullable=False)
+    use_case = Column(Text, nullable=False)
+    requested_access = Column(String(100), nullable=False)
+    consent_timestamp = Column(DateTime(timezone=True), nullable=False)
+    notice_version = Column(String(50), nullable=False)
+    source_page = Column(String(512), nullable=False)
+    status = Column(String(50), nullable=False, default="PENDING")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_access_requests_reference", "reference", unique=True),
+        Index("idx_access_requests_status_created", "status", "created_at"),
+    )
+
+
+class AccessRequestHistory(Base):
+    """Non-tenant audit history for public intake requests."""
+    __tablename__ = "access_request_history"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    access_request_id = Column(UUID(as_uuid=True), nullable=False)
+    actor_id = Column(UUID(as_uuid=True), nullable=True)
+    event_type = Column(String(50), nullable=False)
+    old_status = Column(String(50), nullable=True)
+    new_status = Column(String(50), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    event_metadata = Column("metadata", JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("idx_access_request_history_request", "access_request_id", "created_at"),
+    )
+
+
 class Tenant(Base):
     """Multi-tenant tenant model"""
     __tablename__ = "tenants"
@@ -63,6 +106,11 @@ class User(Base):
     nullable=False,
     default="viewer"
     )  # owner, admin, developer, operator, viewer
+    platform_role = Column(
+        Enum("NONE", "ADMIN", name="platform_role"),
+        nullable=False,
+        default="NONE",
+    )
     mfa_enabled = Column(Boolean, default=False)
     mfa_secret = Column(String(32), nullable=True)  # TOTP secret (encrypted)
     mfa_backup_codes = Column(ARRAY(String), nullable=True)  # TOTP backup codes

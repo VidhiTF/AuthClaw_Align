@@ -24,6 +24,7 @@ notice.
 | Processing flow | Personal-data classes | Technical purpose | Source | Components and storage | Recipient or processor | Tenant isolation | Current retention and deletion |
 |---|---|---|---|---|---|---|---|
 | User identity and access | Name, email, user identifier, tenant membership, roles and OIDC claims | Authentication, authorization and account administration | User, administrator or configured identity provider | Console; `backend/`; PostgreSQL | AuthClaw control plane and configured identity provider | Records and authorization are scoped by `tenant_id` | Retained for the account and tenant lifecycle; organization-approved deletion and exception rules are required |
+| Public demo and early-access intake | Name, business email, company, role and use case | Evaluate and respond to requested product access | Public requester with explicit consent | Marketing intake; `access_requests` in PostgreSQL | Authorized AuthClaw launch owners | Pre-tenant public workflow; access is restricted to launch owner/admin operations | Pending requests: 90 days; rejected requests: 30 days; invited requests: 30 days when onboarding has not begun; approved requests follow the customer lifecycle |
 | API and gateway requests | Request identifier, tenant identifier, provider, model, route and request metadata | Route authorized model requests and enforce policy | Authenticated API client | `backend/`; `gateway/`; operational metadata stores | Configured model provider | Tenant context is established before policy and provider routing | Request payloads should remain transient unless an approved workflow requires persistence |
 | Prompts and model responses | Free-form text that may contain names, contact details, identifiers, financial, health or other personal data | Provide the requested AI operation | End user or authorized application | `gateway/`; `services/agent/`; provider request lifecycle | Configured model provider | Requests are processed using authenticated tenant context | Minimize persistence; raw content must not be written to operational logs or audit metadata by default |
 | Redaction and tokenization mappings | Encrypted original value, token value, entity type, strategy and usage metadata | Replace sensitive values before provider egress and support authorized reversal | Gateway sensitive-data detection | `redaction_tokens` in PostgreSQL; `gateway/redact.go` | AuthClaw gateway and authorized control-plane users | Every mapping contains `tenant_id`; cross-tenant access is forbidden | Tenant-configurable 1-3650 days; default 90 days; expired mappings are eligible for purge |
@@ -59,6 +60,13 @@ notice.
 6. Failed deletion must be observable and safely retryable.
 7. Legal, contractual, security or backup exceptions require an authorized
    organizational decision and documented expiry.
+8. Public intake deletion retains only non-PII history metadata and the original
+   request identifier as deletion evidence.
+
+Public intake retention is infrastructure-operated. The deployment scheduler must
+invoke `POST /api/public/v1/access-requests/retention/purge` at least daily using
+the approved platform Launch Owner/Admin identity. The API does not schedule its
+own execution.
 
 ## Current implementation evidence
 

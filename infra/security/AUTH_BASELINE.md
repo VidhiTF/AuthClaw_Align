@@ -24,6 +24,37 @@ Rotation procedure:
 3. Update dependent clients to the new secret.
 4. The old key is marked inactive with `rotated_at` and stops resolving immediately.
 
+## Platform Authorization
+
+Platform roles are global and separate from tenant roles. Platform operations require
+both the `ADMIN` platform role and the dedicated `platform.admin` API-key scope.
+Platform roles are not exposed or assignable through tenant user APIs. Provisioning is
+performed only through controlled operational procedures.
+Platform-scoped API keys are likewise provisioned and managed only through controlled
+operational procedures; tenant API-key endpoints cannot create, list, rotate or revoke
+them.
+
+Platform identities currently reuse authenticated user records and the existing API-key
+authentication protocol. They may evolve into a dedicated platform identity model in a
+future architecture change.
+A tenant containing a PlatformAdmin identity cannot be deactivated, disabled, or
+suspended until that identity is transferred or removed through the approved
+operational procedure.
+
+Bootstrap from the backend runtime with owner database credentials and the production
+API-key hash secret:
+
+```bash
+PLATFORM_ADMIN_TENANT="Internal Operations" \
+PLATFORM_ADMIN_EMAIL="operator@example.com" \
+python scripts/bootstrap_platform_admin.py
+```
+
+Store the displayed key immediately; it is shown once. Verify with
+`PLATFORM_ADMIN_ACTION=verify` and the same tenant/email variables. Roll back with
+`PLATFORM_ADMIN_ACTION=rollback`; this revokes the identity's platform-scoped keys and
+restores its platform role to `NONE`.
+
 ## Provider Credentials
 
 - Provider credentials are encrypted with the configured AuthClaw secret provider.

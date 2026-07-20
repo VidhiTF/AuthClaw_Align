@@ -6,16 +6,20 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from app.db.models import AuditLogMetadata, RedactionToken
+from app.db.models import (
+    AccessRequest,
+    AccessRequestHistory,
+    AuditLogMetadata,
+    RedactionToken,
+)
 from app.services import event_backbone
 from app.services.audit_store import append_audit_event
-
 
 PURGE_ACTION = "privacy:purge_expired"
 PURGE_DATA_CLASS = "redaction_token_mapping"
@@ -133,9 +137,7 @@ def purge_expired_redaction_mappings(
 
         db.commit()
 
-        event_backbone.increment_metric(
-            "privacy_purge_operations_total"
-        )
+        event_backbone.increment_metric("privacy_purge_operations_total")
         event_backbone.increment_metric(
             "privacy_purged_records_total",
             deleted_count,
@@ -151,7 +153,63 @@ def purge_expired_redaction_mappings(
         )
     except Exception:
         db.rollback()
-        event_backbone.increment_metric(
-            "privacy_purge_failures_total"
-        )
+        event_backbone.increment_metric("privacy_purge_failures_total")
         raise
+
+
+def purge_expired_access_requests(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Delete expired public intake records under the approved ACL-15 policy."""
+    evaluated_at = now or _now_utc()
+    onboarding_started = func.access_request_onboarding_started(
+        AccessRequest.business_email,
+        AccessRequest.updated_at,
+    )
+    expired = (
+        db.query(AccessRequest)
+        .filter(
+            or_(
+                and_(
+                    AccessRequest.status == "PENDING",
+                    AccessRequest.created_at <= evaluated_at - timedelta(days=90),
+                ),
+                and_(
+                    AccessRequest.status == "REJECTED",
+                    AccessRequest.updated_at <= evaluated_at - timedelta(days=30),
+                ),
+                and_(
+                    AccessRequest.status == "INVITED",
+                    AccessRequest.updated_at <= evaluated_at - timedelta(days=30),
+                    onboarding_started.is_(False),
+                ),
+            )
+        )
+        .all()
+    )
+    try:
+        for request in expired:
+            db.add(
+                AccessRequestHistory(
+                    access_request_id=request.id,
+                    event_type="DELETED",
+                    old_status=request.status,
+                    new_status=None,
+                    event_metadata={"policy": "ACL-15"},
+                )
+            )
+            db.delete(request)
+        db.commit()
+    except Exception:
+        db.rollback()
+        event_backbone.increment_metric("access_request_deletion_failures_total")
+        raise
+
+    event_backbone.increment_metric("access_request_deletion_completed_total")
+    event_backbone.increment_metric(
+        "access_request_records_deleted_total",
+        len(expired),
+    )
+    return len(expired)

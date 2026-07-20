@@ -2,20 +2,24 @@ import pytest
 from fastapi.testclient import TestClient
 from fastapi import status
 from sqlalchemy import text, create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker, Session
 import uuid
 from uuid import uuid4, UUID
 import os
 import base64
+from datetime import datetime, timedelta, timezone
 from main import app
 
 # Force fallback to PostgreSQL audit logs by unsetting CLICKHOUSE_HOST for endpoints test suite
 os.environ.pop("CLICKHOUSE_HOST", None)
 
 from app.db.dependencies import get_db
-from app.db.models import Tenant, User, APIKey, Policy, GatewayConfig, RedactionToken, AuditLogMetadata
+from app.db.models import AccessRequest, AccessRequestHistory, Tenant, User, APIKey, Policy, GatewayConfig, RedactionToken, AuditLogMetadata
 from app.core.auth import hash_key
+from app.services import access_requests as access_request_service
+from app.services.privacy_lifecycle import purge_expired_access_requests
 from tests.db_safety import destructive_test_urls
 
 owner_db_url, db_url = destructive_test_urls()
@@ -29,10 +33,16 @@ def db_session() -> Session:
     """Create a clean database session and apply tables/RLS contexts"""
     from app.db.base import Base
     Base.metadata.create_all(bind=owner_engine)
-    
+
+    app_role = owner_engine.dialect.identifier_preparer.quote(
+        os.getenv("POSTGRES_APP_USER", "authclaw_app")
+    )
     # Truncate tables before run
     with owner_engine.connect() as conn:
-        conn.execute(text("TRUNCATE TABLE audit_log_metadata, pending_approvals, redaction_tokens, gateway_configs, policies, api_keys, users, tenants CASCADE;"))
+        conn.execute(text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON access_requests TO {app_role}"))
+        conn.execute(text(f"GRANT SELECT, INSERT ON access_request_history TO {app_role}"))
+        conn.execute(text(f"GRANT SELECT, INSERT ON onboarding_email_otps TO {app_role}"))
+        conn.execute(text("TRUNCATE TABLE access_request_history, access_requests, audit_log_metadata, pending_approvals, redaction_tokens, gateway_configs, policies, api_keys, users, tenants CASCADE;"))
         conn.commit()
         
     db = TestingSessionLocal()
@@ -105,6 +115,139 @@ def test_authentication_gates(client: TestClient):
     response = client.get("/v1/audit-logs", headers={"Authorization": "Bearer badkey"})
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
     assert "Invalid or expired API Key" in response.json()["detail"]
+
+
+def test_public_access_request_persists_server_owned_fields(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        access_request_service.settings,
+        "PRIVACY_NOTICE_VERSION",
+        "approved-test-version",
+    )
+    payload = {
+        "name": "Ada Lovelace",
+        "business_email": "ada@example.com",
+        "company": "Analytical Engines",
+        "role": "CTO",
+        "use_case": "Govern AI traffic.",
+        "requested_access": "EARLY_ACCESS",
+        "consent": True,
+        "source_page": "/security",
+    }
+
+    response = client.post("/api/public/v1/access-requests", json=payload)
+
+    assert response.status_code == status.HTTP_202_ACCEPTED
+    reference = response.json()["reference"]
+    record = db_session.query(AccessRequest).filter(AccessRequest.reference == reference).one()
+    assert record.notice_version == "approved-test-version"
+    assert record.source_page == "/security"
+    assert record.status == "PENDING"
+    history = (
+        db_session.query(AccessRequestHistory)
+        .filter(AccessRequestHistory.access_request_id == record.id)
+        .one()
+    )
+    assert history.event_type == "CREATED"
+    assert history.new_status == "PENDING"
+
+    duplicate = AccessRequest(
+        reference=reference,
+        name=record.name,
+        business_email=record.business_email,
+        company=record.company,
+        role=record.role,
+        use_case=record.use_case,
+        requested_access=record.requested_access,
+        consent_timestamp=record.consent_timestamp,
+        notice_version=record.notice_version,
+        source_page=record.source_page,
+        status=record.status,
+    )
+    db_session.add(duplicate)
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+    assert db_session.query(AccessRequest).filter(AccessRequest.reference == reference).count() == 1
+
+
+def test_access_request_retention_policy(db_session: Session):
+    now = datetime.now(timezone.utc)
+
+    def record(reference: str, status_value: str, age_days: int, email: str):
+        created = now - timedelta(days=age_days)
+        return AccessRequest(
+            reference=reference,
+            name="Synthetic User",
+            business_email=email,
+            company="Synthetic Company",
+            role="Tester",
+            use_case="Synthetic lifecycle test",
+            requested_access="EARLY_ACCESS",
+            consent_timestamp=created,
+            notice_version="test",
+            source_page="/early-access",
+            status=status_value,
+            created_at=created,
+            updated_at=created,
+        )
+
+    expired = [
+        record("AR-RETENTION-PENDING", "PENDING", 91, "pending@example.test"),
+        record("AR-RETENTION-REJECTED", "REJECTED", 31, "rejected@example.test"),
+        record("AR-RETENTION-INVITED", "INVITED", 31, "invited@example.test"),
+    ]
+    retained = [
+        record("AR-RETENTION-APPROVED", "APPROVED", 120, "approved@example.test"),
+        record("AR-RETENTION-RECENT", "PENDING", 10, "recent@example.test"),
+        record("AR-RETENTION-STARTED", "INVITED", 31, "started@example.test"),
+    ]
+    db_session.add_all(expired + retained)
+    db_session.commit()
+    with owner_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO onboarding_email_otps (
+                    id, email, tenant_name, otp_hash, status, expires_at, created_at
+                )
+                VALUES (
+                    :id, 'started@example.test', 'Synthetic', 'synthetic',
+                    'pending', :expires_at, :created_at
+                )
+                """
+            ),
+            {
+                "id": uuid4(),
+                "expires_at": now + timedelta(minutes=15),
+                "created_at": now - timedelta(days=1),
+            },
+        )
+
+    assert purge_expired_access_requests(db_session, now=now) == 3
+
+    remaining = {
+        row.reference
+        for row in db_session.query(AccessRequest)
+        .filter(AccessRequest.reference.like("AR-RETENTION-%"))
+        .all()
+    }
+    assert remaining == {
+        "AR-RETENTION-APPROVED",
+        "AR-RETENTION-RECENT",
+        "AR-RETENTION-STARTED",
+    }
+    deleted_ids = {row.id for row in expired}
+    histories = (
+        db_session.query(AccessRequestHistory)
+        .filter(AccessRequestHistory.access_request_id.in_(deleted_ids))
+        .all()
+    )
+    assert len(histories) == 3
+    assert all(history.event_type == "DELETED" for history in histories)
 
 
 def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):

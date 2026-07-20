@@ -87,6 +87,8 @@ def validate_production_environment() -> None:
 
     if not (os.getenv("SMTP_FROM") or os.getenv("EMAIL_FROM")):
         errors.append("SMTP_FROM or EMAIL_FROM must be configured")
+    if not os.getenv("INTERNAL_LAUNCH_OWNER_EMAIL", "").strip():
+        errors.append("INTERNAL_LAUNCH_OWNER_EMAIL must be configured")
 
     public_gateway = os.getenv("PUBLIC_GATEWAY_URL") or os.getenv("NEXT_PUBLIC_GATEWAY_URL", "")
     if public_gateway and not public_gateway.startswith("https://"):

@@ -7,7 +7,12 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 
 from app.db.models import APIKey
-from app.schemas.models import APIKeyCreate, APIKeyResponse, APIKeyRotate
+from app.schemas.models import (
+    APIKeyCreate,
+    APIKeyResponse,
+    APIKeyRotate,
+    PLATFORM_API_KEY_SCOPES,
+)
 from app.core.auth import get_tenant_db, hash_key, require_roles, require_scopes
 from app.services.notifications import create_notification
 
@@ -46,6 +51,14 @@ def _require_not_current_key(request: Request, key: APIKey) -> None:
         )
 
 
+def _require_tenant_managed_key(key: APIKey) -> None:
+    if PLATFORM_API_KEY_SCOPES.intersection(key.scopes or []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Platform API keys require controlled operational management.",
+        )
+
+
 @router.get("", response_model=list[APIKeyResponse], dependencies=[require_roles(["owner"]), require_scopes(["read"])])
 def list_api_keys(
     request: Request,
@@ -55,6 +68,9 @@ def list_api_keys(
     """List all API keys for the tenant (isolated by tenant RLS)"""
     tenant_id = request.state.tenant_id
     query = db.query(APIKey).filter(APIKey.tenant_id == tenant_id)
+    query = query.filter(
+        ~APIKey.scopes.any(next(iter(PLATFORM_API_KEY_SCOPES)))
+    )
     if not include_inactive:
         query = query.filter(APIKey.is_active == True)
     return query.order_by(APIKey.created_at.desc()).all()
@@ -128,6 +144,7 @@ def rotate_api_key(
     old_key = db.query(APIKey).filter(APIKey.tenant_id == tenant_id, APIKey.id == id).first()
     if not old_key:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API Key not found")
+    _require_tenant_managed_key(old_key)
     _require_not_current_key(request, old_key)
     if not old_key.is_active or old_key.revoked_at or old_key.rotated_at:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="API key is not active")
@@ -184,6 +201,7 @@ def revoke_api_key(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="API Key not found"
         )
+    _require_tenant_managed_key(key)
     _require_not_current_key(request, key)
     key.is_active = False
     key.revoked_at = datetime.now(timezone.utc)

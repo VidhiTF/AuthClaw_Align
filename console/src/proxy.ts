@@ -10,6 +10,8 @@ export function proxy(request: NextRequest) {
     "/pricing",
     "/security",
     "/company",
+    "/demo",
+    "/early-access",
     "/index.html",
     "/product.html",
     "/pricing.html",

@@ -13,6 +13,8 @@ export default function sitemap(): MetadataRoute.Sitemap {
     marketingRoutes.cookies,
     marketingRoutes.subprocessors,
     marketingRoutes.dpa,
+    marketingRoutes.demo,
+    marketingRoutes.earlyAccess,
   ].map((path) => ({
     url: new URL(path, marketingSiteUrl).toString(),
     changeFrequency: "monthly",

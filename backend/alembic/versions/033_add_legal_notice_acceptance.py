@@ -1,15 +1,15 @@
 """Add ACL-35 versioned legal-notice acceptance.
 
-Revision ID: 028
-Revises: 027
+Revision ID: 033
+Revises: 032
 """
 
 from alembic import op
 import sqlalchemy as sa
 
 
-revision = "028"
-down_revision = "027"
+revision = "033"
+down_revision = "032"
 branch_labels = None
 depends_on = None
 
