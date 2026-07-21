@@ -88,6 +88,45 @@ def test_consistency_report_detects_missing_and_hash_mismatch(monkeypatch):
     assert report.hash_mismatches[0]["record_id"] == mismatched["record_id"]
 
 
+def test_chain_validation_follows_legacy_hash_links_before_v2_sequences():
+    tenant_id = str(uuid4())
+    first = {**_record(tenant_id=tenant_id), "tenant_sequence": 1, "chain_version": 1}
+    second = {
+        **_record(tenant_id=tenant_id, prior_hash=first["integrity_hash"]),
+        "tenant_sequence": 3,
+        "chain_version": 1,
+    }
+    third = {
+        **_record(tenant_id=tenant_id, prior_hash=second["integrity_hash"]),
+        "tenant_sequence": 2,
+        "chain_version": 1,
+    }
+
+    assert audit_store._chain_valid([first, third, second])
+
+
+def test_chain_validation_keeps_v2_sequence_order_strict():
+    tenant_id = str(uuid4())
+    first = {
+        **_record(tenant_id=tenant_id),
+        "tenant_sequence": 1,
+        "chain_version": 2,
+        "canonical_payload": '{"sequence":1}',
+    }
+    first["integrity_hash"] = audit_store.compute_integrity_hash(first, "GENESIS")
+    second = {
+        **_record(tenant_id=tenant_id, prior_hash=first["integrity_hash"]),
+        "tenant_sequence": 3,
+        "chain_version": 2,
+        "canonical_payload": '{"sequence":3}',
+    }
+    second["integrity_hash"] = audit_store.compute_integrity_hash(
+        second, first["integrity_hash"]
+    )
+
+    assert not audit_store._chain_valid([first, second])
+
+
 def test_replay_inserts_only_missing_rows_and_preserves_chain_hashes(monkeypatch):
     tenant_id = str(uuid4())
     existing = _record(tenant_id=tenant_id)
