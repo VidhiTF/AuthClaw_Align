@@ -251,6 +251,7 @@ jobs:
           tests/test_authorization_matrix.py
           tests/test_compliance_scoring.py
           tests/test_ephemeral_workers.py
+          tests/test_endpoints.py::test_data_subject_request_lifecycle_authorization_and_isolation
           tests/test_endpoints.py::test_authentication_gates
           tests/test_event_backbone.py
           tests/test_onboarding_invitations.py

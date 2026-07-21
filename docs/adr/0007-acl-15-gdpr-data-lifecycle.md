@@ -179,6 +179,48 @@ Risks:
 These risks require authorization, tenant-isolation tests, synthetic test data,
 safe defaults and observable failures.
 
+## F11 data-subject request workflow
+
+F11 uses the existing tenant authentication, authorization, database session,
+append-only audit, and signed-export infrastructure. Authorized tenant owners
+and administrators process requests through this state model:
+
+`PENDING -> VERIFIED -> APPROVED | REJECTED`
+
+Approved export and deletion requests move to `COMPLETED` only after the
+operation and its audit evidence commit successfully. Row locking makes each
+transition atomic. Requests, lookups, exports, and deletions remain scoped to
+the authenticated tenant.
+
+The supported export contains the subject's AuthClaw user profile,
+tenant-managed API-key metadata, and actor-linked audit metadata. It excludes
+key hashes, credentials, platform-managed keys, and data without an
+authoritative subject link. The signed artifact uses the existing audit-export
+key and manifest format.
+
+Deletion removes tenant-managed API keys, notifications, and onboarding status
+linked to the subject. User identity is retained for account and tenant
+lifecycle integrity. Immutable audit metadata and legal-acceptance records are
+retained as compliance evidence, and platform-managed keys remain subject to
+controlled platform operations. These exceptions are returned as categories
+and reasons without reproducing deleted personal data.
+
+Operators must verify identity before making a decision, record a decision
+reason, confirm the request type and scope, and review reported deletion
+exceptions. They must not treat completion as authorization to restore deleted
+data.
+
+The existing metrics framework records:
+
+- `gdpr_requests_created_total`
+- `gdpr_requests_verified_total`
+- `gdpr_requests_approved_total`
+- `gdpr_exports_completed_total`
+- `gdpr_deletions_completed_total`
+- `gdpr_request_failures_total`
+
+Metric labels and logs do not contain subject data.
+
 ## Verification
 
 ACL-15 must verify:
@@ -208,6 +250,42 @@ If the ACL-15 implementation causes unsafe deletion or audit failures:
 Deleted personal data must not be restored merely to roll back application
 code. Any restoration from backups requires an authorized organizational
 decision.
+
+For an F11 deployment, operators must also:
+
+1. Verify the current Alembic revision and take a database backup before
+   applying revision `035`.
+2. Apply the migration before deploying application code that exposes the F11
+   routes, then verify the table, tenant policies, and restricted-role grants.
+3. Stop new F11 processing before rollback and identify requests currently in
+   `PENDING`, `VERIFIED`, or `APPROVED` state.
+4. Revert application code first. Keep revision `035` applied while any F11
+   rows must be preserved; the older application does not depend on that table.
+5. Downgrade from `035` only when an authorized operator has confirmed that no
+   required request record will be lost, because the downgrade drops the F11
+   table.
+6. After rollback, verify existing authentication, tenant isolation, audit
+   append, and non-F11 API behavior. Preserve immutable audit events already
+   emitted for F11 operations.
+
+In-flight transactions either commit their operation and audit evidence
+together or roll back. A rollback must never recreate personal data already
+deleted by a completed request, reactivate deleted credentials, or alter
+retained immutable evidence.
+
+## F11 acceptance evidence
+
+- Lifecycle, authorization, and tenant isolation:
+  `backend/tests/test_endpoints.py::test_data_subject_request_lifecycle_authorization_and_isolation`.
+- Export scope, signing, completion, and secret exclusion: assertions in the
+  same integration test against the signed export artifact.
+- Deletion, exceptions, idempotency, and transaction rollback: deletion and
+  forced-failure assertions in the same integration test.
+- Immutable audit evidence: asserted lifecycle, export, and deletion actions
+  emitted through `append_audit_event` without subject email or credentials.
+- Migration upgrade and rollback: revision
+  `backend/alembic/versions/035_add_data_subject_requests.py` and migration
+  validation in the backend CI job.
 
 ## Consequences
 
