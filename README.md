@@ -77,6 +77,8 @@ deployment evidence.
 
 See `docs/adr/0006-acl-14-controlled-beta-delivery.md` for the decision and
 `infra/terraform/BETA_DEPLOYMENT.md` for enablement, branch protection, and rollback.
+The supported launch configuration, known limitations, and acceptance-evidence index are
+published in `infra/security/AUDIT_READY_RELEASE_CHECKLIST.md`.
 
 ## Compliance positioning
 

@@ -68,6 +68,19 @@ python scripts/no_credential_proof.py infra/security/no_credential_proof.local.j
 4. Run smoke checks for login, gateway proxy, evidence lookup, findings, and audit export after rollback.
 5. Attach rollback notes to the audit-ready release checklist.
 
+### F21 release-content rollback
+
+1. Use the existing controlled-beta rollback to restore the previous known-good image
+   digests; do not deploy untested content outside the release process.
+2. If a public claim no longer matches its evidence, restore the last approved wording
+   and claim-register mapping, then rerun `npm run test:claims` before release.
+3. If supported configuration or limitation text is inaccurate, revert the affected
+   documentation with the release commit while preserving prior acceptance evidence.
+4. Rerun the release-candidate Playwright suite and documentation validation after the
+   rollback. A failed browser, claim, or documentation gate blocks the replacement release.
+5. Record the rollback commit, restored image digests, gate results, and approval in the
+   existing release evidence; do not edit historical evidence to describe the new state.
+
 ## Red-Team Release Thresholds
 
 - Critical failed probes: `0`

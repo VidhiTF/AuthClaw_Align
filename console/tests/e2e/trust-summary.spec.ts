@@ -25,7 +25,15 @@ const packageResponse = (trustSummary?: Record<string, unknown>) => ({
       framework: "SOC2",
       score: 90,
       readiness_level: "audit_ready",
-      controls: [],
+      controls: [{
+        id: "CC6.1",
+        name: "Logical access",
+        description: "Access control evidence",
+        score: 90,
+        status: "compliant",
+        evidence: ["audit-event:access-reviewed"],
+        gaps: [],
+      }],
       metrics: {
         evidence_count: 0,
         audit_event_count: 0,
@@ -71,6 +79,9 @@ test("renders backend-provided Trust Summary buckets", async ({ page }) => {
   await expect(page.getByText("Access Controls")).toBeVisible();
   await expect(page.getByText("Monitoring")).toBeVisible();
   await expect(page.getByText("Remediation")).toBeVisible();
+  await expect(page.getByText("audit-event:access-reviewed")).toBeVisible();
+  await expect(page.getByText(/not an independent SOC 2 Type II report or a SOC 3 report/)).toBeVisible();
+  await expect(page.getByText(/no certification is implied/)).toBeVisible();
 });
 
 test("renders empty Trust Summary buckets", async ({ page }) => {
@@ -108,4 +119,49 @@ test("supports public responses without Trust Summary", async ({ page }) => {
   await page.goto("/trust-center/demo-token");
 
   await expect(page.getByText("Trust Summary is unavailable for this response.")).toBeVisible();
+});
+
+test("verifies Trust Center access and navigates signed export", async ({ page }) => {
+  await page.addInitScript(() => sessionStorage.removeItem("trust-center:live-token"));
+  await page.route("**/api/trust-center/public/live-token/request-access", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ email: "auditor@example.com", dev_otp: "123456" }),
+    });
+  });
+  await page.route("**/api/trust-center/public/live-token/verify-access", async (route) => {
+    expect(await route.request().postDataJSON()).toEqual({ otp: "123456" });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ access_token: trustCenterAccess }),
+    });
+  });
+  await page.route("**/api/trust-center/public/live-token", async (route) => {
+    expect(route.request().headers()["x-trust-center-access"]).toBe(trustCenterAccess);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(packageResponse()),
+    });
+  });
+  await page.route("**/api/trust-center/public/live-token/signed-export?framework=SOC2", async (route) => {
+    expect(route.request().headers()["x-trust-center-access"]).toBe(trustCenterAccess);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ payload: { export_id: "smoke-export" }, signature: "signed" }),
+    });
+  });
+
+  await page.goto("/trust-center/live-token");
+  await page.getByRole("button", { name: "Send verification code" }).click();
+  await expect(page.getByText("Code sent to auditor@example.com")).toBeVisible();
+  await page.getByRole("button", { name: "Verify and open" }).click();
+  await expect(page.getByRole("heading", { name: "Example Tenant" })).toBeVisible();
+
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download SOC2 Export" }).click();
+  expect((await download).suggestedFilename()).toBe("authclaw_SOC2_signed_export_smoke-export.json");
 });

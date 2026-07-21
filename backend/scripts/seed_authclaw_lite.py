@@ -22,7 +22,13 @@ load_dotenv("../.env.local")
 load_dotenv(".env.local")
 
 TENANT_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
+SECONDARY_TENANT_ID = uuid.UUID("11111111-1111-4111-8111-111111111112")
 ADMIN_USER_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
+ROLE_USERS = (
+    (uuid.UUID("22222222-2222-4222-8222-222222222223"), "admin-role@authclaw-lite.demo", "admin"),
+    (uuid.UUID("22222222-2222-4222-8222-222222222224"), "operator@authclaw-lite.demo", "operator"),
+    (uuid.UUID("22222222-2222-4222-8222-222222222225"), "viewer@authclaw-lite.demo", "viewer"),
+)
 API_KEY_ID = uuid.UUID("33333333-3333-4333-8333-333333333333")
 GATEWAY_ID = uuid.UUID("44444444-4444-4444-8444-444444444444")
 POLICY_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
@@ -97,6 +103,15 @@ def main() -> None:
 
         conn.execute(
             text("""
+            INSERT INTO tenants (id, name, tier, status)
+            VALUES (:id, 'AuthClaw Role Fixture', 'starter', 'active')
+            ON CONFLICT (id) DO UPDATE SET status = 'active', updated_at = NOW()
+            """),
+            {"id": SECONDARY_TENANT_ID},
+        )
+
+        conn.execute(
+            text("""
             INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, is_active)
             VALUES (:id, :tenant_id, 'admin@authclaw-lite.demo', :password_hash, 'owner', 'NONE', false, true)
             ON CONFLICT (tenant_id, email) DO UPDATE SET
@@ -107,6 +122,44 @@ def main() -> None:
             """),
             {"id": ADMIN_USER_ID, "tenant_id": TENANT_ID, "password_hash": hash_password(RAW_ADMIN_PASSWORD)},
         )
+
+        for user_id, email, role in ROLE_USERS:
+            conn.execute(
+                text("""
+                INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, is_active)
+                VALUES (:id, :tenant_id, :email, :password_hash, :role, 'NONE', false, true)
+                ON CONFLICT (tenant_id, email) DO UPDATE SET
+                    password_hash = EXCLUDED.password_hash,
+                    role = EXCLUDED.role,
+                    is_active = true,
+                    updated_at = NOW()
+                """),
+                {
+                    "id": user_id,
+                    "tenant_id": TENANT_ID,
+                    "email": email,
+                    "password_hash": hash_password(RAW_ADMIN_PASSWORD),
+                    "role": role,
+                },
+            )
+            conn.execute(
+                text("""
+                INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, is_active)
+                VALUES (:id, :tenant_id, :email, :password_hash, :role, 'NONE', false, true)
+                ON CONFLICT (tenant_id, email) DO UPDATE SET
+                    password_hash = EXCLUDED.password_hash,
+                    role = EXCLUDED.role,
+                    is_active = true,
+                    updated_at = NOW()
+                """),
+                {
+                    "id": uuid.uuid5(SECONDARY_TENANT_ID, email),
+                    "tenant_id": SECONDARY_TENANT_ID,
+                    "email": email,
+                    "password_hash": hash_password(RAW_ADMIN_PASSWORD),
+                    "role": role,
+                },
+            )
 
         conn.execute(
             text("""

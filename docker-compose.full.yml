@@ -148,7 +148,8 @@ services:
       dockerfile: Dockerfile.demo
     container_name: authclaw-full-backend
     env_file:
-      - .env.local
+      - path: .env.local
+        required: false
     depends_on:
       postgres:
         condition: service_healthy
@@ -222,7 +223,7 @@ services:
       GATEWAY_ESTIMATED_COST_PER_1K_REQUESTS_USD: ${GATEWAY_ESTIMATED_COST_PER_1K_REQUESTS_USD:-1}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
-    command: ["sh", "-c", "DATABASE_URL=\"$$OWNER_DATABASE_URL\" alembic upgrade head && DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$APP_DATABASE_URL\" python -m uvicorn main:app --host 0.0.0.0 --port 8000"]
+    command: ["sh", "-c", "DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$OWNER_DATABASE_URL\" alembic upgrade head && DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$APP_DATABASE_URL\" python -m uvicorn main:app --host 0.0.0.0 --port 8000"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
       interval: 10s
