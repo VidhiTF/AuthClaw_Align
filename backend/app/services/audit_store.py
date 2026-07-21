@@ -237,20 +237,37 @@ def normalize_clickhouse_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _chain_valid(records: Iterable[dict[str, Any]]) -> bool:
+    children: dict[str, dict[str, Any]] = {}
+    hashes: set[str] = set()
+    for record in records:
+        prior_hash = str(record.get("prior_hash") or GENESIS_HASH)
+        integrity_hash = str(record.get("integrity_hash") or "")
+        if (
+            not integrity_hash
+            or integrity_hash in hashes
+            or prior_hash in children
+            or integrity_hash != compute_integrity_hash(record, prior_hash)
+        ):
+            return False
+        children[prior_hash] = record
+        hashes.add(integrity_hash)
+
+    seen: set[str] = set()
     prior_hash = GENESIS_HASH
     prior_sequence = 0
-    for record in records:
+    while prior_hash in children:
+        record = children[prior_hash]
+        integrity_hash = str(record["integrity_hash"])
+        if integrity_hash in seen:
+            return False
         sequence = int(record.get("tenant_sequence") or prior_sequence + 1)
-        if prior_sequence and sequence != prior_sequence + 1:
+        # v1 sequences were backfilled after hashing; their links remain authoritative.
+        if int(record.get("chain_version") or 1) >= 2 and sequence != prior_sequence + 1:
             return False
-        expected = compute_integrity_hash(record, record.get("prior_hash") or GENESIS_HASH)
-        if record.get("prior_hash") != prior_hash:
-            return False
-        if record.get("integrity_hash") != expected:
-            return False
-        prior_hash = record.get("integrity_hash") or expected
+        seen.add(integrity_hash)
+        prior_hash = integrity_hash
         prior_sequence = sequence
-    return True
+    return len(seen) == len(hashes)
 
 
 def get_postgres_records(db: Session, tenant_id: str) -> list[dict[str, Any]]:
