@@ -672,7 +672,9 @@ resource "aws_ecs_task_definition" "service" {
         containerPort = each.value.container_port
         protocol      = "tcp"
       }]
-      environment = local.common_environment
+      environment = concat(local.common_environment, each.key == "gateway" ? [
+        { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
+      ] : [])
       secrets = concat(
         contains(["backend", "gateway", "console"], each.key) ? [
           { name = "DATABASE_URL", valueFrom = each.key == "backend" ? aws_secretsmanager_secret.backend_database_url.arn : aws_secretsmanager_secret.app_database_url.arn },

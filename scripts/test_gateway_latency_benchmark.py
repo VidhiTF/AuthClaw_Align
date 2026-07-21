@@ -14,6 +14,7 @@ def report(name: str, **overrides: object) -> bench.ScenarioReport:
         "requests": 3,
         "successes": 3,
         "failures": 0,
+        "error_rate": 0.0,
         "status_counts": {"200": 3},
         "throughput_rps": 100.0,
         "min_ms": 1.0,

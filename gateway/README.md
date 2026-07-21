@@ -120,7 +120,8 @@ overhead. The CI/release gate sets
 `GATEWAY_RATE_LIMIT_ENABLED=false`, `GATEWAY_HTTP_LOGGER_ENABLED=false`,
 `GATEWAY_AUTH_LAST_USED_ENABLED=false`, `GATEWAY_AUTH_CACHE_TTL_MS=60000`,
 `PROVIDER_CREDENTIAL_CACHE_TTL_MS=60000`, and
-`GATEWAY_POLICY_LOCAL_FAST_PATH=true`, `GATEWAY_POLICY_DECISION_CACHE_TTL_MS=60000`
+`GATEWAY_POLICY_LOCAL_FAST_PATH=true`, `GATEWAY_POLICY_DECISION_CACHE_TTL_MS=60000`,
+and `REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS=60000`
 to isolate gateway/proxy overhead
 from access-log I/O, auth metadata writes, external analyzer, rate-limit store,
 and repeated credential/policy lookup latency.

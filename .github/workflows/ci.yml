@@ -247,6 +247,7 @@ jobs:
           pytest --cov=app --cov-report=term-missing
           tests/test_audit_export.py
           tests/test_audit_store.py
+          tests/test_acl24_migration_rollback.py
           tests/test_auth_baseline.py
           tests/test_authorization_matrix.py
           tests/test_compliance_scoring.py
@@ -440,6 +441,7 @@ jobs:
       GEMINI_BASE_URL: http://mock-provider:19090
       PRESIDIO_ANALYZE_TIMEOUT_MS: "25"
       REDACTION_LOCAL_ANALYZER_ONLY: "true"
+      REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS: "60000"
       AUTHCLAW_LITE_POLICY_REQUESTS_PER_MINUTE: "0"
       GATEWAY_RATE_LIMIT_ENABLED: "false"
       GATEWAY_HTTP_LOGGER_ENABLED: "false"
@@ -566,6 +568,7 @@ jobs:
       - name: Run compliance hardening evidence tests
         run: >
           python -m unittest
+          scripts/test_acl24_evidence.py
           scripts/test_compliance_hardening_evidence.py
           scripts/test_no_credential_proof.py
           scripts/test_acl10_cryptography_controls.py
@@ -573,6 +576,7 @@ jobs:
 
       - name: Validate sample compliance hardening evidence
         run: |
+          python scripts/acl24_evidence.py infra/security/acl24-evidence.example.json
           python scripts/compliance_hardening_evidence.py infra/security/compliance_hardening_evidence.example.json
           python scripts/no_credential_proof.py infra/security/no_credential_proof.local.json
 

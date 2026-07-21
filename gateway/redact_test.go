@@ -907,7 +907,7 @@ func TestProxyIntegrationWithRedaction(t *testing.T) {
 
 	// Create user
 	userID := "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22"
-	_, _ = DB.Exec("INSERT INTO users (id, tenant_id, email, role, mfa_enabled, is_active) VALUES ($1, $2, 'integration@example.com', 'admin', false, true)", userID, tenantID)
+	_, _ = DB.Exec("INSERT INTO users (id, tenant_id, email, role, platform_role, mfa_enabled, is_active) VALUES ($1, $2, 'integration@example.com', 'admin', 'NONE', false, true)", userID, tenantID)
 
 	// API key
 	apiKey := "authclaw_integration_key_1"

@@ -1088,25 +1088,6 @@ func redactionTokenCacheKey(tenantID, encVal, entityType, strategy string, reten
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func touchCachedRedactionToken(tenantID, encVal, entityType, strategy string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`UPDATE redaction_tokens
-			 SET entity_type = COALESCE(entity_type, $3),
-			     last_used_at = NOW(),
-			     use_count = use_count + 1
-			 WHERE tenant_id = $1
-			   AND original_value = $2
-			   AND strategy = $4
-			   AND (expires_at IS NULL OR expires_at > NOW())`,
-			tenantID, encVal, entityType, strategy,
-		)
-		return err
-	})
-}
-
 func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, originalValue, entityType, strategy string, retentionDays int, useCache bool) (string, error) {
 	encVal, err := EncryptDeterministic(originalValue)
 	if err != nil {
@@ -1120,7 +1101,7 @@ func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, origi
 			cached, ok := raw.(cachedRedactionToken)
 			if ok && time.Now().Before(cached.expiresAt) {
 				redactionTokensReusedTotal.Add(1)
-				go touchCachedRedactionToken(tenantID, encVal, entityType, strategy)
+				// ponytail: refresh usage metadata on cache expiry; per-hit writes defeat the cache under load.
 				return cached.token, nil
 			}
 			redactionTokenCache.Delete(cacheKey)

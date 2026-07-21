@@ -19,9 +19,11 @@ def migration():
 def test_migration_adds_binding_consumption_and_audit_fields(monkeypatch):
     module = migration()
     add_column = MagicMock()
+    create_table = MagicMock()
     create_index = MagicMock()
     create_foreign_key = MagicMock()
     monkeypatch.setattr(module.op, "add_column", add_column)
+    monkeypatch.setattr(module.op, "create_table", create_table)
     monkeypatch.setattr(module.op, "create_index", create_index)
     monkeypatch.setattr(module.op, "create_foreign_key", create_foreign_key)
 
@@ -37,7 +39,8 @@ def test_migration_adds_binding_consumption_and_audit_fields(monkeypatch):
         ("approval_audit", "reason"),
         ("approval_audit", "details"),
     }.issubset(added)
-    create_index.assert_called_once_with(
+    create_table.assert_called_once()
+    create_index.assert_any_call(
         "idx_approval_tenant_action_hash",
         "pending_approvals",
         ["tenant_id", "action_hash"],
