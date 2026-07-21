@@ -5,6 +5,8 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master, "dev/**"]
+  schedule:
+    - cron: "17 2 * * *"
   workflow_dispatch:
 
 permissions:
@@ -23,15 +25,49 @@ env:
   NODE_VERSION: "22.23.1"
   GO_VERSION_FILE: gateway/go.mod
   REGISTRY: ghcr.io
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
   line-budget:
     name: Source Size Gate
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.changes.outputs.backend }}
+      audit_consumer: ${{ steps.changes.outputs.audit_consumer }}
+      agent: ${{ steps.changes.outputs.agent }}
+      gateway: ${{ steps.changes.outputs.gateway }}
+      sdk: ${{ steps.changes.outputs.sdk }}
+      console: ${{ steps.changes.outputs.console }}
+      shared: ${{ steps.changes.outputs.shared }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Detect changed components
+        id: changes
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            audit_consumer:
+              - 'audit_consumer/**'
+            agent:
+              - 'services/agent/**'
+            gateway:
+              - 'gateway/**'
+            sdk:
+              - 'sdk/**'
+            console:
+              - 'console/**'
+            shared:
+              - '.github/workflows/ci.yml'
+              - 'docker-compose.full.yml'
+              - '.env.full.example'
+              - 'infra/clickhouse/**'
+              - 'infra/opa/**'
+              - 'scripts/**'
 
       - name: Install Tokei
         uses: taiki-e/install-action@v2
@@ -48,6 +84,8 @@ jobs:
 
   sast-codeql:
     name: SAST / CodeQL
+    # PRs opt into expensive gates with the ci:full label.
+    if: github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full'))
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -175,6 +213,8 @@ jobs:
 
   backend-tests:
     name: Backend Migrations and Tests
+    needs: line-budget
+    if: github.event_name != 'pull_request' || needs.line-budget.outputs.backend == 'true' || needs.line-budget.outputs.shared == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
@@ -265,6 +305,8 @@ jobs:
 
   audit-consumer-tests:
     name: Audit Consumer Tests
+    needs: line-budget
+    if: github.event_name != 'pull_request' || needs.line-budget.outputs.audit_consumer == 'true' || needs.line-budget.outputs.shared == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -287,6 +329,8 @@ jobs:
 
   agent-tests:
     name: Agent Compile and Core Smoke Tests
+    needs: line-budget
+    if: github.event_name != 'pull_request' || needs.line-budget.outputs.agent == 'true' || needs.line-budget.outputs.shared == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -313,6 +357,8 @@ jobs:
 
   gateway-tests:
     name: Gateway Deterministic Tests
+    needs: line-budget
+    if: github.event_name != 'pull_request' || needs.line-budget.outputs.gateway == 'true' || needs.line-budget.outputs.shared == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -349,6 +395,8 @@ jobs:
 
   sdk-tests:
     name: Python SDK Tests
+    needs: line-budget
+    if: github.event_name != 'pull_request' || needs.line-budget.outputs.sdk == 'true' || needs.line-budget.outputs.shared == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -379,6 +427,8 @@ jobs:
 
   console-tests:
     name: Console Lint, Typecheck, Build
+    needs: line-budget
+    if: github.event_name != 'pull_request' || needs.line-budget.outputs.console == 'true' || needs.line-budget.outputs.shared == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -425,6 +475,13 @@ jobs:
 
   integration-and-benchmark:
     name: Full Stack Integration and Benchmark Gate
+    if: >-
+      ${{
+        always() &&
+        (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full'))) &&
+        !contains(needs.*.result, 'failure') &&
+        !contains(needs.*.result, 'cancelled')
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     needs:
@@ -548,6 +605,7 @@ jobs:
 
   compliance-hardening-proof:
     name: Compliance Hardening Proof Gate
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
@@ -582,6 +640,13 @@ jobs:
 
   docker-build-push:
     name: Docker Image Build and Push
+    if: >-
+      ${{
+        always() &&
+        (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full'))) &&
+        !contains(needs.*.result, 'failure') &&
+        !contains(needs.*.result, 'cancelled')
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     needs:
@@ -663,7 +728,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.service }}
           build-args: |
             NEXT_PUBLIC_API_URL=http://localhost:18000/api/v1
             NEXT_PUBLIC_GATEWAY_URL=http://localhost:18080
@@ -688,7 +753,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.service }}
           build-args: |
             NEXT_PUBLIC_API_URL=http://localhost:18000/api/v1
             NEXT_PUBLIC_GATEWAY_URL=http://localhost:18080
@@ -717,4 +782,4 @@ jobs:
       CHECK_RESULTS: ${{ toJSON(needs) }}
     steps:
       - name: Require every build, test, secret, and dependency gate
-        run: echo "$CHECK_RESULTS" | jq -e 'all(.[]; .result == "success")'
+        run: echo "$CHECK_RESULTS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")'
