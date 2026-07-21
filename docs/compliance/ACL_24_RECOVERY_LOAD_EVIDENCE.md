@@ -185,12 +185,12 @@ criterion. Record commands and results here before review:
 | Go gateway tests | Required CI selection passed; full suite compatibility fixtures repaired |
 | Console checks | 18 unit tests, lint, typecheck, and production build passed |
 | Agent and SDK checks | 15 agent smoke tests and 2 SDK tests passed |
-| Local mock-provider load check | 40/40 requests behaved correctly with 0% errors; performance gate rejected local Windows/debug latency |
+| Local mock-provider load check | 1,200/1,200 requests passed at concurrency 5/10/20 with 0% errors and unchanged 900/1200 ms gates |
 | Hosted required CI and live beta drill | Pending; local results are not beta evidence |
 
-The local load run used ten requests per scenario at concurrency five. Observed
-p95/p99 values were: allow 734.0/799.2 ms, redact 1604.2/1621.2 ms, block
-260.2/272.7 ms, and stream 512.0/513.4 ms. The unchanged 900/1200 ms gate
-correctly failed on the redact path and on gateway-overhead limits. Do not use
-this local run as ACL-24 acceptance evidence or relax the beta thresholds because
-of it.
+The final local ramp used 100 requests per scenario at concurrency 5, 10, and
+20. Every scenario recorded 0% errors. The worst measured p95 was 299.1 ms and
+the worst p99 was 320.7 ms; redact's worst p95/p99 was 175.3/191.8 ms. Audit
+outbox backlog returned to zero and post-load smoke checks passed. These local
+results validate the wiring but remain separate from controlled-beta acceptance
+evidence.

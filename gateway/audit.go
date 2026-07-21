@@ -146,6 +146,8 @@ func EmitAuditEvent(event *AuditEvent) error {
 	return nil
 }
 
+var auditAsyncSlots = make(chan struct{}, 4)
+
 func EmitAuditEventAsync(event *AuditEvent) {
 	if auditFailClosedEnabled() {
 		if err := EmitAuditEvent(event); err != nil {
@@ -154,6 +156,9 @@ func EmitAuditEventAsync(event *AuditEvent) {
 		return
 	}
 	go func() {
+		// ponytail: bound background DB/Kafka work; a burst must not exhaust the request pool.
+		auditAsyncSlots <- struct{}{}
+		defer func() { <-auditAsyncSlots }()
 		if err := EmitAuditEvent(event); err != nil {
 			log.Printf("[AUDIT] async emit failed: %v", err)
 		}

@@ -292,7 +292,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(fmt.Sprintf(`{"error":"PolicyBlocked","message":"%s"}`, reason)))
-			EmitAuditEvent(&AuditEvent{
+			EmitAuditEventAsync(&AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "block",
 				DecisionReason: reason, Provider: provider, Model: model,

@@ -97,8 +97,8 @@ def main() -> None:
 
         conn.execute(
             text("""
-            INSERT INTO users (id, tenant_id, email, password_hash, role, mfa_enabled, is_active)
-            VALUES (:id, :tenant_id, 'admin@authclaw-lite.demo', :password_hash, 'owner', false, true)
+            INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, is_active)
+            VALUES (:id, :tenant_id, 'admin@authclaw-lite.demo', :password_hash, 'owner', 'NONE', false, true)
             ON CONFLICT (tenant_id, email) DO UPDATE SET
                 password_hash = EXCLUDED.password_hash,
                 role = EXCLUDED.role,
