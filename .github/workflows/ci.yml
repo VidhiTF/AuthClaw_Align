@@ -221,13 +221,13 @@ jobs:
       postgres:
         image: postgres:17
         env:
-          POSTGRES_DB: authclaw
+          POSTGRES_DB: authclaw_test
           POSTGRES_USER: authclaw
           POSTGRES_PASSWORD: authclaw
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U authclaw -d authclaw"
+          --health-cmd "pg_isready -U authclaw -d authclaw_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
@@ -250,9 +250,11 @@ jobs:
         ports:
           - 8123:8123
     env:
-      OWNER_DATABASE_URL: postgresql+psycopg://authclaw:authclaw@localhost:5432/authclaw
-      DATABASE_URL: postgresql+psycopg://authclaw:authclaw@localhost:5432/authclaw
-      POSTGRES_DB: authclaw
+      OWNER_DATABASE_URL: postgresql+psycopg://authclaw:authclaw@localhost:5432/authclaw_test
+      DATABASE_URL: postgresql+psycopg://authclaw_app:authclaw_app@localhost:5432/authclaw_test
+      TEST_OWNER_DATABASE_URL: postgresql+psycopg://authclaw:authclaw@localhost:5432/authclaw_test
+      TEST_DATABASE_URL: postgresql+psycopg://authclaw_app:authclaw_app@localhost:5432/authclaw_test
+      POSTGRES_DB: authclaw_test
       POSTGRES_APP_USER: authclaw_app
       POSTGRES_APP_PASSWORD: authclaw_app
       REDIS_URL: redis://localhost:6379
@@ -278,8 +280,9 @@ jobs:
       - name: Apply migrations and restricted app role
         working-directory: backend
         run: |
-          alembic upgrade head
-          python scripts/ensure_app_db_role.py
+          DATABASE_URL="$OWNER_DATABASE_URL" python scripts/ensure_app_db_role.py
+          DATABASE_URL="$OWNER_DATABASE_URL" alembic upgrade head
+          DATABASE_URL="$OWNER_DATABASE_URL" python scripts/ensure_app_db_role.py
 
       - name: Run backend tests
         working-directory: backend
@@ -453,6 +456,15 @@ jobs:
       - name: Enforce approved public claims
         working-directory: console
         run: npm run test:claims
+
+      - name: Validate F21 release documentation
+        shell: bash
+        run: |
+          test -f docs/compliance/F21_RELEASE_CANDIDATE_EVIDENCE.md
+          grep -Fq '## Supported launch configuration' infra/security/AUDIT_READY_RELEASE_CHECKLIST.md
+          grep -Fq '## Known launch limitations' infra/security/AUDIT_READY_RELEASE_CHECKLIST.md
+          grep -Fq '## Acceptance evidence' docs/compliance/F21_RELEASE_CANDIDATE_EVIDENCE.md
+          grep -Fq '### F21 release-content rollback' infra/security/COMPLIANCE_HARDENING_RUNBOOK.md
 
       - name: Typecheck
         working-directory: console

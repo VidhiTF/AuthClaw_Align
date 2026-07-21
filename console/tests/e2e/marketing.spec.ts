@@ -166,6 +166,21 @@ test.describe("F25 public marketing routes", () => {
     }
   });
 
+  test("website and demo use registered claim wording", async ({ page }) => {
+    await page.goto("/security");
+    await expect(page.getByText(
+      "AuthClaw includes technical controls that support GDPR obligations and SOC 2 readiness.",
+    )).toBeVisible();
+    await expect(page.getByText(/Configured sensitive-data patterns can be detected and redacted before model-provider egress/)).toBeVisible();
+    await expect(page.getByText("No independent SOC report is currently offered.", { exact: false })).toBeVisible();
+    await expect(page.getByRole("link", { name: "subprocessor list" })).toHaveAttribute("href", "/subprocessors");
+    await expect(page.getByRole("link", { name: "DPA request path" })).toHaveAttribute("href", "/dpa");
+
+    await page.goto("/demo");
+    await expect(page.getByRole("heading", { name: "Book an AuthClaw demo" })).toBeVisible();
+    await expect(page.locator("main")).not.toContainText(/certified|compliant|guarantee|independently audited/i);
+  });
+
   test("public signup requires an approved invitation", async ({ page }) => {
     await page.goto("/signup");
     await expect(page.getByRole("heading", { name: "Invitation required" })).toBeVisible();
