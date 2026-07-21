@@ -1,4 +1,4 @@
-# ADR-0008: Remediation plan and human approval controls
+# ADR-0010: Remediation plan and human approval controls
 
 - Status: Accepted
 - Date: 2026-07-20

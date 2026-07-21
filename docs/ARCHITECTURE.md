@@ -9,7 +9,7 @@ until ACL-14 supplies implementation and acceptance evidence.
 The managed cryptography, key-rotation, TLS-boundary and no-credential evidence model
 is recorded in [ADR-0004](adr/0004-acl-10-managed-cryptography.md).
 The remediation-plan binding, one-time human approval and rejection audit model is
-recorded in [ADR-0008](adr/0008-acl-18-remediation-approval-controls.md).
+recorded in [ADR-0010](adr/0010-acl-18-remediation-approval-controls.md).
 
 ## Runtime boundaries
 

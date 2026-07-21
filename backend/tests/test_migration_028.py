@@ -8,9 +8,9 @@ def migration():
         Path(__file__).parents[1]
         / "alembic"
         / "versions"
-        / "028_add_legal_notice_acceptance.py"
+        / "033_add_legal_notice_acceptance.py"
     )
-    spec = importlib.util.spec_from_file_location("migration_028", path)
+    spec = importlib.util.spec_from_file_location("migration_033", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

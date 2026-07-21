@@ -1,0 +1,105 @@
+{
+  "generated_at": "2026-07-23T12:30:00Z",
+  "environment": "controlled-beta",
+  "release": {
+    "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "alembic_revision": "034",
+    "rds_instances": {
+      "app": "arn:aws:rds:ap-south-1:123456789012:db:authclaw-beta-postgres"
+    },
+    "ecs_task_definitions": {
+      "backend": "arn:aws:ecs:ap-south-1:123456789012:task-definition/authclaw-backend:34"
+    },
+    "alarms_ok": true,
+    "agent_persistence_in_scope": false
+  },
+  "audit_export": {
+    "generated_at": "2026-07-23T08:55:00Z",
+    "signed": true,
+    "signature_verified": true,
+    "pre_drill": true
+  },
+  "backup_restore": {
+    "snapshot_id": "acl24-beta-20260723",
+    "snapshot_encrypted": true,
+    "source_instance_id": "authclaw-controlled-beta-primary-postgres",
+    "restore_instance_id": "acl24-restore-20260723",
+    "restore_isolated": true,
+    "restore_publicly_accessible": false,
+    "started_at": "2026-07-23T09:00:00Z",
+    "completed_at": "2026-07-23T09:18:00Z",
+    "restore_duration_seconds": 1080,
+    "alembic_revision_matches": true,
+    "sentinel_verified": true,
+    "record_counts_match": true,
+    "audit_chain_verified": true
+  },
+  "rollback": {
+    "application_succeeded": true,
+    "database_succeeded": true,
+    "database_rollback_isolated": true,
+    "live_database_untouched": true,
+    "services_stable": true,
+    "pre_rollback_audit_verified": true,
+    "post_rollback_audit_verified": true,
+    "post_rollback_event_extended_chain": true,
+    "recovery_seconds": 180,
+    "smoke_checks": {
+      "login": true,
+      "gateway": true,
+      "audit": true
+    },
+    "previous_task_definitions": {
+      "backend": true,
+      "gateway": true,
+      "console": true
+    },
+    "database_target_id": "acl24-restore-20260723",
+    "notes_reference": "ACL-24/rollback.log"
+  },
+  "load": {
+    "scenarios": ["allow", "redact", "block", "stream"],
+    "concurrency_ramp": [5, 10, 20],
+    "scenario_results": {
+      "allow": {"requests": 100, "p50_ms": 380, "p95_ms": 720, "p99_ms": 930, "throughput_rps": 25, "status_counts": {"200": 100}, "error_rate": 0},
+      "redact": {"requests": 100, "p50_ms": 410, "p95_ms": 750, "p99_ms": 980, "throughput_rps": 24, "status_counts": {"200": 100}, "error_rate": 0},
+      "block": {"requests": 100, "p50_ms": 180, "p95_ms": 320, "p99_ms": 430, "throughput_rps": 28, "status_counts": {"403": 100}, "error_rate": 0},
+      "stream": {"requests": 100, "p50_ms": 430, "p95_ms": 780, "p99_ms": 1010, "throughput_rps": 23, "status_counts": {"200": 100}, "error_rate": 0}
+    },
+    "saturation": {
+      "ecs_cpu_percent": 72,
+      "ecs_memory_percent": 68,
+      "rds_cpu_percent": 64,
+      "rds_database_connections": 24,
+      "rds_freeable_memory_bytes": 536870912,
+      "rds_read_latency_ms": 3.2,
+      "rds_write_latency_ms": 4.1,
+      "alb_5xx": 0,
+      "alb_target_response_p95_ms": 510,
+      "redis_cpu_percent": 38
+    },
+    "recovery_seconds": 120,
+    "health_checks": {
+      "console": true,
+      "backend": true,
+      "gateway": true
+    },
+    "cloudwatch_windows": {"before": true, "during": true, "after": true},
+    "alarms_ok": true,
+    "audit_chain_verified": true
+  },
+  "artifacts": {
+    "redacted": true,
+    "contains_raw_tenant_payloads": false,
+    "sha256": {
+      "audit_export_verification": "1111111111111111111111111111111111111111111111111111111111111111",
+      "benchmark": "2222222222222222222222222222222222222222222222222222222222222222",
+      "cloudwatch_metrics": "3333333333333333333333333333333333333333333333333333333333333333",
+      "rollback_log": "4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  },
+  "ci": {
+    "required_checks_green": true,
+    "compatibility_tests_green": true
+  }
+}
