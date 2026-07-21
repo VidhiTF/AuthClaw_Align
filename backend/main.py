@@ -70,6 +70,7 @@ from app.api.v1.endpoints.cloud import router as cloud_router
 from app.api.v1.endpoints.usage_limits import router as usage_limits_router
 from app.api.v1.endpoints.red_team import router as red_team_router
 from app.api.v1.endpoints.access_requests import router as access_requests_router
+from app.api.v1.endpoints.data_subject_requests import router as data_subject_requests_router
 # Phase 16 — Evidence Repository
 from app.api.v1.endpoints.evidence import router as evidence_router
 # Phase 17 — Findings Dashboard
@@ -102,6 +103,7 @@ app.include_router(evidence_router, prefix="/v1/evidence", tags=["evidence"])
 # Phase 17 — Findings Dashboard
 app.include_router(findings_router, prefix="/v1/findings", tags=["findings"])
 app.include_router(access_requests_router, prefix="/api/public/v1/access-requests", tags=["public-access-requests"])
+app.include_router(data_subject_requests_router, prefix="/v1/data-subject-requests", tags=["data-subject-requests"])
 
 # Ravi's imported console and existing client SDKs use `/api/v1`. Keep Kunal's
 # `/v1` routes canonical while exposing a compatibility alias during migration.
@@ -129,6 +131,7 @@ _compatibility_routers = [
     (cloud_router, "/cloud/connectors", "cloud-connectors"),
     (evidence_router, "/evidence", "evidence"),
     (findings_router, "/findings", "findings"),
+    (data_subject_requests_router, "/data-subject-requests", "data-subject-requests"),
 ]
 for _router, _path, _tag in _compatibility_routers:
     app.include_router(_router, prefix=f"/api/v1{_path}", tags=[_tag], include_in_schema=False)

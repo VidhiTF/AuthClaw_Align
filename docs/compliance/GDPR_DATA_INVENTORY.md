@@ -24,6 +24,7 @@ notice.
 | Processing flow | Personal-data classes | Technical purpose | Source | Components and storage | Recipient or processor | Tenant isolation | Current retention and deletion |
 |---|---|---|---|---|---|---|---|
 | User identity and access | Name, email, user identifier, tenant membership, roles and OIDC claims | Authentication, authorization and account administration | User, administrator or configured identity provider | Console; `backend/`; PostgreSQL | AuthClaw control plane and configured identity provider | Records and authorization are scoped by `tenant_id` | Retained for the account and tenant lifecycle; organization-approved deletion and exception rules are required |
+| Data-subject request processing | Subject identifier, request type and scope, verification and decision metadata, completion timestamp | Process authenticated GDPR access and deletion requests | Authorized tenant operator after subject identity verification | `data_subject_requests`; signed export artifact; append-only audit metadata | Authorized tenant owner or administrator and the requesting subject through the approved delivery process | Requests and every service operation are scoped by `tenant_id` | Workflow records follow the account and tenant lifecycle; completed deletion never restores removed data, while immutable audit and legal evidence remain subject to approved retention requirements |
 | Public demo and early-access intake | Name, business email, company, role and use case | Evaluate and respond to requested product access | Public requester with explicit consent | Marketing intake; `access_requests` in PostgreSQL | Authorized AuthClaw launch owners | Pre-tenant public workflow; access is restricted to launch owner/admin operations | Pending requests: 90 days; rejected requests: 30 days; invited requests: 30 days when onboarding has not begun; approved requests follow the customer lifecycle |
 | API and gateway requests | Request identifier, tenant identifier, provider, model, route and request metadata | Route authorized model requests and enforce policy | Authenticated API client | `backend/`; `gateway/`; operational metadata stores | Configured model provider | Tenant context is established before policy and provider routing | Request payloads should remain transient unless an approved workflow requires persistence |
 | Prompts and model responses | Free-form text that may contain names, contact details, identifiers, financial, health or other personal data | Provide the requested AI operation | End user or authorized application | `gateway/`; `services/agent/`; provider request lifecycle | Configured model provider | Requests are processed using authenticated tenant context | Minimize persistence; raw content must not be written to operational logs or audit metadata by default |
@@ -75,14 +76,19 @@ own execution.
 - `backend/app/schemas/models.py` - retention validation from 1 to 3650 days.
 - `gateway/redact.go` - tenant retention configuration, expiration and automatic purge.
 - `backend/app/core/auth.py` and `backend/app/db/session.py` - tenant authorization context.
+- `backend/app/services/data_subject_requests.py` - F11 lifecycle, signed export,
+  deletion, exception reporting, audit evidence, and telemetry.
+- `backend/alembic/versions/035_add_data_subject_requests.py` - tenant-scoped F11
+  persistence, constraints, indexes, RLS, and restricted-role grants.
+- `backend/tests/test_endpoints.py::test_data_subject_request_lifecycle_authorization_and_isolation`
+  - lifecycle, authorization, tenant isolation, export, deletion, idempotency,
+  rollback, audit, and metric evidence.
 - `services/agent/memory.py` - tenant-isolated agent history foundation.
 - `docs/compliance/GDPR_SOC2_CONTROL_MATRIX.md` - GDPR control mapping.
 
 ## Open ACL-15 implementation gaps
 
-- Produce durable, non-sensitive audit evidence for deletion operations.
-- Centralize backend retention and deletion behavior in a testable service.
-- Verify that logging defaults never expose raw detected personal data.
-- Define and test retention behavior for P0 persisted data classes.
-- Add cross-tenant, authorization, expiry, retry and audit tests.
-- Document telemetry, failure handling and rollback behavior.
+- Verify that logging defaults never expose raw detected personal data across
+  services outside the F11 workflow.
+- Define and test retention behavior for P0 persisted data classes not covered
+  by F11 or the public-intake lifecycle.

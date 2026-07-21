@@ -34,6 +34,47 @@ class AccessRequestResponse(BaseModel):
     created_at: datetime
 
 
+class DataSubjectRequestCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    subject_id: str = Field(..., min_length=1, max_length=255)
+    request_type: Literal["ACCESS", "EXPORT", "DELETION"]
+    scope: Dict[str, Any]
+
+
+class DataSubjectRequestVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identity_verified: Literal[True] = True
+
+
+class DataSubjectRequestDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    decision_reason: str = Field(..., min_length=1, max_length=4000)
+
+
+class DataSubjectRequestResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    tenant_id: UUID
+    subject_id: str
+    request_type: str
+    status: str
+    identity_verified: bool
+    identity_verified_by: Optional[UUID]
+    identity_verified_at: Optional[datetime]
+    scope: Dict[str, Any]
+    decision: Optional[str]
+    decision_reason: Optional[str]
+    decision_by: Optional[UUID]
+    decision_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+
 class TenantCreate(BaseModel):
     """Schema for creating a tenant"""
     name: str = Field(..., min_length=1, max_length=255)
