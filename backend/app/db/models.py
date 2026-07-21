@@ -3,11 +3,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from sqlalchemy import (
     Column, String, UUID, DateTime, Boolean, ForeignKey,
-    Integer, BigInteger, SmallInteger, Text, ARRAY, JSON, Index, Float, create_engine
+    Integer, BigInteger, SmallInteger, Text, ARRAY, JSON, Index, Float, create_engine,
+    CheckConstraint
 )
 from app.db.base import Base
 from sqlalchemy.orm import relationship
 import uuid
+import enum
 from sqlalchemy import UniqueConstraint, Enum
 
 
@@ -55,6 +57,59 @@ class AccessRequestHistory(Base):
 
     __table_args__ = (
         Index("idx_access_request_history_request", "access_request_id", "created_at"),
+    )
+
+
+class DataSubjectRequestStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    VERIFIED = "VERIFIED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    COMPLETED = "COMPLETED"
+
+
+class DataSubjectRequest(Base):
+    """Tenant-scoped GDPR data-subject request lifecycle."""
+    __tablename__ = "data_subject_requests"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    subject_id = Column(String(255), nullable=False)
+    request_type = Column(String(20), nullable=False)
+    status = Column(
+        Enum(
+            DataSubjectRequestStatus,
+            name="data_subject_request_status",
+            native_enum=False,
+            create_constraint=True,
+        ),
+        nullable=False,
+        default=DataSubjectRequestStatus.PENDING,
+    )
+    identity_verified = Column(Boolean, nullable=False, default=False)
+    identity_verified_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    identity_verified_at = Column(DateTime(timezone=True), nullable=True)
+    scope = Column(JSON, nullable=False, default=dict)
+    decision = Column(String(20), nullable=True)
+    decision_reason = Column(Text, nullable=True)
+    decision_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    decision_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "request_type IN ('ACCESS', 'EXPORT', 'DELETION')",
+            name="ck_data_subject_request_type",
+        ),
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('APPROVED', 'REJECTED')",
+            name="ck_data_subject_request_decision",
+        ),
+        Index("idx_data_subject_request_tenant_status", "tenant_id", "status"),
+        Index("idx_data_subject_request_tenant_created", "tenant_id", "created_at"),
+        Index("idx_data_subject_request_tenant_subject", "tenant_id", "subject_id"),
     )
 
 
