@@ -25,6 +25,11 @@ consumer lag above the tenant traffic SLO for 10 minutes.
 3. ClickHouse outage: restore ClickHouse. The consumer must retry without
    committing failed offsets. If the mirror was lost, call the PostgreSQL to
    ClickHouse replay endpoint or `replay_postgres_to_clickhouse`.
+   Compose runs `infra/clickhouse/migrate.sh` before the backend and consumer.
+   Re-running it is safe. An ACL-21 schema upgrade preserves the old mirror as
+   `audit_events_acl21_legacy`, creates a clean current table, and requires a
+   PostgreSQL-to-ClickHouse replay. Keep the legacy table until the consistency
+   endpoint confirms matching counts, hashes, and sequences.
 4. Sequence gap: compare pending outbox rows with PostgreSQL for the tenant.
    Publish the missing lower sequence first. Do not send a gap directly to DLQ.
 5. Key failure: remove revoked keys from signing, keep them in the verifier

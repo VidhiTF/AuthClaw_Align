@@ -126,6 +126,22 @@ services:
       timeout: 5s
       retries: 10
 
+  clickhouse-schema:
+    image: clickhouse/clickhouse-server:latest
+    container_name: authclaw-full-clickhouse-schema
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_NATIVE_PORT: "9000"
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-authclaw}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-authclaw}
+    volumes:
+      - ./infra/clickhouse:/schema:ro
+    entrypoint: ["/bin/bash", "/schema/migrate.sh"]
+    restart: "no"
+
   backend:
     build:
       context: ./backend
@@ -144,8 +160,8 @@ services:
         condition: service_started
       kafka-init:
         condition: service_completed_successfully
-      clickhouse:
-        condition: service_healthy
+      clickhouse-schema:
+        condition: service_completed_successfully
     environment:
       OWNER_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
       APP_DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-authclaw_app}:${POSTGRES_APP_PASSWORD:-authclaw_app}@postgres:5432/${POSTGRES_DB:-authclaw}
@@ -315,8 +331,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-      clickhouse:
-        condition: service_healthy
+      clickhouse-schema:
+        condition: service_completed_successfully
     environment:
       KAFKA_BROKERS: kafka:29092
       KAFKA_TOPICS: gateway.traffic,audit.events
