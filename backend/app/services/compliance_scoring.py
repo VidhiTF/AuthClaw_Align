@@ -529,7 +529,38 @@ def score_all_frameworks(db: Session, tenant_id: str, *, persist: bool = True) -
         "overall_score": overall,
         "readiness_level": readiness_level(overall),
         "frameworks": frameworks,
+        "trust_summary": _build_trust_summary(frameworks),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+def _build_trust_summary(frameworks: list[dict[str, Any]]) -> dict[str, Any]:
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "verified": [],
+        "in_progress": [],
+        "planned": [],
+    }
+    status_to_bucket = {
+        "compliant": "verified",
+        "partial": "in_progress",
+        "non_compliant": "planned",
+    }
+    for framework in frameworks:
+        for control in framework["controls"]:
+            bucket = status_to_bucket[control["status"]]
+            buckets[bucket].append(
+                {
+                    "framework": framework["framework"],
+                    "id": control["id"],
+                    "name": control["name"],
+                    "score": control["score"],
+                    "status": control["status"],
+                }
+            )
+    return {
+        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "counts": {name: len(controls) for name, controls in buckets.items()},
+        **buckets,
     }
 
 

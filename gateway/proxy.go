@@ -119,6 +119,51 @@ func requiresTenantProviderCredential(provider string) bool {
 	}
 }
 
+func supportsSensitiveDataProtection(provider string) bool {
+	switch NormalizeProvider(provider) {
+	case ProviderOpenAI, ProviderAnthropic, ProviderCohere, ProviderAzureOpenAI, ProviderGemini, ProviderBedrock:
+		return true
+	default:
+		return false
+	}
+}
+
+func applyRedactedPromptsToRequest(
+	request *http.Request,
+	originalPrompts []string,
+	redactedPrompts []string,
+	rebuilder func([]string) ([]byte, error),
+) error {
+	if sameStringSlice(originalPrompts, redactedPrompts) {
+		return nil
+	}
+	if rebuilder == nil {
+		return fmt.Errorf("request body rebuilder is unavailable")
+	}
+	newBody, err := rebuilder(redactedPrompts)
+	if err != nil {
+		return fmt.Errorf("rebuild redacted request body: %w", err)
+	}
+	request.Body = io.NopCloser(bytes.NewBuffer(newBody))
+	request.ContentLength = int64(len(newBody))
+	request.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBody)))
+	return nil
+}
+
+func logRedactionDebugMetadata(requestID, provider string, originalPrompts, redactedPrompts []string, tokenCount int) {
+	if !envBool("GATEWAY_DEBUG_PROMPTS", false) {
+		return
+	}
+	log.Printf(
+		"[DEBUG] redaction_metadata request_id=%s provider=%s prompt_count=%d changed=%t token_count=%d",
+		requestID,
+		provider,
+		len(originalPrompts),
+		!sameStringSlice(originalPrompts, redactedPrompts),
+		tokenCount,
+	)
+}
+
 func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Extract tenant ID and request ID from context (injected by AuthMiddleware)
 	tenantID, _ := r.Context().Value(TenantIDContextKey).(string)
@@ -174,6 +219,23 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		originalPrompts = make([]string, len(normalized.Prompts))
 		copy(originalPrompts, normalized.Prompts)
 	}
+	if err != nil && tenantID != "" && supportsSensitiveDataProtection(provider) {
+		log.Printf("[GATEWAY] request normalization failed request_id=%s provider=%s err=%v", requestID, provider, err)
+		RecordPolicyAction("fail_closed")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"SensitiveDataInspectionFailed","message":"Request blocked: request body could not be inspected safely."}`))
+		EmitAuditEvent(&AuditEvent{
+			ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
+			TenantID: tenantID, Action: "block",
+			DecisionReason: "Request normalization failed before sensitive-data inspection",
+			Provider:       provider, RequestSize: int(r.ContentLength),
+			ResponseStatus: http.StatusBadRequest, DurationMs: 0,
+			FrameworksAffected: []string{"GDPR", "SOC2"},
+			ExecutionTrace:     []string{"stage=normalize", "result=fail_closed"},
+		})
+		return
+	}
 	if routeErr := ValidateProviderRoute(provider, r, targetURLStr, model); routeErr != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -206,7 +268,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var customRules []RegexRule
 	if config != nil {
-		customRules = config.RegexRules
+		customRules = RedactionRulesForEgress(config)
 	}
 
 	if normalized != nil && len(normalized.Prompts) > 0 {
@@ -225,16 +287,19 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if blockMatch != nil {
 			reason := PolicyRuleDecisionReason(blockMatch, "block")
+			RecordPolicyAction("block")
 			queueNotification(tenantID, "", "policy_violation_block", "critical", "Policy blocked request", reason, "/audit")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(fmt.Sprintf(`{"error":"PolicyBlocked","message":"%s"}`, reason)))
-			EmitAuditEvent(&AuditEvent{
+			EmitAuditEventAsync(&AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "block",
 				DecisionReason: reason, Provider: provider, Model: model,
 				PromptCount: promptCount, RequestSize: int(r.ContentLength),
 				ResponseStatus: http.StatusForbidden, DurationMs: 0,
+				FrameworksAffected: []string{"GDPR", "SOC2"},
+				ExecutionTrace:     PolicyRuleAuditTrace(blockMatch, "block"),
 			})
 			return
 		}
@@ -244,6 +309,41 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// This runs before redaction and before provider egress. The prompt itself is not
 	// stored in the approval payload; only hashes and policy metadata are stored.
 	finalAllowReason := "Allowed"
+	if normalized != nil && len(normalized.Prompts) > 0 {
+		warningMatch, warningMatchErr := FindWarningRuleMatch(config, normalized.Prompts)
+		if warningMatchErr != nil {
+			log.Printf("Custom warning rule evaluation failed: %v", warningMatchErr)
+			RecordPolicyAction("fail_closed")
+			http.Error(w, "Request blocked: warning policy evaluation failed", http.StatusForbidden)
+			EmitAuditEvent(&AuditEvent{
+				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
+				TenantID: tenantID, PolicyID: policyID, Action: "block",
+				DecisionReason: "Warning policy evaluation failed", Provider: provider, Model: model,
+				PromptCount: promptCount, RequestSize: int(r.ContentLength),
+				ResponseStatus: http.StatusForbidden, DurationMs: 0,
+				FrameworksAffected: []string{"GDPR", "SOC2"},
+				ExecutionTrace:     []string{"stage=warn", "result=fail_closed"},
+			})
+			return
+		}
+		if warningMatch != nil {
+			reason := PolicyRuleDecisionReason(warningMatch, "warn")
+			RecordPolicyAction("warn")
+			finalAllowReason = "Allowed with policy warning and redaction"
+			w.Header().Set("X-AuthClaw-Policy-Action", "warn")
+			w.Header().Set("X-AuthClaw-Policy-Warning", "true")
+			queueNotification(tenantID, "", "policy_violation_warn", "warning", "Policy warning applied", reason, "/audit")
+			EmitAuditEventAsync(&AuditEvent{
+				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
+				TenantID: tenantID, PolicyID: policyID, Action: "warn",
+				DecisionReason: reason, Provider: provider, Model: model,
+				PromptCount: promptCount, RequestSize: int(r.ContentLength),
+				ResponseStatus: 0, DurationMs: 0,
+				FrameworksAffected: []string{"GDPR", "SOC2"},
+				ExecutionTrace:     PolicyRuleAuditTrace(warningMatch, "warn"),
+			})
+		}
+	}
 	if normalized != nil && len(normalized.Prompts) > 0 {
 		approvalMatch, approvalMatchErr := FindApprovalRuleMatch(config, normalized.Prompts)
 		if approvalMatchErr != nil {
@@ -315,7 +415,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Inbound Prompt Redaction
 	var tokenMap map[string]string
-	if tenantID != "" && (provider == ProviderOpenAI || provider == ProviderAnthropic || provider == ProviderCohere || provider == ProviderAzureOpenAI || provider == ProviderGemini || provider == ProviderBedrock) {
+	if tenantID != "" && supportsSensitiveDataProtection(provider) {
 		if normalized != nil && len(normalized.Prompts) > 0 {
 			var redactErr error
 			var redactedPrompts []string
@@ -326,44 +426,62 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if time.Duration(redactDurationMs)*time.Millisecond >= presidioSlowLogThreshold() {
 					log.Printf("[REDACTION] status=slow_complete duration_ms=%d request_id=%s provider=%s prompt_count=%d token_count=%d", redactDurationMs, requestID, provider, len(normalized.Prompts), len(tokenMap))
 				}
-				if envBool("GATEWAY_DEBUG_PROMPTS", false) {
-					log.Printf("[DEBUG] ORIGINAL PROMPT: %v", normalized.Prompts)
-					log.Printf("[DEBUG] REDACTED PROMPT: %v", redactedPrompts)
-				}
+				logRedactionDebugMetadata(requestID, provider, normalized.Prompts, redactedPrompts, len(tokenMap))
 				if len(tokenMap) > 0 {
+					RecordPolicyAction("redact")
 					if finalAllowReason == "Allowed" {
 						finalAllowReason = "Allowed after redaction"
 					} else if !strings.Contains(strings.ToLower(finalAllowReason), "redact") {
 						finalAllowReason += " + redacted"
 					}
 					EmitAuditEventAsync(&AuditEvent{
-						ID:             generateID(),
-						RequestID:      requestID,
-						Timestamp:      time.Now(),
-						TenantID:       tenantID,
-						PolicyID:       policyID,
-						Action:         "redact",
-						DecisionReason: "Prompt redaction applied",
-						Provider:       provider,
-						Model:          model,
-						PromptCount:    promptCount,
-						RequestSize:    int(r.ContentLength),
-						ResponseStatus: 0,
-						DurationMs:     redactDurationMs,
+						ID:                 generateID(),
+						RequestID:          requestID,
+						Timestamp:          time.Now(),
+						TenantID:           tenantID,
+						PolicyID:           policyID,
+						Action:             "redact",
+						DecisionReason:     "Prompt redaction applied",
+						Provider:           provider,
+						Model:              model,
+						PromptCount:        promptCount,
+						RequestSize:        int(r.ContentLength),
+						ResponseStatus:     0,
+						DurationMs:         redactDurationMs,
+						FrameworksAffected: []string{"GDPR", "SOC2"},
+						ExecutionTrace:     []string{"stage=pre_egress", "result=redacted"},
 					})
 				}
-				if !sameStringSlice(normalized.Prompts, redactedPrompts) {
-					newBody, rebuildErr := rebuilder(redactedPrompts)
-					if rebuildErr == nil {
-						r.Body = io.NopCloser(bytes.NewBuffer(newBody))
-						r.ContentLength = int64(len(newBody))
-						r.Header.Set("Content-Length", fmt.Sprintf("%d", len(newBody)))
-					} else {
-						log.Printf("Rebuilding body failed: %v", rebuildErr)
-					}
+				if rebuildErr := applyRedactedPromptsToRequest(r, normalized.Prompts, redactedPrompts, rebuilder); rebuildErr != nil {
+					log.Printf("[REDACTION] status=rebuild_failed request_id=%s provider=%s err=%v", requestID, provider, rebuildErr)
+					RecordPolicyAction("fail_closed")
+					http.Error(w, "Request blocked: sanitized request could not be prepared", http.StatusForbidden)
+					EmitAuditEvent(&AuditEvent{
+						ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
+						TenantID: tenantID, PolicyID: policyID, Action: "block",
+						DecisionReason: "Sanitized request rebuild failed", Provider: provider, Model: model,
+						PromptCount: promptCount, RequestSize: int(r.ContentLength),
+						ResponseStatus: http.StatusForbidden, DurationMs: redactDurationMs,
+						FrameworksAffected: []string{"GDPR", "SOC2"},
+						ExecutionTrace:     []string{"stage=rebuild", "result=fail_closed"},
+					})
+					return
 				}
 			} else {
 				log.Printf("[REDACTION] status=error duration_ms=%d request_id=%s provider=%s prompt_count=%d err=%v", redactDurationMs, requestID, provider, len(normalized.Prompts), redactErr)
+				RecordPolicyAction("fail_closed")
+				http.Error(w, "Request blocked: sensitive-data redaction failed", http.StatusForbidden)
+				EmitAuditEvent(&AuditEvent{
+					ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
+					TenantID: tenantID, PolicyID: policyID, Action: "block",
+					DecisionReason: "Sensitive-data redaction failed before provider egress",
+					Provider:       provider, Model: model, PromptCount: promptCount,
+					RequestSize: int(r.ContentLength), ResponseStatus: http.StatusForbidden,
+					DurationMs:         redactDurationMs,
+					FrameworksAffected: []string{"GDPR", "SOC2"},
+					ExecutionTrace:     []string{"stage=redact", "result=fail_closed"},
+				})
+				return
 			}
 		}
 	}
@@ -385,6 +503,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !allow {
+		RecordPolicyAction("block")
 		queueNotification(tenantID, "", "policy_violation_block", "critical", "Policy blocked request", reason, "/audit")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)

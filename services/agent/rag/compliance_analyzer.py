@@ -290,7 +290,7 @@ The JSON must have this exact structure:
                     ai_data["iso27001_score"] = "Not Yet Evaluated"
                     return ai_data
             else:
-                logger.warning(f"Gemini API returned status {res.status_code} in compliance analysis: {res.text}")
+                logger.warning("Gemini compliance analysis failed: status=%s", res.status_code)
         except Exception as e:
             logger.warning(f"Gemini compliance analysis failed: {str(e)}. Falling back to deterministic rule engine.")
             

@@ -337,6 +337,7 @@ class TestRemediationRollback:
 
         monkeypatch.setattr(workflow_runner, "_kafka_producer", DummyProducer())
         monkeypatch.setattr(workflow_runner, "_init_kafka_producer", lambda: None)
+        monkeypatch.setattr(workflow_runner.event_backbone, "persist_audit_event", lambda _event: None)
 
         workflow_runner.emit_audit_event(
             workflow_id="workflow-123",

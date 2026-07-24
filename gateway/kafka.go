@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	kafkaGatewayTrafficTopic = "gateway.traffic"
-	kafkaAuditDLQTopic       = "audit.deadletter"
+	kafkaAuditEventsTopic = "audit.events"
+	kafkaAuditDLQTopic    = "audit.deadletter"
 )
 
 type kafkaMessageWriter interface {
@@ -47,10 +47,10 @@ func InitKafkaProducer() {
 
 	kafkaWriter = &kafka.Writer{
 		Addr:                   kafka.TCP(brokerList...),
-		Topic:                  kafkaGatewayTrafficTopic,
+		Topic:                  kafkaAuditEventsTopic,
 		Balancer:               &kafka.Hash{},
 		BatchTimeout:           10 * time.Millisecond,
-		Async:                  true,
+		Async:                  false,
 		AllowAutoTopicCreation: false,
 		Completion: func(_ []kafka.Message, err error) {
 			if err != nil {
@@ -77,7 +77,7 @@ func InitKafkaProducer() {
 		},
 	}
 
-	log.Printf("Kafka producers initialised (brokers: %s, topics: %s, %s)", brokers, kafkaGatewayTrafficTopic, kafkaAuditDLQTopic)
+	log.Printf("Kafka producers initialised (brokers: %s, topics: %s, %s)", brokers, kafkaAuditEventsTopic, kafkaAuditDLQTopic)
 }
 
 func auditEventKafkaMessage(event *AuditEvent, payload []byte) kafka.Message {
@@ -92,8 +92,7 @@ func auditEventKafkaMessage(event *AuditEvent, payload []byte) kafka.Message {
 	}
 }
 
-// PublishAuditEvent serialises the event to JSON and writes it asynchronously to Kafka.
-// Returns an error if serialisation fails; Kafka write errors are logged and swallowed.
+// PublishAuditEvent writes one committed outbox event to Kafka.
 func PublishAuditEvent(event *AuditEvent) error {
 	if kafkaWriter == nil {
 		return nil // Kafka not configured — caller falls back to stdout
@@ -109,12 +108,41 @@ func PublishAuditEvent(event *AuditEvent) error {
 
 	err = kafkaWriter.WriteMessages(ctx, auditEventKafkaMessage(event, payload))
 	if err != nil {
-		// Non-fatal: log and continue so request path is not affected.
 		kafkaPublishFailures.Add(1)
 		log.Printf("[KAFKA] Failed to publish audit event: %v", err)
+		return err
 	}
 
 	return nil
+}
+
+func PublishAuditOutboxPayload(tenantID string, payload []byte) error {
+	if kafkaWriter == nil {
+		return nil
+	}
+	var identity struct {
+		ID        string `json:"id"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(payload, &identity); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := kafkaWriter.WriteMessages(ctx, kafka.Message{
+		Key:   []byte(tenantID),
+		Value: payload,
+		Headers: []kafka.Header{
+			{Key: "event_id", Value: []byte(identity.ID)},
+			{Key: "tenant_id", Value: []byte(tenantID)},
+			{Key: "request_id", Value: []byte(identity.RequestID)},
+		},
+	})
+	if err != nil {
+		kafkaPublishFailures.Add(1)
+		log.Printf("[KAFKA] Failed to publish audit outbox event: %v", err)
+	}
+	return err
 }
 
 func dlqKafkaMessage(dlq DLQMessage, envelope []byte) kafka.Message {
@@ -199,6 +227,9 @@ func KafkaMetricsHandler(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)
 	}
 	for name, value := range RedactionMetricsSnapshot() {
+		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)
+	}
+	for name, value := range PolicyActionMetricsSnapshot() {
 		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)
 	}
 }

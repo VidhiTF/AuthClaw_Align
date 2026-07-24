@@ -1,0 +1,92 @@
+groups:
+  - name: authclaw-acl21-audit-evidence
+    rules:
+      - alert: AuditCanonicalAppendFailures
+        expr: increase(authclaw_gateway_audit_postgres_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Canonical PostgreSQL audit appends are failing
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditIdempotencyCollisions
+        expr: increase(authclaw_gateway_audit_idempotency_collisions_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Changed content reused an audit idempotency key
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditOutboxStalled
+        expr: authclaw_gateway_audit_outbox_backlog > 0 and authclaw_gateway_audit_outbox_oldest_age_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Transactional audit outbox publication is stalled
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditConsumerSequenceGap
+        expr: increase(audit_consumer_sequence_gaps_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: ClickHouse mirror is waiting for a missing tenant sequence
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditMirrorDrift
+        expr: increase(audit_consumer_mirror_drift_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: PostgreSQL and ClickHouse audit chain tails differ
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditDeadLetterGrowth
+        expr: increase(audit_consumer_dlq_published_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Invalid audit proof events reached the DLQ
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditConsumerLag
+        expr: max({__name__=~"audit_consumer_lag_.*"}) > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit mirror consumer lag is above the initial threshold
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditVerificationFailures
+        expr: increase(audit_consumer_verification_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Audit proof verification is failing
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditExportVerificationFailures
+        expr: increase(audit_export_verification_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Offline evidence export verification is failing
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditSigningKeyFailures
+        expr: increase(audit_export_signing_key_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Evidence export signing-key trust checks are failing
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -9,12 +11,28 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/lib/pq"
 )
 
+func randomTestUUID(t *testing.T) string {
+	t.Helper()
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		t.Fatal(err)
+	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	return fmt.Sprintf(
+		"%x-%x-%x-%x-%x",
+		value[0:4],
+		value[4:6],
+		value[6:8],
+		value[8:10],
+		value[10:16],
+	)
+}
+
 func TestEmitAuditEvent(t *testing.T) {
-	event := &AuditEvent{
+	EmitAuditEvent(&AuditEvent{
 		ID:             "test-id",
 		Timestamp:      time.Now(),
 		TenantID:       "tenant-123",
@@ -24,10 +42,7 @@ func TestEmitAuditEvent(t *testing.T) {
 		RequestSize:    100,
 		ResponseStatus: 200,
 		DurationMs:     50,
-	}
-
-	// Make sure it runs and serializes without errors
-	EmitAuditEvent(event)
+	})
 }
 
 func TestEmitAuditEvent_WritesOutboxWhenFailClosedAndDatabaseUnavailable(t *testing.T) {
@@ -47,9 +62,8 @@ func TestEmitAuditEvent_WritesOutboxWhenFailClosedAndDatabaseUnavailable(t *test
 		Action:         "allow",
 		DecisionReason: "outbox test",
 	}
-
-	if err := EmitAuditEvent(event); err != nil {
-		t.Fatalf("EmitAuditEvent returned error with durable outbox available: %v", err)
+	if err := EmitAuditEvent(event); err == nil {
+		t.Fatal("fail-closed mode must reject a request without a canonical PostgreSQL append")
 	}
 	data, err := os.ReadFile(outboxPath)
 	if err != nil {
@@ -79,184 +93,246 @@ func TestEmitAuditEvent_FailClosedWhenOutboxUnavailable(t *testing.T) {
 		Action:    "allow",
 	})
 	if err == nil {
-		t.Fatalf("expected fail-closed error when Postgres and outbox are unavailable")
+		t.Fatal("expected fail-closed error when Postgres and outbox are unavailable")
 	}
 }
 
-func TestAuditEventMetadataConcurrentHashChain(t *testing.T) {
+func TestAuditEventMetadataConcurrentCanonicalAppend(t *testing.T) {
 	if os.Getenv("AUTHCLAW_GATEWAY_AUDIT_DB_TESTS") != "true" {
-		t.Skip("set AUTHCLAW_GATEWAY_AUDIT_DB_TESTS=true to run Postgres audit-chain test")
+		t.Skip("set AUTHCLAW_GATEWAY_AUDIT_DB_TESTS=true to run the PostgreSQL test")
+	}
+	InitDB()
+	var functionExists bool
+	if err := DB.QueryRow(`
+		SELECT to_regprocedure(
+			'append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)'
+		) IS NOT NULL
+	`).Scan(&functionExists); err != nil || !functionExists {
+		t.Fatalf("migration 028 must be applied before this test: %v", err)
 	}
 
-	InitDB()
-	ensureAuditChainTestSchema(t)
-
-	tenantID := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-	_, err := DB.Exec(
-		"INSERT INTO tenants (id, name, tier, status) VALUES ($1, $2, 'starter', 'active') ON CONFLICT (id) DO NOTHING",
+	tenantID := randomTestUUID(t)
+	if _, err := DB.Exec(
+		"INSERT INTO tenants (id, name, tier, status) VALUES ($1, $2, 'starter', 'active')",
 		tenantID,
-		"Audit Chain Test Tenant",
-	)
-	if err != nil {
+		"ACL-21 concurrency "+tenantID,
+	); err != nil {
 		t.Fatalf("insert tenant: %v", err)
 	}
-	t.Cleanup(func() {
-		_, _ = DB.Exec("DELETE FROM audit_log_metadata WHERE tenant_id = $1", tenantID)
-	})
-	_, _ = DB.Exec("DELETE FROM audit_log_metadata WHERE tenant_id = $1", tenantID)
 
-	const workers = 32
+	const workers = 100
 	start := make(chan struct{})
+	failures := make(chan error, workers)
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			persistAuditMetadata(&AuditEvent{
-				ID:             fmt.Sprintf("bbbbbbbb-bbbb-4bbb-8bbb-%012d", i),
-				RequestID:      fmt.Sprintf("req-%02d", i),
-				Timestamp:      time.Unix(1700000000, 0),
+			event := &AuditEvent{
+				ID:             randomTestUUID(t),
+				IdempotencyKey: fmt.Sprintf("acl21-concurrency-%03d", i),
+				RequestID:      fmt.Sprintf("req-%03d", i),
+				Timestamp:      time.Unix(1700000000, int64(i)*1_000_000),
 				TenantID:       tenantID,
 				Action:         "allow",
-				DecisionReason: "concurrency audit-chain test",
+				DecisionReason: "ACL-21 canonical append concurrency test",
 				Provider:       "test",
 				Model:          "mock",
-				PromptCount:    1,
-				RequestSize:    10 + i,
+				RequestSize:    i,
 				ResponseStatus: 200,
-				DurationMs:     int64(i),
-			})
+			}
+			if err := persistAuditMetadata(event); err != nil {
+				failures <- err
+			}
 		}(i)
 	}
 	close(start)
 	wg.Wait()
+	close(failures)
+	for err := range failures {
+		t.Errorf("concurrent append failed: %v", err)
+	}
 
-	rows, err := DB.Query(`
-		SELECT record_id, request_id, action, provider, model, reason, prompt_count,
-		       request_size, response_status, duration_ms, frameworks_affected,
-		       execution_trace, created_at, prior_hash, integrity_hash
-		FROM audit_log_metadata
-		WHERE tenant_id = $1
-		ORDER BY created_at ASC, record_id ASC
-	`, tenantID)
+	replayed := &AuditEvent{
+		ID:             randomTestUUID(t),
+		IdempotencyKey: "acl21-exact-replay",
+		RequestID:      "req-exact-replay",
+		Timestamp:      time.Unix(1700001000, 0),
+		TenantID:       tenantID,
+		Action:         "allow",
+		DecisionReason: "exact duplicate replay",
+		Provider:       "test",
+		ResponseStatus: 200,
+	}
+	if err := persistAuditMetadata(replayed); err != nil {
+		t.Fatalf("first replay append: %v", err)
+	}
+	firstSequence, firstHash := replayed.TenantSequence, replayed.IntegrityHash
+	if err := persistAuditMetadata(replayed); err != nil {
+		t.Fatalf("exact replay must return the existing row: %v", err)
+	}
+	if replayed.TenantSequence != firstSequence || replayed.IntegrityHash != firstHash {
+		t.Fatal("exact replay returned different proof data")
+	}
+	collision := *replayed
+	collision.ID = randomTestUUID(t)
+	collision.Action = "block"
+	if err := persistAuditMetadata(&collision); err == nil {
+		t.Fatal("changed content with the same idempotency key must fail")
+	}
+
+	ctx := context.Background()
+	err := RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT tenant_sequence, prior_hash, integrity_hash,
+			       encode(
+			           digest(
+			               convert_to(canonical_payload || prior_hash, 'UTF8'),
+			               'sha256'
+			           ),
+			           'hex'
+			       ) AS expected_hash
+			FROM audit_log_metadata
+			WHERE tenant_id = $1
+			ORDER BY tenant_sequence
+		`, tenantID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		priorHash := "GENESIS"
+		count := 0
+		for rows.Next() {
+			var sequence int
+			var previous, integrity, expected string
+			if err := rows.Scan(&sequence, &previous, &integrity, &expected); err != nil {
+				return err
+			}
+			count++
+			if sequence != count {
+				return fmt.Errorf("sequence %d, want %d", sequence, count)
+			}
+			if previous != priorHash {
+				return fmt.Errorf("sequence %d prior hash mismatch", sequence)
+			}
+			if integrity != expected {
+				return fmt.Errorf("sequence %d integrity hash mismatch", sequence)
+			}
+			priorHash = integrity
+		}
+		if count != workers+1 {
+			return fmt.Errorf("got %d rows, want %d", count, workers+1)
+		}
+		var outboxCount int
+		if err := tx.QueryRowContext(
+			ctx,
+			"SELECT count(*) FROM audit_outbox WHERE tenant_id = $1",
+			tenantID,
+		).Scan(&outboxCount); err != nil {
+			return err
+		}
+		if outboxCount != workers+1 {
+			return fmt.Errorf("got %d outbox rows, want %d", outboxCount, workers+1)
+		}
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("query audit chain: %v", err)
+		t.Fatal(err)
 	}
-	defer rows.Close()
-
-	prior := auditGenesisHash
-	count := 0
-	for rows.Next() {
-		var (
-			recordID       string
-			requestID      string
-			action         string
-			provider       string
-			model          string
-			reason         string
-			promptCount    int
-			requestSize    int
-			responseStatus int
-			durationMs     int64
-			frameworks     pq.StringArray
-			executionTrace sql.NullString
-			createdAt      time.Time
-			priorHash      string
-			integrityHash  string
+	if err := RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(
+			ctx,
+			"UPDATE audit_log_metadata SET action = 'tampered' WHERE tenant_id = $1",
+			tenantID,
 		)
-		if err := rows.Scan(
-			&recordID,
-			&requestID,
-			&action,
-			&provider,
-			&model,
-			&reason,
-			&promptCount,
-			&requestSize,
-			&responseStatus,
-			&durationMs,
-			&frameworks,
-			&executionTrace,
-			&createdAt,
-			&priorHash,
-			&integrityHash,
-		); err != nil {
-			t.Fatalf("scan audit row: %v", err)
-		}
-		if priorHash != prior {
-			t.Fatalf("row %d prior_hash = %q, want %q", count, priorHash, prior)
-		}
-		trace := []string(nil)
-		if executionTrace.Valid && executionTrace.String != "" && executionTrace.String != "[]" {
-			trace = []string{executionTrace.String}
-		}
-		event := &AuditEvent{
-			ID:                 recordID,
-			RequestID:          requestID,
-			Timestamp:          createdAt,
-			TenantID:           tenantID,
-			Action:             action,
-			DecisionReason:     reason,
-			Provider:           provider,
-			Model:              model,
-			PromptCount:        promptCount,
-			RequestSize:        requestSize,
-			ResponseStatus:     responseStatus,
-			DurationMs:         durationMs,
-			FrameworksAffected: []string(frameworks),
-			ExecutionTrace:     trace,
-		}
-		if got := hashAuditEvent(event, priorHash); got != integrityHash {
-			t.Fatalf("row %d integrity_hash = %q, want %q", count, integrityHash, got)
-		}
-		prior = integrityHash
-		count++
+		return err
+	}); err == nil {
+		t.Fatal("immutable trigger must reject UPDATE")
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate audit rows: %v", err)
-	}
-	if count != workers {
-		t.Fatalf("got %d audit rows, want %d", count, workers)
+	if err := RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(
+			ctx,
+			"DELETE FROM audit_log_metadata WHERE tenant_id = $1",
+			tenantID,
+		)
+		return err
+	}); err == nil {
+		t.Fatal("immutable trigger must reject DELETE")
 	}
 }
 
-func ensureAuditChainTestSchema(t *testing.T) {
-	t.Helper()
-	if _, err := DB.Exec(`
-		CREATE TABLE IF NOT EXISTS tenants (
-			id uuid PRIMARY KEY,
-			name varchar(255) UNIQUE NOT NULL,
-			tier varchar(50) NOT NULL DEFAULT 'starter',
-			status varchar(50) NOT NULL DEFAULT 'active'
-		)
-	`); err != nil {
-		t.Fatalf("ensure tenants table: %v", err)
+func TestAuditEventMetadataConcurrentMultiTenant(t *testing.T) {
+	if os.Getenv("AUTHCLAW_GATEWAY_AUDIT_DB_TESTS") != "true" {
+		t.Skip("set AUTHCLAW_GATEWAY_AUDIT_DB_TESTS=true to run the PostgreSQL test")
 	}
-	if _, err := DB.Exec(`
-		CREATE TABLE IF NOT EXISTS audit_log_metadata (
-			id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-			tenant_id uuid NOT NULL,
-			record_id uuid UNIQUE NOT NULL,
-			actor_id uuid NULL,
-			action varchar(255) NOT NULL,
-			request_id text NULL,
-			policy_id uuid NULL,
-			provider text NULL,
-			model text NULL,
-			reason text NULL,
-			prompt_count integer NULL,
-			request_size integer NULL,
-			response_status integer NULL,
-			duration_ms bigint NULL,
-			frameworks_affected text[] NULL,
-			created_at timestamptz NOT NULL DEFAULT now(),
-			prior_hash text NULL,
-			integrity_hash text NULL,
-			actor_type text NULL,
-			execution_trace text NULL
-		)
-	`); err != nil {
-		t.Fatalf("ensure audit table: %v", err)
+	InitDB()
+	const tenantCount = 4
+	const eventsPerTenant = 20
+	tenants := make([]string, tenantCount)
+	for index := range tenants {
+		tenants[index] = randomTestUUID(t)
+		if _, err := DB.Exec(
+			"INSERT INTO tenants (id, name, tier, status) VALUES ($1, $2, 'starter', 'active')",
+			tenants[index],
+			"ACL-21 multi-tenant "+tenants[index],
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	start := make(chan struct{})
+	failures := make(chan error, tenantCount*eventsPerTenant)
+	var wg sync.WaitGroup
+	for _, tenantID := range tenants {
+		for index := 0; index < eventsPerTenant; index++ {
+			wg.Add(1)
+			go func(tenantID string, index int) {
+				defer wg.Done()
+				<-start
+				failures <- persistAuditMetadata(&AuditEvent{
+					ID:             randomTestUUID(t),
+					IdempotencyKey: fmt.Sprintf("multi-%s-%d", tenantID, index),
+					Timestamp:      time.Unix(1700010000, int64(index)*1_000_000),
+					TenantID:       tenantID,
+					Action:         "allow",
+					DecisionReason: "multi-tenant concurrency",
+				})
+			}(tenantID, index)
+		}
+	}
+	close(start)
+	wg.Wait()
+	close(failures)
+	for err := range failures {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx := context.Background()
+	for _, tenantID := range tenants {
+		err := RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+			var count, minimum, maximum int
+			if err := tx.QueryRowContext(ctx, `
+				SELECT count(*), min(tenant_sequence), max(tenant_sequence)
+				FROM audit_log_metadata WHERE tenant_id = $1
+			`, tenantID).Scan(&count, &minimum, &maximum); err != nil {
+				return err
+			}
+			if count != eventsPerTenant || minimum != 1 || maximum != eventsPerTenant {
+				return fmt.Errorf(
+					"tenant %s sequence range count=%d min=%d max=%d",
+					tenantID,
+					count,
+					minimum,
+					maximum,
+				)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

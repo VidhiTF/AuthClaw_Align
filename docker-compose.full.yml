@@ -62,7 +62,7 @@ services:
       - "${PRESIDIO_PORT:-3000}:3000"
 
   mock-provider:
-    image: python:3.12-slim
+    image: python:3.14.3-slim
     container_name: authclaw-full-mock-provider
     profiles: ["ci"]
     working_dir: /app
@@ -126,13 +126,30 @@ services:
       timeout: 5s
       retries: 10
 
+  clickhouse-schema:
+    image: clickhouse/clickhouse-server:latest
+    container_name: authclaw-full-clickhouse-schema
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_NATIVE_PORT: "9000"
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-authclaw}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-authclaw}
+    volumes:
+      - ./infra/clickhouse:/schema:ro
+    entrypoint: ["/bin/bash", "/schema/migrate.sh"]
+    restart: "no"
+
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile.demo
     container_name: authclaw-full-backend
     env_file:
-      - .env.local
+      - path: .env.local
+        required: false
     depends_on:
       postgres:
         condition: service_healthy
@@ -144,8 +161,8 @@ services:
         condition: service_started
       kafka-init:
         condition: service_completed_successfully
-      clickhouse:
-        condition: service_healthy
+      clickhouse-schema:
+        condition: service_completed_successfully
     environment:
       OWNER_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
       APP_DATABASE_URL: postgresql+psycopg://${POSTGRES_APP_USER:-authclaw_app}:${POSTGRES_APP_PASSWORD:-authclaw_app}@postgres:5432/${POSTGRES_DB:-authclaw}
@@ -178,6 +195,20 @@ services:
       DEMO_OTP_VISIBLE: ${DEMO_OTP_VISIBLE:-false}
       AUTHCLAW_EMAIL_OUTBOX_PATH: ${AUTHCLAW_EMAIL_OUTBOX_PATH:-/app/.authclaw/email-outbox.jsonl}
       AUTHCLAW_LITE_DEMO_PASSWORD: ${AUTHCLAW_LITE_DEMO_PASSWORD:-AuthClawDemo!234}
+      OIDC_TENANT_CLAIM: ${OIDC_TENANT_CLAIM:-tenant_id}
+      OIDC_TENANT_CLAIM_VALUE: ${OIDC_TENANT_CLAIM_VALUE:-}
+      AUTHCLAW_OIDC_TENANT_MAPPINGS: ${AUTHCLAW_OIDC_TENANT_MAPPINGS:-{}}
+      OIDC_REQUIRE_MFA: ${OIDC_REQUIRE_MFA:-true}
+      OIDC_ACCEPTED_AMR: ${OIDC_ACCEPTED_AMR:-mfa}
+      OIDC_ACCEPTED_ACR: ${OIDC_ACCEPTED_ACR:-}
+      OIDC_MAX_AUTH_AGE_SECONDS: ${OIDC_MAX_AUTH_AGE_SECONDS:-43200}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      SMTP_TLS: ${SMTP_TLS:-true}
       NEXT_PUBLIC_AUTHCLAW_DEMO_MODE: "false"
       PUBLIC_GATEWAY_URL: ${PUBLIC_GATEWAY_URL:-http://localhost:8080}
       ONBOARDING_SIGNUP_EMAIL_PER_HOUR: ${ONBOARDING_SIGNUP_EMAIL_PER_HOUR:-20}
@@ -192,7 +223,7 @@ services:
       GATEWAY_ESTIMATED_COST_PER_1K_REQUESTS_USD: ${GATEWAY_ESTIMATED_COST_PER_1K_REQUESTS_USD:-1}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
-    command: ["sh", "-c", "DATABASE_URL=\"$$OWNER_DATABASE_URL\" alembic upgrade head && DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$APP_DATABASE_URL\" python -m uvicorn main:app --host 0.0.0.0 --port 8000"]
+    command: ["sh", "-c", "DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$OWNER_DATABASE_URL\" alembic upgrade head && DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$APP_DATABASE_URL\" python -m uvicorn main:app --host 0.0.0.0 --port 8000"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
       interval: 10s
@@ -226,6 +257,7 @@ services:
       PRESIDIO_URL: http://presidio:3000
       PRESIDIO_ANALYZE_TIMEOUT_MS: ${PRESIDIO_ANALYZE_TIMEOUT_MS:-750}
       REDACTION_LOCAL_ANALYZER_ONLY: ${REDACTION_LOCAL_ANALYZER_ONLY:-false}
+      REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS: ${REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS:-0}
       KAFKA_BROKERS: kafka:29092
       ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
@@ -300,8 +332,8 @@ services:
     depends_on:
       kafka-init:
         condition: service_completed_successfully
-      clickhouse:
-        condition: service_healthy
+      clickhouse-schema:
+        condition: service_completed_successfully
     environment:
       KAFKA_BROKERS: kafka:29092
       KAFKA_TOPICS: gateway.traffic,audit.events

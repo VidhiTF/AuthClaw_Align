@@ -1,11 +1,31 @@
 import type { MetadataRoute } from "next";
-import { marketingSiteUrl } from "@/marketing/config";
+import {
+  isMarketingSiteIndexable,
+  marketingSiteUrl,
+} from "@/marketing/config";
 
 export default function robots(): MetadataRoute.Robots {
+  if (!isMarketingSiteIndexable) {
+    return {
+      rules: { userAgent: "*", disallow: "/" },
+    };
+  }
+
   return {
     rules: {
       userAgent: "*",
-      allow: ["/", "/product", "/pricing", "/security", "/company"],
+      allow: [
+        "/",
+        "/product",
+        "/pricing",
+        "/security",
+        "/company",
+        "/privacy",
+        "/terms",
+        "/cookies",
+        "/subprocessors",
+        "/dpa",
+      ],
       disallow: [
         "/api/",
         "/agent",

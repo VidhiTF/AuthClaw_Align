@@ -42,10 +42,11 @@ class GatewayProviderTests(unittest.TestCase):
                 self.assertEqual(captured["headers"]["X-Provider"], provider)
 
     def test_safe_gateway_error(self):
-        response = FakeResponse({"message": "Provider credential could not be loaded."}, 502)
+        response = FakeResponse({"message": "sensitive provider response"}, 502)
         with patch("providers.gateway_provider.requests.post", return_value=response):
-            with self.assertRaisesRegex(RuntimeError, "HTTP 502: Provider credential could not be loaded"):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 502: Provider unavailable") as caught:
                 GatewayProvider("tenant-key", "gemini").generate("hello")
+        self.assertNotIn("sensitive provider response", str(caught.exception))
 
 
 if __name__ == "__main__":

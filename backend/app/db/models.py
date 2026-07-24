@@ -3,16 +3,114 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from sqlalchemy import (
     Column, String, UUID, DateTime, Boolean, ForeignKey,
-    Integer, Text, ARRAY, JSON, Index, Float, create_engine
+    Integer, BigInteger, SmallInteger, Text, ARRAY, JSON, Index, Float, create_engine,
+    CheckConstraint
 )
 from app.db.base import Base
 from sqlalchemy.orm import relationship
 import uuid
+import enum
 from sqlalchemy import UniqueConstraint, Enum
 
 
 def default_api_key_expiry():
     return datetime.now(timezone.utc) + timedelta(days=90)
+
+
+class AccessRequest(Base):
+    """Public demo and early-access intake request."""
+    __tablename__ = "access_requests"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reference = Column(String(35), nullable=False)
+    name = Column(String(255), nullable=False)
+    business_email = Column(String(255), nullable=False)
+    company = Column(String(255), nullable=False)
+    role = Column(String(100), nullable=False)
+    use_case = Column(Text, nullable=False)
+    requested_access = Column(String(100), nullable=False)
+    consent_timestamp = Column(DateTime(timezone=True), nullable=False)
+    notice_version = Column(String(50), nullable=False)
+    source_page = Column(String(512), nullable=False)
+    status = Column(String(50), nullable=False, default="PENDING")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_access_requests_reference", "reference", unique=True),
+        Index("idx_access_requests_status_created", "status", "created_at"),
+    )
+
+
+class AccessRequestHistory(Base):
+    """Non-tenant audit history for public intake requests."""
+    __tablename__ = "access_request_history"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    access_request_id = Column(UUID(as_uuid=True), nullable=False)
+    actor_id = Column(UUID(as_uuid=True), nullable=True)
+    event_type = Column(String(50), nullable=False)
+    old_status = Column(String(50), nullable=True)
+    new_status = Column(String(50), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    event_metadata = Column("metadata", JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        Index("idx_access_request_history_request", "access_request_id", "created_at"),
+    )
+
+
+class DataSubjectRequestStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    VERIFIED = "VERIFIED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    COMPLETED = "COMPLETED"
+
+
+class DataSubjectRequest(Base):
+    """Tenant-scoped GDPR data-subject request lifecycle."""
+    __tablename__ = "data_subject_requests"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    subject_id = Column(String(255), nullable=False)
+    request_type = Column(String(20), nullable=False)
+    status = Column(
+        Enum(
+            DataSubjectRequestStatus,
+            name="data_subject_request_status",
+            native_enum=False,
+            create_constraint=True,
+        ),
+        nullable=False,
+        default=DataSubjectRequestStatus.PENDING,
+    )
+    identity_verified = Column(Boolean, nullable=False, default=False)
+    identity_verified_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    identity_verified_at = Column(DateTime(timezone=True), nullable=True)
+    scope = Column(JSON, nullable=False, default=dict)
+    decision = Column(String(20), nullable=True)
+    decision_reason = Column(Text, nullable=True)
+    decision_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    decision_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "request_type IN ('ACCESS', 'EXPORT', 'DELETION')",
+            name="ck_data_subject_request_type",
+        ),
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('APPROVED', 'REJECTED')",
+            name="ck_data_subject_request_decision",
+        ),
+        Index("idx_data_subject_request_tenant_status", "tenant_id", "status"),
+        Index("idx_data_subject_request_tenant_created", "tenant_id", "created_at"),
+        Index("idx_data_subject_request_tenant_subject", "tenant_id", "subject_id"),
+    )
 
 
 class Tenant(Base):
@@ -63,6 +161,11 @@ class User(Base):
     nullable=False,
     default="viewer"
     )  # owner, admin, developer, operator, viewer
+    platform_role = Column(
+        Enum("NONE", "ADMIN", name="platform_role"),
+        nullable=False,
+        default="NONE",
+    )
     mfa_enabled = Column(Boolean, default=False)
     mfa_secret = Column(String(32), nullable=True)  # TOTP secret (encrypted)
     mfa_backup_codes = Column(ARRAY(String), nullable=True)  # TOTP backup codes
@@ -237,9 +340,15 @@ class TenantOIDCConfig(Base):
     jwks_uri = Column(String(512), nullable=True)
     email_claim = Column(String(100), nullable=False, default="email")
     groups_claim = Column(String(100), nullable=False, default="groups")
+    tenant_claim = Column(String(100), nullable=False, default="tenant_id")
+    tenant_claim_value = Column(String(255), nullable=True)
     role_mapping = Column(JSON, nullable=False, default=dict)
     default_role = Column(String(50), nullable=False, default="viewer")
     auto_provision = Column(Boolean, nullable=False, default=False)
+    require_mfa = Column(Boolean, nullable=False, default=True)
+    accepted_amr = Column(ARRAY(String), nullable=False, default=["mfa"])
+    accepted_acr = Column(ARRAY(String), nullable=False, default=list)
+    max_auth_age_seconds = Column(Integer, nullable=False, default=43200)
     status = Column(String(50), nullable=False, default="disabled")
     last_tested_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
@@ -306,6 +415,10 @@ class OnboardingEmailOTP(Base):
     invited_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True)
     api_key_id = Column(UUID(as_uuid=True), ForeignKey("api_keys.id"), nullable=True)
+    terms_version = Column(String(32), nullable=True)
+    terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
+    privacy_notice_version = Column(String(32), nullable=True)
+    privacy_notice_acknowledged_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -381,13 +494,17 @@ class PendingApproval(Base):
     action_type = Column(String(50), nullable=False)  # remediation, configuration_change, etc.
     action_description = Column(Text, nullable=False)
     action_payload = Column(JSON, nullable=False)  # Full action details
-    status = Column(String(50), nullable=False, default="PENDING")  # PENDING, APPROVED, REJECTED, EXPIRED
+    action_hash = Column(String(64), nullable=True)
+    status = Column(String(50), nullable=False, default="PENDING")  # PENDING, APPROVED, REJECTED, EXPIRED, CONSUMED
     requester_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     approver_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     mfa_verified = Column(Boolean, default=False)
     mfa_timestamp = Column(DateTime(timezone=True), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)  # 30 min from creation
     approved_at = Column(DateTime(timezone=True), nullable=True)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    consumed_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    resolution_reason = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -398,6 +515,7 @@ class PendingApproval(Base):
         Index("idx_approval_tenant", "tenant_id"),
         Index("idx_approval_status", "status"),
         Index("idx_approval_expires", "expires_at"),
+        Index("idx_approval_tenant_action_hash", "tenant_id", "action_hash"),
     )
 
 
@@ -410,6 +528,9 @@ class ApprovalAudit(Base):
     approval_id = Column(UUID(as_uuid=True), ForeignKey("pending_approvals.id"), nullable=False)
     actor_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     action = Column(String(50), nullable=False)  # APPROVED, REJECTED, EXPIRED
+    action_hash = Column(String(64), nullable=True)
+    reason = Column(Text, nullable=True)
+    details = Column(JSON, nullable=True)
     mfa_verified = Column(Boolean, default=False)
     mfa_timestamp = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
@@ -421,12 +542,16 @@ class ApprovalAudit(Base):
 
 
 class AuditLogMetadata(Base):
-    """Metadata reference table for ClickHouse audit logs (actual logs stored in ClickHouse)"""
+    """Authoritative PostgreSQL audit chain mirrored to ClickHouse for analytics."""
     __tablename__ = "audit_log_metadata"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     record_id = Column(UUID(as_uuid=True), nullable=False, unique=True)  # Matches ClickHouse record_id
+    tenant_sequence = Column(BigInteger, nullable=False)
+    idempotency_key = Column(Text, nullable=False)
+    chain_version = Column(SmallInteger, nullable=False, default=2)
+    canonical_payload = Column(Text, nullable=False)
     actor_id = Column(UUID(as_uuid=True), nullable=True)
     actor_type = Column(String(100), nullable=False, default="gateway")
     action = Column(String(255), nullable=False)
@@ -449,6 +574,29 @@ class AuditLogMetadata(Base):
         Index("idx_audit_metadata_tenant", "tenant_id"),
         Index("idx_audit_metadata_record", "record_id"),
         Index("idx_audit_metadata_created", "created_at"),
+        UniqueConstraint("tenant_id", "tenant_sequence", name="uq_audit_log_tenant_sequence"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_audit_log_tenant_idempotency"),
+    )
+
+
+class AuditOutbox(Base):
+    """Transactional Kafka publication queue for immutable audit records."""
+
+    __tablename__ = "audit_outbox"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    record_id = Column(UUID(as_uuid=True), ForeignKey("audit_log_metadata.record_id"), nullable=False, unique=True)
+    tenant_sequence = Column(BigInteger, nullable=False)
+    event_payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    publish_attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_audit_outbox_pending", "published_at", "created_at"),
+        UniqueConstraint("tenant_id", "tenant_sequence", name="uq_audit_outbox_tenant_sequence"),
     )
 
 

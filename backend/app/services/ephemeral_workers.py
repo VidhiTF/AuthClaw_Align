@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import AuditLogMetadata, EphemeralWorkerRun, EphemeralWorkerToken
 from app.services import event_backbone
-from app.services.audit_store import GENESIS_HASH, compute_integrity_hash
+from app.services.audit_store import append_audit_event
 
 DEFAULT_TTL_SECONDS = 900
 MAX_TTL_SECONDS = 1800
@@ -235,36 +235,15 @@ def emit_worker_audit_event(
     if trace:
         trace_items.extend(trace)
 
-    last = (
-        db.query(AuditLogMetadata)
-        .filter(AuditLogMetadata.tenant_id == tenant_id)
-        .order_by(AuditLogMetadata.created_at.desc(), AuditLogMetadata.record_id.desc())
-        .first()
-    )
-    prior_hash = last.integrity_hash if last and last.integrity_hash else GENESIS_HASH
     created_at = now_utc()
     record_id = uuid.uuid4()
-    log = AuditLogMetadata(
-        tenant_id=tenant_id,
-        record_id=record_id,
-        actor_id=actor_id,
-        actor_type="ephemeral_worker",
-        action=f"worker:{action}",
-        request_id=request_id or "",
-        provider="ephemeral-worker",
-        model=connector or "",
-        reason=reason,
-        prompt_count=0,
-        request_size=0,
-        response_status=response_status,
-        duration_ms=0,
-        frameworks_affected=[],
-        execution_trace=json.dumps(trace_items),
-        prior_hash=prior_hash,
-        created_at=created_at,
-    )
-    record = {
-        "record_id": str(record_id),
+    event = {
+        "id": str(record_id),
+        "idempotency_key": (
+            f"worker:{request_id}:{action}"
+            if request_id
+            else f"worker:{record_id}"
+        ),
         "tenant_id": tenant_id_str,
         "timestamp": created_at,
         "actor_id": str(actor_id) if actor_id else "",
@@ -279,13 +258,35 @@ def emit_worker_audit_event(
         "response_status": response_status,
         "duration_ms": 0,
         "frameworks_affected": [],
-        "execution_trace": log.execution_trace,
+        "execution_trace": trace_items,
         "request_id": request_id or "",
     }
-    log.integrity_hash = compute_integrity_hash(record, prior_hash)
-    db.add(log)
+    appended = append_audit_event(db, event)
     event_backbone.increment_metric(f"ephemeral_worker_{action.replace('.', '_')}_events_total")
-    return log
+    return AuditLogMetadata(
+        tenant_id=tenant_id,
+        record_id=appended["record_id"],
+        tenant_sequence=appended["tenant_sequence"],
+        idempotency_key=event["idempotency_key"],
+        chain_version=2,
+        canonical_payload=appended["canonical_payload"],
+        actor_id=actor_id,
+        actor_type="ephemeral_worker",
+        action=event["action"],
+        request_id=event["request_id"],
+        provider=event["provider"],
+        model=event["model"],
+        reason=reason,
+        prompt_count=0,
+        request_size=0,
+        response_status=response_status,
+        duration_ms=0,
+        frameworks_affected=[],
+        execution_trace=json.dumps(trace_items),
+        prior_hash=appended["prior_hash"],
+        integrity_hash=appended["integrity_hash"],
+        created_at=created_at,
+    )
 
 
 def issue_worker_token(

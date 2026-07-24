@@ -461,6 +461,31 @@ footer.ft{background:var(--navy-950);color:#AFBBD6;padding:64px 0 30px;font-size
 .tl h3{font-size:18px;font-weight:600;margin-top:6px}
 .tl p{color:var(--slate);font-size:15px;margin-top:6px}
 
+/* intake */
+.intake-page{background:var(--paper-2);padding:72px 0 88px}
+.intake-card{max-width:760px;margin:auto;background:#fff;border:1px solid var(--line);border-radius:var(--r-xl);
+  padding:42px;box-shadow:var(--shadow)}
+.intake-card h1{font-size:clamp(30px,4vw,44px);margin-top:10px}
+.intake-description{color:var(--slate);font-size:17px;margin:12px 0 28px}
+.intake-card form{display:grid;gap:20px}
+.intake-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.intake-card label{display:grid;gap:8px;font-family:var(--font-d);font-size:14px;font-weight:600;color:var(--navy-800)}
+.intake-card input,.intake-card textarea{width:100%;border:1px solid var(--line);border-radius:var(--r-sm);
+  padding:12px 14px;background:#fff;color:var(--ink);font:inherit}
+.intake-card textarea{resize:vertical}
+.intake-card input:focus-visible,.intake-card textarea:focus-visible{outline:3px solid rgba(109,40,217,.2);border-color:var(--violet)}
+.intake-card input[readonly]{background:var(--paper-2);color:var(--slate)}
+.privacy-notice{background:var(--paper-2);border:1px solid var(--line);border-radius:var(--r-md);padding:18px}
+.privacy-notice p{color:var(--slate);font-size:14px;margin-bottom:12px}
+.intake-card .consent{display:flex;align-items:flex-start;gap:10px;font-family:var(--font-b)}
+.intake-card .consent input{width:18px;height:18px;flex:none;margin-top:1px}
+.intake-error{border:1px solid #FCA5A5;border-radius:var(--r-sm);background:#FEF2F2;color:#991B1B;padding:12px 14px}
+.intake-card .btn{justify-self:start}
+.intake-card .btn:disabled{cursor:not-allowed;opacity:.55;transform:none}
+.intake-success{text-align:center}
+.intake-success p{color:var(--slate);margin-top:14px}
+.intake-reference{font-family:var(--font-m);font-size:13px}
+
 /* callout / spec */
 .callout{background:var(--paper-2);border:1px solid var(--line);border-radius:var(--r-lg);padding:30px 34px;margin-top:30px}
 .callout .eyebrow{margin-bottom:10px;display:block}
@@ -470,6 +495,22 @@ footer.ft{background:var(--navy-950);color:#AFBBD6;padding:64px 0 30px;font-size
 .spec td:first-child{font-family:var(--font-d);font-weight:600;color:var(--navy-800);width:38%}
 .spec td:last-child{font-family:var(--font-m);color:var(--slate);font-size:13px}
 .spec tr:last-child td{border-bottom:0}
+
+/* versioned legal notices */
+.legal-meta{display:flex;gap:28px;margin-top:28px}
+.legal-meta div{display:grid;gap:4px}
+.legal-meta dt{font-family:var(--font-d);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--mute)}
+.legal-meta dd{font-family:var(--font-m);font-size:14px;color:var(--navy-800)}
+.legal-body{max-width:900px;padding-top:52px;padding-bottom:76px}
+.legal-body section{margin-bottom:38px}
+.legal-body h2{font-size:25px;margin-bottom:12px}
+.legal-body p,.legal-body li{color:var(--slate);font-size:16px;line-height:1.75}
+.legal-body ul{padding-left:24px;display:grid;gap:8px}
+.legal-body a{color:var(--violet);text-decoration:underline;text-underline-offset:3px}
+.legal-table{width:100%;border-collapse:collapse;margin-top:18px;border:1px solid var(--line);background:#fff}
+.legal-table th,.legal-table td{padding:14px 16px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+.legal-table th{background:var(--paper-2);font-family:var(--font-d);font-size:13px}
+.legal-table td{color:var(--slate);font-size:14px;line-height:1.55}
 
 /* reveal */
 .reveal{opacity:0;transform:translateY(18px);transition:opacity .6s ease, transform .6s ease}
@@ -502,6 +543,9 @@ footer.ft{background:var(--navy-950);color:#AFBBD6;padding:64px 0 30px;font-size
   .team{grid-template-columns:1fr 1fr}
 }
 @media (max-width:560px){
+  .intake-page{padding:40px 0 56px}
+  .intake-card{padding:26px 20px}
+  .intake-grid{grid-template-columns:1fr}
   .steps{grid-template-columns:1fr}
   .stat-grid{grid-template-columns:1fr}
   .cmp thead{display:none}

@@ -4,13 +4,24 @@ Verifies that RLS policies enforce strict multi-tenant data separation
 """
 import pytest
 import os
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import text, create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.pool import StaticPool
 from uuid import uuid4
 
-from app.db.models import Tenant, User, APIKey, Policy
+from app.db.models import (
+    APIKey,
+    ApprovalAudit,
+    AWSS3Document,
+    AWSUsageLimits,
+    PendingApproval,
+    Policy,
+    Tenant,
+    User,
+)
+from tests.db_safety import destructive_test_urls
 
 _owner_engine = None
 _app_engine = None
@@ -20,11 +31,7 @@ _TestingSessionLocal = None
 def _engines():
     global _owner_engine, _app_engine, _TestingSessionLocal
     if _owner_engine is None or _app_engine is None or _TestingSessionLocal is None:
-        from app.core.config import settings
-        owner_db_url = os.getenv("OWNER_DATABASE_URL", settings.DATABASE_URL)
-        app_user = os.getenv("POSTGRES_APP_USER", "authclaw_app")
-        app_password = os.getenv("POSTGRES_APP_PASSWORD", "authclaw_app")
-        db_url = settings.DATABASE_URL.replace("authclaw:authclaw@", f"{app_user}:{app_password}@")
+        owner_db_url, db_url = destructive_test_urls()
         _owner_engine = create_engine(owner_db_url, echo=False, poolclass=StaticPool)
         _app_engine = create_engine(db_url, echo=False, poolclass=StaticPool)
         _TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_app_engine, expire_on_commit=False)
@@ -288,6 +295,96 @@ def test_tenant_isolation_policies(test_db: Session):
     assert len(policies_in_b) == 1
     assert policies_in_b[0].tenant_id == tenant_b.id
     assert policies_in_b[0].name == "policy-b"
+
+
+@pytest.mark.parametrize(
+    "model",
+    (ApprovalAudit, AWSUsageLimits, AWSS3Document),
+    ids=("approval-audit", "aws-usage-limits", "aws-s3-documents"),
+)
+def test_p0_resource_cross_tenant_crud_is_denied(test_db: Session, model):
+    tenant_a = create_tenant(test_db, "tenant-a")
+    tenant_b = create_tenant(test_db, "tenant-b")
+    tenant_c = create_tenant(test_db, "tenant-c")
+    tenant_a_id = tenant_a.id
+
+    if model is ApprovalAudit:
+        approvals = []
+        users = []
+        for tenant, suffix in ((tenant_b, "b"), (tenant_c, "c")):
+            test_db.execute(text(f"SET app.current_tenant_id = '{tenant.id}'"))
+            user = User(
+                id=uuid4(), tenant_id=tenant.id, email=f"user-{suffix}@example.com", role="admin"
+            )
+            test_db.add(user)
+            test_db.flush()
+            approval = PendingApproval(
+                id=uuid4(),
+                tenant_id=tenant.id,
+                action_id=f"action-{suffix}",
+                action_type="remediation",
+                action_description="Tenant isolation test",
+                action_payload={},
+                requester_id=user.id,
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+            )
+            test_db.add(approval)
+            test_db.commit()
+            users.append(user)
+            approvals.append(approval)
+        records = [
+            ApprovalAudit(
+                id=uuid4(),
+                tenant_id=tenant.id,
+                approval_id=approval.id,
+                actor_id=user.id,
+                action="APPROVED",
+            )
+            for tenant, approval, user in zip((tenant_b, tenant_c), approvals, users)
+        ]
+    elif model is AWSUsageLimits:
+        records = [AWSUsageLimits(id=uuid4(), tenant_id=tenant.id) for tenant in (tenant_b, tenant_c)]
+    else:
+        records = [
+            AWSS3Document(
+                id=uuid4(),
+                tenant_id=tenant.id,
+                bucket_name="tenant-isolation",
+                object_key=f"{suffix}/document.txt",
+                file_name="document.txt",
+            )
+            for tenant, suffix in ((tenant_b, "b"), (tenant_c, "c"))
+        ]
+
+    tenant_b_record, wrong_tenant_record = records
+    test_db.execute(text(f"SET app.current_tenant_id = '{tenant_b.id}'"))
+    test_db.add(tenant_b_record)
+    test_db.commit()
+    tenant_b_record_id = tenant_b_record.id
+
+    test_db.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
+    test_db.expire_all()
+    read_denied = test_db.query(model).filter(model.id == tenant_b_record_id).first() is None
+
+    test_db.add(wrong_tenant_record)
+    try:
+        test_db.flush()
+        create_denied = False
+    except DBAPIError:
+        create_denied = True
+    test_db.rollback()
+
+    test_db.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
+    updated = test_db.execute(
+        text(f"UPDATE {model.__tablename__} SET tenant_id = :tenant_id WHERE id = :id"),
+        {"tenant_id": tenant_a_id, "id": tenant_b_record_id},
+    )
+
+    deleted = test_db.execute(
+        text(f"DELETE FROM {model.__tablename__} WHERE id = :id"),
+        {"id": tenant_b_record_id},
+    )
+    assert (read_denied, create_denied, updated.rowcount, deleted.rowcount) == (True, True, 0, 0)
 
 
 if __name__ == "__main__":

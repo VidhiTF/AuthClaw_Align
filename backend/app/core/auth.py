@@ -1,5 +1,6 @@
 """Authentication and tenant context middleware / dependencies"""
 import hmac
+import logging
 import os
 from typing import Generator, List
 from fastapi import Request, Depends, HTTPException, status
@@ -9,6 +10,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.db.dependencies import get_db
+
+
+logger = logging.getLogger("auth.middleware")
 
 
 def hash_key(key: str) -> str:
@@ -36,6 +40,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Bypass authentication for public routes
         public_paths = {
             "/health",
+            "/metrics",
             "/docs",
             "/openapi.json",
             "/redoc",
@@ -48,6 +53,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/v1/auth/login",
             "/v1/auth/password-reset/request",
             "/v1/auth/password-reset/confirm",
+            "/api/public/v1/access-requests",
         }
         if request.method == "OPTIONS" or canonical_path in public_paths or path.startswith("/static") or canonical_path.startswith("/v1/trust-center/public"):
             return await call_next(request)
@@ -90,7 +96,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             principal = db.execute(
                 text(
                     """
-                    SELECT u.role, u.is_active, t.status AS tenant_status
+                    SELECT u.role, u.platform_role, u.is_active, t.status AS tenant_status
                     FROM users u
                     JOIN tenants t ON t.id = u.tenant_id
                     WHERE u.id = :user_id AND u.tenant_id = :tenant_id
@@ -138,11 +144,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.user_id = result.created_by
             request.state.api_key_id = result.id
             request.state.user_role = _normalize_role(principal.role)
+            request.state.tenant_role = request.state.user_role
+            request.state.platform_role = str(principal.platform_role).upper()
+            request.state.user_is_active = bool(principal.is_active)
         except Exception as e:
             db.rollback()
+            logger.exception("Authentication middleware failed")
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": f"Internal server error during auth: {str(e)}"}
+                content={"detail": "Authentication failed"}
             )
         finally:
             try:
@@ -195,6 +205,27 @@ def require_roles(required_roles: List[str]):
                 detail="Forbidden: Insufficient role"
             )
     return Depends(dependency)
+
+
+def require_platform_admin():
+    """Require the global ADMIN role and its dedicated platform scope."""
+
+    def dependency(request: Request):
+        platform_role = str(getattr(request.state, "platform_role", "NONE")).upper()
+        scopes = getattr(request.state, "scopes", [])
+        is_active = getattr(request.state, "user_is_active", False)
+        if (
+            not is_active
+            or platform_role != "ADMIN"
+            or "platform.admin" not in scopes
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Platform administrator access required",
+            )
+
+    return Depends(dependency)
+
 
 def get_current_tenant(request: Request) -> str:
     """Dependency to retrieve the current tenant_id from the request state"""

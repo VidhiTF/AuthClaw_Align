@@ -85,11 +85,11 @@ func TestPolicyEnforcement(t *testing.T) {
 
 	// Seed user for Tenant A
 	userA := "a0eebc99-0000-0000-0000-bb6d6bb9bd33"
-	_, _ = DB.Exec("INSERT INTO users (id, tenant_id, email, role, mfa_enabled, is_active) VALUES ($1, $2, 'adminA@example.com', 'admin', false, true)", userA, tenantA)
+	_, _ = DB.Exec("INSERT INTO users (id, tenant_id, email, role, platform_role, mfa_enabled, is_active) VALUES ($1, $2, 'adminA@example.com', 'admin', 'NONE', false, true)", userA, tenantA)
 
 	// Seed user for Tenant B
 	userB := "b0eebc99-0000-0000-0000-bb6d6bb9bd44"
-	_, _ = DB.Exec("INSERT INTO users (id, tenant_id, email, role, mfa_enabled, is_active) VALUES ($1, $2, 'adminB@example.com', 'admin', false, true)", userB, tenantB)
+	_, _ = DB.Exec("INSERT INTO users (id, tenant_id, email, role, platform_role, mfa_enabled, is_active) VALUES ($1, $2, 'adminB@example.com', 'admin', 'NONE', false, true)", userB, tenantB)
 
 	// 3. Test YAML Validation & Regex check
 	t.Run("YAML_Validation_Syntax_And_Regex", func(t *testing.T) {
@@ -417,7 +417,7 @@ func TestProxyIntegrationWithPolicy(t *testing.T) {
 	_, _ = DB.Exec("INSERT INTO tenants (id, name, tier, status) VALUES ($1, 'Proxy Policy Tenant', 'starter', 'active')", tenantID)
 
 	userID := "c0eebc99-1111-1111-1111-bb6d6bb9bd22"
-	_, _ = DB.Exec("INSERT INTO users (id, tenant_id, email, role, mfa_enabled, is_active) VALUES ($1, $2, 'proxy@example.com', 'admin', false, true)", userID, tenantID)
+	_, _ = DB.Exec("INSERT INTO users (id, tenant_id, email, role, platform_role, mfa_enabled, is_active) VALUES ($1, $2, 'proxy@example.com', 'admin', 'NONE', false, true)", userID, tenantID)
 
 	apiKey := "authclaw_proxy_policy_key_1"
 	keyHash := HashKey(apiKey)

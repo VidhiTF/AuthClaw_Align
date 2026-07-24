@@ -21,7 +21,7 @@ def list_provider_credentials(request: Request, db: Session = Depends(get_tenant
     ).order_by(ProviderCredential.created_at.desc()).all()
 
 
-@router.post("", response_model=ProviderCredentialResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_roles(["owner", "admin"])])
+@router.post("", response_model=ProviderCredentialResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def create_provider_credential(
     request: Request,
     credential_in: ProviderCredentialCreate,
@@ -74,7 +74,7 @@ def create_provider_credential(
     return credential
 
 
-@router.post("/{credential_id}/rotate", response_model=ProviderCredentialResponse, dependencies=[require_roles(["owner", "admin"])])
+@router.post("/{credential_id}/rotate", response_model=ProviderCredentialResponse, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def rotate_provider_credential(
     credential_id: UUID,
     credential_in: ProviderCredentialCreate,
@@ -115,7 +115,7 @@ def rotate_provider_credential(
     return new_credential
 
 
-@router.delete("/{credential_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner", "admin"])])
+@router.delete("/{credential_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def revoke_provider_credential(
     credential_id: UUID,
     request: Request,

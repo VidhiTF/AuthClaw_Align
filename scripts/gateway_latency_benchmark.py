@@ -56,6 +56,7 @@ class ScenarioReport:
     requests: int
     successes: int
     failures: int
+    error_rate: float
     status_counts: dict[str, int]
     throughput_rps: float
     min_ms: float
@@ -316,6 +317,7 @@ def run_scenario(
         requests=len(samples),
         successes=sum(1 for sample in samples if sample.ok),
         failures=sum(1 for sample in samples if not sample.ok),
+        error_rate=sum(1 for sample in samples if not sample.ok) / len(samples) if samples else 1.0,
         status_counts=status_counts,
         throughput_rps=len(samples) / elapsed,
         min_ms=min(latencies) if latencies else 0.0,
@@ -471,16 +473,14 @@ def threshold_failures(
     if args.require_provider_baseline and not args.provider_baseline_url:
         failures.append("provider baseline URL is required for gateway overhead proof")
     for baseline in baseline_reports.values():
-        failure_rate = baseline.failures / baseline.requests if baseline.requests else 1
-        if failure_rate > args.max_failure_rate:
+        if baseline.error_rate > args.max_failure_rate:
             failures.append(
-                f"provider baseline {baseline.scenario} failure rate {failure_rate:.2%} exceeds {args.max_failure_rate:.2%}"
+                f"provider baseline {baseline.scenario} failure rate {baseline.error_rate:.2%} exceeds {args.max_failure_rate:.2%}"
             )
     for report in reports:
         scenario = SCENARIOS[report.scenario]
-        failure_rate = report.failures / report.requests if report.requests else 1
-        if failure_rate > args.max_failure_rate:
-            failures.append(f"{report.scenario} failure rate {failure_rate:.2%} exceeds {args.max_failure_rate:.2%}")
+        if report.error_rate > args.max_failure_rate:
+            failures.append(f"{report.scenario} failure rate {report.error_rate:.2%} exceeds {args.max_failure_rate:.2%}")
         if report.p95_ms > args.p95_threshold_ms:
             failures.append(f"{report.scenario} p95 {report.p95_ms:.1f}ms exceeds {args.p95_threshold_ms:.1f}ms")
         if report.p99_ms > args.p99_threshold_ms:

@@ -9,7 +9,7 @@ from app.core.auth import get_tenant_db, require_roles, require_scopes
 router = APIRouter()
 
 
-@router.post("", response_model=GatewayConfigResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_roles(["owner", "admin"])])
+@router.post("", response_model=GatewayConfigResponse, status_code=status.HTTP_201_CREATED, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def register_gateway(
     request: Request,
     gateway_in: GatewayConfigCreate,
@@ -80,7 +80,7 @@ def list_gateways(
     return db.query(GatewayConfig).filter(GatewayConfig.tenant_id == tenant_id).all()
 
 
-@router.put("/{id}", response_model=GatewayConfigResponse, dependencies=[require_roles(["owner", "admin"])])
+@router.put("/{id}", response_model=GatewayConfigResponse, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def update_gateway(
     id: UUID,
     gateway_in: GatewayConfigCreate,
@@ -106,7 +106,7 @@ def update_gateway(
     return gateway
 
 
-@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner", "admin"])])
+@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def delete_gateway(
     id: UUID,
     request: Request,

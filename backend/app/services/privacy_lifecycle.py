@@ -6,16 +6,20 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from app.db.models import AuditLogMetadata, RedactionToken
+from app.db.models import (
+    AccessRequest,
+    AccessRequestHistory,
+    AuditLogMetadata,
+    RedactionToken,
+)
 from app.services import event_backbone
-from app.services.audit_store import GENESIS_HASH, compute_integrity_hash
-
+from app.services.audit_store import append_audit_event
 
 PURGE_ACTION = "privacy:purge_expired"
 PURGE_DATA_CLASS = "redaction_token_mapping"
@@ -44,21 +48,6 @@ def _add_purge_audit_record(
     deleted_count: int,
     duration_ms: int,
 ) -> AuditLogMetadata:
-    last = (
-        db.query(AuditLogMetadata)
-        .filter(AuditLogMetadata.tenant_id == tenant_id)
-        .order_by(
-            AuditLogMetadata.created_at.desc(),
-            AuditLogMetadata.record_id.desc(),
-        )
-        .first()
-    )
-    prior_hash = (
-        last.integrity_hash
-        if last and last.integrity_hash
-        else GENESIS_HASH
-    )
-
     created_at = _now_utc()
     record_id = uuid.uuid4()
     trace_items = [
@@ -67,28 +56,9 @@ def _add_purge_audit_record(
         "retention_state=expired",
     ]
 
-    log = AuditLogMetadata(
-        tenant_id=tenant_id,
-        record_id=record_id,
-        actor_id=actor_id,
-        actor_type="privacy_lifecycle",
-        action=PURGE_ACTION,
-        request_id=request_id,
-        provider="control-plane",
-        model="",
-        reason=f"Purged {deleted_count} expired redaction mappings",
-        prompt_count=0,
-        request_size=0,
-        response_status=200,
-        duration_ms=duration_ms,
-        frameworks_affected=["GDPR"],
-        execution_trace=json.dumps(trace_items),
-        prior_hash=prior_hash,
-        created_at=created_at,
-    )
-
-    hash_record = {
-        "record_id": str(record_id),
+    event = {
+        "id": str(record_id),
+        "idempotency_key": f"privacy-purge:{request_id or record_id}",
         "tenant_id": str(tenant_id),
         "timestamp": created_at,
         "actor_id": str(actor_id) if actor_id else "",
@@ -97,18 +67,40 @@ def _add_purge_audit_record(
         "policy_id": "",
         "provider": "control-plane",
         "model": "",
-        "reason": log.reason,
+        "reason": f"Purged {deleted_count} expired redaction mappings",
         "prompt_count": 0,
         "request_size": 0,
         "response_status": 200,
         "duration_ms": duration_ms,
         "frameworks_affected": ["GDPR"],
-        "execution_trace": log.execution_trace,
+        "execution_trace": trace_items,
         "request_id": request_id,
     }
-    log.integrity_hash = compute_integrity_hash(hash_record, prior_hash)
-    db.add(log)
-    return log
+    appended = append_audit_event(db, event)
+    return AuditLogMetadata(
+        tenant_id=tenant_id,
+        record_id=appended["record_id"],
+        tenant_sequence=appended["tenant_sequence"],
+        idempotency_key=event["idempotency_key"],
+        chain_version=2,
+        canonical_payload=appended["canonical_payload"],
+        actor_id=actor_id,
+        actor_type="privacy_lifecycle",
+        action=PURGE_ACTION,
+        request_id=request_id,
+        provider="control-plane",
+        model="",
+        reason=event["reason"],
+        prompt_count=0,
+        request_size=0,
+        response_status=200,
+        duration_ms=duration_ms,
+        frameworks_affected=["GDPR"],
+        execution_trace=json.dumps(trace_items),
+        prior_hash=appended["prior_hash"],
+        integrity_hash=appended["integrity_hash"],
+        created_at=created_at,
+    )
 
 
 def purge_expired_redaction_mappings(
@@ -145,9 +137,7 @@ def purge_expired_redaction_mappings(
 
         db.commit()
 
-        event_backbone.increment_metric(
-            "privacy_purge_operations_total"
-        )
+        event_backbone.increment_metric("privacy_purge_operations_total")
         event_backbone.increment_metric(
             "privacy_purged_records_total",
             deleted_count,
@@ -163,7 +153,63 @@ def purge_expired_redaction_mappings(
         )
     except Exception:
         db.rollback()
-        event_backbone.increment_metric(
-            "privacy_purge_failures_total"
-        )
+        event_backbone.increment_metric("privacy_purge_failures_total")
         raise
+
+
+def purge_expired_access_requests(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Delete expired public intake records under the approved ACL-15 policy."""
+    evaluated_at = now or _now_utc()
+    onboarding_started = func.access_request_onboarding_started(
+        AccessRequest.business_email,
+        AccessRequest.updated_at,
+    )
+    expired = (
+        db.query(AccessRequest)
+        .filter(
+            or_(
+                and_(
+                    AccessRequest.status == "PENDING",
+                    AccessRequest.created_at <= evaluated_at - timedelta(days=90),
+                ),
+                and_(
+                    AccessRequest.status == "REJECTED",
+                    AccessRequest.updated_at <= evaluated_at - timedelta(days=30),
+                ),
+                and_(
+                    AccessRequest.status == "INVITED",
+                    AccessRequest.updated_at <= evaluated_at - timedelta(days=30),
+                    onboarding_started.is_(False),
+                ),
+            )
+        )
+        .all()
+    )
+    try:
+        for request in expired:
+            db.add(
+                AccessRequestHistory(
+                    access_request_id=request.id,
+                    event_type="DELETED",
+                    old_status=request.status,
+                    new_status=None,
+                    event_metadata={"policy": "ACL-15"},
+                )
+            )
+            db.delete(request)
+        db.commit()
+    except Exception:
+        db.rollback()
+        event_backbone.increment_metric("access_request_deletion_failures_total")
+        raise
+
+    event_backbone.increment_metric("access_request_deletion_completed_total")
+    event_backbone.increment_metric(
+        "access_request_records_deleted_total",
+        len(expired),
+    )
+    return len(expired)

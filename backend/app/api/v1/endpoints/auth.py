@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import logging
 import secrets
+import jwt
+import requests
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -25,9 +29,59 @@ from app.db.models import APIKey, OnboardingEmailOTP, Tenant, TenantOIDCConfig, 
 from app.services.email_service import EmailDeliveryError
 
 from app.core.oidc import oidc_config
-from app.services import oidc_sso
+from app.services import event_backbone, oidc_sso
 
 router = APIRouter()
+logger = logging.getLogger("api.auth")
+_oidc_kafka_producer = None
+
+
+def _emit_oidc_audit(
+    *,
+    tenant_id: str,
+    actor_id: str = "",
+    action: str,
+    reason: str,
+    request_id: str = "",
+    response_status: int,
+    provider: str = "oidc",
+) -> None:
+    global _oidc_kafka_producer
+    event = event_backbone.audit_event(
+        event_type="authentication",
+        tenant_id=tenant_id,
+        subject_id=actor_id or tenant_id,
+        identity_action=action,
+        action=f"auth:{action}",
+        reason=reason,
+        provider=provider,
+        request_id=request_id,
+        trace=[],
+    )
+    event["actor_id"] = actor_id
+    event["result"] = "success" if response_status < 400 else "failure"
+    event["response_status"] = response_status
+    event_backbone.increment_metric(f"oidc_{action}_total")
+    if _oidc_kafka_producer is None:
+        try:
+            _oidc_kafka_producer = event_backbone.make_kafka_producer()
+        except Exception:
+            logger.warning("OIDC audit Kafka producer unavailable")
+    if exc := event_backbone.publish_audit_event(_oidc_kafka_producer, tenant_id, event):
+        logger.warning("Failed to publish OIDC audit event: action=%s", action)
+    logger.info("[OIDC_AUDIT] %s", json.dumps(event, sort_keys=True))
+
+
+def _oidc_authentication_reason(exc: Exception) -> str:
+    if isinstance(exc, jwt.InvalidIssuerError):
+        return "issuer_validation_failed"
+    if isinstance(exc, jwt.InvalidAudienceError):
+        return "audience_validation_failed"
+    if isinstance(exc, (jwt.InvalidSignatureError, jwt.PyJWKClientError)):
+        return "signature_validation_failed"
+    if isinstance(exc, oidc_sso.OIDCAuthenticationError):
+        return exc.reason_code
+    return "invalid_token"
 
 
 class PasswordLoginRequest(BaseModel):
@@ -108,9 +162,15 @@ class OIDCAdminConfigRequest(BaseModel):
     jwks_uri: str | None = None
     email_claim: str = "email"
     groups_claim: str = "groups"
+    tenant_claim: str = "tenant_id"
+    tenant_claim_value: str = ""
     role_mapping: dict[str, str] = Field(default_factory=dict)
     default_role: str = "viewer"
     auto_provision: bool = False
+    require_mfa: bool = True
+    accepted_amr: list[str] = Field(default_factory=lambda: ["mfa"])
+    accepted_acr: list[str] = Field(default_factory=list)
+    max_auth_age_seconds: int = Field(default=43200, ge=0)
 
 
 def _generate_console_key() -> str:
@@ -191,19 +251,46 @@ def _oidc_callback_config(db, tenant_name: str | None):
 
 
 @router.post("/oidc/callback", response_model=PasswordLoginResponse)
-def oidc_callback(payload: OIDCCallbackRequest):
+def oidc_callback(payload: OIDCCallbackRequest, request: Request):
     db = OwnerSessionLocal()
+    tenant = None
+    request_id = request.headers.get("x-request-id", "")
     try:
         tenant, config = _oidc_callback_config(db, payload.tenant_name)
+        configured_redirect_uri = config["redirect_uri"] if isinstance(config, dict) else config.redirect_uri
+        if payload.redirect_uri != configured_redirect_uri:
+            _emit_oidc_audit(
+                tenant_id=str(tenant.id),
+                action="redirect_uri_validation_failed",
+                reason="redirect_uri_validation_failed",
+                request_id=request_id,
+                response_status=400,
+            )
+            raise HTTPException(status_code=400, detail="Invalid OIDC redirect URI")
         tokens = oidc_sso.exchange_code(config, payload.code, payload.redirect_uri)
         id_token = tokens.get("id_token")
         if not id_token:
+            _emit_oidc_audit(
+                tenant_id=str(tenant.id),
+                action="invalid_token",
+                reason="invalid_token",
+                request_id=request_id,
+                response_status=400,
+            )
             raise HTTPException(status_code=400, detail="OIDC token response did not include id_token")
         claims = oidc_sso.validate_id_token(config, id_token, payload.nonce)
         db.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(tenant.id)})
         user, role = oidc_sso.map_user(db, tenant, config, claims)
         raw_key, scopes = oidc_sso.issue_console_key(db, tenant, user, user.email, role, "OIDC")
         db.commit()
+        _emit_oidc_audit(
+            tenant_id=str(tenant.id),
+            actor_id=str(user.id),
+            action="oidc_login_succeeded",
+            reason="success",
+            request_id=request_id,
+            response_status=200,
+        )
         return PasswordLoginResponse(
             user_id=user.id,
             tenant_id=tenant.id,
@@ -213,12 +300,37 @@ def oidc_callback(payload: OIDCCallbackRequest):
             scopes=scopes,
             api_key=raw_key,
         )
-    except PermissionError as exc:
+    except (oidc_sso.OIDCAuthorizationError, PermissionError) as exc:
         db.rollback()
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
+        reason = exc.reason_code if isinstance(exc, oidc_sso.OIDCAuthorizationError) else "authorization_failed"
+        if tenant:
+            _emit_oidc_audit(
+                tenant_id=str(tenant.id),
+                action=reason,
+                reason=reason,
+                request_id=request_id,
+                response_status=403,
+            )
+        raise HTTPException(status_code=403, detail="OIDC authorization failed") from exc
+    except (oidc_sso.OIDCAuthenticationError, jwt.PyJWTError, jwt.PyJWKClientError, requests.HTTPError) as exc:
         db.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if tenant:
+            reason = _oidc_authentication_reason(exc)
+            _emit_oidc_audit(
+                tenant_id=str(tenant.id),
+                action=reason,
+                reason=reason,
+                request_id=request_id,
+                response_status=401,
+            )
+        raise HTTPException(status_code=401, detail="OIDC authentication failed") from exc
+    except (ValueError, TypeError) as exc:
+        db.rollback()
+        logger.exception("OIDC callback failed")
+        raise HTTPException(status_code=400, detail="OIDC authentication failed") from exc
+    except requests.RequestException as exc:
+        db.rollback()
+        raise HTTPException(status_code=502, detail="OIDC provider request failed") from exc
     except HTTPException:
         db.rollback()
         raise
@@ -242,7 +354,8 @@ def save_oidc_admin_config(payload: OIDCAdminConfigRequest, request: Request, db
         config = oidc_sso.upsert_config(db, request.state.tenant_id, request.state.user_id, payload.model_dump())
         return oidc_sso.serialize_config(config)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("OIDC configuration failed")
+        raise HTTPException(status_code=400, detail="OIDC authentication failed") from exc
 
 
 @router.post("/oidc/admin-config/test", dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
@@ -288,6 +401,14 @@ def password_login(payload: PasswordLoginRequest):
         user.last_login = now
         db.add(api_key)
         db.commit()
+        _emit_oidc_audit(
+            tenant_id=str(tenant.id),
+            actor_id=str(user.id),
+            action="password_login_succeeded",
+            reason="success",
+            response_status=200,
+            provider="password",
+        )
 
         return PasswordLoginResponse(
             user_id=user.id,
@@ -373,7 +494,11 @@ def request_password_reset(payload: PasswordResetRequest):
         )
     except EmailDeliveryError as exc:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        logger.exception("Password reset delivery failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service is temporarily unavailable",
+        ) from exc
     except HTTPException:
         db.rollback()
         raise

@@ -59,3 +59,4 @@ jobs:
         with:
           name: terraform-plan
           path: infra/terraform/terraform-plan.txt
+          retention-days: 3

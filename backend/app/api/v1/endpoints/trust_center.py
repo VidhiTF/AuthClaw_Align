@@ -6,13 +6,14 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, require_roles, require_scopes
 from app.db.dependencies import get_db
-from app.db.models import TrustCenterShare
+from app.db.models import Tenant, TrustCenterShare
+from app.services.email_service import EmailDeliveryError
 from app.services import trust_center
 from app.services.notifications import create_notification
 
@@ -21,7 +22,7 @@ router = APIRouter()
 
 class TrustCenterShareCreate(BaseModel):
     label: str = Field(default="Auditor Trust Center", min_length=3, max_length=255)
-    auditor_email: str | None = None
+    auditor_email: EmailStr
     frameworks: list[str] = Field(default_factory=lambda: list(trust_center.DEFAULT_FRAMEWORKS))
     expires_in_days: int = Field(default=30, ge=1, le=trust_center.MAX_SHARE_TTL_DAYS)
 
@@ -49,6 +50,10 @@ class TrustCenterShareCreateResponse(BaseModel):
 
 class TrustCenterVerifyRequest(BaseModel):
     artifact: dict[str, Any]
+
+
+class TrustCenterAccessVerifyRequest(BaseModel):
+    otp: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
 
 
 def _share_response(share: TrustCenterShare) -> TrustCenterShareResponse:
@@ -82,7 +87,18 @@ def _clear_public_rls_context(db: Session) -> None:
     db.execute(text("SELECT set_config('app.trust_center_token_hash', '', false)"))
 
 
-@router.get("/shares", response_model=list[TrustCenterShareResponse], dependencies=[require_scopes(["read"])])
+def _require_auditor_access(request: Request, share: TrustCenterShare, raw_token: str) -> None:
+    try:
+        trust_center.verify_auditor_access(
+            share,
+            raw_token,
+            request.headers.get("x-trust-center-access", ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@router.get("/shares", response_model=list[TrustCenterShareResponse], dependencies=[require_roles(["owner", "admin"]), require_scopes(["read"])])
 def list_trust_center_shares(
     request: Request,
     db: Session = Depends(get_tenant_db),
@@ -106,7 +122,7 @@ def create_trust_center_share(
             db,
             tenant_id=request.state.tenant_id,
             label=payload.label,
-            auditor_email=payload.auditor_email,
+            auditor_email=str(payload.auditor_email),
             frameworks=payload.frameworks,
             expires_in_days=payload.expires_in_days,
             created_by=getattr(request.state, "user_id", None),
@@ -165,6 +181,7 @@ def get_public_trust_center(
 ):
     try:
         share = _public_share_or_404(db, token)
+        _require_auditor_access(request, share, token)
         package = trust_center.build_public_package(db, share)
         trust_center.record_access(
             db,
@@ -187,6 +204,7 @@ def get_public_trust_center_export(
 ):
     try:
         share = _public_share_or_404(db, token)
+        _require_auditor_access(request, share, token)
         if "download_signed_audit_export" not in set(share.permissions or []):
             raise HTTPException(status_code=403, detail="This share cannot download signed exports")
         try:
@@ -201,6 +219,40 @@ def get_public_trust_center_export(
             user_agent=request.headers.get("user-agent", ""),
         )
         return artifact
+    finally:
+        _clear_public_rls_context(db)
+
+
+@router.post("/public/{token}/request-access")
+def request_public_trust_center_access(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        share = _public_share_or_404(db, token)
+        tenant = db.query(Tenant).filter(Tenant.id == share.tenant_id).first()
+        try:
+            return trust_center.issue_auditor_otp(db, share, tenant.name if tenant else "AuthClaw")
+        except EmailDeliveryError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        _clear_public_rls_context(db)
+
+
+@router.post("/public/{token}/verify-access")
+def verify_public_trust_center_access(
+    token: str,
+    payload: TrustCenterAccessVerifyRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        share = _public_share_or_404(db, token)
+        try:
+            return trust_center.verify_auditor_otp(db, share, token, payload.otp)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         _clear_public_rls_context(db)
 

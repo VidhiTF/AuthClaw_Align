@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from database import engine
 from sqlalchemy import text
-from verify_audit import create_audit_block, log_agent_event
+from verify_audit import GENESIS_HASH, create_audit_block, log_agent_event
 
 
 class AuditAgent:
@@ -74,6 +74,7 @@ class AuditAgent:
 
         if row:
             integrity_hash, previous_hash = row[0], row[1]
+            previous_hash = previous_hash or GENESIS_HASH
             log_agent_event(
                 tenant_id=tenant_id,
                 session_id=session_id,

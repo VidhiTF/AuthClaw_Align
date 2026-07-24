@@ -156,18 +156,35 @@ def _verify_chain(records: List[dict]) -> List[dict]:
     # Reverse records to go oldest -> newest for rolling verification
     asc_records = list(reversed(records))
     last_hash_by_tenant: Dict[str, str] = {}
+    last_sequence_by_tenant: Dict[str, int] = {}
 
     for record in asc_records:
         tenant_id = record.get("tenant_id", "")
         prior_hash = record.get("prior_hash") or _GENESIS_HASH
-        data = _canonical_json(record) + prior_hash
+        canonical = (
+            record.get("canonical_payload")
+            if int(record.get("chain_version") or 1) >= 2
+            else None
+        ) or _canonical_json(record)
+        data = str(canonical) + prior_hash
         expected = hashlib.sha256(data.encode("utf-8")).hexdigest()
         actual = record.get("integrity_hash", "")
         previous_hash = last_hash_by_tenant.get(tenant_id)
-        link_valid = previous_hash is None or prior_hash == previous_hash
+        sequence = int(record.get("tenant_sequence") or 0)
+        previous_sequence = last_sequence_by_tenant.get(tenant_id)
+        link_valid = (
+            (previous_hash is None or prior_hash == previous_hash)
+            and (
+                previous_sequence is None
+                or not sequence
+                or sequence == previous_sequence + 1
+            )
+        )
         record["chain_valid"] = bool(actual) and expected == actual and link_valid
         if actual:
             last_hash_by_tenant[tenant_id] = actual
+        if sequence:
+            last_sequence_by_tenant[tenant_id] = sequence
 
     # Reverse back to keep original order (newest first)
     return list(reversed(asc_records))
@@ -202,9 +219,6 @@ def get_audit_logs(
     - Set integrity_check=true to verify the SHA-256 hash chain.
     """
     tenant_id: str = str(request.state.tenant_id)
-    if integrity_check:
-        return _query_postgres(db, tenant_id, limit, offset, action, integrity_check)
-
     # ── ClickHouse path ────────────────────────────────────────────────────────
     host = os.getenv("CLICKHOUSE_HOST")
     if host:
@@ -319,7 +333,7 @@ def get_audit_store_consistency(
 
 @router.post(
     "/store/replay",
-    dependencies=[require_roles(["owner", "admin"])],
+    dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])],
 )
 def replay_audit_store(
     request: Request,
@@ -355,6 +369,10 @@ def _query_clickhouse(
         SELECT
             toString(ae.record_id)    AS record_id,
             toString(ae.tenant_id)    AS tenant_id,
+            ae.tenant_sequence        AS tenant_sequence,
+            ae.idempotency_key        AS idempotency_key,
+            ae.chain_version          AS chain_version,
+            ae.canonical_payload      AS canonical_payload,
             ae.timestamp              AS timestamp,
             ae.actor_id               AS actor_id,
             ae.actor_type             AS actor_type,
@@ -375,7 +393,7 @@ def _query_clickhouse(
         FROM authclaw.audit_events AS ae
         WHERE ae.tenant_id = {{tenant_id:UUID}}
         {action_filter}
-        ORDER BY ae.timestamp DESC, ae.record_id DESC
+        ORDER BY ae.tenant_sequence DESC
         LIMIT {{limit:UInt32}}
         OFFSET {{offset:UInt32}}
     """
@@ -431,13 +449,17 @@ def _query_postgres(
             q = q.filter(AuditLogMetadata.action == action)
         
         total_count = q.count()
-        logs = q.order_by(AuditLogMetadata.created_at.desc(), AuditLogMetadata.record_id.desc()).offset(offset).limit(limit).all()
+        logs = q.order_by(AuditLogMetadata.tenant_sequence.desc()).offset(offset).limit(limit).all()
 
         records = [
             {
                 "id": str(log.id),
                 "record_id": str(log.record_id),
                 "tenant_id": str(log.tenant_id),
+                "tenant_sequence": log.tenant_sequence,
+                "idempotency_key": log.idempotency_key,
+                "chain_version": log.chain_version,
+                "canonical_payload": log.canonical_payload,
                 "timestamp": log.created_at.isoformat() if log.created_at else None,
                 "actor_id": str(log.actor_id) if log.actor_id else "",
                 "actor_type": getattr(log, "actor_type", None) or "gateway",

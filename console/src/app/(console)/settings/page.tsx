@@ -171,9 +171,15 @@ interface SsoConfig {
   jwks_uri: string;
   email_claim: string;
   groups_claim: string;
+  tenant_claim: string;
+  tenant_claim_value: string;
   role_mapping: Record<string, string>;
   default_role: string;
   auto_provision: boolean;
+  require_mfa: boolean;
+  accepted_amr: string[];
+  accepted_acr: string[];
+  max_auth_age_seconds: number;
   has_client_secret: boolean;
   last_tested_at?: string | null;
   last_error?: string | null;
@@ -191,9 +197,15 @@ const defaultSsoConfig: SsoConfig = {
   jwks_uri: "",
   email_claim: "email",
   groups_claim: "groups",
+  tenant_claim: "tenant_id",
+  tenant_claim_value: "",
   role_mapping: {},
   default_role: "viewer",
   auto_provision: false,
+  require_mfa: true,
+  accepted_amr: ["mfa"],
+  accepted_acr: [],
+  max_auth_age_seconds: 43200,
   has_client_secret: false,
 };
 
@@ -532,9 +544,15 @@ export default function SettingsPage() {
         jwks_uri: ssoConfig.jwks_uri || undefined,
         email_claim: ssoConfig.email_claim,
         groups_claim: ssoConfig.groups_claim,
+        tenant_claim: ssoConfig.tenant_claim,
+        tenant_claim_value: ssoConfig.tenant_claim_value,
         role_mapping: roleMapping,
         default_role: ssoConfig.default_role,
         auto_provision: ssoConfig.auto_provision,
+        require_mfa: ssoConfig.require_mfa,
+        accepted_amr: ssoConfig.accepted_amr,
+        accepted_acr: ssoConfig.accepted_acr,
+        max_auth_age_seconds: ssoConfig.max_auth_age_seconds,
       }));
       const data = await responseJson<{ error?: string } & SsoConfig>(res);
       if (!res.ok) throw new Error(data.error || "Could not save SSO configuration");
@@ -1203,6 +1221,8 @@ export default function SettingsPage() {
                   ["JWKS URI", "jwks_uri", "Defaults to issuer/.well-known/jwks.json"],
                   ["Email Claim", "email_claim", "email"],
                   ["Groups Claim", "groups_claim", "groups"],
+                  ["Tenant Claim", "tenant_claim", "tenant_id"],
+                  ["Tenant Claim Value", "tenant_claim_value", "Immutable external tenant ID"],
                 ].map(([label, key, placeholder]) => (
                   <label key={key} className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
                     {label}
@@ -1250,6 +1270,41 @@ export default function SettingsPage() {
                     className="rounded border-[#E6E9F0] text-indigo-500 focus:ring-0"
                   />
                   Auto-provision verified SSO users
+                </label>
+                <label className="flex items-center gap-2 rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs font-semibold text-[#475069]">
+                  <input
+                    type="checkbox"
+                    checked={ssoConfig.require_mfa}
+                    onChange={(event) => setSsoConfig((current) => ({ ...current, require_mfa: event.target.checked }))}
+                    className="rounded border-[#E6E9F0] text-indigo-500 focus:ring-0"
+                  />
+                  Require IdP MFA context
+                </label>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
+                  Accepted AMR values
+                  <input
+                    value={ssoConfig.accepted_amr.join(" ")}
+                    onChange={(event) => setSsoConfig((current) => ({ ...current, accepted_amr: event.target.value.split(/\s+/).filter(Boolean) }))}
+                    className="mt-1 w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs normal-case tracking-normal text-[#0E1726] outline-none focus:border-indigo-500"
+                  />
+                </label>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
+                  Accepted ACR values
+                  <input
+                    value={ssoConfig.accepted_acr.join(" ")}
+                    onChange={(event) => setSsoConfig((current) => ({ ...current, accepted_acr: event.target.value.split(/\s+/).filter(Boolean) }))}
+                    className="mt-1 w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs normal-case tracking-normal text-[#0E1726] outline-none focus:border-indigo-500"
+                  />
+                </label>
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
+                  Maximum authentication age (seconds)
+                  <input
+                    type="number"
+                    min="0"
+                    value={ssoConfig.max_auth_age_seconds}
+                    onChange={(event) => setSsoConfig((current) => ({ ...current, max_auth_age_seconds: Number(event.target.value) }))}
+                    className="mt-1 w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs normal-case tracking-normal text-[#0E1726] outline-none focus:border-indigo-500"
+                  />
                 </label>
                 <label className="block text-[10px] font-bold uppercase tracking-wider text-[#6B7488] md:col-span-2">
                   Group Role Mapping JSON
@@ -2034,6 +2089,8 @@ export default function SettingsPage() {
                   className="w-full px-3 py-2 rounded-lg bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-indigo-500/80 transition"
                 >
                   <option value="viewer">Viewer (Overview & audit)</option>
+                  <option value="developer">Developer (Read-only technical view)</option>
+                  <option value="operator">Operator (Read-only operational view)</option>
                   <option value="admin">Admin (Policies & provider keys)</option>
                   <option value="owner">Owner (Tenant control)</option>
                 </select>

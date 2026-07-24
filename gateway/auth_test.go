@@ -31,7 +31,7 @@ func TestAuthMiddleware(t *testing.T) {
 	// 4. Insert test user
 	userID := "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22"
 	_, err = DB.Exec(
-		"INSERT INTO users (id, tenant_id, email, role, mfa_enabled, is_active) VALUES ($1, $2, 'test@example.com', 'admin', false, true)",
+		"INSERT INTO users (id, tenant_id, email, role, platform_role, mfa_enabled, is_active) VALUES ($1, $2, 'test@example.com', 'admin', 'NONE', false, true)",
 		userID, tenantID,
 	)
 	if err != nil {

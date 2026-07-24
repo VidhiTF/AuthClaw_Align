@@ -2,27 +2,29 @@ import pytest
 from fastapi.testclient import TestClient
 from fastapi import status
 from sqlalchemy import text, create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker, Session
 import uuid
 from uuid import uuid4, UUID
 import os
 import base64
+from datetime import datetime, timedelta, timezone
 from main import app
 
 # Force fallback to PostgreSQL audit logs by unsetting CLICKHOUSE_HOST for endpoints test suite
 os.environ.pop("CLICKHOUSE_HOST", None)
 
 from app.db.dependencies import get_db
-from app.db.models import Tenant, User, APIKey, Policy, GatewayConfig, RedactionToken, AuditLogMetadata
+from app.db.models import AccessRequest, AccessRequestHistory, DataSubjectRequest, Notification, Tenant, User, APIKey, Policy, GatewayConfig, RedactionToken, AuditLogMetadata
 from app.core.auth import hash_key
-from app.core.config import settings
+from app.services import access_requests as access_request_service
+from app.services.privacy_lifecycle import purge_expired_access_requests
+from app.services import data_subject_requests as data_subject_request_service
+from app.services import event_backbone
+from tests.db_safety import destructive_test_urls
 
-# Force using authclaw_app (RLS-restricted user) for database interactions in tests.
-owner_db_url = os.getenv("OWNER_DATABASE_URL", settings.DATABASE_URL)
-app_user = os.getenv("POSTGRES_APP_USER", "authclaw_app")
-app_password = os.getenv("POSTGRES_APP_PASSWORD", "authclaw_app")
-db_url = settings.DATABASE_URL.replace("authclaw:authclaw@", f"{app_user}:{app_password}@")
+owner_db_url, db_url = destructive_test_urls()
 owner_engine = create_engine(owner_db_url, echo=False, poolclass=StaticPool)
 engine = create_engine(db_url, echo=False, poolclass=StaticPool)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
@@ -33,10 +35,17 @@ def db_session() -> Session:
     """Create a clean database session and apply tables/RLS contexts"""
     from app.db.base import Base
     Base.metadata.create_all(bind=owner_engine)
-    
+
+    app_role = owner_engine.dialect.identifier_preparer.quote(
+        os.getenv("POSTGRES_APP_USER", "authclaw_app")
+    )
     # Truncate tables before run
     with owner_engine.connect() as conn:
-        conn.execute(text("TRUNCATE TABLE audit_log_metadata, pending_approvals, redaction_tokens, gateway_configs, policies, api_keys, users, tenants CASCADE;"))
+        conn.execute(text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON access_requests TO {app_role}"))
+        conn.execute(text(f"GRANT SELECT, INSERT ON access_request_history TO {app_role}"))
+        conn.execute(text(f"GRANT SELECT, INSERT ON onboarding_email_otps TO {app_role}"))
+        conn.execute(text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON data_subject_requests TO {app_role}"))
+        conn.execute(text("TRUNCATE TABLE data_subject_requests, access_request_history, access_requests, audit_log_metadata, pending_approvals, redaction_tokens, gateway_configs, policies, api_keys, users, tenants CASCADE;"))
         conn.commit()
         
     db = TestingSessionLocal()
@@ -111,6 +120,451 @@ def test_authentication_gates(client: TestClient):
     assert "Invalid or expired API Key" in response.json()["detail"]
 
 
+def test_data_subject_request_lifecycle_authorization_and_isolation(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    metrics_before = event_backbone.metrics_snapshot()
+    tenant_a_id, tenant_b_id = uuid4(), uuid4()
+    owner_a_id, viewer_a_id, owner_b_id = uuid4(), uuid4(), uuid4()
+    owner_a_key, viewer_a_key, owner_b_key = "dsr-owner-a", "dsr-viewer-a", "dsr-owner-b"
+
+    for tenant_id, name, users in (
+        (tenant_a_id, "DSR Tenant A", [(owner_a_id, "owner-a@dsr.test", "owner"), (viewer_a_id, "viewer-a@dsr.test", "viewer")]),
+        (tenant_b_id, "DSR Tenant B", [(owner_b_id, "owner-b@dsr.test", "owner")]),
+    ):
+        db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+        db_session.add(Tenant(id=tenant_id, name=name, tier="enterprise", status="active"))
+        db_session.flush()
+        for user_id, email, role in users:
+            db_session.add(User(id=user_id, tenant_id=tenant_id, email=email, role=role, is_active=True))
+        db_session.commit()
+
+    for tenant_id, user_id, key, scopes in (
+        (tenant_a_id, owner_a_id, owner_a_key, ["admin", "read", "write"]),
+        (tenant_a_id, viewer_a_id, viewer_a_key, ["read"]),
+        (tenant_b_id, owner_b_id, owner_b_key, ["admin", "read", "write"]),
+    ):
+        db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+        db_session.add(APIKey(id=uuid4(), tenant_id=tenant_id, key_hash=hash_key(key), name="Subject API key", scopes=scopes, is_active=True, created_by=user_id))
+        db_session.commit()
+    db_session.execute(text("SET app.current_tenant_id = ''"))
+
+    audit_events = []
+    monkeypatch.setattr(
+        data_subject_request_service,
+        "append_audit_event",
+        lambda _db, event: audit_events.append(event) or {},
+    )
+    payload = {
+        "subject_id": "customer-123",
+        "request_type": "ACCESS",
+        "scope": {"systems": ["console"]},
+    }
+    owner_a_headers = {"Authorization": f"Bearer {owner_a_key}"}
+
+    denied = client.post(
+        "/v1/data-subject-requests",
+        json=payload,
+        headers={"Authorization": f"Bearer {viewer_a_key}"},
+    )
+    assert denied.status_code == status.HTTP_403_FORBIDDEN
+
+    created = client.post("/v1/data-subject-requests", json=payload, headers=owner_a_headers)
+    assert created.status_code == status.HTTP_201_CREATED
+    request_id = created.json()["id"]
+    assert created.json()["status"] == "PENDING"
+
+    isolated = client.get(
+        f"/v1/data-subject-requests/{request_id}",
+        headers={"Authorization": f"Bearer {owner_b_key}"},
+    )
+    assert isolated.status_code == status.HTTP_404_NOT_FOUND
+
+    verified = client.post(
+        f"/v1/data-subject-requests/{request_id}/verify",
+        json={"identity_verified": True},
+        headers=owner_a_headers,
+    )
+    assert verified.status_code == status.HTTP_200_OK
+    assert verified.json()["status"] == "VERIFIED"
+
+    approved = client.post(
+        f"/v1/data-subject-requests/{request_id}/approve",
+        json={"decision_reason": "Identity and scope confirmed"},
+        headers=owner_a_headers,
+    )
+    assert approved.status_code == status.HTTP_200_OK
+    assert approved.json()["status"] == "APPROVED"
+
+    invalid_state = client.post(
+        f"/v1/data-subject-requests/{request_id}/export",
+        headers=owner_a_headers,
+    )
+    assert invalid_state.status_code == status.HTTP_409_CONFLICT
+
+    second = client.post(
+        "/v1/data-subject-requests",
+        json={**payload, "subject_id": "customer-456", "request_type": "DELETION"},
+        headers=owner_a_headers,
+    )
+    second_id = second.json()["id"]
+    client.post(
+        f"/v1/data-subject-requests/{second_id}/verify",
+        json={"identity_verified": True},
+        headers=owner_a_headers,
+    )
+    rejected = client.post(
+        f"/v1/data-subject-requests/{second_id}/reject",
+        json={"decision_reason": "Identity confirmed; request rejected"},
+        headers=owner_a_headers,
+    )
+    assert rejected.status_code == status.HTTP_200_OK
+    assert rejected.json()["status"] == "REJECTED"
+
+    def approved_request(subject_id: str, request_type: str) -> str:
+        response = client.post(
+            "/v1/data-subject-requests",
+            json={**payload, "subject_id": subject_id, "request_type": request_type},
+            headers=owner_a_headers,
+        )
+        export_request_id = response.json()["id"]
+        assert client.post(
+            f"/v1/data-subject-requests/{export_request_id}/verify",
+            json={"identity_verified": True},
+            headers=owner_a_headers,
+        ).status_code == status.HTTP_200_OK
+        assert client.post(
+            f"/v1/data-subject-requests/{export_request_id}/approve",
+            json={"decision_reason": "Approved subject access export"},
+            headers=owner_a_headers,
+        ).status_code == status.HTTP_200_OK
+        return export_request_id
+
+    export_request_id = approved_request(str(owner_a_id), "EXPORT")
+    unauthorized = client.post(
+        f"/v1/data-subject-requests/{export_request_id}/export",
+        headers={"Authorization": f"Bearer {viewer_a_key}"},
+    )
+    assert unauthorized.status_code == status.HTTP_403_FORBIDDEN
+    cross_tenant = client.post(
+        f"/v1/data-subject-requests/{export_request_id}/export",
+        headers={"Authorization": f"Bearer {owner_b_key}"},
+    )
+    assert cross_tenant.status_code == status.HTTP_404_NOT_FOUND
+
+    exported = client.post(
+        f"/v1/data-subject-requests/{export_request_id}/export",
+        headers=owner_a_headers,
+    )
+    assert exported.status_code == status.HTTP_200_OK
+    artifact = exported.json()
+    assert artifact["manifest"]["format_version"] == "authclaw.data-subject.export.v1"
+    assert artifact["manifest"]["record_counts"] == {
+        "users": 1,
+        "api_keys": 1,
+        "audit_metadata": 0,
+    }
+    assert artifact["request_id"] == export_request_id
+    assert artifact["tenant_id"] == str(tenant_a_id)
+    assert artifact["subject"] == {"id": str(owner_a_id)}
+    assert artifact["data"]["user"]["email"] == "owner-a@dsr.test"
+    assert "key_hash" not in str(artifact)
+    assert owner_a_key not in str(artifact)
+    assert artifact["digest"]["algorithm"] == "SHA-256"
+    assert artifact["signature"]["algorithm"] == "Ed25519"
+
+    completed = client.post(
+        f"/v1/data-subject-requests/{export_request_id}/export",
+        headers=owner_a_headers,
+    )
+    assert completed.status_code == status.HTTP_409_CONFLICT
+
+    empty_request_id = approved_request("external-subject-with-no-records", "EXPORT")
+    empty_export = client.post(
+        f"/v1/data-subject-requests/{empty_request_id}/export",
+        headers=owner_a_headers,
+    )
+    assert empty_export.status_code == status.HTTP_200_OK
+    assert empty_export.json()["manifest"]["record_counts"] == {
+        "users": 0,
+        "api_keys": 0,
+        "audit_metadata": 0,
+    }
+
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
+    db_session.add(
+        Notification(
+            tenant_id=tenant_a_id,
+            user_id=viewer_a_id,
+            type="privacy-test",
+            severity="info",
+            title="Synthetic notification",
+            body="Synthetic content",
+        )
+    )
+    db_session.commit()
+    deletion_request_id = approved_request(str(viewer_a_id), "DELETION")
+    unauthorized_delete = client.post(
+        f"/v1/data-subject-requests/{deletion_request_id}/delete",
+        headers={"Authorization": f"Bearer {viewer_a_key}"},
+    )
+    assert unauthorized_delete.status_code == status.HTTP_403_FORBIDDEN
+    cross_tenant_delete = client.post(
+        f"/v1/data-subject-requests/{deletion_request_id}/delete",
+        headers={"Authorization": f"Bearer {owner_b_key}"},
+    )
+    assert cross_tenant_delete.status_code == status.HTTP_404_NOT_FOUND
+
+    deleted = client.post(
+        f"/v1/data-subject-requests/{deletion_request_id}/delete",
+        headers=owner_a_headers,
+    )
+    assert deleted.status_code == status.HTTP_200_OK
+    deletion_result = deleted.json()
+    assert deletion_result["deleted_items"] == {
+        "api_keys": 1,
+        "notifications": 1,
+        "onboarding_status": 0,
+    }
+    assert deletion_result["retained_items"] == {"user_identity": 1}
+    assert deletion_result["exception_reasons"] == [
+        "user_identity:account_and_tenant_lifecycle"
+    ]
+    assert deletion_result["completed_at"]
+    assert "viewer-a@dsr.test" not in str(deletion_result)
+
+    repeated = client.post(
+        f"/v1/data-subject-requests/{deletion_request_id}/delete",
+        headers=owner_a_headers,
+    )
+    assert repeated.status_code == status.HTTP_200_OK
+    assert repeated.json()["deleted_items"] == {}
+
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
+    assert db_session.query(User).filter(User.id == viewer_a_id).one().is_active
+    assert db_session.query(APIKey).filter(APIKey.created_by == viewer_a_id).count() == 0
+    assert db_session.query(Notification).filter(Notification.user_id == viewer_a_id).count() == 0
+    assert [event["action"] for event in audit_events] == [
+        "request_created",
+        "identity_verified",
+        "request_approved",
+        "request_created",
+        "identity_verified",
+        "request_rejected",
+        "request_created",
+        "identity_verified",
+        "request_approved",
+        "export_started",
+        "export_completed",
+        "request_created",
+        "identity_verified",
+        "request_approved",
+        "export_started",
+        "export_completed",
+        "request_created",
+        "identity_verified",
+        "request_approved",
+        "deletion_started",
+        "deletion_exception_applied",
+        "deletion_completed",
+    ]
+    export_audit = [
+        event for event in audit_events if event["action"].startswith("export_")
+    ]
+    assert all(f"subject_id={owner_a_id}" in event["execution_trace"] for event in export_audit[:2])
+    assert "owner-a@dsr.test" not in str(export_audit)
+    assert owner_a_key not in str(export_audit)
+
+    deletion_audit = [
+        event for event in audit_events if event["action"].startswith("deletion_")
+    ]
+    assert [event["action"] for event in deletion_audit] == [
+        "deletion_started",
+        "deletion_exception_applied",
+        "deletion_completed",
+    ]
+    assert "viewer-a@dsr.test" not in str(deletion_audit)
+
+    rollback_request_id = approved_request("rollback-subject", "DELETION")
+    monkeypatch.setattr(
+        data_subject_request_service.DataSubjectRequestService,
+        "_delete_subject_data",
+        staticmethod(lambda _db, _record: (_ for _ in ()).throw(RuntimeError("failure"))),
+    )
+    with pytest.raises(RuntimeError, match="failure"):
+        client.post(
+            f"/v1/data-subject-requests/{rollback_request_id}/delete",
+            headers=owner_a_headers,
+        )
+    db_session.expire_all()
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
+    rollback_record = db_session.query(DataSubjectRequest).filter(
+        DataSubjectRequest.id == rollback_request_id
+    ).one()
+    assert rollback_record.status == "APPROVED"
+    assert rollback_record.completed_at is None
+
+    metrics_after = event_backbone.metrics_snapshot()
+    assert metrics_after["gdpr_requests_created_total"] - metrics_before.get(
+        "gdpr_requests_created_total", 0
+    ) == 6
+    assert metrics_after["gdpr_requests_verified_total"] - metrics_before.get(
+        "gdpr_requests_verified_total", 0
+    ) == 6
+    assert metrics_after["gdpr_requests_approved_total"] - metrics_before.get(
+        "gdpr_requests_approved_total", 0
+    ) == 5
+    assert metrics_after["gdpr_exports_completed_total"] - metrics_before.get(
+        "gdpr_exports_completed_total", 0
+    ) == 2
+    assert metrics_after["gdpr_deletions_completed_total"] - metrics_before.get(
+        "gdpr_deletions_completed_total", 0
+    ) == 1
+    assert metrics_after["gdpr_request_failures_total"] > metrics_before.get(
+        "gdpr_request_failures_total", 0
+    )
+
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
+    records = db_session.query(DataSubjectRequest).filter(DataSubjectRequest.tenant_id == tenant_a_id).all()
+    assert len(records) == 6
+    assert sum(record.status == "COMPLETED" for record in records) == 3
+
+
+def test_public_access_request_persists_server_owned_fields(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        access_request_service.settings,
+        "PRIVACY_NOTICE_VERSION",
+        "approved-test-version",
+    )
+    payload = {
+        "name": "Ada Lovelace",
+        "business_email": "ada@example.com",
+        "company": "Analytical Engines",
+        "role": "CTO",
+        "use_case": "Govern AI traffic.",
+        "requested_access": "EARLY_ACCESS",
+        "consent": True,
+        "source_page": "/security",
+    }
+
+    response = client.post("/api/public/v1/access-requests", json=payload)
+
+    assert response.status_code == status.HTTP_202_ACCEPTED
+    reference = response.json()["reference"]
+    record = db_session.query(AccessRequest).filter(AccessRequest.reference == reference).one()
+    assert record.notice_version == "approved-test-version"
+    assert record.source_page == "/security"
+    assert record.status == "PENDING"
+    history = (
+        db_session.query(AccessRequestHistory)
+        .filter(AccessRequestHistory.access_request_id == record.id)
+        .one()
+    )
+    assert history.event_type == "CREATED"
+    assert history.new_status == "PENDING"
+
+    duplicate = AccessRequest(
+        reference=reference,
+        name=record.name,
+        business_email=record.business_email,
+        company=record.company,
+        role=record.role,
+        use_case=record.use_case,
+        requested_access=record.requested_access,
+        consent_timestamp=record.consent_timestamp,
+        notice_version=record.notice_version,
+        source_page=record.source_page,
+        status=record.status,
+    )
+    db_session.add(duplicate)
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+    assert db_session.query(AccessRequest).filter(AccessRequest.reference == reference).count() == 1
+
+
+def test_access_request_retention_policy(db_session: Session):
+    now = datetime.now(timezone.utc)
+
+    def record(reference: str, status_value: str, age_days: int, email: str):
+        created = now - timedelta(days=age_days)
+        return AccessRequest(
+            reference=reference,
+            name="Synthetic User",
+            business_email=email,
+            company="Synthetic Company",
+            role="Tester",
+            use_case="Synthetic lifecycle test",
+            requested_access="EARLY_ACCESS",
+            consent_timestamp=created,
+            notice_version="test",
+            source_page="/early-access",
+            status=status_value,
+            created_at=created,
+            updated_at=created,
+        )
+
+    expired = [
+        record("AR-RETENTION-PENDING", "PENDING", 91, "pending@example.test"),
+        record("AR-RETENTION-REJECTED", "REJECTED", 31, "rejected@example.test"),
+        record("AR-RETENTION-INVITED", "INVITED", 31, "invited@example.test"),
+    ]
+    retained = [
+        record("AR-RETENTION-APPROVED", "APPROVED", 120, "approved@example.test"),
+        record("AR-RETENTION-RECENT", "PENDING", 10, "recent@example.test"),
+        record("AR-RETENTION-STARTED", "INVITED", 31, "started@example.test"),
+    ]
+    db_session.add_all(expired + retained)
+    db_session.commit()
+    with owner_engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO onboarding_email_otps (
+                    id, email, tenant_name, otp_hash, status, expires_at, created_at
+                )
+                VALUES (
+                    :id, 'started@example.test', 'Synthetic', 'synthetic',
+                    'pending', :expires_at, :created_at
+                )
+                """
+            ),
+            {
+                "id": uuid4(),
+                "expires_at": now + timedelta(minutes=15),
+                "created_at": now - timedelta(days=1),
+            },
+        )
+
+    assert purge_expired_access_requests(db_session, now=now) == 3
+
+    remaining = {
+        row.reference
+        for row in db_session.query(AccessRequest)
+        .filter(AccessRequest.reference.like("AR-RETENTION-%"))
+        .all()
+    }
+    assert remaining == {
+        "AR-RETENTION-APPROVED",
+        "AR-RETENTION-RECENT",
+        "AR-RETENTION-STARTED",
+    }
+    deleted_ids = {row.id for row in expired}
+    histories = (
+        db_session.query(AccessRequestHistory)
+        .filter(AccessRequestHistory.access_request_id.in_(deleted_ids))
+        .all()
+    )
+    assert len(histories) == 3
+    assert all(history.event_type == "DELETED" for history in histories)
+
+
 def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     """Test full CRUD endpoints, YAML validations, and tenant RLS isolation"""
     
@@ -131,10 +585,10 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     db_session.add(tenant_b)
     db_session.commit()
 
-    # Seed Admin User & System API Key with 'admin' scope for Tenant A to call POST /tenants
+    # Seed Owner User & System API Key with 'admin' scope for Tenant A to call POST /tenants
     admin_user_id = uuid4()
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
-    admin_user = User(id=admin_user_id, tenant_id=tenant_a_id, email="admin@tenantA.com", role="admin", is_active=True)
+    admin_user = User(id=admin_user_id, tenant_id=tenant_a_id, email="admin@tenantA.com", role="owner", is_active=True)
     db_session.add(admin_user)
     db_session.commit()
 
@@ -186,7 +640,7 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     response = client.post("/v1/tenants", json={"name": "Tenant C", "tier": "starter"}, headers=headers_b)
     assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    # Request as Tenant A admin (admin scope) -> 201 Created
+    # Request as Tenant A owner (admin scope) -> 201 Created
     response = client.post("/v1/tenants", json={"name": "Tenant C", "tier": "pro"}, headers=headers_admin)
     assert response.status_code == status.HTTP_201_CREATED
     assert response.json()["name"] == "Tenant C"
@@ -320,6 +774,10 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
         id=uuid4(),
         tenant_id=tenant_a_id,
         record_id=uuid4(),
+        tenant_sequence=1,
+        idempotency_key="test:audit-endpoint",
+        chain_version=2,
+        canonical_payload="{}",
         actor_id=admin_user_id,
         action="policy_block",
         frameworks_affected=["GDPR", "SOC2"]
@@ -476,7 +934,9 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     db_app_final = db_session.query(PendingApproval).filter(
         PendingApproval.id == uuid.UUID(approval_id)
     ).first()
-    assert db_app_final.status == "APPROVED"
+    assert db_app_final.status == "CONSUMED"
     assert db_app_final.approved_at is not None
     assert db_app_final.approver_id == user_id
+    assert db_app_final.consumed_at is not None
+    assert db_app_final.consumed_by_id == user_id
     db_session.execute(text("SET app.current_tenant_id = ''"))

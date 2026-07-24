@@ -2,12 +2,26 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 )
+
+func TestMain(m *testing.M) {
+	raw := os.Getenv("DATABASE_URL")
+	parsed, err := url.Parse(raw)
+	if err != nil || !strings.HasSuffix(strings.Trim(parsed.Path, "/"), "_test") {
+		fmt.Fprintln(os.Stderr, "DATABASE_URL must explicitly target a database ending in _test")
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
 
 func TestHealthCheck(t *testing.T) {
 	r := chi.NewRouter()
@@ -15,16 +29,13 @@ func TestHealthCheck(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
-
 	r.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("Expected status code %d, got %d", http.StatusOK, w.Code)
 	}
-
-	expectedContentType := "application/json"
-	if contentType := w.Header().Get("Content-Type"); contentType != expectedContentType {
-		t.Errorf("Expected Content-Type %q, got %q", expectedContentType, contentType)
+	if contentType := w.Header().Get("Content-Type"); contentType != "application/json" {
+		t.Errorf("Expected Content-Type %q, got %q", "application/json", contentType)
 	}
 
 	var body map[string]interface{}

@@ -88,8 +88,8 @@ function fromStoredSession(session: StoredSessionData | SessionData): { session:
 export class SessionStore {
   private readSessions(): { sessions: Map<string, SessionData>; needsRewrite: boolean } {
     try {
-      if (fs.existsSync(SESSIONS_FILE)) {
-        const content = fs.readFileSync(SESSIONS_FILE, "utf-8");
+      if (fs.existsSync(/* turbopackIgnore: true */ SESSIONS_FILE)) {
+        const content = fs.readFileSync(/* turbopackIgnore: true */ SESSIONS_FILE, "utf-8");
         const obj = JSON.parse(content) as SessionFileData;
         let needsRewrite = false;
         const sessions = new Map<string, SessionData>();
@@ -139,6 +139,14 @@ export class SessionStore {
     // Check TTL (e.g. 24 hours)
     const oneDay = 24 * 60 * 60 * 1000;
     if (Date.now() - session.createdAt > oneDay) {
+      console.warn(JSON.stringify({
+        tenant_id: session.tenantId,
+        actor_id: session.userId,
+        action: "auth:session_expired",
+        result: "failure",
+        reason: "expired_session",
+        request_correlation_id: "",
+      }));
       sessions.delete(sessionId);
       this.writeSessions(sessions);
       return undefined;

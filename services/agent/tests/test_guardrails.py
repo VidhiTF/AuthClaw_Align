@@ -195,14 +195,17 @@ def test_audit_log_generation():
     res = client.post("/chat", headers=headers, json=chat_payload)
     assert res.status_code in (200, 500, 503)
 
-    # Query the database to check if the audit block contains the policy metadata columns
+    # The stored query is redacted, so identify the latest block without searching
+    # for the original sensitive value.
     with engine.connect() as conn:
         row = conn.execute(
-            text("SELECT policy_name, policy_type, matched_pattern, redacted_value, username FROM audit_logs WHERE user_query LIKE '%Trigger log%' ORDER BY id DESC LIMIT 1")
+            text("SELECT user_query, policy_name, policy_type, matched_pattern, redacted_value, username FROM audit_logs ORDER BY id DESC LIMIT 1")
         ).fetchone()
         
         assert row is not None
+        assert "P12345678" not in row.user_query
         assert "GDPR" in row.policy_type
         assert "passport" in row.matched_pattern
-        assert "P12345678" in row.redacted_value
+        assert "P12345678" not in row.redacted_value
+        assert "tok_passport_" in row.redacted_value
         assert row.username == "admin_user"

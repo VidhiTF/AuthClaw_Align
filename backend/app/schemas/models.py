@@ -1,8 +1,78 @@
 """Pydantic schemas for request/response validation"""
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from uuid import UUID
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+PLATFORM_API_KEY_SCOPES = frozenset({"platform.admin"})
+TENANT_API_KEY_SCOPES = frozenset({"read", "write", "admin"})
+
+
+class AccessRequestCreate(BaseModel):
+    """Validated public demo and early-access intake."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(..., min_length=1, max_length=255)
+    business_email: EmailStr = Field(
+        ...,
+        description="Syntax-validated email; business-domain policy requires product guidance.",
+    )
+    company: str = Field(..., min_length=1, max_length=255)
+    role: str = Field(..., min_length=1, max_length=100)
+    use_case: str = Field(..., min_length=1, max_length=4000)
+    requested_access: Literal["DEMO", "EARLY_ACCESS"]
+    consent: Literal[True]
+    source_page: Literal[
+        "/", "/product", "/pricing", "/security", "/company", "/demo", "/early-access"
+    ]
+
+
+class AccessRequestResponse(BaseModel):
+    """Non-PII acknowledgement for an accepted intake request."""
+    reference: str
+    status: Literal["PENDING"]
+    created_at: datetime
+
+
+class DataSubjectRequestCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    subject_id: str = Field(..., min_length=1, max_length=255)
+    request_type: Literal["ACCESS", "EXPORT", "DELETION"]
+    scope: Dict[str, Any]
+
+
+class DataSubjectRequestVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identity_verified: Literal[True] = True
+
+
+class DataSubjectRequestDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    decision_reason: str = Field(..., min_length=1, max_length=4000)
+
+
+class DataSubjectRequestResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    tenant_id: UUID
+    subject_id: str
+    request_type: str
+    status: str
+    identity_verified: bool
+    identity_verified_by: Optional[UUID]
+    identity_verified_at: Optional[datetime]
+    scope: Dict[str, Any]
+    decision: Optional[str]
+    decision_reason: Optional[str]
+    decision_by: Optional[UUID]
+    decision_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
 
 
 class TenantCreate(BaseModel):
@@ -33,13 +103,13 @@ class UserCreate(BaseModel):
     """Schema for creating a user"""
     email: EmailStr
     password: str = Field(..., min_length=12)
-    role: str = Field(default="viewer", pattern="^(owner|admin|viewer)$")
+    role: str = Field(default="viewer", pattern="^(owner|admin|developer|operator|viewer)$")
 
 
 class UserInviteRequest(BaseModel):
     """Invite a user into the current tenant with email OTP verification."""
     email: EmailStr
-    role: str = Field(default="viewer", pattern="^(owner|admin|viewer)$")
+    role: str = Field(default="viewer", pattern="^(owner|admin|developer|operator|viewer)$")
 
 
 class UserInviteResponse(BaseModel):
@@ -77,9 +147,10 @@ class APIKeyCreate(BaseModel):
     @field_validator("scopes")
     @classmethod
     def validate_scopes(cls, value: List[str]) -> List[str]:
-        allowed = {"read", "write", "admin"}
-        normalized = sorted({scope.strip().lower() for scope in value if scope and scope.strip()})
-        invalid = sorted(set(normalized) - allowed)
+        normalized = sorted(
+            {scope.strip().lower() for scope in value if scope and scope.strip()}
+        )
+        invalid = sorted(set(normalized) - TENANT_API_KEY_SCOPES)
         if invalid:
             raise ValueError(f"Unsupported API key scopes: {', '.join(invalid)}")
         if not normalized:
@@ -254,6 +325,10 @@ class OnboardingSignupRequest(BaseModel):
     """Start Lite self-service onboarding by sending an email OTP."""
     email: EmailStr
     tenant_name: str = Field(..., min_length=2, max_length=255)
+    terms_accepted: bool
+    terms_version: str = Field(..., min_length=1, max_length=32)
+    privacy_notice_acknowledged: bool
+    privacy_notice_version: str = Field(..., min_length=1, max_length=32)
 
 
 class OnboardingSignupResponse(BaseModel):
@@ -287,6 +362,10 @@ class OnboardingVerifyRequest(BaseModel):
     signup_id: UUID
     otp: str = Field(..., min_length=6, max_length=6)
     password: str = Field(..., min_length=12, max_length=256)
+    terms_accepted: bool
+    terms_version: str = Field(..., min_length=1, max_length=32)
+    privacy_notice_acknowledged: bool
+    privacy_notice_version: str = Field(..., min_length=1, max_length=32)
 
 
 class OnboardingChecklistResponse(BaseModel):

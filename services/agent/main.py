@@ -4470,7 +4470,7 @@ Question:
                 data = res.json()
                 answer = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             else:
-                logger.warning(f"Gemini API returned status {res.status_code} in document chat: {res.text}")
+                logger.warning("Gemini document chat failed: status=%s", res.status_code)
         except Exception as e:
             logger.warning(f"Gemini doc chat failed: {str(e)}")
             
@@ -5531,7 +5531,8 @@ def oidc_public_providers(tenant_id: Optional[int] = None, domain: Optional[str]
     try:
         return {"tenant_id": resolved_tenant_id, "providers": _public_oidc_providers_for_tenant(resolved_tenant_id)}
     except EnterpriseIdentityError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("OIDC provider discovery failed")
+        raise HTTPException(status_code=400, detail="OIDC authentication failed") from exc
 
 
 @app.get("/auth/oidc/login")
@@ -5539,14 +5540,16 @@ def oidc_login(tenant_id: int, provider_id: int):
     try:
         return create_authorization_request(tenant_id, provider_id)
     except EnterpriseIdentityError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("OIDC authorization request failed")
+        raise HTTPException(status_code=400, detail="OIDC authentication failed") from exc
 
 
 def _complete_oidc_login_response(state: str, code: str) -> dict:
     try:
         result = complete_oidc_callback(state, code)
     except EnterpriseIdentityError as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+        logger.exception("OIDC callback failed")
+        raise HTTPException(status_code=401, detail="OIDC authentication failed") from exc
     profile = result["profile"]
     now_ts = int(time.time())
     access_payload = {
@@ -5611,7 +5614,8 @@ def identity_provider_upsert(req: OIDCProviderConfigRequest, payload: dict = Dep
         request_payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
         return upsert_provider_config(payload["tenant_id"], request_payload)
     except EnterpriseIdentityError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("OIDC provider configuration failed")
+        raise HTTPException(status_code=400, detail="OIDC authentication failed") from exc
 
 
 @app.post("/identity/providers/{provider_id}/enabled")
@@ -5619,7 +5623,8 @@ def identity_provider_enabled(provider_id: int, req: OIDCProviderEnableRequest, 
     try:
         return set_provider_enabled(payload["tenant_id"], provider_id, req.enabled)
     except EnterpriseIdentityError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        logger.exception("OIDC provider configuration failed")
+        raise HTTPException(status_code=404, detail="OIDC authentication failed") from exc
 
 
 @app.get("/security/posture")
@@ -5719,11 +5724,11 @@ def deliver_auth_email(recipient: str, subject: str, body: str, purpose: str) ->
                 elif response.status_code == 400 and "from" in response.text.lower():
                     hint = "sendgrid_invalid_or_unverified_sender"
                 logger.error(
-                    "%s SendGrid API delivery failed: category=%s status=%s body=%s",
+                    "%s SendGrid API delivery failed: category=%s status=%s retryable=%s",
                     purpose,
                     hint,
                     response.status_code,
-                    response.text[:500],
+                    response.status_code == 429 or response.status_code >= 500,
                 )
                 raise HTTPException(
                     status_code=503,

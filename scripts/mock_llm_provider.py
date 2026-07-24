@@ -102,12 +102,17 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
 
 
+class MockProviderServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 128
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=19090)
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), MockProviderHandler)
+    server = MockProviderServer((args.host, args.port), MockProviderHandler)
     print(f"Mock LLM provider listening on http://{args.host}:{args.port}")
     server.serve_forever()
 

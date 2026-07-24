@@ -4,16 +4,18 @@ from typing import Any, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_current_tenant, get_tenant_db
+from app.core.auth import get_current_tenant, get_tenant_db, require_roles, require_scopes
 from app.services import findings_service
 
 router = APIRouter()
 
 
 class FindingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     workflow_id: Optional[str]
     evidence_id: Optional[UUID]
@@ -31,10 +33,6 @@ class FindingResponse(BaseModel):
     updated_at: Any
     resolved_at: Optional[Any]
     evidence_created_at: Optional[Any] = None
-
-    class Config:
-        orm_mode = True
-
 
 class FindingListResponse(BaseModel):
     items: List[FindingResponse]
@@ -60,7 +58,7 @@ class AssignOwnerRequest(BaseModel):
     owner_user_id: Optional[str]
 
 
-@router.get("", response_model=FindingListResponse)
+@router.get("", response_model=FindingListResponse, dependencies=[require_scopes(["read"])])
 def list_findings(
     framework: Optional[str] = None,
     severity: Optional[str] = None,
@@ -90,7 +88,7 @@ def list_findings(
     }
 
 
-@router.get("/summary/dashboard", response_model=DashboardSummaryResponse)
+@router.get("/summary/dashboard", response_model=DashboardSummaryResponse, dependencies=[require_scopes(["read"])])
 def get_dashboard_summary(
     db: Session = Depends(get_tenant_db),
     tenant_id: str = Depends(get_current_tenant),
@@ -99,7 +97,7 @@ def get_dashboard_summary(
     return findings_service.get_dashboard_summary(db, tenant_id=tenant_id)
 
 
-@router.get("/summary/charts")
+@router.get("/summary/charts", dependencies=[require_scopes(["read"])])
 def get_charts_data(
     db: Session = Depends(get_tenant_db),
     tenant_id: str = Depends(get_current_tenant),
@@ -113,7 +111,7 @@ def get_charts_data(
     }
 
 
-@router.get("/{finding_id}", response_model=FindingResponse)
+@router.get("/{finding_id}", response_model=FindingResponse, dependencies=[require_scopes(["read"])])
 def get_finding(
     finding_id: str,
     db: Session = Depends(get_tenant_db),
@@ -126,7 +124,7 @@ def get_finding(
     return finding
 
 
-@router.get("/workflow/{workflow_id}", response_model=List[FindingResponse])
+@router.get("/workflow/{workflow_id}", response_model=List[FindingResponse], dependencies=[require_scopes(["read"])])
 def get_findings_by_workflow(
     workflow_id: str,
     db: Session = Depends(get_tenant_db),
@@ -136,7 +134,11 @@ def get_findings_by_workflow(
     return findings_service.get_findings_by_workflow(db, tenant_id=tenant_id, workflow_id=workflow_id)
 
 
-@router.patch("/{finding_id}/status", response_model=FindingResponse)
+@router.patch(
+    "/{finding_id}/status",
+    response_model=FindingResponse,
+    dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])],
+)
 def update_status(
     finding_id: str,
     req: StatusUpdateRequest,
@@ -161,7 +163,11 @@ def update_status(
     return finding
 
 
-@router.patch("/{finding_id}/assign", response_model=FindingResponse)
+@router.patch(
+    "/{finding_id}/assign",
+    response_model=FindingResponse,
+    dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])],
+)
 def assign_owner(
     finding_id: str,
     req: AssignOwnerRequest,

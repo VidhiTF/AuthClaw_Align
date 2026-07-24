@@ -16,7 +16,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.db.models import ComplianceWorkflow, PendingApproval
+from app.db.models import ApprovalAudit, ComplianceWorkflow, PendingApproval
 from app.orchestrator.graph import (
     ComplianceState,
     ExecutionStatus,
@@ -29,6 +29,11 @@ from app.orchestrator.graph import (
     verify_results,
 )
 from app.services import event_backbone, evidence_service, findings_service
+from app.services.remediation_approval import (
+    build_action_payload,
+    compute_action_hash,
+    evaluate_approval,
+)
 
 logger = logging.getLogger("orchestrator.runner")
 
@@ -138,6 +143,7 @@ def _create_approval_in_db(
     tenant_id: str,
     workflow_id: str,
     plan: list,
+    requester_id: Optional[str] = None,
 ) -> str:
     """Create a pending_approvals record for HITL review."""
     approval_id = str(uuid.uuid4())
@@ -148,12 +154,18 @@ def _create_approval_in_db(
         {"tid": tenant_id},
     )
 
-    # Look up a valid user_id for the requester (use first active user in tenant)
-    result = db.execute(
-        text("SELECT id FROM users WHERE tenant_id = :tid AND is_active = true LIMIT 1"),
-        {"tid": tenant_id},
-    ).first()
-    requester_id = result[0] if result else uuid.UUID(tenant_id)
+    if requester_id:
+        resolved_requester_id = uuid.UUID(str(requester_id))
+    else:
+        # Legacy graph-created approvals do not carry an HTTP user context.
+        result = db.execute(
+            text("SELECT id FROM users WHERE tenant_id = :tid AND is_active = true LIMIT 1"),
+            {"tid": tenant_id},
+        ).first()
+        resolved_requester_id = result[0] if result else uuid.UUID(tenant_id)
+
+    expires_at = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
+    action_payload = build_action_payload(workflow_id, plan)
 
     approval = PendingApproval(
         id=uuid.UUID(approval_id),
@@ -161,10 +173,15 @@ def _create_approval_in_db(
         action_id=workflow_id,
         action_type="remediation",
         action_description=f"Compliance remediation plan ({len(plan)} actions)",
-        action_payload={"workflow_id": workflow_id, "plan": plan},
+        action_payload=action_payload,
+        action_hash=compute_action_hash(
+            tenant_id=tenant_id,
+            action_payload=action_payload,
+            expires_at=expires_at,
+        ),
         status="PENDING",
-        requester_id=requester_id,
-        expires_at=datetime.now(tz=timezone.utc) + timedelta(minutes=30),
+        requester_id=resolved_requester_id,
+        expires_at=expires_at,
     )
 
     db.add(approval)
@@ -245,25 +262,55 @@ def _make_store_finding_fn(db: Session):
     return _store
 
 
-def _check_approval_in_db(db: Session, approval_id: str) -> str:
-    """Check the status of a pending approval."""
+def _record_approval_audit(
+    db: Session,
+    approval: PendingApproval,
+    actor_id: uuid.UUID,
+    action: str,
+    reason: str,
+) -> None:
+    db.add(
+        ApprovalAudit(
+            id=uuid.uuid4(),
+            tenant_id=approval.tenant_id,
+            approval_id=approval.id,
+            actor_id=actor_id,
+            action=action,
+            action_hash=approval.action_hash,
+            reason=reason,
+            details={
+                "action_id": approval.action_id,
+                "action_type": approval.action_type,
+                "status": approval.status,
+            },
+            mfa_verified=approval.mfa_verified,
+            mfa_timestamp=approval.mfa_timestamp,
+        )
+    )
+
+
+def _check_approval_in_db(
+    db: Session,
+    approval_id: str,
+    tenant_id: str,
+    actor_id: str,
+    workflow_id: str,
+    current_plan: list,
+) -> str:
+    """Validate and atomically consume a remediation approval."""
     try:
         approval = db.query(PendingApproval).filter(
-            PendingApproval.id == uuid.UUID(approval_id)
-        ).first()
+            PendingApproval.id == uuid.UUID(approval_id),
+            PendingApproval.tenant_id == uuid.UUID(tenant_id),
+            PendingApproval.action_type == "remediation",
+        ).with_for_update().first()
     except ValueError:
         return "EXPIRED"
 
     if not approval:
         return "EXPIRED"
 
-    # Check expiry
     now = datetime.now(tz=timezone.utc)
-    if approval.expires_at and approval.expires_at.replace(tzinfo=timezone.utc) < now:
-        approval.status = "EXPIRED"
-        db.commit()
-        return "EXPIRED"
-
     plan = (approval.action_payload or {}).get("plan") or []
     destructive = any(bool(item.get("destructive")) for item in plan if isinstance(item, dict))
     if approval.status == "APPROVED" and destructive:
@@ -272,10 +319,45 @@ def _check_approval_in_db(db: Session, approval_id: str) -> str:
             mfa_timestamp = mfa_timestamp.replace(tzinfo=timezone.utc)
         if not approval.mfa_verified or not mfa_timestamp or mfa_timestamp < now - timedelta(minutes=30):
             approval.status = "EXPIRED"
+            approval.resolution_reason = "Fresh MFA expired before remediation execution"
+            _record_approval_audit(
+                db, approval, uuid.UUID(actor_id), "EXPIRED", approval.resolution_reason
+            )
+            event_backbone.increment_metric("remediation_approval_expired_total")
             db.commit()
             return "EXPIRED"
 
-    return approval.status
+    decision = evaluate_approval(
+        approval=approval,
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        workflow_id=workflow_id,
+        current_plan=current_plan,
+        now=now,
+    )
+    if not decision.allowed:
+        if decision.status in {"EXPIRED", "ALTERED"}:
+            approval.status = decision.status
+        approval.resolution_reason = decision.reason
+        _record_approval_audit(
+            db, approval, uuid.UUID(actor_id), f"{decision.status}_REJECTED", decision.reason
+        )
+        event_backbone.increment_metric(
+            f"remediation_approval_{decision.status.lower()}_rejected_total"
+        )
+        db.commit()
+        if decision.status in {"EXPIRED", "REPLAYED", "ALTERED", "USER_MISMATCH", "ACTION_MISMATCH"}:
+            return "EXPIRED"
+        return approval.status
+
+    approval.status = "CONSUMED"
+    approval.consumed_at = now
+    approval.consumed_by_id = uuid.UUID(actor_id)
+    approval.resolution_reason = "Approval consumed for one remediation execution"
+    _record_approval_audit(db, approval, uuid.UUID(actor_id), "CONSUMED", approval.resolution_reason)
+    event_backbone.increment_metric("remediation_approval_consumed_total")
+    db.commit()
+    return "APPROVED"
 
 
 class ComplianceWorkflowRunner:
@@ -392,6 +474,7 @@ class ComplianceWorkflowRunner:
         self,
         workflow_id: str,
         tenant_id: str,
+        actor_id: Optional[str] = None,
     ) -> dict:
         """Resume a paused workflow (e.g., after approval)."""
         lock_key = int(uuid.UUID(workflow_id).int & 0x7fffffffffffffff)
@@ -426,7 +509,14 @@ class ComplianceWorkflowRunner:
                 "_emit_audit": emit_audit_event,
                 "_persist_state": lambda s: _persist_state_to_db(self.db, s),
                 "_create_approval": lambda tid, wid, plan: _create_approval_in_db(self.db, tid, wid, plan),
-                "_check_approval": lambda aid: _check_approval_in_db(self.db, aid),
+                "_check_approval": lambda aid: _check_approval_in_db(
+                    self.db,
+                    aid,
+                    tenant_id,
+                    actor_id or "",
+                    workflow_id,
+                    wf.remediation_plan or [],
+                ),
                 "_store_evidence": _make_store_evidence_fn(self.db),
                 "_store_finding": _make_store_finding_fn(self.db),
             }

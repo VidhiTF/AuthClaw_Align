@@ -8,6 +8,13 @@ export default function sitemap(): MetadataRoute.Sitemap {
     marketingRoutes.pricing,
     marketingRoutes.security,
     marketingRoutes.company,
+    marketingRoutes.privacy,
+    marketingRoutes.terms,
+    marketingRoutes.cookies,
+    marketingRoutes.subprocessors,
+    marketingRoutes.dpa,
+    marketingRoutes.demo,
+    marketingRoutes.earlyAccess,
   ].map((path) => ({
     url: new URL(path, marketingSiteUrl).toString(),
     changeFrequency: "monthly",

@@ -38,7 +38,6 @@ def main() -> None:
     password_literal = quote_literal(app_password)
 
     with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_backup_codes VARCHAR[];"))
         conn.execute(
             text(
                 f"""
@@ -48,6 +47,19 @@ def main() -> None:
                         CREATE ROLE {app_user} LOGIN PASSWORD {password_literal};
                     ELSE
                         ALTER ROLE {app_user} LOGIN PASSWORD {password_literal};
+                    END IF;
+                END
+                $$;
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF to_regclass('public.users') IS NOT NULL THEN
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_backup_codes VARCHAR[];
                     END IF;
                 END
                 $$;

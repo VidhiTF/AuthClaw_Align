@@ -9,6 +9,20 @@ The AuthClaw Gateway is a high-performance Go-based reverse proxy that intercept
 - **Dynamic Routing**: Re-writes request headers and URLs to proxy the requests transparently to downstream endpoints.
 - **Audit Logging**: Emits tenant-keyed traffic events with stable event IDs to Kafka (`gateway.traffic`) and falls back to stdout when Kafka is disabled.
 
+## Sensitive-data policy enforcement
+
+ACL-17 enforces tenant policy before model-provider egress. Supported actions are
+`block`, `warn`, `redact`, and `require_approval`. A warning remains observable through
+response headers and safe telemetry, but matching content is redacted before it is sent
+to the provider. Normalization, analysis, tokenization, and request-rebuild failures are
+fail-closed so the original request is never used as a fallback.
+
+Gateway logs and audit traces contain identifiers, entity types, counts, actions, and
+match fingerprints only; they do not contain raw prompts or matched sensitive values.
+The metrics endpoint exposes policy block, warn, redact, and fail-closed counters. See
+[`ADR-0008`](../docs/adr/0008-acl-17-gateway-policy-redaction.md) for the processing
+order and rollback decision.
+
 ## Provider Compatibility
 
 | Provider | Gateway route | Upstream auth injection | Streaming format |
@@ -106,7 +120,8 @@ overhead. The CI/release gate sets
 `GATEWAY_RATE_LIMIT_ENABLED=false`, `GATEWAY_HTTP_LOGGER_ENABLED=false`,
 `GATEWAY_AUTH_LAST_USED_ENABLED=false`, `GATEWAY_AUTH_CACHE_TTL_MS=60000`,
 `PROVIDER_CREDENTIAL_CACHE_TTL_MS=60000`, and
-`GATEWAY_POLICY_LOCAL_FAST_PATH=true`, `GATEWAY_POLICY_DECISION_CACHE_TTL_MS=60000`
+`GATEWAY_POLICY_LOCAL_FAST_PATH=true`, `GATEWAY_POLICY_DECISION_CACHE_TTL_MS=60000`,
+and `REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS=60000`
 to isolate gateway/proxy overhead
 from access-log I/O, auth metadata writes, external analyzer, rate-limit store,
 and repeated credential/policy lookup latency.

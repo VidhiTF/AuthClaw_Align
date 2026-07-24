@@ -85,15 +85,99 @@ def make_kafka_producer() -> Any:
 
 
 def publish_audit_event(producer: Any, tenant_id: str, event: dict[str, Any]) -> Exception | None:
+    if exc := persist_audit_event(event):
+        increment_metric("backend_audit_postgres_failures_total")
+        return exc
     if not producer:
         return None
+    return publish_pending_audit_events(producer, tenant_id)
+
+
+def publish_pending_audit_events(
+    producer: Any,
+    tenant_id: str,
+    *,
+    limit: int = 100,
+) -> Exception | None:
+    """Publish committed outbox rows in tenant sequence order."""
+    from app.db.models import AuditOutbox
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
     try:
-        future = producer.send(AUDIT_EVENTS_TOPIC, key=tenant_key(tenant_id), value=event)
-        future.get(timeout=5)
+        db.info["tenant_id"] = tenant_id
+        pending = (
+            db.query(AuditOutbox)
+            .filter(
+                AuditOutbox.tenant_id == uuid.UUID(tenant_id),
+                AuditOutbox.published_at.is_(None),
+            )
+            .order_by(AuditOutbox.tenant_sequence.asc())
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+            .all()
+        )
+        _metrics["backend_audit_outbox_backlog"] = len(pending)
+        _metrics["backend_audit_outbox_oldest_age_seconds"] = (
+            max(
+                0,
+                int(
+                    (
+                        datetime.now(tz=timezone.utc)
+                        - pending[0].created_at.replace(tzinfo=timezone.utc)
+                        if pending[0].created_at.tzinfo is None
+                        else datetime.now(tz=timezone.utc) - pending[0].created_at
+                    ).total_seconds()
+                ),
+            )
+            if pending
+            else 0
+        )
+        for row in pending:
+            try:
+                future = producer.send(
+                    AUDIT_EVENTS_TOPIC,
+                    key=tenant_key(tenant_id),
+                    value=row.event_payload,
+                )
+                future.get(timeout=5)
+                row.published_at = datetime.now(tz=timezone.utc)
+                row.publish_attempts += 1
+                row.last_error = None
+            except Exception as exc:
+                row.publish_attempts += 1
+                row.last_error = str(exc)[:2000]
+                db.commit()
+                increment_metric("backend_audit_publish_failures_total")
+                return exc
+        db.commit()
+        _metrics["backend_audit_outbox_published_total"] += len(pending)
+        return None
     except Exception as exc:
+        db.rollback()
         increment_metric("backend_audit_publish_failures_total")
         return exc
-    return None
+    finally:
+        db.close()
+
+
+def persist_audit_event(event: dict[str, Any]) -> Exception | None:
+    """Append through PostgreSQL and commit its transactional outbox row."""
+    from app.db.session import SessionLocal
+    from app.services.audit_store import append_audit_event
+
+    db = SessionLocal()
+    try:
+        append_audit_event(db, event)
+        db.commit()
+        return None
+    except Exception as exc:
+        db.rollback()
+        if "idempotency-key collision" in str(exc):
+            increment_metric("backend_audit_idempotency_collisions_total")
+        return exc
+    finally:
+        db.close()
 
 
 def metrics_snapshot() -> dict[str, int]:

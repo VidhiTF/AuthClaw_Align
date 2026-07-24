@@ -1,0 +1,148 @@
+{
+  "digest": {
+    "algorithm": "SHA-256",
+    "value": "ccd4342330ab285dc60bf33414133810c01318990b987c990b0b47997c4c49e7"
+  },
+  "format": "authclaw.audit.export.v2",
+  "manifest": {
+    "control_links": [
+      {
+        "control_id": "SOC2",
+        "record_ids": [
+          "bbbbbbbb-bbbb-4bbb-8bbb-000000000001",
+          "bbbbbbbb-bbbb-4bbb-8bbb-000000000002",
+          "bbbbbbbb-bbbb-4bbb-8bbb-000000000003"
+        ],
+        "reference": "docs/compliance/GDPR_SOC2_CONTROL_MATRIX.md"
+      }
+    ],
+    "export_id": "3f065dbe-edb8-4bd4-8b01-1f3968ad4b56",
+    "final_chain_root": "b9b233fb986d40387a950a712384fef2cbde9d4b64a6371827dec0275fa9a10d",
+    "format_version": "authclaw.audit.export.v2",
+    "generated_at": "2026-07-20T10:02:39.000Z",
+    "proof": {
+      "algorithm": "SHA-256",
+      "chain_errors": [],
+      "chain_valid_at_export": true,
+      "records_sha256": "454a61b995e703ea0874502c9ac707042178a4899e6e3525c0d062539f441c9f"
+    },
+    "record_count": 3,
+    "requested_by": "acl21-evidence-generator",
+    "selection": {
+      "filters": {
+        "action": "allow",
+        "end": "",
+        "framework": "",
+        "start": ""
+      },
+      "proof_records_retained": 1,
+      "selected_record_ids": [
+        "bbbbbbbb-bbbb-4bbb-8bbb-000000000001",
+        "bbbbbbbb-bbbb-4bbb-8bbb-000000000003"
+      ]
+    },
+    "sequence_range": {
+      "end": 3,
+      "start": 1
+    },
+    "signing": {
+      "algorithm": "Ed25519",
+      "trusted_key_id": "5f9e6c6a844afb63"
+    },
+    "starting_anchor": "GENESIS",
+    "tenant_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "verification": {
+      "command": "python backend/scripts/verify_audit_export.py --trusted-keys trusted-keys.json export.json",
+      "verifier_sha256": "84541ee12fe7a06f4e9634244e7a0d2d45d5f9d153dce6e6d3ec1da733ad573e",
+      "verifier_version": "2.0.0"
+    }
+  },
+  "records": [
+    {
+      "action": "allow",
+      "actor_id": "",
+      "actor_type": "gateway",
+      "canonical_payload": "{\"action\":\"allow\",\"chain_version\":2,\"record_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-000000000001\",\"tenant_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"tenant_sequence\":1}",
+      "chain_version": 2,
+      "duration_ms": 1,
+      "execution_trace": "[\"synthetic\"]",
+      "frameworks_affected": [
+        "SOC2"
+      ],
+      "idempotency_key": "sample:1",
+      "integrity_hash": "f365d7d3e80daf6860084252bb3ccf8fbea68c7a560762016f1b5e463c477cea",
+      "model": "offline",
+      "policy_id": "",
+      "prior_hash": "GENESIS",
+      "prompt_count": 0,
+      "provider": "sample",
+      "reason": "Synthetic ACL-21 evidence",
+      "record_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000001",
+      "request_id": "sample-1",
+      "request_size": 0,
+      "response_status": 200,
+      "tenant_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "tenant_sequence": 1,
+      "timestamp": "2026-07-20T10:00:01.000Z"
+    },
+    {
+      "action": "block",
+      "actor_id": "",
+      "actor_type": "gateway",
+      "canonical_payload": "{\"action\":\"block\",\"chain_version\":2,\"record_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-000000000002\",\"tenant_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"tenant_sequence\":2}",
+      "chain_version": 2,
+      "duration_ms": 1,
+      "execution_trace": "[\"synthetic\"]",
+      "frameworks_affected": [
+        "SOC2"
+      ],
+      "idempotency_key": "sample:2",
+      "integrity_hash": "c8dc97468fcdbec4fa2fb09bef4843edb3d80194197202f3b390ea992014598e",
+      "model": "offline",
+      "policy_id": "",
+      "prior_hash": "f365d7d3e80daf6860084252bb3ccf8fbea68c7a560762016f1b5e463c477cea",
+      "prompt_count": 0,
+      "provider": "sample",
+      "reason": "Synthetic ACL-21 evidence",
+      "record_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000002",
+      "request_id": "sample-2",
+      "request_size": 0,
+      "response_status": 200,
+      "tenant_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "tenant_sequence": 2,
+      "timestamp": "2026-07-20T10:00:02.000Z"
+    },
+    {
+      "action": "allow",
+      "actor_id": "",
+      "actor_type": "gateway",
+      "canonical_payload": "{\"action\":\"allow\",\"chain_version\":2,\"record_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-000000000003\",\"tenant_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"tenant_sequence\":3}",
+      "chain_version": 2,
+      "duration_ms": 1,
+      "execution_trace": "[\"synthetic\"]",
+      "frameworks_affected": [
+        "SOC2"
+      ],
+      "idempotency_key": "sample:3",
+      "integrity_hash": "b9b233fb986d40387a950a712384fef2cbde9d4b64a6371827dec0275fa9a10d",
+      "model": "offline",
+      "policy_id": "",
+      "prior_hash": "c8dc97468fcdbec4fa2fb09bef4843edb3d80194197202f3b390ea992014598e",
+      "prompt_count": 0,
+      "provider": "sample",
+      "reason": "Synthetic ACL-21 evidence",
+      "record_id": "bbbbbbbb-bbbb-4bbb-8bbb-000000000003",
+      "request_id": "sample-3",
+      "request_size": 0,
+      "response_status": 200,
+      "tenant_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "tenant_sequence": 3,
+      "timestamp": "2026-07-20T10:00:03.000Z"
+    }
+  ],
+  "signature": {
+    "algorithm": "Ed25519",
+    "key_id": "5f9e6c6a844afb63",
+    "value": "ORvrYMoP4usgONcwEOsEOrgzU30WRuduAYxXmHYlALTXHqlARsHPkm8x8XtMFCVbKIiY1s0trX3bhjyJRz43BQ=="
+  }
+}
