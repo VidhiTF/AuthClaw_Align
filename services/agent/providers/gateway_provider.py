@@ -78,11 +78,7 @@ class GatewayProvider(BaseProvider):
             timeout=self.timeout,
         )
         if not response.ok:
-            body = response.json() if "application/json" in response.headers.get("content-type", "") else {}
-            if not isinstance(body, dict):
-                body = {}
-            message = body.get("message") or body.get("detail") or body.get("error") or "Gateway request failed"
-            raise RuntimeError(f"AuthClaw gateway returned HTTP {response.status_code}: {message}")
+            raise RuntimeError(f"AuthClaw gateway returned HTTP {response.status_code}: Provider unavailable")
 
         data = response.json()
         if self.provider_name == "gemini":

@@ -326,7 +326,8 @@ def oidc_callback(payload: OIDCCallbackRequest, request: Request):
         raise HTTPException(status_code=401, detail="OIDC authentication failed") from exc
     except (ValueError, TypeError) as exc:
         db.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("OIDC callback failed")
+        raise HTTPException(status_code=400, detail="OIDC authentication failed") from exc
     except requests.RequestException as exc:
         db.rollback()
         raise HTTPException(status_code=502, detail="OIDC provider request failed") from exc
@@ -353,7 +354,8 @@ def save_oidc_admin_config(payload: OIDCAdminConfigRequest, request: Request, db
         config = oidc_sso.upsert_config(db, request.state.tenant_id, request.state.user_id, payload.model_dump())
         return oidc_sso.serialize_config(config)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception("OIDC configuration failed")
+        raise HTTPException(status_code=400, detail="OIDC authentication failed") from exc
 
 
 @router.post("/oidc/admin-config/test", dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
@@ -492,7 +494,11 @@ def request_password_reset(payload: PasswordResetRequest):
         )
     except EmailDeliveryError as exc:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        logger.exception("Password reset delivery failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service is temporarily unavailable",
+        ) from exc
     except HTTPException:
         db.rollback()
         raise

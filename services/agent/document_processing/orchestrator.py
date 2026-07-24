@@ -198,7 +198,7 @@ Do not include markdown packaging like ```json.
                 if ai_findings:
                     all_findings.extend(ai_findings)
             else:
-                logger.warning(f"Gemini AI review returned status {res.status_code}: {res.text}")
+                logger.warning("Gemini document review failed: status=%s", res.status_code)
         except Exception as e:
             logger.error(f"Gemini AI review call failed: {str(e)}")
             

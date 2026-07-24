@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     });
     return nextResponse;
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Onboarding verification failed";
-    return NextResponse.json({ detail: message }, { status: 500 });
+    console.error("Onboarding verification failed:", error);
+    return NextResponse.json({ detail: "Authentication failed" }, { status: 500 });
   }
 }

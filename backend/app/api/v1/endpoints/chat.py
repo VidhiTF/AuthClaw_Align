@@ -314,7 +314,7 @@ def post_message(
                     timeout=30
                 )
                 if not res.ok:
-                    logger.error("Gateway request failed: %s", res.text)
+                    logger.error("Gateway request failed: status=%s", res.status_code)
                     response_text = rag_result["answer"]
                 else:
                     data = res.json()

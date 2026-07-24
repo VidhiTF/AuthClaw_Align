@@ -402,6 +402,34 @@ def test_authentication_middleware_exposes_platform_role(monkeypatch):
     assert response.status_code == 204
 
 
+def test_auth_middleware_internal_error_is_generic_and_logged(monkeypatch, caplog):
+    db = MagicMock()
+    db.execute.side_effect = RuntimeError("sensitive database detail")
+    monkeypatch.setattr(auth, "SessionLocal", lambda: db)
+    monkeypatch.setenv("API_KEY_HASH_SECRET", "test-secret")
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/platform-test",
+            "headers": [(b"authorization", b"Bearer platform-key")],
+            "query_string": b"",
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+
+    with caplog.at_level("ERROR", logger="auth.middleware"):
+        response = asyncio.run(auth.AuthMiddleware(MagicMock()).dispatch(request, MagicMock()))
+
+    assert response.status_code == 500
+    assert response.body == b'{"detail":"Authentication failed"}'
+    assert b"sensitive database detail" not in response.body
+    assert "sensitive database detail" in caplog.text
+    db.rollback.assert_called_once()
+
+
 def test_platform_role_migration_is_symmetric(monkeypatch):
     path = (
         Path(__file__).parents[1] / "alembic" / "versions" / "031_add_platform_role.py"
