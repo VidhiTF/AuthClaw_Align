@@ -3,6 +3,7 @@ import time
 from unittest.mock import MagicMock
 
 import jwt
+import pyotp
 import pytest
 from fastapi import HTTPException
 
@@ -13,10 +14,44 @@ from app.schemas.models import APIKeyCreate, APIKeyRotate
 from app.services import oidc_sso
 from app.services.email_service import send_otp_email
 from app.api.v1.endpoints import auth as auth_endpoints
+from app.api.v1.endpoints import users as user_endpoints
 
 
 def _request(request_id="request-1"):
     return MagicMock(headers={"x-request-id": request_id})
+
+
+def test_mfa_disable_requires_current_code():
+    secret = pyotp.random_base32()
+    user = MagicMock(
+        id="00000000-0000-4000-8000-000000000001",
+        tenant_id="00000000-0000-4000-8000-000000000002",
+        email="owner@example.com",
+        role="owner",
+        mfa_enabled=True,
+        mfa_secret=secret,
+        mfa_backup_codes=["backup01"],
+    )
+    request = MagicMock()
+    request.state.user_id = user.id
+    request.state.tenant_id = user.tenant_id
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = user
+
+    with pytest.raises(HTTPException, match="Invalid MFA token"):
+        user_endpoints.disable_my_mfa(user_endpoints.MFADisableRequest(code="000000"), request, db)
+    assert user.mfa_enabled is True
+    db.commit.assert_not_called()
+
+    response = user_endpoints.disable_my_mfa(
+        user_endpoints.MFADisableRequest(code=pyotp.TOTP(secret).now()),
+        request,
+        db,
+    )
+    assert response.mfa_enabled is False
+    assert user.mfa_secret is None
+    assert user.mfa_backup_codes is None
+    db.commit.assert_called_once()
 
 
 def test_api_key_create_rejects_unknown_scope():

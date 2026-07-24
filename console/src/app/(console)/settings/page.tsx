@@ -503,10 +503,12 @@ export default function SettingsPage() {
 
   const handleDisableMfa = async () => {
     if (!confirm("Disable MFA for your console user? Approval-sensitive actions will no longer ask for your TOTP code.")) return;
+    const code = prompt("Enter your current TOTP or backup code to disable MFA:")?.trim();
+    if (!code) return;
     setMfaBusy(true);
     setMfaError(null);
     try {
-      const res = await fetch("/api/users/me/mfa/disable", { method: "POST" });
+      const res = await fetch("/api/users/me/mfa/disable", jsonRequest("POST", { code }));
       const data = await responseJson<{ error?: string } & SecurityState>(res);
       if (!res.ok) throw new Error(data.error || "Failed to disable MFA");
       setMfaSetup(null);

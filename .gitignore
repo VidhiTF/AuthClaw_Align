@@ -62,6 +62,9 @@ scripts/download_tokei.py
 # Local study artifacts
 PROJECT_MIND_MAP.md
 Home_Page/
+AUTHCLAW_AUDIT_2026-07-23.md
+PENETRATION_FINDINGS_VALIDATION.md
+.security_scan_tmp
 
 # Terraform
 .terraform/
