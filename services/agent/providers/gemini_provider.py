@@ -64,7 +64,7 @@ class GeminiProvider(BaseProvider):
         logger.info("API Key Loaded")
         logger.info(f"Model Selected: {self.model_name}")
 
-        request_url = f"{self.api_url}/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
+        request_url = f"{self.api_url}/v1beta/models/{self.model_name}:generateContent"
         print(f"REQUEST URL (model only): /v1beta/models/{self.model_name}:generateContent", flush=True)
 
         contents = []
@@ -106,7 +106,8 @@ class GeminiProvider(BaseProvider):
             payload["generationConfig"] = generation_config
 
         headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
         }
 
         import time
