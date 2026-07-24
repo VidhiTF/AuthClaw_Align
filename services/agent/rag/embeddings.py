@@ -86,7 +86,7 @@ def generate_embedding(text: str) -> list[float]:
                     else:
                         return [float(x) for x in embedding[:768]]
             else:
-                logger.warning(f"Gemini API returned status {res.status_code}: {res.text}")
+                logger.warning("Gemini embedding request failed: status=%s", res.status_code)
                 if res.status_code in {400, 401, 403, 404, 429}:
                     _remote_embeddings_disabled = True
                     logger.warning(

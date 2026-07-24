@@ -330,6 +330,55 @@ def test_oidc_invalid_token_returns_sanitized_401(monkeypatch):
     assert "sensitive" not in exc.value.detail
 
 
+def test_oidc_internal_error_returns_generic_response_and_is_logged(monkeypatch, caplog):
+    db = MagicMock()
+    tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
+    monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
+    monkeypatch.setattr(oidc_sso, "exchange_code", MagicMock(side_effect=ValueError("sensitive provider detail")))
+
+    with caplog.at_level("ERROR", logger="api.auth"), pytest.raises(HTTPException) as exc:
+        auth_endpoints.oidc_callback(
+            auth_endpoints.OIDCCallbackRequest(
+                code="code",
+                state="state",
+                nonce="nonce",
+                tenant_name="tenant",
+                redirect_uri=config["redirect_uri"],
+            ),
+            _request(),
+        )
+
+    assert exc.value.detail == "OIDC authentication failed"
+    assert "sensitive provider detail" not in exc.value.detail
+    assert "sensitive provider detail" in caplog.text
+    db.rollback.assert_called_once()
+
+
+def test_password_reset_delivery_error_is_generic_and_logged(monkeypatch, caplog):
+    db = MagicMock()
+    tenant = MagicMock(id="00000000-0000-4000-8000-000000000001", name="tenant")
+    monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
+    monkeypatch.setattr(auth_endpoints, "_active_users_for_email", lambda *_: [(MagicMock(), tenant)])
+    monkeypatch.setattr(
+        auth_endpoints,
+        "_deliver_otp",
+        MagicMock(side_effect=auth_endpoints.EmailDeliveryError("sensitive SMTP detail")),
+    )
+
+    with caplog.at_level("ERROR", logger="api.auth"), pytest.raises(HTTPException) as exc:
+        auth_endpoints.request_password_reset(
+            auth_endpoints.PasswordResetRequest(email="user@example.com", tenant_name="tenant")
+        )
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "Authentication service is temporarily unavailable"
+    assert "sensitive SMTP detail" not in exc.value.detail
+    assert "sensitive SMTP detail" in caplog.text
+    db.rollback.assert_called_once()
+
+
 @pytest.mark.parametrize(("error", "reason"), [
     (oidc_sso.OIDCAuthorizationError("OIDC identity is not authorized for this tenant", "wrong_tenant"), "wrong_tenant"),
     (oidc_sso.OIDCAuthorizationError("Required OIDC MFA context is missing", "missing_mfa"), "missing_mfa"),

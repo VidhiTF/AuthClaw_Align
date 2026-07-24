@@ -139,21 +139,18 @@ class GeminiProvider(BaseProvider):
                 logger.info(f"Provider Response Received: Status={response.status_code}")
                 print(f"[Attempt {attempt + 1}] Response status: {response.status_code}", flush=True)
 
-                # ── DETAILED ERROR BODY LOGGING ───────────────────────────────
                 if response.status_code != 200:
-                    print(f"=== GEMINI HTTP ERROR {response.status_code} ===", flush=True)
-                    try:
-                        error_body = response.json()
-                        error_msg = error_body.get("error", {}).get("message", "<no message>")
-                        error_status = error_body.get("error", {}).get("status", "<no status>")
-                        print(f"  Status  : {error_status}", flush=True)
-                        print(f"  Message : {error_msg}", flush=True)
-                        logger.error(f"GEMINI API ERROR {response.status_code}: [{error_status}] {error_msg}")
-                    except Exception:
-                        print(f"  Raw body: {response.text[:500]}", flush=True)
-                        logger.error(f"GEMINI API ERROR {response.status_code}: {response.text[:500]}")
-                    print("=" * 40, flush=True)
-                # ─────────────────────────────────────────────────────────────
+                    retryable = response.status_code in {429, 503}
+                    logger.error(
+                        "Gemini API request failed: status=%s category=provider_http_error retryable=%s",
+                        response.status_code,
+                        retryable,
+                    )
+                    print(
+                        f"GEMINI API ERROR status={response.status_code} "
+                        f"category=provider_http_error retryable={str(retryable).lower()}",
+                        flush=True,
+                    )
 
                 # Check for rate limit
                 if response.status_code == 429:
@@ -283,14 +280,14 @@ class GeminiProvider(BaseProvider):
             if not candidates:
                 prompt_feedback = resp_json.get("promptFeedback", {})
                 if prompt_feedback:
-                    msg = f"GEMINI ERROR: Response blocked by safety settings: {prompt_feedback}"
+                    msg = "GEMINI ERROR: Response blocked by provider safety settings"
                     logger.error(msg)
                     print(msg, flush=True)
-                    raise RuntimeError(f"Gemini API response blocked by safety settings: {prompt_feedback}")
-                msg = f"GEMINI ERROR: No candidates in response: {resp_json}"
+                    raise RuntimeError("Provider unavailable: Response blocked")
+                msg = "GEMINI ERROR: Provider response contained no candidates"
                 logger.error(msg)
                 print(msg, flush=True)
-                raise RuntimeError(f"Gemini API response contains no candidates: {resp_json}")
+                raise RuntimeError("Provider unavailable: Invalid response")
 
             first_candidate = candidates[0]
             finish_reason = first_candidate.get("finishReason")
@@ -303,8 +300,8 @@ class GeminiProvider(BaseProvider):
             return text
 
         except (KeyError, IndexError) as e:
-            msg = f"GEMINI ERROR: Failed to parse response — {type(e).__name__}: {str(e)}\nFull response: {resp_json}"
+            msg = f"GEMINI ERROR: Failed to parse provider response — {type(e).__name__}"
             logger.error(msg)
             print(msg, flush=True)
             traceback.print_exc()
-            raise RuntimeError(f"Failed to parse text from Gemini API response: {resp_json}") from e
+            raise RuntimeError("Provider unavailable: Invalid response") from e

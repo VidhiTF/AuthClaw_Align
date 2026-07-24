@@ -1,5 +1,6 @@
 """Authentication and tenant context middleware / dependencies"""
 import hmac
+import logging
 import os
 from typing import Generator, List
 from fastapi import Request, Depends, HTTPException, status
@@ -9,6 +10,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.db.dependencies import get_db
+
+
+logger = logging.getLogger("auth.middleware")
 
 
 def hash_key(key: str) -> str:
@@ -145,9 +149,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.user_is_active = bool(principal.is_active)
         except Exception as e:
             db.rollback()
+            logger.exception("Authentication middleware failed")
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": f"Internal server error during auth: {str(e)}"}
+                content={"detail": "Authentication failed"}
             )
         finally:
             try:

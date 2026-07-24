@@ -1,4 +1,3 @@
-import re
 from typing import Any, Dict
 
 import requests
@@ -138,11 +137,10 @@ def test_provider_connection(provider: str, payload: Dict[str, Any], live: bool 
         else:
             raise ProviderConnectionTestError(f"Unsupported provider: {provider}")
     except requests.RequestException as exc:
-        raise ProviderConnectionTestError(f"Provider connection failed: {exc}") from exc
+        raise ProviderConnectionTestError("Provider connection failed.") from exc
 
     if response.status_code >= 400:
-        body = re.sub(r"\s+", " ", response.text[:300])
-        raise ProviderConnectionTestError(f"Provider returned HTTP {response.status_code}: {body}")
+        raise ProviderConnectionTestError(f"Provider returned HTTP {response.status_code}.")
 
     return {
         **validation,

@@ -52,6 +52,33 @@ python scripts/no_credential_proof.py infra/security/no_credential_proof.local.j
 3. Run login, gateway, audit export, and connector smoke checks after rotation.
 4. Link the rotation record to SOC 2 CC6.1 and CC6.6.
 
+### JWT and session secrets
+
+- JWT signing currently uses one active secret and has no multi-key compatibility.
+  Rotating it invalidates existing JWTs. Deploy the replacement through the existing
+  secret-injection process, then verify new login and authenticated API requests; record
+  the expected rejection of tokens signed with the previous secret.
+- Session signing currently uses one active secret and has no multi-key compatibility.
+  Rotating it invalidates existing sessions. Deploy the replacement through the existing
+  secret-injection process, then verify that a new login creates a usable session and that
+  sessions created with the previous secret are rejected.
+- Do not claim seamless JWT or session-secret rotation. Record the deployment identifier,
+  rotation time, smoke-check results and resulting authentication telemetry as release evidence.
+
+### Certificate rotation
+
+The controlled-beta ACM certificate is an external account-bootstrap input documented in
+`infra/terraform/BETA_DEPLOYMENT.md`; this repository does not issue or renew it.
+
+1. Confirm the replacement ACM certificate is issued in the deployment region, covers the
+   configured beta hostname, and is valid before changing the deployment input.
+2. Preserve the current certificate ARN for rollback, update `BETA_CERTIFICATE_ARN` through
+   the existing controlled-beta configuration, and run the existing deployment workflow.
+3. Verify the deployed hostname presents the replacement certificate and that the existing
+   endpoint health checks succeed.
+4. Record the workflow URL, certificate ARN, validation output and deployment artifact.
+   This is staging or production evidence; repository validation alone is insufficient.
+
 ## Audit Export Verification
 
 1. Generate a signed audit export from the console or backend audit endpoint.
@@ -67,6 +94,22 @@ python scripts/no_credential_proof.py infra/security/no_credential_proof.local.j
 3. For migrations, document whether rollback is automatic, manual, or forward-fix only.
 4. Run smoke checks for login, gateway proxy, evidence lookup, findings, and audit export after rollback.
 5. Attach rollback notes to the audit-ready release checklist.
+
+### Rotation rollback and verification
+
+- **Certificate:** restore the preserved certificate ARN through the same controlled-beta
+  configuration and deployment workflow. Existing sessions are not intentionally invalidated
+  by certificate replacement. Verify the hostname presents the restored certificate and that
+  endpoint health checks pass.
+- **JWT secret:** restoring the previous secret permits only JWTs signed with that secret;
+  JWTs issued under the replacement secret become invalid because only one active signing
+  secret is supported. Require a fresh login and rerun authenticated API smoke checks.
+- **Session secret:** restoring the previous secret invalidates sessions created with the
+  replacement secret because only one active session secret is supported. Require a fresh
+  login and verify new-session creation, logout and protected-route access.
+- Preserve the original rotation record. Attach the rollback workflow URL, configuration
+  version, certificate validation where applicable, smoke results, authentication telemetry
+  and approval to the release evidence.
 
 ### F21 release-content rollback
 
