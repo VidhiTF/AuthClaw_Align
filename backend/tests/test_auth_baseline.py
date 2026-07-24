@@ -664,13 +664,15 @@ def test_password_login_preserves_persisted_invitation_role(monkeypatch, role, s
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(auth_endpoints, "_active_users_for_email", lambda *_args: [(user, tenant)])
     monkeypatch.setattr(auth_endpoints, "verify_password", lambda *_: True)
+    monkeypatch.setattr(auth_endpoints, "_enforce_password_login_rate_limit", lambda *_: None)
 
     response = auth_endpoints.password_login(
         auth_endpoints.PasswordLoginRequest(
             email="user@example.com",
             password="correct password",
             tenant_name="tenant",
-        )
+        ),
+        _request(),
     )
 
     assert str(response.user_id) == user.id
@@ -681,6 +683,39 @@ def test_password_login_preserves_persisted_invitation_role(monkeypatch, role, s
     assert response.api_key.startswith("acl_console_")
     db.add.assert_called_once()
     db.commit.assert_called_once()
+
+
+def test_password_login_rate_limits_before_database_lookup(monkeypatch):
+    open_database = MagicMock()
+    monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", open_database)
+    monkeypatch.setattr(
+        auth_endpoints,
+        "_enforce_password_login_rate_limit",
+        MagicMock(side_effect=HTTPException(status_code=429, detail="Too many login attempts. Try again later.")),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        auth_endpoints.password_login(
+            auth_endpoints.PasswordLoginRequest(email="USER@example.com", password="wrong"),
+            _request(),
+        )
+
+    assert exc.value.status_code == 429
+    open_database.assert_not_called()
+
+
+def test_password_login_rate_limit_uses_normalized_account_and_direct_peer(monkeypatch):
+    calls = []
+    monkeypatch.setattr(auth_endpoints, "_enforce_onboarding_rate_limit", lambda *args: calls.append(args))
+    request = MagicMock(headers={"x-forwarded-for": "198.51.100.9"})
+    request.client.host = "203.0.113.7"
+
+    auth_endpoints._enforce_password_login_rate_limit("user@example.com", request)
+
+    assert calls[0][0] == f"auth:login:ip:{auth_endpoints._rate_limit_hash('203.0.113.7')}"
+    assert calls[1][0] == f"auth:login:account:{auth_endpoints._rate_limit_hash('user@example.com')}"
+    assert calls[0][1:3] == (auth_endpoints.LOGIN_IP_ATTEMPTS_PER_MINUTE, 60)
+    assert calls[1][1:3] == (auth_endpoints.LOGIN_ACCOUNT_ATTEMPTS_PER_15_MINUTES, 900)
 
 
 def test_oidc_audit_event_contains_no_sensitive_authentication_material(monkeypatch):
