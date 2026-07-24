@@ -57,12 +57,14 @@ export async function GET() {
     }
 
     try {
-      const sessions = await agentFetch("/chat/sessions");
+      const readiness = await agentFetch("/api/v1/agent/health/ready");
       items.push({
         key: "agent",
         label: "Agent service authenticated",
-        ok: Array.isArray(sessions),
-        detail: Array.isArray(sessions) ? "Control-plane identity accepted" : "Unexpected agent response",
+        ok: readiness?.status === "ready",
+        detail: readiness?.status === "ready"
+          ? "Canonical agent API is ready"
+          : "Canonical agent API is not ready",
       });
     } catch (error: unknown) {
       items.push({
