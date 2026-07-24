@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { marketingSiteUrl } from "./config";
+import { isMarketingSiteIndexable, marketingSiteUrl } from "./config";
 
 type MarketingMetadataInput = {
   title: string;
@@ -15,6 +15,9 @@ export function createMarketingMetadata({
   return {
     title,
     description,
+    robots: isMarketingSiteIndexable
+      ? undefined
+      : { index: false, follow: false },
     alternates: { canonical: path },
     openGraph: {
       type: "website",

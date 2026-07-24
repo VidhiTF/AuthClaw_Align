@@ -70,3 +70,8 @@ export const marketingSiteUrl = new URL(
   process.env.NEXT_PUBLIC_SITE_URL || "https://authclaw.ai"
 );
 
+export const isMarketingSiteIndexable =
+  process.env.NODE_ENV === "production" &&
+  marketingSiteUrl.protocol === "https:" &&
+  marketingSiteUrl.hostname === "authclaw.ai";
+

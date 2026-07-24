@@ -241,7 +241,7 @@ export const homeContent = `
         <span class="tag"><span class="d">◆</span>Cohere</span>
         <span class="tag"><span class="d">◆</span>AWS Bedrock</span>
       </div>
-      <h4 style="margin-top:26px">Connects your environment</h3>
+      <h4 style="margin-top:26px">Connects your environment</h4>
       <div class="taglist">
         <span class="tag"><span class="d">◇</span>AWS</span>
         <span class="tag"><span class="d">◇</span>GCP</span>
@@ -506,7 +506,7 @@ export const productContent = `
         <span class="tag"><span class="d">◆</span>Cohere</span>
         <span class="tag"><span class="d">◆</span>AWS Bedrock</span>
       </div>
-      <h4 style="margin-top:26px">Connects your environment</h3>
+      <h4 style="margin-top:26px">Connects your environment</h4>
       <div class="taglist">
         <span class="tag"><span class="d">◇</span>AWS</span>
         <span class="tag"><span class="d">◇</span>GCP</span>

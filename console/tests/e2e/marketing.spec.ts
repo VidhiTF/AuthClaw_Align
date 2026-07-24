@@ -65,6 +65,16 @@ test.describe("F25 public marketing routes", () => {
     await expect(navigation.locator('a[href$=".html"]')).toHaveCount(0);
   });
 
+  test("desktop navigation supports visible keyboard focus", async ({ page }) => {
+    await page.goto("/");
+    await page.keyboard.press("Tab");
+    const home = page.getByRole("link", { name: "AuthClaw home" }).first();
+    await expect(home).toBeFocused();
+    await expect(home).toHaveCSS("outline-style", "solid");
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("link", { name: "Product" }).first()).toBeFocused();
+  });
+
   test("mobile navigation supports state and keyboard dismissal", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/");
@@ -117,9 +127,12 @@ test.describe("F25 public marketing routes", () => {
     const robots = await request.get("/robots.txt");
     expect(robots.status()).toBe(200);
     const robotsBody = await robots.text();
-    expect(robotsBody).toContain("Sitemap:");
-    expect(robotsBody).toContain("Disallow: /agent");
-    expect(robotsBody).toContain("Disallow: /trust-center/");
+    expect(robotsBody).toContain("Disallow: /");
+
+    await expect(page.locator('meta[name="robots"]')).toHaveAttribute(
+      "content",
+      /noindex.*nofollow|nofollow.*noindex/
+    );
 
     const sitemap = await request.get("/sitemap.xml");
     expect(sitemap.status()).toBe(200);
