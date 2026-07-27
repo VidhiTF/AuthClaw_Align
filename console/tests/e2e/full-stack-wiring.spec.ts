@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 const TENANT_ID = "11111111-1111-4111-8111-111111111111";
 const USER_ID = "22222222-2222-4222-8222-222222222222";
+const DELETION_SUBJECT_ID = "22222222-2222-4222-8222-222222222225";
 
 async function json<T>(response: import("@playwright/test").APIResponse): Promise<T> {
   expect(response.ok(), await response.text()).toBeTruthy();
@@ -111,13 +112,58 @@ test("authenticated privacy and compliance golden path", async ({ page }) => {
     manifest: { format_version: "authclaw.data-subject.export.v1" },
   });
 
+  const deletionRequest = await json<{ id: string; status: string }>(
+    await request.post("/api/proxy?path=/v1/data-subject-requests", {
+      data: { subject_id: DELETION_SUBJECT_ID, request_type: "DELETION", scope: { systems: ["console"] } },
+    }),
+  );
+  expect((await json<{ status: string }>(await request.post(
+    `/api/proxy?path=/v1/data-subject-requests/${deletionRequest.id}/verify`,
+    { data: { identity_verified: true } },
+  ))).status).toBe("VERIFIED");
+  expect((await json<{ status: string }>(await request.post(
+    `/api/proxy?path=/v1/data-subject-requests/${deletionRequest.id}/approve`,
+    { data: { decision_reason: "Golden-path deletion approved" } },
+  ))).status).toBe("APPROVED");
+  const deletion = await json<{ request_id: string; completed_at: string }>(
+    await request.post(`/api/proxy?path=/v1/data-subject-requests/${deletionRequest.id}/delete`, { data: {} }),
+  );
+  expect(deletion.request_id).toBe(deletionRequest.id);
+  expect(deletion.completed_at).toBeTruthy();
+  await expect.poll(async () => {
+    const audit = await json<{ records: Array<{ request_id?: string; action?: string }> }>(
+      await request.get("/api/audit?limit=100"),
+    );
+    return audit.records.some((record) =>
+      record.request_id === deletionRequest.id && record.action === "deletion_completed"
+    );
+  }).toBeTruthy();
+
+  const redTeamRun = await json<{ run: { workflow_id: string } }>(
+    await request.post("/api/red-team", { data: { observed_responses: {}, simulation_only: true } }),
+  );
+  const evidence = await json<{
+    items: Array<{ id: string; workflow_id: string; framework: string }>;
+  }>(await request.get("/api/evidence?page_size=100"));
+  const evidenceRecord = evidence.items.find((item) => item.workflow_id === redTeamRun.run.workflow_id);
+  expect(evidenceRecord?.id).toBeTruthy();
+  const retrievedEvidence = await json<{ id: string; workflow_id: string; framework: string }>(
+    await request.get(`/api/evidence/${evidenceRecord!.id}`),
+  );
+  expect(retrievedEvidence).toMatchObject({
+    id: evidenceRecord!.id,
+    workflow_id: redTeamRun.run.workflow_id,
+    framework: "RED_TEAM",
+  });
+
   const score = await json<{
-    controls: Array<{ traceability: { audit_event_total: number; links: { evidence_url: string } } }>;
+    controls: Array<{ id: string; traceability: { audit_event_total: number; links: { evidence_url: string } } }>;
   }>(await request.get("/api/compliance-scores/SOC2"));
-  expect(score.controls.some((control) =>
+  const evidenceLinkedControl = score.controls.find((control) =>
     control.traceability.audit_event_total > 0
       && control.traceability.links.evidence_url === "/evidence?framework=SOC2"
-  )).toBeTruthy();
+  );
+  expect(evidenceLinkedControl?.id).toBeTruthy();
 
   await page.goto("/audit");
   await expect(page.getByRole("heading", { name: "Audit Explorer" })).toBeVisible();

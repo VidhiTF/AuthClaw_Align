@@ -524,12 +524,13 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
             db.flush()
 
             raw_api_key = _generate_gateway_key()
+            scopes = _scopes_for_role(invited_role)
             api_key = APIKey(
                 tenant_id=tenant.id,
                 key_hash=_api_key_hash(raw_api_key),
                 name=f"Console Access - {signup_row.email}",
                 description="Issued during AuthClaw Lite tenant invite verification",
-                scopes=_scopes_for_role(invited_role),
+                scopes=scopes,
                 is_active=True,
                 expires_at=now + timedelta(days=90),
                 created_by=user.id,
@@ -564,6 +565,7 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
                 user_id=user.id,
                 email=user.email,
                 role=user.role,
+                scopes=scopes,
                 api_key=raw_api_key,
                 gateway_url=gateway_url,
                 provider=DEFAULT_PROVIDER,

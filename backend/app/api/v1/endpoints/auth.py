@@ -371,7 +371,6 @@ def password_login(payload: PasswordLoginRequest):
     email = payload.email.strip().lower()
     db = OwnerSessionLocal()
     try:
-        all_users = _active_users_for_email(db, email)
         users = _active_users_for_email(db, email, payload.tenant_name)
 
         matches = [(user, tenant) for user, tenant in users if verify_password(payload.password, user.password_hash)]
@@ -382,8 +381,6 @@ def password_login(payload: PasswordLoginRequest):
 
         user, tenant = matches[0]
         db.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(tenant.id)})
-        if len(all_users) == 1 and user.role != "owner":
-            user.role = "owner"
         role = user.role or "viewer"
         scopes = _scopes_for_role(role)
         raw_key = _generate_console_key()

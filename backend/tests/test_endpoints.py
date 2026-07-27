@@ -196,7 +196,8 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         headers=owner_a_headers,
     )
     assert approved.status_code == status.HTTP_200_OK
-    assert approved.json()["status"] == "APPROVED"
+    assert approved.json()["status"] == "COMPLETED"
+    assert approved.json()["completed_at"]
 
     invalid_state = client.post(
         f"/v1/data-subject-requests/{request_id}/export",
@@ -350,6 +351,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         "request_created",
         "identity_verified",
         "request_approved",
+        "request_completed",
         "request_created",
         "identity_verified",
         "request_rejected",
@@ -429,7 +431,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
     records = db_session.query(DataSubjectRequest).filter(DataSubjectRequest.tenant_id == tenant_a_id).all()
     assert len(records) == 6
-    assert sum(record.status == "COMPLETED" for record in records) == 3
+    assert sum(record.status == "COMPLETED" for record in records) == 4
 
 
 def test_public_access_request_persists_server_owned_fields(
