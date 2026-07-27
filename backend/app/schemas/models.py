@@ -387,6 +387,7 @@ class OnboardingVerifyResponse(BaseModel):
     user_id: UUID
     email: EmailStr
     role: str
+    scopes: List[str]
     api_key: str
     gateway_url: str
     provider: str

@@ -118,6 +118,17 @@ export async function agentFetch(path: string, options: AgentRequestOptions = {}
   if (!context) throw new BackendRequestError("Unauthorized: No session cookie found", 401);
   if (!context.session) throw new BackendRequestError("Unauthorized: Session expired or invalid", 401);
 
+  const validation = await fetchBackend(`${BACKEND_URL}/v1/auth/me`, {
+    headers: { Authorization: `Bearer ${context.session.apiKey}` },
+  });
+  if (!validation.ok) {
+    if (validation.status === 401 || validation.status === 403) {
+      sessionStore.deleteSession(context.session.sessionId);
+      throw new BackendRequestError("Unauthorized: Session expired or invalid", 401);
+    }
+    throw new BackendRequestError("Backend request failed", validation.status);
+  }
+
   const secret = process.env.AUTHCLAW_INTERNAL_SERVICE_SECRET;
   if (!secret) throw new BackendRequestError("Agent service authentication is not configured", 503);
 

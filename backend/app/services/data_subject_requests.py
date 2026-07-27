@@ -149,6 +149,10 @@ class DataSubjectRequestService:
                 actor_id,
                 "request_approved" if decision == "APPROVED" else "request_rejected",
             )
+            if decision == "APPROVED" and record.request_type == "ACCESS":
+                record.status = "COMPLETED"
+                record.completed_at = now
+                cls._audit(db, record, actor_id, "request_completed")
             db.commit()
             db.refresh(record)
             if decision == "APPROVED":

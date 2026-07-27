@@ -31,6 +31,7 @@ const prohibitedClaims = [
   ["immutable audit guarantee", /\bimmutable\b/gi],
   ["unsupported 99.99% SLA", /99\.99%\s+(?:uptime\s+)?sla\b/gi],
   ["absolute 100% request claim", /\b100%[^\r\n]{0,80}\b(?:prompts|responses|requests)\b/gi],
+  ["hardcoded public readiness score", /<b>\s*\d{1,3}(?:\.\d+)?%\s*<\/b>/gi],
 ];
 
 const requiredClaims = [

@@ -303,6 +303,27 @@ def test_oidc_accepts_single_audience_without_azp(monkeypatch):
     assert oidc_sso.validate_id_token({**_identity_policy(), "issuer": "https://idp.example.com", "client_id": "authclaw-console", "jwks_uri": "https://idp.example.com/jwks"}, "token", "nonce") == claims
 
 
+def test_oidc_rejects_substituted_id_token(monkeypatch):
+    key = MagicMock(key="configured-provider-key")
+    monkeypatch.setattr(jwt, "PyJWKClient", lambda *_: MagicMock(get_signing_key_from_jwt=lambda *_: key))
+    monkeypatch.setattr(jwt, "decode", MagicMock(side_effect=jwt.InvalidSignatureError()))
+
+    with pytest.raises(jwt.InvalidSignatureError):
+        oidc_sso.validate_id_token({**_identity_policy(), "issuer": "https://idp.example.com", "client_id": "authclaw-console", "jwks_uri": "https://idp.example.com/jwks"}, "substituted-token", "nonce")
+
+
+def test_oidc_rejects_replayed_id_token_from_previous_nonce(monkeypatch):
+    claims = {"nonce": "previous-nonce"}
+    key = MagicMock(key="configured-provider-key")
+    monkeypatch.setattr(jwt, "PyJWKClient", lambda *_: MagicMock(get_signing_key_from_jwt=lambda *_: key))
+    monkeypatch.setattr(jwt, "decode", lambda *_args, **_kwargs: claims)
+
+    with pytest.raises(oidc_sso.OIDCAuthenticationError) as exc:
+        oidc_sso.validate_id_token({**_identity_policy(), "issuer": "https://idp.example.com", "client_id": "authclaw-console", "jwks_uri": "https://idp.example.com/jwks"}, "replayed-token", "current-nonce")
+
+    assert exc.value.reason_code == "nonce_validation_failed"
+
+
 def test_oidc_invalid_token_returns_sanitized_401(monkeypatch):
     db = MagicMock()
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
@@ -583,7 +604,17 @@ def test_oidc_success_emits_actor_and_tenant_audit(monkeypatch):
     )
 
 
-def test_existing_password_login_still_succeeds(monkeypatch):
+@pytest.mark.parametrize(
+    ("role", "scopes"),
+    [
+        ("viewer", ["read"]),
+        ("developer", ["read"]),
+        ("operator", ["read"]),
+        ("admin", ["admin", "read", "write"]),
+        ("owner", ["admin", "read", "write"]),
+    ],
+)
+def test_password_login_preserves_persisted_invitation_role(monkeypatch, role, scopes):
     db = MagicMock()
     tenant = MagicMock(
         id="00000000-0000-4000-8000-000000000001",
@@ -593,7 +624,7 @@ def test_existing_password_login_still_succeeds(monkeypatch):
         id="00000000-0000-4000-8000-000000000002",
         email="user@example.com",
         password_hash="password-hash",
-        role="owner",
+        role=role,
     )
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(auth_endpoints, "_active_users_for_email", lambda *_args: [(user, tenant)])
@@ -609,7 +640,9 @@ def test_existing_password_login_still_succeeds(monkeypatch):
 
     assert str(response.user_id) == user.id
     assert str(response.tenant_id) == tenant.id
-    assert response.role == "owner"
+    assert response.role == role
+    assert response.scopes == scopes
+    assert user.role == role
     assert response.api_key.startswith("acl_console_")
     db.add.assert_called_once()
     db.commit.assert_called_once()

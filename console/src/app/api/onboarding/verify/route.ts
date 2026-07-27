@@ -22,8 +22,8 @@ export async function POST(request: Request) {
       apiKey: data.api_key,
       userId: data.user_id,
       tenantId: data.tenant_id,
-      scopes: ["admin", "read", "write"],
-      role: data.role || "owner",
+      scopes: data.scopes,
+      role: data.role,
     });
 
     const cookiePayload = {
@@ -31,8 +31,8 @@ export async function POST(request: Request) {
       userId: data.user_id,
       tenantId: data.tenant_id,
       tenantName: data.tenant_name,
-      scopes: ["admin", "read", "write"],
-      role: data.role || "owner",
+      scopes: data.scopes,
+      role: data.role,
       email: data.email,
     };
 
