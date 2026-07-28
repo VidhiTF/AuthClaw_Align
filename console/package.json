@@ -9,7 +9,7 @@
     "lint": "eslint",
     "test:claims": "node scripts/check-public-claims.mjs",
     "test:session-store": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/session-store.test.mts",
-    "test:unit": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/agent-client-contract.test.mts tests/auth-error-sanitization.test.mts tests/oidc-callback.test.mts tests/oidc-state.test.mts tests/session-auth.test.mts tests/session-store.test.mts tests/startup-validation.test.mts tests/trust-summary.test.mts tests/ui-format.test.mts",
+    "test:unit": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/agent-client-contract.test.mts tests/auth-error-sanitization.test.mts tests/oidc-callback.test.mts tests/oidc-state.test.mts tests/policy-warn-contract.test.mts tests/session-auth.test.mts tests/session-store.test.mts tests/startup-validation.test.mts tests/trust-summary.test.mts tests/ui-format.test.mts",
     "postinstall": "node scripts/patch-next-picomatch.mjs"
   },
   "dependencies": {

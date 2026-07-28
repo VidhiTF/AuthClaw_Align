@@ -45,6 +45,22 @@ def test_validate_policy_returns_normalized_report():
     assert report["normalized_policy"]["rate_limits"]["requests_per_minute"] == 60
 
 
+def test_validate_policy_accepts_warn_action():
+    report = validate_policy_yaml(
+        """
+regex_rules:
+  - name: employee_email_warning
+    pattern: '(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}'
+    reason: 'Employee email is redacted and recorded as a warning.'
+    severity: medium
+    action: warn
+"""
+    )
+
+    assert report["valid"] is True
+    assert report["normalized_policy"]["regex_rules"][0]["action"] == "warn"
+
+
 @pytest.mark.parametrize(
     "policy_yaml, path_fragment",
     [
@@ -115,6 +131,30 @@ def test_simulate_policy_explains_block_before_egress():
     assert result.decision == "block"
     assert result.allow is False
     assert "ssn_block" in result.reason
+
+
+def test_simulate_policy_warns_and_allows_redacted_egress():
+    result = simulate_policy(
+        """
+regex_rules:
+  - name: employee_email_warning
+    pattern: '(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}'
+    reason: 'Employee email is redacted and recorded as a warning.'
+    severity: medium
+    action: warn
+model_rules:
+  whitelist: [gemini-2.5-flash-lite]
+""",
+        model="gemini-2.5-flash-lite",
+        prompts=["Contact synthetic.employee@example.test"],
+    )
+
+    assert result.decision == "warn"
+    assert result.allow is True
+    assert result.matched_rules[0]["action"] == "warn"
+    assert any(item.stage == "regex_rules" and item.outcome == "warn" for item in result.explanations)
+    assert result.explanations[-1].stage == "final"
+    assert result.explanations[-1].outcome == "warn"
 
 
 def test_simulate_policy_explains_model_and_topic_blocks():

@@ -5,9 +5,9 @@
 | Owner | Vidhi Sharma |
 | Collaborator | Kunal |
 | Jira issue | ACL-17 |
-| Branch | `feat/gateway/ACL-17-policy-redaction` |
-| Evidence date | 2026-07-17 |
-| Status | Local implementation evidence; CI and reviewer approval pending |
+| Branch | `codex/acl-17-warn-control-plane` |
+| Evidence date | 2026-07-28 |
+| Status | Local implementation and end-to-end evidence complete; CI and reviewer approval pending |
 
 ## Scope
 
@@ -21,7 +21,7 @@ fixtures.
 | Requirement | Implementation and evidence |
 |---|---|
 | Detect approved PII/PHI fixtures | `gateway/acl17_policy_redaction_test.go` covers email, US SSN, health data and person-name fixtures. |
-| Tenant-configurable block, warn and redact | `gateway/policy.go` validates all three actions; `gateway/proxy.go` applies them before provider egress. |
+| Tenant-configurable block, warn and redact | `gateway/policy.go` applies all three actions before provider egress. `backend/app/services/policy_engine.py` validates and simulates Warn, and the Policies UI exposes `Warn, redact, and pass`. |
 | Block prevents provider egress | Matching block rules return HTTP 403 before request proxying. |
 | Warn is observable and safe | Warning headers, notification, audit event and counter are emitted; matching content is redacted before continuing. |
 | Redact transforms provider payload | Tests rebuild an OpenAI request and verify the raw fixture is absent and a token is present. |
@@ -37,6 +37,11 @@ fixtures.
 - `gateway/acl17_policy_redaction_test.go`
 - `gateway/README.md`
 - `docs/adr/0008-acl-17-gateway-policy-redaction.md`
+- `backend/app/services/policy_engine.py`
+- `backend/tests/test_policy_engine.py`
+- `console/src/app/(console)/policies/page.tsx`
+- `console/tests/policy-warn-contract.test.mts`
+- `console/tests/e2e/full-stack-wiring.spec.ts`
 
 ## Verification record
 
@@ -65,7 +70,26 @@ backend\.venv\Scripts\python.exe -m pytest
 Result: 28 passed
 
 npm.cmd run test:unit
-Result: 12 passed
+Result: 26 passed
+
+python -m pytest tests/test_policy_engine.py -q
+Result: 11 passed (Docker Python environment)
+
+npm.cmd run lint
+Result: PASS
+
+npm.cmd run build
+Result: PASS
+
+npx.cmd playwright test tests/e2e/full-stack-wiring.spec.ts
+  --grep "ACL-17 warn is configurable" --project=chromium
+Result: 1 passed
+
+POST /v1/policies/validate with action: warn
+Result: valid=true, errors=[]
+
+POST /v1/policies/simulate with a synthetic email fixture
+Result: decision=warn, allow=true, matched action=warn
 ```
 
 The full gateway integration suite additionally requires PostgreSQL with the gateway
