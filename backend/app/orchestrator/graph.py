@@ -410,9 +410,16 @@ def awaiting_approval(state: ComplianceState) -> ComplianceState:
         next_state = WorkflowState.COMPLETE.value
         exec_status = ExecutionStatus.COMPLETED.value
     else:  # PENDING — stay paused
-        return {**state, "approval_status": status,
-                "execution_status": ExecutionStatus.PAUSED.value,
-                "updated_at": datetime.now(tz=timezone.utc).isoformat()}
+        persist = state.get("_persist_state")
+        new_state = {
+            **state,
+            "approval_status": status,
+            "execution_status": ExecutionStatus.PAUSED.value,
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        if persist:
+            persist(new_state)
+        return new_state
     
     emit = state.get("_emit_audit")
     if emit:

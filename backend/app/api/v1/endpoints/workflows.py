@@ -17,13 +17,18 @@ import pyotp
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.auth import get_tenant_db, require_scopes
 from app.core.startup_checks import is_production
 from app.db.models import PendingApproval, ComplianceWorkflow, User, ApprovalAudit, Tenant
 from app.orchestrator.runner import ComplianceWorkflowRunner
 from app.services.notifications import create_notification
-from app.services.remediation_approval import build_action_payload, compute_action_hash
+from app.services.remediation_approval import (
+    build_action_payload,
+    compute_action_hash,
+    mark_altered_approval_and_workflow,
+)
 from app.services.worker_throttle import check_worker_throttle
 from datetime import datetime, timedelta, timezone
 
@@ -191,6 +196,40 @@ def _auto_expire_stale(db: Session, tenant_id: str, actor_id: uuid.UUID) -> None
         db.add(audit)
     if stale:
         db.commit()
+
+
+def _record_altered_approval_rejection(
+    db: Session,
+    *,
+    approval: PendingApproval,
+    workflow: Optional[ComplianceWorkflow],
+    tenant_id: str,
+    actor_id: uuid.UUID,
+    workflow_id: str,
+) -> None:
+    """Reject a tampered approval and persist a terminal-safe workflow state."""
+    reason = mark_altered_approval_and_workflow(
+        approval=approval,
+        workflow=workflow,
+    )
+    if workflow:
+        flag_modified(workflow, "state_data")
+
+    db.add(
+        ApprovalAudit(
+            id=uuid.uuid4(),
+            tenant_id=uuid.UUID(tenant_id),
+            approval_id=approval.id,
+            actor_id=actor_id,
+            action="ALTERED_REJECTED",
+            action_hash=approval.action_hash,
+            reason=reason,
+            details={"workflow_id": workflow_id},
+            mfa_verified=False,
+            mfa_timestamp=None,
+        )
+    )
+    db.commit()
 
 
 def _verify_mfa_if_enabled(
@@ -497,23 +536,14 @@ def approve_workflow(
         expires_at=approval.expires_at,
     )
     if approval.action_payload != expected_payload or approval.action_hash != expected_hash:
-        approval.status = "ALTERED"
-        approval.resolution_reason = "Remediation plan or approval binding changed before approval"
-        db.add(
-            ApprovalAudit(
-                id=uuid.uuid4(),
-                tenant_id=uuid.UUID(tenant_id),
-                approval_id=approval.id,
-                actor_id=user_id,
-                action="ALTERED_REJECTED",
-                action_hash=approval.action_hash,
-                reason=approval.resolution_reason,
-                details={"workflow_id": workflow_id},
-                mfa_verified=False,
-                mfa_timestamp=None,
-            )
+        _record_altered_approval_rejection(
+            db,
+            approval=approval,
+            workflow=wf,
+            tenant_id=tenant_id,
+            actor_id=user_id,
+            workflow_id=workflow_id,
         )
-        db.commit()
         raise HTTPException(status_code=409, detail="Approval action binding is invalid")
 
     # Validate MFA if enabled on user (uses shared helper)
@@ -716,7 +746,6 @@ def remediate_workflow(
     wf.approval_id = uuid.UUID(approval_id)
 
     # Update state_data
-    from sqlalchemy.orm.attributes import flag_modified
     state_data = wf.state_data or {}
     state_data.update({
         "current_state": "AWAITING_APPROVAL",
