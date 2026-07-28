@@ -176,3 +176,52 @@ test("authenticated privacy and compliance golden path", async ({ page }) => {
   const hashChainedEvents = liveInputs.getByText("Hash-Chained Events", { exact: true }).locator("..");
   await expect(hashChainedEvents).not.toContainText(/^Hash-Chained Events\s+0$/);
 });
+
+test("ACL-17 warn is configurable in the policy UI and control-plane API", async ({ page }) => {
+  await login(page);
+  await page.goto("/policies");
+
+  const warnOptions = page.locator('select option[value="warn"]');
+  expect(await warnOptions.count()).toBeGreaterThan(0);
+  await expect(warnOptions.first()).toHaveText("Warn, redact, and pass");
+
+  const warnPolicyYaml = `
+regex_rules:
+  - name: employee_email_warning
+    pattern: '(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}'
+    reason: 'Employee email is redacted and recorded as a warning.'
+    severity: medium
+    action: warn
+model_rules:
+  whitelist: [gemini-2.5-flash-lite]
+  blacklist: []
+topic_rules: []
+rate_limits:
+  requests_per_minute: 60
+`;
+
+  const validation = await json<{ valid: boolean; errors: unknown[] }>(
+    await page.request.post("/api/policies/validate", {
+      data: { policy_yaml: warnPolicyYaml },
+    }),
+  );
+  expect(validation).toMatchObject({ valid: true, errors: [] });
+
+  const simulation = await json<{
+    decision: string;
+    allow: boolean;
+    matched_rules: Array<{ name?: string; action?: string }>;
+  }>(await page.request.post("/api/policies/simulate", {
+    data: {
+      policy_yaml: warnPolicyYaml,
+      model: "gemini-2.5-flash-lite",
+      prompts: ["Contact synthetic.employee@example.test"],
+      topics: [],
+    },
+  }));
+  expect(simulation).toMatchObject({ decision: "warn", allow: true });
+  expect(simulation.matched_rules).toContainEqual(expect.objectContaining({
+    name: "employee_email_warning",
+    action: "warn",
+  }));
+});

@@ -12,7 +12,7 @@ import re
 import yaml
 
 
-PolicyDecision = Literal["allow", "block", "require_approval"]
+PolicyDecision = Literal["allow", "warn", "block", "require_approval"]
 
 
 ALLOWED_TOP_LEVEL_KEYS = {"model_rules", "regex_rules", "topic_rules", "rate_limits"}
@@ -28,7 +28,7 @@ ALLOWED_REGEX_RULE_KEYS = {
 }
 ALLOWED_TOPIC_RULE_KEYS = {"topic", "allowed_models", "reason"}
 ALLOWED_RATE_LIMIT_KEYS = {"requests_per_minute"}
-ALLOWED_REGEX_ACTIONS = {"redact", "require_approval", "block"}
+ALLOWED_REGEX_ACTIONS = {"redact", "warn", "require_approval", "block"}
 ALLOWED_SEVERITIES = {"low", "medium", "high", "critical"}
 
 MAX_POLICY_BYTES = 64 * 1024
@@ -195,14 +195,14 @@ def _normalize_policy(raw: dict[str, Any], errors: list[dict[str, str]], warning
 
             action = str(rule.get("action") or "redact").strip().lower()
             if action not in ALLOWED_REGEX_ACTIONS:
-                errors.append(_err(f"{path}.action", "must be redact, require_approval, or block"))
+                errors.append(_err(f"{path}.action", "must be redact, warn, require_approval, or block"))
             severity = str(rule.get("severity") or "medium").strip().lower()
             if severity not in ALLOWED_SEVERITIES:
                 errors.append(_err(f"{path}.severity", "must be low, medium, high, or critical"))
             reason = str(rule.get("reason") or "").strip()
             if len(reason) > MAX_REASON_LENGTH:
                 errors.append(_err(f"{path}.reason", f"must be {MAX_REASON_LENGTH} characters or fewer"))
-            if action in {"block", "require_approval"} and not reason:
+            if action in {"warn", "block", "require_approval"} and not reason:
                 errors.append(_err(f"{path}.reason", f"reason is required for {action} rules"))
 
             timeout = rule.get("hitl_timeout_seconds", DEFAULT_HITL_TIMEOUT_SECONDS)
@@ -321,6 +321,7 @@ def simulate_policy(policy_yaml: str, *, model: str, route: str = "", prompts: l
     topics = [topic.strip().lower() for topic in (topics or []) if isinstance(topic, str) and topic.strip()]
     explanations: list[RuleExplanation] = []
     matched_rules: list[dict[str, Any]] = []
+    warning_reason: str | None = None
 
     if rate_limit_exceeded:
         explanation = RuleExplanation(
@@ -384,6 +385,8 @@ def simulate_policy(policy_yaml: str, *, model: str, route: str = "", prompts: l
                 return PolicySimulationResult("block", False, message, explanations, matched_rules)
             if rule["action"] == "require_approval":
                 return PolicySimulationResult("require_approval", False, message, explanations, matched_rules)
+            if rule["action"] == "warn" and warning_reason is None:
+                warning_reason = message
     if policy["regex_rules"]:
         explanations.append(RuleExplanation("regex_rules", "pass", "No blocking or approval regex rules matched.", "regex"))
 
@@ -408,6 +411,14 @@ def simulate_policy(policy_yaml: str, *, model: str, route: str = "", prompts: l
             rule_name=rule["topic"],
             rule_type="topic",
         ))
+
+    if warning_reason:
+        explanations.append(RuleExplanation(
+            "final",
+            "warn",
+            "Allowed with policy warning and redaction.",
+        ))
+        return PolicySimulationResult("warn", True, warning_reason, explanations, matched_rules)
 
     explanations.append(RuleExplanation("final", "allow", "No policy rule blocked the request."))
     return PolicySimulationResult("allow", True, "Allowed by AuthClaw policy simulation", explanations, matched_rules)

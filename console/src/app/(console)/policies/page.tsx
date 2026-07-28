@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { getErrorMessage } from "@/lib/errors";
 
-type RuleAction = "redact" | "require_approval" | "block";
+type RuleAction = "redact" | "warn" | "require_approval" | "block";
 type RuleSeverity = "low" | "medium" | "high" | "critical";
 
 interface RedactionRule {
@@ -49,7 +49,7 @@ interface PolicyValidationResult {
 }
 
 interface PolicySimulationResult {
-  decision: "allow" | "block" | "require_approval";
+  decision: "allow" | "warn" | "block" | "require_approval";
   allow: boolean;
   reason: string;
   explanations: Array<{
@@ -116,7 +116,7 @@ function unquoteYamlScalar(value: string) {
 }
 
 function coerceRuleAction(value: string): RuleAction {
-  return value === "require_approval" || value === "block" ? value : "redact";
+  return value === "warn" || value === "require_approval" || value === "block" ? value : "redact";
 }
 
 function coerceRuleSeverity(value: string): RuleSeverity {
@@ -654,6 +654,7 @@ export default function PoliciesPage() {
                       className="w-full px-3 py-2 rounded-lg bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-indigo-500"
                     >
                       <option value="redact">Redact and pass</option>
+                      <option value="warn">Warn, redact, and pass</option>
                       <option value="require_approval">Require HITL approval</option>
                       <option value="block">Block immediately</option>
                     </select>
