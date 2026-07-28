@@ -152,10 +152,23 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
     audit_events = []
+    published_tenants = []
+    producer = object()
     monkeypatch.setattr(
         data_subject_request_service,
         "append_audit_event",
         lambda _db, event: audit_events.append(event) or {},
+    )
+    monkeypatch.setattr(data_subject_request_service, "_kafka_producer", None)
+    monkeypatch.setattr(
+        data_subject_request_service.event_backbone,
+        "make_kafka_producer",
+        lambda: producer,
+    )
+    monkeypatch.setattr(
+        data_subject_request_service.event_backbone,
+        "publish_pending_audit_events",
+        lambda actual, tenant_id: published_tenants.append((actual, tenant_id)),
     )
     payload = {
         "subject_id": "customer-123",
@@ -190,6 +203,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     assert verified.status_code == status.HTTP_200_OK
     assert verified.json()["status"] == "VERIFIED"
 
+    publication_count = len(published_tenants)
     approved = client.post(
         f"/v1/data-subject-requests/{request_id}/approve",
         json={"decision_reason": "Identity and scope confirmed"},
@@ -198,6 +212,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     assert approved.status_code == status.HTTP_200_OK
     assert approved.json()["status"] == "COMPLETED"
     assert approved.json()["completed_at"]
+    assert published_tenants[publication_count:] == [(producer, str(tenant_a_id))]
 
     invalid_state = client.post(
         f"/v1/data-subject-requests/{request_id}/export",
@@ -318,6 +333,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     )
     assert cross_tenant_delete.status_code == status.HTTP_404_NOT_FOUND
 
+    publication_count = len(published_tenants)
     deleted = client.post(
         f"/v1/data-subject-requests/{deletion_request_id}/delete",
         headers=owner_a_headers,
@@ -335,6 +351,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     ]
     assert deletion_result["completed_at"]
     assert "viewer-a@dsr.test" not in str(deletion_result)
+    assert published_tenants[publication_count:] == [(producer, str(tenant_a_id))]
 
     repeated = client.post(
         f"/v1/data-subject-requests/{deletion_request_id}/delete",
@@ -395,11 +412,13 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         "_delete_subject_data",
         staticmethod(lambda _db, _record: (_ for _ in ()).throw(RuntimeError("failure"))),
     )
+    publication_count = len(published_tenants)
     with pytest.raises(RuntimeError, match="failure"):
         client.post(
             f"/v1/data-subject-requests/{rollback_request_id}/delete",
             headers=owner_a_headers,
         )
+    assert len(published_tenants) == publication_count
     db_session.expire_all()
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
     rollback_record = db_session.query(DataSubjectRequest).filter(
