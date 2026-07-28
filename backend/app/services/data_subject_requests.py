@@ -1,6 +1,7 @@
 """Tenant-scoped GDPR data-subject request lifecycle operations."""
 
 import base64
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -24,13 +25,30 @@ from app.services.audit_export import (
     signing_key_metadata,
 )
 from app.services.audit_store import append_audit_event, standardize_timestamp
+from app.services import event_backbone
 from app.services.event_backbone import increment_metric
 
 EXPORT_FORMAT = "authclaw.data-subject.export.v1"
+logger = logging.getLogger("services.data_subject_requests")
+_kafka_producer = None
 
 
 def _timestamp(value):
     return standardize_timestamp(value) if value else None
+
+
+def _publish_audit_outbox(tenant_id) -> None:
+    global _kafka_producer
+    if _kafka_producer is None:
+        try:
+            _kafka_producer = event_backbone.make_kafka_producer()
+        except Exception as exc:
+            logger.warning("GDPR audit Kafka producer unavailable: %s", exc)
+            return
+    if exc := event_backbone.publish_pending_audit_events(
+        _kafka_producer, str(tenant_id)
+    ):
+        logger.warning("Failed to publish GDPR audit outbox: %s", exc)
 
 
 class DataSubjectRequestService:
@@ -96,6 +114,7 @@ class DataSubjectRequestService:
             db.add(record)
             cls._audit(db, record, actor_id, "request_created")
             db.commit()
+            _publish_audit_outbox(tenant_id)
             db.refresh(record)
             increment_metric("gdpr_requests_created_total")
             return record
@@ -120,6 +139,7 @@ class DataSubjectRequestService:
             record.updated_at = now
             cls._audit(db, record, actor_id, "identity_verified")
             db.commit()
+            _publish_audit_outbox(tenant_id)
             db.refresh(record)
             increment_metric("gdpr_requests_verified_total")
             return record
@@ -154,6 +174,7 @@ class DataSubjectRequestService:
                 record.completed_at = now
                 cls._audit(db, record, actor_id, "request_completed")
             db.commit()
+            _publish_audit_outbox(tenant_id)
             db.refresh(record)
             if decision == "APPROVED":
                 increment_metric("gdpr_requests_approved_total")
@@ -350,6 +371,7 @@ class DataSubjectRequestService:
             record.updated_at = completed_at
             cls._audit(db, record, actor_id, "export_completed", include_subject=True)
             db.commit()
+            _publish_audit_outbox(tenant_id)
             increment_metric("gdpr_exports_completed_total")
             return artifact
         except Exception:
@@ -496,6 +518,7 @@ class DataSubjectRequestService:
                 ],
             )
             db.commit()
+            _publish_audit_outbox(tenant_id)
             increment_metric("gdpr_deletions_completed_total")
             return cls._deletion_result(record, deleted, retained, reasons)
         except Exception:

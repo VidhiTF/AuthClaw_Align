@@ -35,6 +35,7 @@ POLICY_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
 PROVIDER_CREDENTIAL_ID = uuid.UUID("66666666-6666-4666-8666-666666666666")
 RAW_API_KEY = os.getenv("AUTHCLAW_LITE_DEMO_KEY", "acl_lite_demo_key")
 RAW_ADMIN_PASSWORD = os.getenv("AUTHCLAW_LITE_DEMO_PASSWORD", "AuthClawDemo!234")
+RAW_ADMIN_TOTP_SECRET = os.getenv("AUTHCLAW_LITE_DEMO_TOTP_SECRET", "").strip() or None
 RAW_PROVIDER_KEY = os.getenv("AUTHCLAW_LITE_PROVIDER_KEY", "ci-mock-provider-key")
 PROVIDER_ENDPOINT = os.getenv("AUTHCLAW_LITE_PROVIDER_ENDPOINT", "")
 POLICY_REQUESTS_PER_MINUTE = max(0, int(os.getenv("AUTHCLAW_LITE_POLICY_REQUESTS_PER_MINUTE", "60")))
@@ -112,15 +113,23 @@ def main() -> None:
 
         conn.execute(
             text("""
-            INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, is_active)
-            VALUES (:id, :tenant_id, 'admin@authclaw-lite.demo', :password_hash, 'owner', 'NONE', false, true)
+            INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, mfa_secret, is_active)
+            VALUES (:id, :tenant_id, 'admin@authclaw-lite.demo', :password_hash, 'owner', 'NONE', :mfa_enabled, :mfa_secret, true)
             ON CONFLICT (tenant_id, email) DO UPDATE SET
                 password_hash = EXCLUDED.password_hash,
                 role = EXCLUDED.role,
+                mfa_enabled = EXCLUDED.mfa_enabled,
+                mfa_secret = EXCLUDED.mfa_secret,
                 is_active = true,
                 updated_at = NOW()
             """),
-            {"id": ADMIN_USER_ID, "tenant_id": TENANT_ID, "password_hash": hash_password(RAW_ADMIN_PASSWORD)},
+            {
+                "id": ADMIN_USER_ID,
+                "tenant_id": TENANT_ID,
+                "password_hash": hash_password(RAW_ADMIN_PASSWORD),
+                "mfa_enabled": RAW_ADMIN_TOTP_SECRET is not None,
+                "mfa_secret": RAW_ADMIN_TOTP_SECRET,
+            },
         )
 
         for user_id, email, role in ROLE_USERS:

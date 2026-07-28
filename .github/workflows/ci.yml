@@ -507,6 +507,7 @@ jobs:
       AUTHCLAW_LITE_DEMO_KEY: acl_lite_demo_key
       NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: "true"
       AUTHCLAW_LITE_DEMO_PASSWORD: AuthClawDemo!234
+      AUTHCLAW_LITE_DEMO_TOTP_SECRET: JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP
       GEMINI_API_KEY: ci-mock-provider-key
       GEMINI_BASE_URL: http://mock-provider:19090
       PRESIDIO_ANALYZE_TIMEOUT_MS: "25"
@@ -581,6 +582,7 @@ jobs:
         env:
           E2E_LOGIN_EMAIL: admin@authclaw-lite.demo
           E2E_LOGIN_PASSWORD: AuthClawDemo!234
+          E2E_TOTP_SECRET: ${{ env.AUTHCLAW_LITE_DEMO_TOTP_SECRET }}
           E2E_BASE_URL: http://localhost:3001
 
       - name: Gateway latency benchmark gate
