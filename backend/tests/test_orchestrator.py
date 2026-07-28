@@ -197,8 +197,12 @@ class TestApprovalPauseResume:
         assert state["approval_status"] == "PENDING"
 
         # Check again while still PENDING → stays PAUSED
+        persist_count = len(state["_persist_calls"])
         state = awaiting_approval(state)
         assert state["execution_status"] == ExecutionStatus.PAUSED.value
+        assert len(state["_persist_calls"]) == persist_count + 1
+        assert state["_persist_calls"][-1]["approval_status"] == "PENDING"
+        assert state["_persist_calls"][-1]["execution_status"] == ExecutionStatus.PAUSED.value
 
         # Simulate external approval
         state["_check_approval"] = lambda aid: "APPROVED"

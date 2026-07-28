@@ -6,6 +6,7 @@ from app.services.remediation_approval import (
     build_action_payload,
     compute_action_hash,
     evaluate_approval,
+    mark_altered_approval_and_workflow,
     normalize_remediation_plan,
 )
 
@@ -116,3 +117,38 @@ def test_approval_is_bound_to_tenant_user_and_workflow():
     assert wrong_tenant.status == "TENANT_MISMATCH"
     assert wrong_user.status == "USER_MISMATCH"
     assert wrong_workflow.status == "ACTION_MISMATCH"
+
+
+def test_altered_approval_persists_terminal_safe_workflow_state():
+    approval = SimpleNamespace(
+        status="PENDING",
+        resolution_reason=None,
+    )
+    workflow = SimpleNamespace(
+        current_state="AWAITING_APPROVAL",
+        execution_status="PAUSED",
+        approval_status="PENDING",
+        state_data={
+            "current_state": "AWAITING_APPROVAL",
+            "execution_status": "PAUSED",
+            "approval_status": "PENDING",
+            "remediation_state": "NOT_STARTED",
+        },
+        completed_at=None,
+        updated_at=NOW,
+    )
+
+    reason = mark_altered_approval_and_workflow(
+        approval=approval,
+        workflow=workflow,
+        now=NOW,
+    )
+
+    assert approval.status == "ALTERED"
+    assert approval.resolution_reason == reason
+    assert workflow.approval_status == "ALTERED"
+    assert workflow.current_state == "COMPLETE"
+    assert workflow.execution_status == "COMPLETED"
+    assert workflow.state_data["approval_status"] == "ALTERED"
+    assert workflow.state_data["remediation_state"] == "NOT_STARTED"
+    assert workflow.completed_at == NOW

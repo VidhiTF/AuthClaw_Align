@@ -10,6 +10,7 @@ from typing import Any
 
 
 APPROVAL_SCHEMA_VERSION = "acl-18.v1"
+ALTERED_APPROVAL_REASON = "Remediation plan or approval binding changed before approval"
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,39 @@ def compute_action_hash(
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def mark_altered_approval_and_workflow(
+    *,
+    approval: Any,
+    workflow: Any | None,
+    now: datetime | None = None,
+) -> str:
+    """Synchronize a tampered approval with a terminal-safe workflow state."""
+    current_time = _utc(now or datetime.now(timezone.utc))
+    approval.status = "ALTERED"
+    approval.resolution_reason = ALTERED_APPROVAL_REASON
+
+    if workflow:
+        workflow.approval_status = "ALTERED"
+        workflow.current_state = "COMPLETE"
+        workflow.execution_status = "COMPLETED"
+        workflow.completed_at = current_time
+        workflow.updated_at = current_time
+        state_data = dict(workflow.state_data or {})
+        state_data.update(
+            {
+                "approval_status": "ALTERED",
+                "current_state": "COMPLETE",
+                "execution_status": "COMPLETED",
+                "remediation_state": "NOT_STARTED",
+                "updated_at": current_time.isoformat(),
+                "completed_at": current_time.isoformat(),
+            }
+        )
+        workflow.state_data = state_data
+
+    return ALTERED_APPROVAL_REASON
 
 
 def evaluate_approval(

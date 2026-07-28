@@ -614,7 +614,7 @@ class ComplianceWorkflow(Base):
     risk_score = Column(Float, nullable=True)
     remediation_plan = Column(JSON, nullable=True)
     approval_id = Column(UUID(as_uuid=True), ForeignKey("pending_approvals.id"), nullable=True)
-    approval_status = Column(String(50), nullable=True)  # PENDING, APPROVED, REJECTED, EXPIRED
+    approval_status = Column(String(50), nullable=True)  # PENDING, APPROVED, REJECTED, EXPIRED, ALTERED
     execution_status = Column(String(50), nullable=False, default="RUNNING")
     execution_result = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
