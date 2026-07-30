@@ -9,6 +9,8 @@ interface Probe {
   name: string;
   category: string;
   prompt: string;
+  severity: "critical" | "high" | "medium" | "low";
+  risk_score: number;
 }
 
 interface ProbeResult extends Probe {
@@ -17,6 +19,10 @@ interface ProbeResult extends Probe {
   policy_decision: string;
   response_status: string;
   reason: string;
+  case_severity: "critical" | "high" | "medium" | "low";
+  severity_rank: number;
+  risk_score: number;
+  matched_signals: string[];
 }
 
 interface RedTeamRun {
@@ -41,6 +47,13 @@ function badgeClass(status: string) {
   if (status === "pass" || status === "go") return "border-emerald-600/30 bg-emerald-50 text-emerald-700";
   if (status === "fail" || status === "no_go") return "border-red-600/30 bg-red-50 text-red-700";
   return "border-[#E6E9F0] bg-[#F5F7FA] text-[#475069]";
+}
+
+function severityClass(severity: string) {
+  if (severity === "critical") return "border-red-600/30 bg-red-50 text-red-700";
+  if (severity === "high") return "border-amber-600/30 bg-amber-50 text-amber-700";
+  if (severity === "medium") return "border-yellow-600/30 bg-yellow-50 text-yellow-700";
+  return "border-blue-600/30 bg-blue-50 text-blue-700";
 }
 
 export default function RiskPage() {
@@ -199,12 +212,23 @@ export default function RiskPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     {result?.status === "pass" ? <CheckCircle2 className="h-4 w-4 text-emerald-700" /> : <ShieldAlert className="h-4 w-4 text-[#6B7488]" />}
                     <h3 className="font-semibold text-[#0E1726]">{probe.name}</h3>
+                    <span className="rounded-md border border-[#D8DEEA] bg-[#F5F7FA] px-2 py-0.5 text-xs font-semibold text-[#475069]">
+                      {probe.category.replaceAll("_", " ")}
+                    </span>
+                    <span className={`rounded-md border px-2 py-0.5 text-xs font-semibold ${severityClass(probe.severity)}`}>
+                      {probe.severity.toUpperCase()} · RANK {result?.severity_rank ?? "—"}
+                    </span>
                     <span className={`rounded-md border px-2 py-0.5 text-xs font-semibold ${badgeClass(result?.status || "")}`}>
                       {result?.status?.toUpperCase() || "READY"}
                     </span>
                   </div>
                   <p className="mt-2 text-sm leading-6 text-[#6B7488]">{probe.prompt}</p>
-                  {result && <p className="mt-2 text-xs text-[#6B7488]">{result.reason}</p>}
+                  {result && (
+                    <div className="mt-2 space-y-1 text-xs text-[#6B7488]">
+                      <p>{result.reason}</p>
+                      <p>Risk score: {result.risk_score.toFixed(2)} · Matched signals: {result.matched_signals.join(", ") || "none"}</p>
+                    </div>
+                  )}
                 </div>
                 <textarea
                   value={responses[probe.id] || ""}
