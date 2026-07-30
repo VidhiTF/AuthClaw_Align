@@ -49,7 +49,7 @@ export default function OverviewPage() {
       setLoading(true);
       const [dashboardRes, scoresRes] = await Promise.all([
         fetch("/api/dashboard"),
-        fetch("/api/compliance-scores"),
+        fetch("/api/compliance-scores?persist_snapshot=false"),
       ]);
       if (dashboardRes.status === 401 || scoresRes.status === 401) {
         window.location.href = "/login";

@@ -294,7 +294,7 @@ export default function EvidencePage() {
 
     if (evidenceId && openDrawer === "true" && !selectedRecord) {
       // Fetch specifically this record to show it immediately
-      fetch(`/api/proxy?path=/v1/evidence/${evidenceId}`)
+      fetch(`/api/evidence/${evidenceId}`)
         .then(res => res.json())
         .then(data => {
           if (data && data.id) setSelectedRecord(data);

@@ -427,14 +427,21 @@ def score_control(control: dict[str, Any], metrics: FrameworkMetrics) -> dict[st
     }
 
 
-def score_framework(db: Session, tenant_id: str, framework: str) -> dict[str, Any]:
+def score_framework(
+    db: Session,
+    tenant_id: str,
+    framework: str,
+    *,
+    include_traceability: bool = True,
+) -> dict[str, Any]:
     framework = framework.upper()
     if framework not in CONTROL_CATALOG:
         raise ValueError(f"Unsupported framework: {framework}")
     metrics = collect_metrics(db, tenant_id, framework)
     controls = [score_control(control, metrics) for control in CONTROL_CATALOG[framework]]
-    for control, catalog_control in zip(controls, CONTROL_CATALOG[framework]):
-        control["traceability"] = _control_traceability(db, tenant_id, framework, catalog_control)
+    if include_traceability:
+        for control, catalog_control in zip(controls, CONTROL_CATALOG[framework]):
+            control["traceability"] = _control_traceability(db, tenant_id, framework, catalog_control)
     overall = round(sum(control["score"] * control["weight"] for control in controls), 1)
     return {
         "framework": framework,
@@ -519,8 +526,17 @@ def upsert_score_snapshot(db: Session, tenant_id: str, framework_score: dict[str
     return snapshot
 
 
-def score_all_frameworks(db: Session, tenant_id: str, *, persist: bool = True) -> dict[str, Any]:
-    frameworks = [score_framework(db, tenant_id, framework) for framework in FRAMEWORKS]
+def score_all_frameworks(
+    db: Session,
+    tenant_id: str,
+    *,
+    persist: bool = True,
+    include_traceability: bool = True,
+) -> dict[str, Any]:
+    frameworks = [
+        score_framework(db, tenant_id, framework, include_traceability=include_traceability)
+        for framework in FRAMEWORKS
+    ]
     if persist:
         for framework_score in frameworks:
             upsert_score_snapshot(db, tenant_id, framework_score)

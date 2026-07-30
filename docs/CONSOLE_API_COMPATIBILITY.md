@@ -17,8 +17,8 @@ does not own users, tenants, policy, audit, evidence or workflow records.
 - Approval decisions reuse the canonical workflow approval endpoints and retain backend
   scope and MFA enforcement.
 - `/`, `/product`, `/pricing`, `/security`, and `/company` are public App Router routes
-  in the canonical Next.js application. Legacy `console/public/*.html` pages remain only
-  for rollback parity and permanently redirect to their canonical routes.
+  in the canonical Next.js application. Legacy `.html` URLs permanently redirect to
+  those routes; the duplicate static pages have been removed.
 
 ## Runtime boundary
 

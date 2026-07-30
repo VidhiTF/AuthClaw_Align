@@ -329,7 +329,7 @@ export default function FindingsDashboard() {
 
   const fetchSummary = useCallback(async () => {
     try {
-      const res = await fetch("/api/proxy?path=/v1/findings/summary/dashboard");
+      const res = await fetch("/api/findings/summary/dashboard");
       if (!res.ok) throw new Error("Failed to fetch dashboard summary");
       const data = await res.json();
       setSummary(data);
@@ -351,7 +351,7 @@ export default function FindingsDashboard() {
       if (severity) params.append("severity", severity);
       if (status) params.append("status", status);
 
-      const res = await fetch(`/api/proxy?path=/v1/findings&${params.toString()}`);
+      const res = await fetch(`/api/findings?${params.toString()}`);
       if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
       const data: FindingListResponse = await res.json();
       setFindings(data.items);
@@ -375,7 +375,7 @@ export default function FindingsDashboard() {
     const findingId = searchParams.get("finding_id");
     if (!findingId || selectedFinding?.id === findingId) return;
     const timer = window.setTimeout(() => {
-      fetch(`/api/proxy?path=/v1/findings/${findingId}`)
+      fetch(`/api/findings/${findingId}`)
         .then((res) => res.json())
         .then((data) => {
           if (data?.id) setSelectedFinding(data);
@@ -387,7 +387,7 @@ export default function FindingsDashboard() {
 
   const handleStatusChange = async (findingId: string, newStatus: string) => {
     try {
-      const res = await fetch(`/api/proxy?path=/v1/findings/${findingId}/status`, {
+      const res = await fetch(`/api/findings/${findingId}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: newStatus }),
