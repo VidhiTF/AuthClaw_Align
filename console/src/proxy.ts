@@ -22,8 +22,6 @@ export function proxy(request: NextRequest) {
     "/pricing.html",
     "/security.html",
     "/company.html",
-    "/styles.css",
-    "/app.js",
     "/robots.txt",
     "/sitemap.xml",
     "/opengraph-image",
