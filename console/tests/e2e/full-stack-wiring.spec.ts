@@ -115,21 +115,21 @@ test("authenticated privacy and compliance golden path", async ({ page }) => {
   expect(exportVerification.record_count).toBeGreaterThan(0);
 
   const dsr = await json<{ id: string; status: string }>(
-    await request.post("/api/proxy?path=/v1/data-subject-requests", {
+    await request.post("/api/data-subject-requests", {
       data: { subject_id: USER_ID, request_type: "EXPORT", scope: { systems: ["console"] } },
     }),
   );
   expect(dsr.status).toBe("PENDING");
   expect((await json<{ status: string }>(await request.post(
-    `/api/proxy?path=/v1/data-subject-requests/${dsr.id}/verify`,
+    `/api/data-subject-requests/${dsr.id}/verify`,
     { data: { identity_verified: true } },
   ))).status).toBe("VERIFIED");
   expect((await json<{ status: string }>(await request.post(
-    `/api/proxy?path=/v1/data-subject-requests/${dsr.id}/approve`,
+    `/api/data-subject-requests/${dsr.id}/approve`,
     { data: { decision_reason: "Golden-path identity and scope verified" } },
   ))).status).toBe("APPROVED");
   const subjectExport = await json<{ request_id: string; manifest: { format_version: string } }>(
-    await request.post(`/api/proxy?path=/v1/data-subject-requests/${dsr.id}/export`, { data: {} }),
+    await request.post(`/api/data-subject-requests/${dsr.id}/export`, { data: {} }),
   );
   expect(subjectExport).toMatchObject({
     request_id: dsr.id,
@@ -137,20 +137,20 @@ test("authenticated privacy and compliance golden path", async ({ page }) => {
   });
 
   const deletionRequest = await json<{ id: string; status: string }>(
-    await request.post("/api/proxy?path=/v1/data-subject-requests", {
+    await request.post("/api/data-subject-requests", {
       data: { subject_id: DELETION_SUBJECT_ID, request_type: "DELETION", scope: { systems: ["console"] } },
     }),
   );
   expect((await json<{ status: string }>(await request.post(
-    `/api/proxy?path=/v1/data-subject-requests/${deletionRequest.id}/verify`,
+    `/api/data-subject-requests/${deletionRequest.id}/verify`,
     { data: { identity_verified: true } },
   ))).status).toBe("VERIFIED");
   expect((await json<{ status: string }>(await request.post(
-    `/api/proxy?path=/v1/data-subject-requests/${deletionRequest.id}/approve`,
+    `/api/data-subject-requests/${deletionRequest.id}/approve`,
     { data: { decision_reason: "Golden-path deletion approved" } },
   ))).status).toBe("APPROVED");
   const deletion = await json<{ request_id: string; completed_at: string }>(
-    await request.post(`/api/proxy?path=/v1/data-subject-requests/${deletionRequest.id}/delete`, { data: {} }),
+    await request.post(`/api/data-subject-requests/${deletionRequest.id}/delete`, { data: {} }),
   );
   expect(deletion.request_id).toBe(deletionRequest.id);
   expect(deletion.completed_at).toBeTruthy();

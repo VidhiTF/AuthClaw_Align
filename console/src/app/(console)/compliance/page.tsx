@@ -213,7 +213,7 @@ export default function FrameworksPage() {
     setError(null);
     try {
       const [scoreRes, frameworkRes] = await Promise.all([
-        fetch("/api/compliance-scores"),
+        fetch("/api/compliance-scores?persist_snapshot=false"),
         fetch(`/api/compliance-scores/${activeFramework}`),
       ]);
       if (scoreRes.status === 401 || frameworkRes.status === 401) {
