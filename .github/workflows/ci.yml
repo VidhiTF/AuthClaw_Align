@@ -165,12 +165,13 @@ jobs:
         run: |
           pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements-tooling.txt requirements-tooling.in
           (cd backend && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements.txt requirements.in)
+          (cd backend && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements-test.txt requirements-test.in)
           (cd audit_consumer && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements.txt requirements.in)
           (cd audit_consumer && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements-test.txt requirements-test.in)
           (cd services/agent && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements.txt requirements.in)
           (cd services/agent && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements-model.txt requirements-model.in)
           (cd services/agent && pip-compile --generate-hashes --allow-unsafe --strip-extras --resolver=backtracking --quiet --output-file=requirements-test.txt requirements-test.in)
-          git diff --exit-code -- requirements-tooling.txt backend/requirements.txt audit_consumer/requirements.txt audit_consumer/requirements-test.txt services/agent/requirements.txt services/agent/requirements-model.txt services/agent/requirements-test.txt
+          git diff --exit-code -- requirements-tooling.txt backend/requirements.txt backend/requirements-test.txt audit_consumer/requirements.txt audit_consumer/requirements-test.txt services/agent/requirements.txt services/agent/requirements-model.txt services/agent/requirements-test.txt
 
       - name: Python dependency audit
         run: |
@@ -275,7 +276,7 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        run: python -m pip install --require-hashes -r requirements.txt
+        run: python -m pip install --require-hashes -r requirements-test.txt
 
       - name: Apply migrations and restricted app role
         working-directory: backend

@@ -1,5 +1,11 @@
 # AuthClaw SRS Gap Analysis
 
+> **Archived:** July 30, 2026. This is a historical July 3 working snapshot, not
+> current implementation, release, security, or compliance evidence. Its
+> “Complete” labels were planning assertions and may conflict with Jira or
+> environment-backed validation. Use the AuthClaw Jira project and the current
+> release checklists for active status.
+
 Source: `C:\Users\WIN10\Downloads\AuthClaw_Project_Plan.pdf`  
 Scanned as the working SRS on July 3, 2026.
 

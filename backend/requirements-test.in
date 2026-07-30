@@ -1,0 +1,13 @@
+-r requirements.in
+
+# Testing
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+httpx==0.28.1
+
+# Development
+black==26.5.1
+flake8==7.3.0
+mypy==2.2.0
+isort==8.0.1
