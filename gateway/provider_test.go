@@ -54,18 +54,17 @@ func TestProviderRouteValidationAllowsGeminiStreamingRoute(t *testing.T) {
 func TestApplyProviderCredentialHeaders(t *testing.T) {
 	target, _ := url.Parse("https://api.example.test")
 	tests := []struct {
-		name          string
-		provider      string
-		wantHeader    string
-		wantValue     string
-		rejectAuth    bool
-		requiresQuery bool
+		name       string
+		provider   string
+		wantHeader string
+		wantValue  string
+		rejectAuth bool
 	}{
 		{name: "openai", provider: ProviderOpenAI, wantHeader: "Authorization", wantValue: "Bearer provider-key"},
 		{name: "anthropic", provider: ProviderAnthropic, wantHeader: "x-api-key", wantValue: "provider-key", rejectAuth: true},
 		{name: "cohere", provider: ProviderCohere, wantHeader: "Authorization", wantValue: "Bearer provider-key"},
-		{name: "gemini", provider: ProviderGemini, wantHeader: "x-goog-api-key", wantValue: "provider-key", rejectAuth: true, requiresQuery: true},
-		{name: "azure_openai", provider: ProviderAzureOpenAI, wantHeader: "api-key", wantValue: "provider-key", rejectAuth: true, requiresQuery: true},
+		{name: "gemini", provider: ProviderGemini, wantHeader: "x-goog-api-key", wantValue: "provider-key", rejectAuth: true},
+		{name: "azure_openai", provider: ProviderAzureOpenAI, wantHeader: "api-key", wantValue: "provider-key", rejectAuth: true},
 	}
 
 	for _, tt := range tests {
@@ -84,8 +83,8 @@ func TestApplyProviderCredentialHeaders(t *testing.T) {
 			if tt.rejectAuth && req.Header.Get("Authorization") != "" {
 				t.Fatalf("expected Authorization header to be stripped for %s", tt.provider)
 			}
-			if tt.provider == ProviderGemini && req.URL.Query().Get("key") != "provider-key" {
-				t.Fatalf("expected Gemini key query injection, got %q", req.URL.RawQuery)
+			if tt.provider == ProviderGemini && req.URL.Query().Get("key") != "" {
+				t.Fatalf("expected no Gemini key in query, got %q", req.URL.RawQuery)
 			}
 			if tt.provider == ProviderAzureOpenAI && req.URL.Query().Get("api-version") != "2024-10-21" {
 				t.Fatalf("expected Azure api-version query injection, got %q", req.URL.RawQuery)

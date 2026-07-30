@@ -9,7 +9,7 @@ const ALLOWED: Record<BffMethod, RegExp> = {
   DELETE: /^(users\/(?:invites\/[^/]+|(?!me$|invite$|invites$)[^/]+)|provider-credentials\/[^/]+|gateways\/[^/]+|api-keys\/[^/]+)$/,
 };
 
-const NO_BODY_POST = /^(users\/me\/mfa\/(?:setup|disable)|notifications\/(?:read-all|[^/]+\/read)|policies\/[^/]+\/activate|ephemeral-workers\/tokens\/[^/]+\/revoke|workflows\/[^/]+\/(?:reject|remediate)|approvals\/[^/]+\/reject)$/;
+const NO_BODY_POST = /^(users\/me\/mfa\/setup|notifications\/(?:read-all|[^/]+\/read)|policies\/[^/]+\/activate|ephemeral-workers\/tokens\/[^/]+\/revoke|workflows\/[^/]+\/(?:reject|remediate)|approvals\/[^/]+\/reject)$/;
 const OPTIONAL_BODY_POST = /^(workflows|approvals)\/[^/]+\/approve$/;
 const CREATED = /^(users|provider-credentials|red-team|gateways|ephemeral-workers\/tokens|api-keys(?:\/[^/]+\/rotate)?)$/;
 

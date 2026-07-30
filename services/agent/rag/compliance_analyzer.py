@@ -262,14 +262,14 @@ The JSON must have this exact structure:
   ]
 }}
 """
-            url = f"{api_url}/v1beta/models/{model}:generateContent?key={api_key}"
+            url = f"{api_url}/v1beta/models/{model}:generateContent"
             payload = {
                 "contents": [{
                     "role": "user",
                     "parts": [{"text": prompt}]
                 }]
             }
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=20)
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, timeout=20)
             if res.status_code == 200:
                 data = res.json()
                 text_response = data["candidates"][0]["content"]["parts"][0]["text"].strip()

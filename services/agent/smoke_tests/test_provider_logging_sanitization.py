@@ -30,6 +30,21 @@ class ProviderLoggingSanitizationTests(unittest.TestCase):
         self.assertIn("category=%s status=%s retryable=%s", main_source)
         self.assertIn('"Gemini document chat failed: status=%s"', main_source)
 
+    def test_gemini_credentials_use_headers_not_urls(self):
+        root = pathlib.Path(__file__).parents[1]
+        files = [
+            root / "main.py",
+            root / "providers" / "gemini_provider.py",
+            root / "rag" / "embeddings.py",
+            root / "rag" / "compliance_analyzer.py",
+            root / "document_processing" / "orchestrator.py",
+        ]
+        for path in files:
+            with self.subTest(path=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertNotIn("?key={", source)
+                self.assertIn('"x-goog-api-key"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

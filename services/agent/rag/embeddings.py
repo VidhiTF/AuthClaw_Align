@@ -65,14 +65,14 @@ def generate_embedding(text: str) -> list[float]:
     if is_key_valid:
         try:
             model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
-            url = f"{api_url}/v1beta/models/{model}:embedContent?key={api_key}"
+            url = f"{api_url}/v1beta/models/{model}:embedContent"
             payload = {
                 "model": f"models/{model}",
                 "content": {
                     "parts": [{"text": text}]
                 }
             }
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, timeout=10)
             if res.status_code == 200:
                 data = res.json()
                 embedding = data.get("embedding", {}).get("values", [])
