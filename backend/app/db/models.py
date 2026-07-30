@@ -461,6 +461,7 @@ class RedactionToken(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     original_value = Column(Text, nullable=False)  # Encrypted
+    original_value_blind_index = Column(String(64), nullable=True)
     token_hash = Column(String(255), nullable=False)  # SHA-256 hash of token
     token_value = Column(String(255), nullable=False)  # Synthetic/masked value
     strategy = Column(String(50), nullable=False)  # mask, hash, synthetic
@@ -475,7 +476,7 @@ class RedactionToken(Base):
     tenant = relationship("Tenant", back_populates="redaction_tokens")
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "original_value", "strategy", name="uq_redaction_tokens_tenant_original_strategy"),
+        UniqueConstraint("tenant_id", "original_value_blind_index", "strategy", name="uq_redaction_tokens_tenant_blind_index_strategy"),
         Index("idx_redaction_tenant", "tenant_id"),
         Index("idx_redaction_hash", "token_hash"),
         Index("idx_redaction_expires", "tenant_id", "expires_at"),

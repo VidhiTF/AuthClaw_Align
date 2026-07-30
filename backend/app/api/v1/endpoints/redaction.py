@@ -7,7 +7,7 @@ from typing import List
 from app.db.models import RedactionToken
 from app.schemas.models import RedactionTokenMapResponse
 from app.core.auth import get_tenant_db, require_scopes
-from app.core.crypto import decrypt_deterministic
+from app.core.crypto import decrypt_secret
 from app.services.privacy_lifecycle import purge_expired_redaction_mappings
 
 router = APIRouter()
@@ -42,7 +42,7 @@ def get_tokenization_map(
     response = []
     for t in tokens:
         try:
-            decrypted = decrypt_deterministic(t.original_value)
+            decrypted = decrypt_secret(t.original_value)
         except Exception as dec_err:
             print(f"[WARN] Failed to decrypt token value for mapping ID {t.id}: {dec_err}")
             decrypted = "[Decryption Failed]"
