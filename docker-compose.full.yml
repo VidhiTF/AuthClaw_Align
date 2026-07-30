@@ -375,6 +375,7 @@ services:
       GATEWAY_INTERNAL_URL: http://gateway:8080
       AGENT_INTERNAL_URL: http://agent:8001
       AGENT_TIMEOUT_MS: ${AGENT_TIMEOUT_MS:-45000}
+      AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
       AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-full-internal-service-secret-change-me}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
       NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:8080}
