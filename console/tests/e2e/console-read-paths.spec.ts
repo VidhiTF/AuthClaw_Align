@@ -17,4 +17,13 @@ test("authenticated console read paths respond without proxy timeouts", async ({
 
   expect(responses.map((response) => response.status())).toEqual([200, 200, 200]);
   expect(Date.now() - started).toBeLessThan(15_000);
+
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.goto("/compliance");
+  await page.getByRole("button", { name: /GDPR/ }).click();
+  await expect(page.getByText("GDPR Live Control Scores")).toBeVisible();
+  await page.getByRole("button", { name: /HIPAA Security Rule/ }).click();
+  await expect(page.getByText("HIPAA Live Control Scores")).toBeVisible();
+  expect(pageErrors).toEqual([]);
 });

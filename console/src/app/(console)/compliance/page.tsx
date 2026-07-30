@@ -62,7 +62,7 @@ interface ControlScore {
   status: "compliant" | "partial" | "non_compliant";
   evidence: string[];
   gaps: string[];
-  traceability?: ControlTraceability;
+  traceability?: ControlTraceability | null;
 }
 
 interface FrameworkScore {
