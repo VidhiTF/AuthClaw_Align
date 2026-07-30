@@ -52,8 +52,6 @@ services:
       - "/policies"
     volumes:
       - ./infra/opa:/policies:ro
-    ports:
-      - "${OPA_PORT:-8181}:8181"
 
   presidio:
     image: mcr.microsoft.com/presidio-analyzer:latest
