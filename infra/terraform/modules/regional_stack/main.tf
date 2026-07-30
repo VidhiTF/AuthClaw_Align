@@ -685,6 +685,9 @@ resource "aws_ecs_task_definition" "service" {
         contains(["console", "agent"], each.key) ? [
           { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn }
         ] : [],
+        each.key == "gateway" ? [
+          { name = "REDACTION_HASH_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
+        ] : [],
         each.key == "agent" ? [
           { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn },
           { name = "JWT_SECRET", valueFrom = aws_secretsmanager_secret.jwt.arn },

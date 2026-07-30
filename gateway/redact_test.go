@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -484,11 +485,14 @@ func TestGetOrCreateRedactionTokenAppliesRetentionAndPurgesExpired(t *testing.T)
 	var entityType string
 	var useCount int
 	var daysUntilExpiry float64
+	var encryptedValue string
+	var blindIndex string
 	err = DB.QueryRow(`
-		SELECT entity_type, use_count, EXTRACT(EPOCH FROM (expires_at - NOW())) / 86400
+		SELECT entity_type, use_count, EXTRACT(EPOCH FROM (expires_at - NOW())) / 86400,
+		       original_value, original_value_blind_index
 		FROM redaction_tokens
 		WHERE tenant_id = $1
-	`, tenantID).Scan(&entityType, &useCount, &daysUntilExpiry)
+	`, tenantID).Scan(&entityType, &useCount, &daysUntilExpiry, &encryptedValue, &blindIndex)
 	if err != nil {
 		t.Fatalf("read token metadata: %v", err)
 	}
@@ -500,6 +504,16 @@ func TestGetOrCreateRedactionTokenAppliesRetentionAndPurgesExpired(t *testing.T)
 	}
 	if daysUntilExpiry < 29 || daysUntilExpiry > 31 {
 		t.Fatalf("expected roughly 30 days retention, got %.2f", daysUntilExpiry)
+	}
+	if !strings.HasPrefix(encryptedValue, secretEnvelopeV2Prefix) || strings.Contains(encryptedValue, "MRN-123456") {
+		t.Fatalf("expected randomized secret envelope, got %q", encryptedValue)
+	}
+	plaintext, err := DecryptSecret(encryptedValue)
+	if err != nil || plaintext != "MRN-123456" {
+		t.Fatalf("failed to decrypt redaction value: plaintext=%q err=%v", plaintext, err)
+	}
+	if len(blindIndex) != sha256.Size*2 {
+		t.Fatalf("expected SHA-256 blind index, got %q", blindIndex)
 	}
 
 	_, err = DB.Exec("UPDATE redaction_tokens SET expires_at = NOW() - INTERVAL '1 second' WHERE tenant_id = $1", tenantID)
@@ -522,6 +536,58 @@ func TestGetOrCreateRedactionTokenAppliesRetentionAndPurgesExpired(t *testing.T)
 	}
 	if count != 1 {
 		t.Fatalf("expected expired token to be purged before recreate, got %d rows", count)
+	}
+}
+
+func TestGetOrCreateRedactionTokenMigratesLegacyCiphertext(t *testing.T) {
+	InitDB()
+	t.Setenv("ENVELOPE_KEY", "test-envelope-key-material-32-bytes!!")
+	t.Setenv("ENCRYPTION_KEY", "")
+	t.Setenv("AUTHCLAW_SECRET_PROVIDER", "env")
+	t.Setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
+	encryptionKey = nil
+	defer func() { encryptionKey = nil }()
+
+	var tenantID string
+	err := DB.QueryRow("INSERT INTO tenants (id, name, tier, status) VALUES (gen_random_uuid(), 'Legacy Token Tenant ' || gen_random_uuid()::text, 'starter', 'active') RETURNING id::text").Scan(&tenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer DB.Exec("DELETE FROM redaction_tokens WHERE tenant_id = $1", tenantID)
+	defer DB.Exec("DELETE FROM tenants WHERE id = $1", tenantID)
+
+	legacyCiphertext, err := EncryptDeterministic("legacy@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const existingToken = "[REDACTED_EMAIL_ADDRESS_legacy]"
+	_, err = DB.Exec(`
+		INSERT INTO redaction_tokens (
+			id, tenant_id, original_value, token_hash, token_value, strategy, entity_type, use_count, created_at
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, 'mask', 'EMAIL_ADDRESS', 1, NOW())
+	`, tenantID, legacyCiphertext, hashToken(existingToken), existingToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	token, err := GetOrCreateRedactionToken(context.Background(), tenantID, "legacy@example.com", "EMAIL_ADDRESS", "mask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != existingToken {
+		t.Fatalf("expected legacy token reuse, got %q", token)
+	}
+
+	var migratedCiphertext, blindIndex string
+	err = DB.QueryRow(`
+		SELECT original_value, original_value_blind_index
+		FROM redaction_tokens WHERE tenant_id = $1
+	`, tenantID).Scan(&migratedCiphertext, &blindIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(migratedCiphertext, secretEnvelopeV2Prefix) || migratedCiphertext == legacyCiphertext || len(blindIndex) != sha256.Size*2 {
+		t.Fatalf("legacy row was not migrated: ciphertext=%q blind_index=%q", migratedCiphertext, blindIndex)
 	}
 }
 
@@ -570,6 +636,20 @@ func TestSecretEnvelopeEncryptionIsRandomizedAndBackwardCompatible(t *testing.T)
 	}
 }
 
+func TestRedactionBlindIndexIsStableAndTenantScoped(t *testing.T) {
+	t.Setenv("ENVELOPE_KEY", "test-envelope-key-material-32-bytes!!")
+	t.Setenv("AUTHCLAW_SECRET_PROVIDER", "env")
+	t.Setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
+	t.Setenv("REDACTION_HASH_SALT", "stable-test-redaction-index-key")
+
+	first := redactionBlindIndex("tenant-a", "jane@example.com")
+	second := redactionBlindIndex("tenant-a", "jane@example.com")
+	otherTenant := redactionBlindIndex("tenant-b", "jane@example.com")
+	if first != second || first == otherTenant || len(first) != sha256.Size*2 {
+		t.Fatalf("unexpected blind indexes: %q %q %q", first, second, otherTenant)
+	}
+}
+
 func TestSecretEnvelopeVersionedKeyRotation(t *testing.T) {
 	t.Setenv("AUTHCLAW_SECRET_PROVIDER", "env")
 	t.Setenv("AUTHCLAW_SECRET_KEY_VERSION", "v2")
@@ -604,6 +684,19 @@ func TestValidateEnvelopeKeyConfigRejectsDemoProductionKey(t *testing.T) {
 
 	if err := ValidateEnvelopeKeyConfig(); err == nil {
 		t.Fatal("expected production demo envelope key to be rejected")
+	}
+}
+
+func TestValidateEnvelopeKeyConfigRejectsMissingRedactionSaltInProduction(t *testing.T) {
+	t.Setenv("AUTHCLAW_ENV", "production")
+	t.Setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
+	t.Setenv("ENVELOPE_KEY", "production-envelope-key-material-32!!")
+	t.Setenv("ENCRYPTION_KEY", "")
+	t.Setenv("REDACTION_HASH_SALT", "")
+
+	err := ValidateEnvelopeKeyConfig()
+	if err == nil || !strings.Contains(err.Error(), "REDACTION_HASH_SALT") {
+		t.Fatalf("expected missing production redaction salt to be rejected, got %v", err)
 	}
 }
 
