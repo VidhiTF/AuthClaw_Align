@@ -1,5 +1,6 @@
 from app.services import compliance_scoring
 from app.services.compliance_scoring import FrameworkMetrics
+from app.api.v1.endpoints.compliance_scores import ControlScoreResponse
 
 
 def _metrics(**overrides):
@@ -80,6 +81,7 @@ def test_score_all_frameworks_can_skip_expensive_traceability(monkeypatch):
 
     assert len(result["frameworks"]) == 3
     assert all("traceability" not in control for framework in result["frameworks"] for control in framework["controls"])
+    assert ControlScoreResponse.model_validate(result["frameworks"][0]["controls"][0]).traceability is None
 
 
 def test_readiness_levels_are_stable():

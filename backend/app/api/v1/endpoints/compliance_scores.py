@@ -23,7 +23,7 @@ class ControlScoreResponse(BaseModel):
     status: str
     evidence: list[str]
     gaps: list[str]
-    traceability: dict[str, Any] = {}
+    traceability: dict[str, Any] | None = None
 
 
 class FrameworkScoreResponse(BaseModel):
