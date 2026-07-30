@@ -10,6 +10,11 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import ComplianceWorkflow, EvidenceRecord, Policy
+from app.core.evidence_integrity import (
+    INTEGRITY_ALGORITHM,
+    INTEGRITY_VERSION,
+    compute_evidence_integrity_hash,
+)
 from app.services import event_backbone, findings_service
 from app.services.policy_engine import simulate_policy
 
@@ -182,20 +187,37 @@ def run(
     try:
         db.add(workflow)
         for item in results:
+            evidence_id = uuid.uuid4()
+            evidence_data = {
+                **item,
+                "simulation_only": simulation_only,
+                "destructive_actions_allowed": False,
+                "records_created": ["evidence", "finding"] if item["status"] == "fail" else ["evidence"],
+            }
             evidence = EvidenceRecord(
+                id=evidence_id,
                 tenant_id=uuid.UUID(tenant_id),
                 workflow_id=workflow_id,
                 framework="RED_TEAM",
                 source_type="red_team_probe",
                 source_reference=item["probe_id"],
                 evidence_type="red_team_result",
-                evidence_data={
-                    **item,
-                    "simulation_only": simulation_only,
-                    "destructive_actions_allowed": False,
-                    "records_created": ["evidence", "finding"] if item["status"] == "fail" else ["evidence"],
-                },
+                evidence_data=evidence_data,
                 severity=item["severity"],
+                integrity_hash=compute_evidence_integrity_hash(
+                    evidence_id=evidence_id,
+                    tenant_id=tenant_id,
+                    workflow_id=workflow_id,
+                    framework="RED_TEAM",
+                    source_type="red_team_probe",
+                    source_reference=item["probe_id"],
+                    evidence_type="red_team_result",
+                    evidence_data=evidence_data,
+                    severity=item["severity"],
+                    created_at=now,
+                ),
+                integrity_algorithm=INTEGRITY_ALGORITHM,
+                integrity_version=INTEGRITY_VERSION,
                 created_at=now,
             )
             db.add(evidence)

@@ -62,6 +62,16 @@ interface ControlScore {
   status: "compliant" | "partial" | "non_compliant";
   evidence: string[];
   gaps: string[];
+  exceptions?: Array<{
+    status: "open" | "closed";
+    type: "evidence_gap" | "missing_evidence";
+    message: string;
+  }>;
+  product_owners?: string[];
+  operational_owners?: string[];
+  implementation_status?: "built_in" | "partial" | "operational" | "gap" | "not_mapped";
+  evidence_sources?: string[];
+  collection_frequency?: string;
   traceability?: ControlTraceability | null;
 }
 
@@ -479,6 +489,29 @@ export default function FrameworksPage() {
 
                     <p className="text-[#6B7488] text-xs leading-relaxed">{control.description}</p>
 
+                    <div className="grid gap-3 rounded-xl border border-[#E6E9F0] bg-[#F5F7FA]/50 p-3 text-[10px] md:grid-cols-2">
+                      <div className="space-y-1">
+                        <p><span className="font-bold uppercase tracking-wider text-[#6B7488]">Product owner:</span> <span className="text-[#475069]">{(control.product_owners ?? []).join(", ") || "Not mapped"}</span></p>
+                        <p><span className="font-bold uppercase tracking-wider text-[#6B7488]">Operational owner:</span> <span className="text-[#475069]">{(control.operational_owners ?? []).join(", ") || "Not mapped"}</span></p>
+                        <p><span className="font-bold uppercase tracking-wider text-[#6B7488]">Implementation:</span> <span className="font-mono text-[#475069]">{(control.implementation_status ?? "not_mapped").replaceAll("_", " ").toUpperCase()}</span></p>
+                      </div>
+                      <div className="space-y-1">
+                        <p className="font-bold uppercase tracking-wider text-[#6B7488]">Collection frequency</p>
+                        <p className="text-[#475069]">{control.collection_frequency ?? "Not mapped"}</p>
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-[10px] font-bold text-[#6B7488] uppercase tracking-wider">Mapped Evidence Sources</p>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {((control.evidence_sources ?? []).length ? control.evidence_sources! : ["No evidence source mapped"]).map((source) => (
+                          <span key={source} className="rounded border border-[#E6E9F0] bg-[#F5F7FA] px-2 py-1 font-mono text-[10px] text-[#475069]">
+                            {source}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
                     <div className="h-1.5 w-full rounded-full bg-[#F5F7FA] overflow-hidden">
                       <div className="h-full rounded-full bg-indigo-500" style={{ width: `${control.score}%` }} />
                     </div>
@@ -512,6 +545,20 @@ export default function FrameworksPage() {
                         </div>
                       </div>
                     </div>
+
+                    {(control.exceptions ?? []).length > 0 && (
+                      <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-red-400">Open Exceptions — compliance blocked</p>
+                        <div className="mt-2 space-y-1.5">
+                          {control.exceptions!.map((exception) => (
+                            <div key={`${exception.type}-${exception.message}`} className="flex items-start gap-2 text-xs text-red-300">
+                              <XCircle className="mt-0.5 h-3 w-3 flex-shrink-0" />
+                              <span>{exception.message}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                     {control.traceability && (
                       <div className="border-t border-[#E6E9F0] pt-4">

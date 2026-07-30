@@ -16,10 +16,11 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, require_scopes
+from app.core.evidence_integrity import verify_evidence_integrity
 from app.services import evidence_service
 
 logger = logging.getLogger("api.evidence")
@@ -52,7 +53,11 @@ class EvidenceRecordResponse(BaseModel):
     evidence_data: Dict[str, Any]
     severity: str
     created_at: datetime
-    links: List[EvidenceLinkResponse] = []
+    integrity_hash: str
+    integrity_algorithm: str
+    integrity_version: int
+    integrity_verified: bool
+    links: List[EvidenceLinkResponse] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -83,6 +88,10 @@ def _serialize_record(record, include_links: bool = False) -> dict:
         "evidence_data": record.evidence_data or {},
         "severity": record.severity,
         "created_at": record.created_at,
+        "integrity_hash": record.integrity_hash,
+        "integrity_algorithm": record.integrity_algorithm,
+        "integrity_version": record.integrity_version,
+        "integrity_verified": verify_evidence_integrity(record),
         "links": [],
     }
     if include_links and hasattr(record, "links") and record.links:

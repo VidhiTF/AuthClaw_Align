@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, require_scopes
@@ -23,6 +23,12 @@ class ControlScoreResponse(BaseModel):
     status: str
     evidence: list[str]
     gaps: list[str]
+    exceptions: list[dict[str, Any]] = Field(default_factory=list)
+    product_owners: list[str] = Field(default_factory=list)
+    operational_owners: list[str] = Field(default_factory=list)
+    implementation_status: str = "not_mapped"
+    evidence_sources: list[str] = Field(default_factory=list)
+    collection_frequency: str = "Not mapped"
     traceability: dict[str, Any] | None = None
 
 

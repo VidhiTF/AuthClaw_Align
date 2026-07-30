@@ -55,29 +55,101 @@ CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
             "id": "CC6.1",
             "name": "Logical Access Controls",
             "description": "Access to gateway configuration, policies, and audit evidence is restricted and traceable.",
-            "weight": 0.25,
+            "weight": 0.125,
             "signals": ("active_api_keys", "active_policies", "active_gateways", "audit_hashes"),
-        },
-        {
-            "id": "CC6.3",
-            "name": "System Monitoring",
-            "description": "LLM traffic is monitored, retained, and available as tamper-evident audit evidence.",
-            "weight": 0.25,
-            "signals": ("audit_events", "hash_chain", "framework_evidence"),
+            "product_owners": ["Kunal"],
+            "operational_owners": ["Kunal"],
+            "implementation_status": "built_in",
+            "evidence_sources": [
+                "backend/app/services/compliance_scoring.py",
+                "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#access-review",
+                "access-review export",
+            ],
+            "collection_frequency": "Continuous audit events; quarterly and pre-release access review",
         },
         {
             "id": "CC6.6",
             "name": "Transmission Protection",
             "description": "PII/PHI is redacted or tokenized before model-provider egress.",
-            "weight": 0.25,
+            "weight": 0.125,
             "signals": ("redactions", "pii_evidence", "active_policies"),
+            "product_owners": ["Kunal", "Vidhi"],
+            "operational_owners": ["Kunal"],
+            "implementation_status": "built_in",
+            "evidence_sources": ["gateway/", "services/agent/redaction.py", "gateway contract tests", "redaction evidence records"],
+            "collection_frequency": "Per request; aggregate evidence per release",
+        },
+        {
+            "id": "CC7.1",
+            "name": "Vulnerability and Configuration Monitoring",
+            "description": "Vulnerabilities, secrets, and insecure infrastructure are detected before release.",
+            "weight": 0.125,
+            "signals": ("framework_evidence", "findings", "hash_chain"),
+            "product_owners": ["Kunal"],
+            "operational_owners": ["Kunal"],
+            "implementation_status": "built_in",
+            "evidence_sources": [".github/workflows/ci.yml", "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#vulnerability-management", "release CI evidence"],
+            "collection_frequency": "Every pull request and release",
         },
         {
             "id": "CC7.2",
-            "name": "Issue Response and Remediation",
-            "description": "Findings, approvals, and remediation attempts are tracked through closure.",
-            "weight": 0.25,
+            "name": "Security Event Monitoring",
+            "description": "Security-relevant activity is monitored, triaged, and retained as integrity-protected evidence.",
+            "weight": 0.125,
+            "signals": ("audit_events", "hash_chain", "framework_evidence"),
+            "product_owners": ["Kunal"],
+            "operational_owners": ["Kunal", "Authorized governance reviewer"],
+            "implementation_status": "built_in",
+            "evidence_sources": ["audit_consumer/", "backend/app/services/compliance_scoring.py", "incident record", "signed audit export"],
+            "collection_frequency": "Continuous collection; daily alert review; per incident",
+        },
+        {
+            "id": "CC7.3",
+            "name": "Finding and Remediation Lifecycle",
+            "description": "Findings, approvals, remediation, retest, and closure are tracked without hiding open exceptions.",
+            "weight": 0.125,
             "signals": ("findings", "remediation_audit", "approvals"),
+            "product_owners": ["Kunal"],
+            "operational_owners": ["Kunal"],
+            "implementation_status": "partial",
+            "evidence_sources": ["findings and remediation records", "signed audit export", "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#vulnerability-management"],
+            "collection_frequency": "Per finding; weekly open-finding review; per release",
+        },
+        {
+            "id": "CC8.1",
+            "name": "Change Management",
+            "description": "Production changes are authorized, tested, reviewed, and traceable to release evidence.",
+            "weight": 0.125,
+            "signals": ("approvals", "framework_evidence", "hash_chain"),
+            "product_owners": ["Kunal"],
+            "operational_owners": ["Authorized release governance reviewer"],
+            "implementation_status": "partial",
+            "evidence_sources": ["docs/BRANCH_GOVERNANCE.md", ".github/workflows/ci.yml", "pull request, approval, CI, and rollback evidence"],
+            "collection_frequency": "Every change and release",
+        },
+        {
+            "id": "A1.2",
+            "name": "Recoverability",
+            "description": "Backups, restore tests, failover, and rollback evidence demonstrate recoverability.",
+            "weight": 0.125,
+            "signals": ("framework_evidence", "hash_chain", "findings"),
+            "product_owners": ["Kunal"],
+            "operational_owners": ["Kunal"],
+            "implementation_status": "partial",
+            "evidence_sources": ["infra/terraform/DR_RUNBOOK.md", "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#backup-and-restore", "release rollback record"],
+            "collection_frequency": "Daily backup checks; quarterly restore/failover; after material changes",
+        },
+        {
+            "id": "C1.1",
+            "name": "Confidential Information Protection",
+            "description": "Tenant and provider data is protected through isolation, encryption, and controlled disclosure.",
+            "weight": 0.125,
+            "signals": ("active_api_keys", "active_policies", "hash_chain", "pii_evidence"),
+            "product_owners": ["Kunal", "Vidhi"],
+            "operational_owners": ["Kunal"],
+            "implementation_status": "built_in",
+            "evidence_sources": ["docs/COMPLIANCE_BOUNDARY.md", "tenant-isolation evidence", "encryption configuration", "redaction evidence"],
+            "collection_frequency": "Continuous controls; tenant-isolation test per release; quarterly key review",
         },
     ],
     "GDPR": [
@@ -323,9 +395,6 @@ def _control_traceability(db: Session, tenant_id: str, framework: str, control: 
         evidence_q = evidence_base.filter(_ilike_any(EvidenceRecord.source_reference, terms))
         evidence_rows = evidence_q.order_by(EvidenceRecord.created_at.desc()).limit(5).all()
         evidence_scope = "control"
-        if not evidence_rows:
-            evidence_rows = evidence_base.order_by(EvidenceRecord.created_at.desc()).limit(3).all()
-            evidence_scope = "framework"
 
         finding_base = db.query(Finding).filter(Finding.tenant_id == tid, Finding.framework == framework)
         finding_q = finding_base.filter(or_(
@@ -336,9 +405,6 @@ def _control_traceability(db: Session, tenant_id: str, framework: str, control: 
         ))
         finding_rows = finding_q.order_by(Finding.created_at.desc()).limit(5).all()
         finding_scope = "control"
-        if not finding_rows:
-            finding_rows = finding_base.order_by(Finding.created_at.desc()).limit(3).all()
-            finding_scope = "framework"
 
         try:
             audit_base = db.query(AuditLogMetadata).filter(
@@ -354,15 +420,12 @@ def _control_traceability(db: Session, tenant_id: str, framework: str, control: 
         ))
         audit_rows = audit_q.order_by(AuditLogMetadata.created_at.desc()).limit(5).all()
         audit_scope = "control"
-        if not audit_rows:
-            audit_rows = audit_base.order_by(AuditLogMetadata.created_at.desc()).limit(3).all()
-            audit_scope = "framework"
 
         return {
             **empty,
-            "evidence_total": evidence_base.count(),
-            "finding_total": finding_base.count(),
-            "audit_event_total": audit_base.count(),
+            "evidence_total": evidence_q.count(),
+            "finding_total": finding_q.count(),
+            "audit_event_total": audit_q.count(),
             "evidence": [
                 {
                     "id": str(row.id),
@@ -414,16 +477,34 @@ def score_control(control: dict[str, Any], metrics: FrameworkMetrics) -> dict[st
             evidence.append(evidence_item)
         if gap:
             gaps.append(gap)
+    unique_gaps = sorted(set(gaps))
+    implementation_status = control.get("implementation_status", "not_mapped")
+    if implementation_status != "built_in":
+        unique_gaps.append(f"Control implementation status is {implementation_status.replace('_', ' ')}")
+        unique_gaps = sorted(set(unique_gaps))
     control_score = round(sum(scores) / max(1, len(scores)), 1)
+    status = control_status(control_score)
+    if unique_gaps and status == "compliant":
+        control_score = min(control_score, 84.9)
+        status = "partial"
     return {
         "id": control["id"],
         "name": control["name"],
         "description": control["description"],
         "weight": control["weight"],
         "score": control_score,
-        "status": control_status(control_score),
+        "status": status,
         "evidence": sorted(set(evidence)),
-        "gaps": sorted(set(gaps)),
+        "gaps": unique_gaps,
+        "exceptions": [
+            {"status": "open", "type": "evidence_gap", "message": gap}
+            for gap in unique_gaps
+        ],
+        "product_owners": list(control.get("product_owners", [])),
+        "operational_owners": list(control.get("operational_owners", [])),
+        "implementation_status": implementation_status,
+        "evidence_sources": list(control.get("evidence_sources", [])),
+        "collection_frequency": control.get("collection_frequency", "Not mapped"),
     }
 
 
@@ -442,11 +523,31 @@ def score_framework(
     if include_traceability:
         for control, catalog_control in zip(controls, CONTROL_CATALOG[framework]):
             control["traceability"] = _control_traceability(db, tenant_id, framework, catalog_control)
+            traceability = control["traceability"]
+            if (
+                traceability["evidence_total"]
+                + traceability["finding_total"]
+                + traceability["audit_event_total"]
+                == 0
+            ):
+                gap = "No control-specific operating evidence"
+                if gap not in control["gaps"]:
+                    control["gaps"].append(gap)
+                    control["gaps"].sort()
+                    control["exceptions"].append(
+                        {"status": "open", "type": "missing_evidence", "message": gap}
+                    )
+                control["score"] = min(control["score"], 84.9)
+                if control["status"] == "compliant":
+                    control["status"] = "partial"
     overall = round(sum(control["score"] * control["weight"] for control in controls), 1)
+    framework_readiness = readiness_level(overall)
+    if framework_readiness == "audit_ready" and any(control["status"] != "compliant" for control in controls):
+        framework_readiness = "monitor"
     return {
         "framework": framework,
         "score": overall,
-        "readiness_level": readiness_level(overall),
+        "readiness_level": framework_readiness,
         "controls": controls,
         "metrics": {
             "evidence_count": metrics.evidence_count,
@@ -541,9 +642,14 @@ def score_all_frameworks(
         for framework_score in frameworks:
             upsert_score_snapshot(db, tenant_id, framework_score)
     overall = round(sum(item["score"] for item in frameworks) / len(frameworks), 1)
+    overall_readiness = readiness_level(overall)
+    if overall_readiness == "audit_ready" and any(
+        framework["readiness_level"] != "audit_ready" for framework in frameworks
+    ):
+        overall_readiness = "monitor"
     return {
         "overall_score": overall,
-        "readiness_level": readiness_level(overall),
+        "readiness_level": overall_readiness,
         "frameworks": frameworks,
         "trust_summary": _build_trust_summary(frameworks),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),

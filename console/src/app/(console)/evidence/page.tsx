@@ -44,6 +44,10 @@ interface EvidenceRecord {
   evidence_data: Record<string, unknown>;
   severity: string;
   created_at: string;
+  integrity_hash?: string;
+  integrity_algorithm?: string;
+  integrity_version?: number;
+  integrity_verified?: boolean;
   links: EvidenceLink[];
 }
 
@@ -168,6 +172,17 @@ function EvidenceDrawer({
                 <p className={`text-xs text-[#0E1726] break-all ${mono ? "font-mono" : ""}`}>{value}</p>
               </div>
             ))}
+          </div>
+
+          <div className={`rounded-lg border p-3 ${record.integrity_verified ? "border-emerald-500/20 bg-emerald-500/5" : "border-red-500/20 bg-red-500/5"}`}>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[10px] uppercase tracking-wider font-semibold text-[#6B7488]">Integrity Metadata</p>
+              <span className={`text-[10px] font-bold uppercase ${record.integrity_verified ? "text-emerald-500" : "text-red-500"}`}>
+                {record.integrity_verified ? "Verified" : "Invalid"}
+              </span>
+            </div>
+            <p className="mt-2 break-all font-mono text-[10px] text-[#475069]">{record.integrity_hash ?? "Integrity metadata not available"}</p>
+            <p className="mt-1 text-[10px] text-[#6B7488]">{(record.integrity_algorithm ?? "unknown").toUpperCase()} - canonical version {record.integrity_version ?? "unknown"}</p>
           </div>
 
           {/* Source reference */}

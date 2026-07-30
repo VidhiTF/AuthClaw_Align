@@ -9,6 +9,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.models import EvidenceRecord, EvidenceLink
+from app.core.evidence_integrity import (
+    INTEGRITY_ALGORITHM,
+    INTEGRITY_VERSION,
+    compute_evidence_integrity_hash,
+)
 from app.services import event_backbone
 
 logger = logging.getLogger("services.evidence")
@@ -91,6 +96,7 @@ def create_evidence(
         {"tenant_id": str(tenant_id)},
     )
 
+    created_at = datetime.now(tz=timezone.utc)
     record = EvidenceRecord(
         id=evidence_id,
         tenant_id=uuid.UUID(tenant_id),
@@ -101,7 +107,21 @@ def create_evidence(
         evidence_type=evidence_type,
         evidence_data=evidence_data,
         severity=severity,
-        created_at=datetime.now(tz=timezone.utc),
+        integrity_hash=compute_evidence_integrity_hash(
+            evidence_id=evidence_id,
+            tenant_id=tenant_id,
+            workflow_id=workflow_id,
+            framework=framework,
+            source_type=source_type,
+            source_reference=source_reference,
+            evidence_type=evidence_type,
+            evidence_data=evidence_data,
+            severity=severity,
+            created_at=created_at,
+        ),
+        integrity_algorithm=INTEGRITY_ALGORITHM,
+        integrity_version=INTEGRITY_VERSION,
+        created_at=created_at,
     )
     db.add(record)
 

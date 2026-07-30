@@ -878,6 +878,12 @@ class EvidenceRecord(Base):
     # Severity classification: critical | high | medium | low | info
     severity = Column(String(50), nullable=False, default="info")
 
+    # Canonical hash over tenant, source, payload, classification, and timestamp.
+    # Versioning allows the canonical form to evolve without rewriting old evidence.
+    integrity_hash = Column(String(64), nullable=False)
+    integrity_algorithm = Column(String(20), nullable=False, default="sha256")
+    integrity_version = Column(Integer, nullable=False, default=1)
+
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
     # Relationships

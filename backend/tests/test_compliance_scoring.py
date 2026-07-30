@@ -29,7 +29,7 @@ def _metrics(**overrides):
 
 
 def test_score_control_marks_strong_signal_compliant():
-    control = compliance_scoring.CONTROL_CATALOG["SOC2"][1]
+    control = next(item for item in compliance_scoring.CONTROL_CATALOG["SOC2"] if item["id"] == "CC7.2")
 
     scored = compliance_scoring.score_control(control, _metrics())
 
@@ -39,7 +39,7 @@ def test_score_control_marks_strong_signal_compliant():
 
 
 def test_score_control_penalizes_open_critical_findings():
-    control = compliance_scoring.CONTROL_CATALOG["SOC2"][3]
+    control = next(item for item in compliance_scoring.CONTROL_CATALOG["SOC2"] if item["id"] == "CC7.3")
 
     scored = compliance_scoring.score_control(
         control,
@@ -53,15 +53,80 @@ def test_score_control_penalizes_open_critical_findings():
 
 def test_score_framework_uses_catalog_weights(monkeypatch):
     monkeypatch.setattr(compliance_scoring, "collect_metrics", lambda _db, _tenant, framework: _metrics(framework=framework))
+    monkeypatch.setattr(
+        compliance_scoring,
+        "_control_traceability",
+        lambda *_args: {
+            "evidence_total": 1,
+            "finding_total": 0,
+            "audit_event_total": 1,
+            "evidence": [],
+            "findings": [],
+            "audit_events": [],
+            "links": {
+                "evidence_url": "/evidence?framework=SOC2",
+                "findings_url": "/findings?framework=SOC2",
+                "audit_url": "/audit",
+            },
+        },
+    )
 
     result = compliance_scoring.score_framework(object(), "00000000-0000-0000-0000-000000000001", "SOC2")
 
     assert result["framework"] == "SOC2"
     assert result["score"] >= 90
-    assert result["readiness_level"] == "audit_ready"
+    assert result["readiness_level"] == "monitor"
+    assert any(control["implementation_status"] == "partial" for control in result["controls"])
     assert len(result["controls"]) == len(compliance_scoring.CONTROL_CATALOG["SOC2"])
     assert result["controls"][0]["traceability"]["links"]["evidence_url"] == "/evidence?framework=SOC2"
     assert result["controls"][0]["traceability"]["links"]["findings_url"] == "/findings?framework=SOC2"
+
+
+def test_soc2_catalog_matches_frozen_p0_matrix_and_exposes_ownership():
+    controls = compliance_scoring.CONTROL_CATALOG["SOC2"]
+
+    assert [control["id"] for control in controls] == [
+        "CC6.1", "CC6.6", "CC7.1", "CC7.2", "CC7.3", "CC8.1", "A1.2", "C1.1"
+    ]
+    assert sum(control["weight"] for control in controls) == 1.0
+    assert all(control["product_owners"] for control in controls)
+    assert all(control["operational_owners"] for control in controls)
+    assert all(control["evidence_sources"] for control in controls)
+    assert all(control["collection_frequency"] for control in controls)
+
+
+def test_open_evidence_gap_cannot_be_reported_compliant():
+    control = next(item for item in compliance_scoring.CONTROL_CATALOG["SOC2"] if item["id"] == "CC6.1")
+
+    scored = compliance_scoring.score_control(control, _metrics(active_api_key_count=0))
+
+    assert scored["score"] <= 84.9
+    assert scored["status"] == "partial"
+    assert scored["exceptions"]
+    assert any("API key" in item["message"] for item in scored["exceptions"])
+
+
+def test_missing_control_specific_evidence_blocks_audit_ready(monkeypatch):
+    monkeypatch.setattr(compliance_scoring, "collect_metrics", lambda _db, _tenant, framework: _metrics(framework=framework))
+    monkeypatch.setattr(
+        compliance_scoring,
+        "_control_traceability",
+        lambda *_args: {
+            "evidence_total": 0,
+            "finding_total": 0,
+            "audit_event_total": 0,
+            "evidence": [],
+            "findings": [],
+            "audit_events": [],
+            "links": {"evidence_url": "/evidence", "findings_url": "/findings", "audit_url": "/audit"},
+        },
+    )
+
+    result = compliance_scoring.score_framework(object(), "00000000-0000-0000-0000-000000000001", "SOC2")
+
+    assert result["readiness_level"] != "audit_ready"
+    assert all(control["status"] != "compliant" for control in result["controls"])
+    assert all("No control-specific operating evidence" in control["gaps"] for control in result["controls"])
 
 
 def test_score_all_frameworks_can_skip_expensive_traceability(monkeypatch):
