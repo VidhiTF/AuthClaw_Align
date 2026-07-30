@@ -575,23 +575,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			req.URL.RawPath = ""
 		}
 		ApplyProviderCredential(req, provider, providerCredential, tenantID, target)
-		if provider == "gemini" {
-			// Existing Gemini auth — UNCHANGED
-			req.Header.Del("Authorization")
-			geminiKey := ""
-			if providerCredential != nil {
-				geminiKey = providerCredential.APIKey
-			}
-			if geminiKey == "" && tenantID == "" {
-				geminiKey = os.Getenv("GEMINI_API_KEY")
-			}
-			if geminiKey != "" {
-				req.Header.Set("x-goog-api-key", geminiKey)
-				q := req.URL.Query()
-				q.Set("key", geminiKey)
-				req.URL.RawQuery = q.Encode()
-			}
-		} else if provider == "anthropic" {
+		if provider == "anthropic" {
 			req.Header.Del("Authorization")
 			if providerCredential != nil && providerCredential.APIKey != "" {
 				req.Header.Set("x-api-key", providerCredential.APIKey)

@@ -219,9 +219,6 @@ func ApplyProviderCredential(req *http.Request, provider string, credential *Pro
 		}
 		if geminiKey != "" {
 			req.Header.Set("x-goog-api-key", geminiKey)
-			q := req.URL.Query()
-			q.Set("key", geminiKey)
-			req.URL.RawQuery = q.Encode()
 		}
 	case ProviderAnthropic:
 		req.Header.Del("Authorization")

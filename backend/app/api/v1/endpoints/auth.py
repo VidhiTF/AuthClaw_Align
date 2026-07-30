@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import jwt
 import requests
@@ -18,9 +19,11 @@ from app.api.v1.endpoints.onboarding import (
     OTP_TTL_MINUTES,
     OwnerSessionLocal,
     _deliver_otp,
+    _enforce_onboarding_rate_limit,
     _generate_otp,
     _next_resend_at,
     _otp_hash,
+    _rate_limit_hash,
     _scopes_for_role,
 )
 from app.core.passwords import hash_password, validate_password, verify_password
@@ -34,6 +37,8 @@ from app.services import event_backbone, oidc_sso
 router = APIRouter()
 logger = logging.getLogger("api.auth")
 _oidc_kafka_producer = None
+LOGIN_ACCOUNT_ATTEMPTS_PER_15_MINUTES = int(os.getenv("LOGIN_ACCOUNT_ATTEMPTS_PER_15_MINUTES", "10"))
+LOGIN_IP_ATTEMPTS_PER_MINUTE = int(os.getenv("LOGIN_IP_ATTEMPTS_PER_MINUTE", "60"))
 
 
 def _emit_oidc_audit(
@@ -98,6 +103,23 @@ class PasswordLoginResponse(BaseModel):
     role: str
     scopes: list[str]
     api_key: str
+
+
+def _enforce_password_login_rate_limit(email: str, request: Request) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    message = "Too many login attempts. Try again later."
+    _enforce_onboarding_rate_limit(
+        f"auth:login:ip:{_rate_limit_hash(client_ip)}",
+        LOGIN_IP_ATTEMPTS_PER_MINUTE,
+        60,
+        message,
+    )
+    _enforce_onboarding_rate_limit(
+        f"auth:login:account:{_rate_limit_hash(email)}",
+        LOGIN_ACCOUNT_ATTEMPTS_PER_15_MINUTES,
+        900,
+        message,
+    )
 
 
 class CurrentUserResponse(BaseModel):
@@ -367,8 +389,9 @@ def test_oidc_admin_config(request: Request, db: Session = Depends(get_tenant_db
 
 
 @router.post("/login", response_model=PasswordLoginResponse)
-def password_login(payload: PasswordLoginRequest):
+def password_login(payload: PasswordLoginRequest, request: Request):
     email = payload.email.strip().lower()
+    _enforce_password_login_rate_limit(email, request)
     db = OwnerSessionLocal()
     try:
         users = _active_users_for_email(db, email, payload.tenant_name)

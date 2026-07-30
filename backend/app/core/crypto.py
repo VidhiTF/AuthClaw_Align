@@ -144,7 +144,7 @@ def secret_management_status() -> dict:
 
 
 def decrypt_deterministic(ciphertext_str: str) -> str:
-    """Decrypts base64 encoded ciphertext using AES-256 CBC with a derived IV (matching Go gateway)"""
+    """Decrypts legacy deterministic redaction/provider ciphertext."""
     key = get_encryption_key()
     try:
         data = base64.b64decode(ciphertext_str)
@@ -178,7 +178,7 @@ def _pkcs7_pad(data: bytes) -> bytes:
 
 
 def encrypt_deterministic(plaintext: str) -> str:
-    """Encrypts plaintext using the AES-CBC format the Go gateway can decrypt."""
+    """Encrypts legacy AES-CBC ciphertext for compatibility tests only."""
     key = get_encryption_key()
     plaintext_bytes = plaintext.encode("utf-8")
     iv = hashlib.sha256(plaintext_bytes + key).digest()[:16]

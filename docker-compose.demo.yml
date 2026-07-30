@@ -45,7 +45,7 @@ services:
       retries: 10
 
   opa:
-    image: openpolicyagent/opa:latest
+    image: openpolicyagent/opa@sha256:dc009236137bb225a1ef09293bb32f2ee1861cc428870d297bf71412d50221c3
     container_name: authclaw-demo-opa
     command:
       - "run"
@@ -54,11 +54,9 @@ services:
       - "/policies"
     volumes:
       - ./infra/opa:/policies:ro
-    ports:
-      - "${OPA_PORT:-8181}:8181"
 
   presidio:
-    image: mcr.microsoft.com/presidio-analyzer:latest
+    image: mcr.microsoft.com/presidio-analyzer@sha256:286e3fa7f3a7426e775e8564fe1870f1ba8f999d3ab8bbb8cc46a44355d9d6e9
     container_name: authclaw-demo-presidio
     ports:
       - "${PRESIDIO_PORT:-3000}:3000"
@@ -124,6 +122,8 @@ services:
       ONBOARDING_SIGNUP_EMAIL_PER_HOUR: ${ONBOARDING_SIGNUP_EMAIL_PER_HOUR:-3}
       ONBOARDING_SIGNUP_IP_PER_DAY: ${ONBOARDING_SIGNUP_IP_PER_DAY:-10}
       ONBOARDING_VERIFY_IP_PER_HOUR: ${ONBOARDING_VERIFY_IP_PER_HOUR:-30}
+      LOGIN_ACCOUNT_ATTEMPTS_PER_15_MINUTES: ${LOGIN_ACCOUNT_ATTEMPTS_PER_15_MINUTES:-10}
+      LOGIN_IP_ATTEMPTS_PER_MINUTE: ${LOGIN_IP_ATTEMPTS_PER_MINUTE:-60}
       GATEWAY_RATE_LIMIT_ENABLED: ${GATEWAY_RATE_LIMIT_ENABLED:-true}
       GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-30}
       GATEWAY_RATE_LIMIT_BURST_10S: ${GATEWAY_RATE_LIMIT_BURST_10S:-10}
@@ -161,6 +161,7 @@ services:
       OPA_URL: http://opa:8181
       PRESIDIO_URL: http://presidio:3000
       PRESIDIO_ANALYZE_TIMEOUT_MS: ${PRESIDIO_ANALYZE_TIMEOUT_MS:-750}
+      REDACTION_HASH_SALT: ${REDACTION_HASH_SALT:-authclaw_redaction_salt_v1}
       KAFKA_BROKERS: ""
       ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
@@ -244,6 +245,7 @@ services:
       GATEWAY_INTERNAL_URL: http://gateway:8080
       AGENT_INTERNAL_URL: http://agent:8001
       AGENT_TIMEOUT_MS: ${AGENT_TIMEOUT_MS:-45000}
+      AUTHCLAW_ENV: ${AUTHCLAW_ENV:-demo}
       AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-demo-internal-service-secret-change-me}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:18000/api/v1}
       NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:18080}

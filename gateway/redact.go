@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -227,11 +228,13 @@ func RedactionMetricsSnapshot() map[string]uint64 {
 	}
 }
 
+const defaultRedactionHashSalt = "authclaw_redaction_salt_v1"
+
 func redactionHashSalt() string {
 	if salt := os.Getenv("REDACTION_HASH_SALT"); strings.TrimSpace(salt) != "" {
 		return salt
 	}
-	return "authclaw_redaction_salt_v1"
+	return defaultRedactionHashSalt
 }
 
 func loadCustomNERRecognizers() []CustomNERRecognizerConfig {
@@ -652,7 +655,7 @@ func fallbackAnalyze(text string, customRules []RegexRule) []AnalyzeResult {
 	return appendCustomNERAnalyzeResults(results, text)
 }
 
-// Encryption Helpers (AES-256 CBC Deterministic)
+// Encryption helpers. Deterministic CBC remains only for reading legacy rows.
 var encryptionKey []byte
 
 const secretEnvelopePrefix = "authclaw-secret-v1:"
@@ -713,6 +716,10 @@ func ValidateEnvelopeKeyConfig() error {
 	}
 	if len([]byte(keyStr)) < 32 {
 		return fmt.Errorf("ENVELOPE_KEY or ENCRYPTION_KEY must be at least 32 bytes in production")
+	}
+	redactionSalt := strings.TrimSpace(os.Getenv("REDACTION_HASH_SALT"))
+	if redactionSalt == "" || redactionSalt == defaultRedactionHashSalt || strings.Contains(redactionSalt, "change-me") {
+		return fmt.Errorf("REDACTION_HASH_SALT must be set to a non-demo secret in production")
 	}
 	return nil
 }
@@ -842,6 +849,16 @@ func DecryptDeterministic(ciphertextStr string) (string, error) {
 	}
 
 	return string(unpadded), nil
+}
+
+func redactionBlindIndex(tenantID, plaintext string) string {
+	derived := hmac.New(sha256.New, []byte(redactionHashSalt()))
+	derived.Write([]byte("authclaw-redaction-blind-index-v1"))
+	index := hmac.New(sha256.New, derived.Sum(nil))
+	index.Write([]byte(tenantID))
+	index.Write([]byte{0})
+	index.Write([]byte(plaintext))
+	return hex.EncodeToString(index.Sum(nil))
 }
 
 func EncryptSecret(plaintext string) (string, error) {
@@ -1074,11 +1091,11 @@ type cachedRedactionToken struct {
 	expiresAt time.Time
 }
 
-func redactionTokenCacheKey(tenantID, encVal, entityType, strategy string, retentionDays int) string {
+func redactionTokenCacheKey(tenantID, lookupHash, entityType, strategy string, retentionDays int) string {
 	h := sha256.New()
 	h.Write([]byte(tenantID))
 	h.Write([]byte{0})
-	h.Write([]byte(encVal))
+	h.Write([]byte(lookupHash))
 	h.Write([]byte{0})
 	h.Write([]byte(entityType))
 	h.Write([]byte{0})
@@ -1089,14 +1106,19 @@ func redactionTokenCacheKey(tenantID, encVal, entityType, strategy string, reten
 }
 
 func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, originalValue, entityType, strategy string, retentionDays int, useCache bool) (string, error) {
-	encVal, err := EncryptDeterministic(originalValue)
+	lookupHash := redactionBlindIndex(tenantID, originalValue)
+	encVal, err := EncryptSecret(originalValue)
+	if err != nil {
+		return "", err
+	}
+	legacyEncVal, err := EncryptDeterministic(originalValue)
 	if err != nil {
 		return "", err
 	}
 	cacheTTL := redactionTokenCacheTTL()
 	cacheKey := ""
 	if useCache && cacheTTL > 0 {
-		cacheKey = redactionTokenCacheKey(tenantID, encVal, entityType, strategy, retentionDays)
+		cacheKey = redactionTokenCacheKey(tenantID, lookupHash, entityType, strategy, retentionDays)
 		if raw, ok := redactionTokenCache.Load(cacheKey); ok {
 			cached, ok := raw.(cachedRedactionToken)
 			if ok && time.Now().Before(cached.expiresAt) {
@@ -1132,11 +1154,12 @@ func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, origi
 			`SELECT id::text, token_value
 			 FROM redaction_tokens
 			 WHERE tenant_id = $1
-			   AND original_value = $2
+			   AND (original_value_blind_index = $2 OR (original_value_blind_index IS NULL AND original_value = $4))
 			   AND strategy = $3
 			   AND (expires_at IS NULL OR expires_at > NOW())
-			 LIMIT 1`,
-			tenantID, encVal, strategy,
+			 LIMIT 1
+			 FOR UPDATE`,
+			tenantID, lookupHash, strategy, legacyEncVal,
 		).Scan(&tokenID, &tokenVal)
 
 		if err == nil {
@@ -1146,25 +1169,18 @@ func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, origi
 				if err != nil {
 					return err
 				}
-				_, err = tx.ExecContext(ctx,
-					`UPDATE redaction_tokens
-					 SET token_value = $1,
-					     token_hash = $2,
-					     entity_type = $5,
-					     last_used_at = NOW(),
-					     use_count = use_count + 1
-					 WHERE tenant_id = $3 AND id = $4::uuid`,
-					tokenVal, hashToken(tokenVal), tenantID, tokenID, entityType,
-				)
-				return err
 			}
 			_, err = tx.ExecContext(ctx,
 				`UPDATE redaction_tokens
-				 SET entity_type = COALESCE(entity_type, $3),
+				 SET original_value = CASE WHEN original_value_blind_index IS NULL THEN $4 ELSE original_value END,
+				     original_value_blind_index = $5,
+				     token_value = $6,
+				     token_hash = $7,
+				     entity_type = COALESCE(entity_type, $3),
 				     last_used_at = NOW(),
 				     use_count = use_count + 1
 				 WHERE tenant_id = $1 AND id = $2::uuid`,
-				tenantID, tokenID, entityType,
+				tenantID, tokenID, entityType, encVal, lookupHash, tokenVal, hashToken(tokenVal),
 			)
 			return err
 		}
@@ -1181,10 +1197,10 @@ func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, origi
 
 		err = tx.QueryRowContext(ctx, `
 			INSERT INTO redaction_tokens (
-				id, tenant_id, original_value, token_hash, token_value, strategy, entity_type, expires_at, last_used_at, use_count, created_at
+				id, tenant_id, original_value, original_value_blind_index, token_hash, token_value, strategy, entity_type, expires_at, last_used_at, use_count, created_at
 			)
-			VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW() + ($7::text || ' days')::interval, NOW(), 1, NOW())
-			ON CONFLICT (tenant_id, original_value, strategy)
+			VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW() + ($8::text || ' days')::interval, NOW(), 1, NOW())
+			ON CONFLICT (tenant_id, original_value_blind_index, strategy)
 			DO UPDATE SET
 				token_value = redaction_tokens.token_value,
 				entity_type = COALESCE(redaction_tokens.entity_type, EXCLUDED.entity_type),
@@ -1192,7 +1208,7 @@ func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, origi
 				use_count = redaction_tokens.use_count + 1
 			RETURNING token_value
 		`,
-			tenantID, encVal, tokenHash, tokenVal, strategy, entityType, retentionDaysOrDefault(retentionDays),
+			tenantID, encVal, lookupHash, tokenHash, tokenVal, strategy, entityType, retentionDaysOrDefault(retentionDays),
 		).Scan(&tokenVal)
 		if err == nil {
 			redactionTokensCreatedTotal.Add(1)

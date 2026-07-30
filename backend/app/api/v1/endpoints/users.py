@@ -7,7 +7,7 @@ import pyotp
 import qrcode
 import io
 import base64
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db.models import APIKey, OnboardingEmailOTP, Tenant, User
 from app.schemas.models import UserCreate, UserInviteRequest, UserInviteResponse, UserResponse
@@ -49,6 +49,10 @@ class MFASetupResponse(MFASecurityResponse):
     provisioning_uri: str
     backup_codes: list[str]
     qr_code_base64: str
+
+
+class MFADisableRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=64)
 
 
 @router.get("", response_model=list[UserResponse], dependencies=[require_roles(["owner", "admin"])])
@@ -117,7 +121,7 @@ def setup_my_mfa(request: Request, db: Session = Depends(get_tenant_db)):
 
 
 @router.post("/me/mfa/disable", response_model=MFASecurityResponse)
-def disable_my_mfa(request: Request, db: Session = Depends(get_tenant_db)):
+def disable_my_mfa(body: MFADisableRequest, request: Request, db: Session = Depends(get_tenant_db)):
     """Disable TOTP MFA for the current console principal."""
     user = db.query(User).filter(
         User.id == request.state.user_id,
@@ -125,6 +129,14 @@ def disable_my_mfa(request: Request, db: Session = Depends(get_tenant_db)):
     ).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if not user.mfa_enabled or not user.mfa_secret:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
+
+    code = body.code.strip()
+    valid_totp = pyotp.TOTP(user.mfa_secret).verify(code, valid_window=1)
+    valid_backup = code.lower() in (user.mfa_backup_codes or [])
+    if not valid_totp and not valid_backup:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid MFA token or backup code")
 
     user.mfa_enabled = False
     user.mfa_secret = None

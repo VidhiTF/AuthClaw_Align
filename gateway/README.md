@@ -31,7 +31,7 @@ order and rollback decision.
 | Anthropic | `/v1/messages` | `x-api-key` plus `anthropic-version` | Anthropic `content_block_delta` events |
 | Cohere | `/v2/chat` | `Authorization: Bearer <provider key>` | Cohere `content-delta` events |
 | Azure OpenAI | `/v1/chat/completions` with `X-Provider: azure_openai`, backed by a deployment-scoped endpoint, or direct `/openai/deployments/.../chat/completions` | `api-key` plus `api-version` query | OpenAI-compatible chat deltas |
-| Gemini | `/v1/models/{model}:generateContent` | `x-goog-api-key` plus `key` query | Gemini candidate part deltas |
+| Gemini | `/v1/models/{model}:generateContent` | `x-goog-api-key` | Gemini candidate part deltas |
 
 For Azure OpenAI, save the provider credential endpoint as the deployment-scoped URL, for example
 `https://YOUR_RESOURCE.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT/chat/completions`.

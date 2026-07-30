@@ -174,14 +174,14 @@ Return ONLY a JSON response matching this schema:
 }}
 Do not include markdown packaging like ```json.
 """
-            url = f"{api_url}/v1beta/models/{model}:generateContent?key={api_key}"
+            url = f"{api_url}/v1beta/models/{model}:generateContent"
             payload = {
                 "contents": [{
                     "role": "user",
                     "parts": [{"text": prompt}]
                 }]
             }
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, timeout=15)
             if res.status_code == 200:
                 data = res.json()
                 ai_text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
