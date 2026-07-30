@@ -63,6 +63,25 @@ def test_score_framework_uses_catalog_weights(monkeypatch):
     assert result["controls"][0]["traceability"]["links"]["findings_url"] == "/findings?framework=SOC2"
 
 
+def test_score_all_frameworks_can_skip_expensive_traceability(monkeypatch):
+    monkeypatch.setattr(compliance_scoring, "collect_metrics", lambda _db, _tenant, framework: _metrics(framework=framework))
+    monkeypatch.setattr(
+        compliance_scoring,
+        "_control_traceability",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("traceability should be skipped")),
+    )
+
+    result = compliance_scoring.score_all_frameworks(
+        object(),
+        "00000000-0000-0000-0000-000000000001",
+        persist=False,
+        include_traceability=False,
+    )
+
+    assert len(result["frameworks"]) == 3
+    assert all("traceability" not in control for framework in result["frameworks"] for control in framework["controls"])
+
+
 def test_readiness_levels_are_stable():
     assert compliance_scoring.readiness_level(95) == "audit_ready"
     assert compliance_scoring.readiness_level(80) == "monitor"
