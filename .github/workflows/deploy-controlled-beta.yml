@@ -2,7 +2,7 @@ name: Deploy Controlled Beta
 
 on:
   workflow_run:
-    workflows: ["AuthClaw CI/CD Hard Gates"]
+    workflows: ["AuthClaw Minimal Master CI"]
     branches: [master]
     types: [completed]
 

@@ -27,6 +27,12 @@ trigger Actions. `ACL-14 Required Checks` is therefore a post-merge release gate
 than a merge-blocking status check. Owner review, Code Owner review, resolved
 conversations, linear history, and force-push/deletion protections remain required.
 
+The default master gate uses one path-aware runner and essential component checks.
+Relevant code changes retain CodeQL, secret scanning, and filesystem/dependency/IaC
+scanning. Full-stack integration, benchmarks, and Playwright are not part of every
+push. Release images are built and scanned only when the controlled-beta environment
+is enabled; Terraform validation runs only for relevant changes.
+
 This intentionally changes the pre-merge portion of the original decision below.
 Applicable local tests must be run before review, and a failed master run blocks release
 and controlled-beta deployment.

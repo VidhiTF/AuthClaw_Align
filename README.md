@@ -63,10 +63,11 @@ not match.
 
 ## Delivery and controlled beta
 
-Master-only CI exposes `ACL-14 Required Checks`, one aggregate status that succeeds only after the
-build, test, secret, dependency, compliance, integration, benchmark, and image-scan jobs
-pass following a push to `master`. Feature branches and pull requests do not trigger
-GitHub Actions. A successful hard-gate run on `master` triggers the controlled-beta workflow, but
+Master-only CI exposes `ACL-14 Required Checks`. One runner detects changed components
+and runs their essential backend, gateway, console, agent, audit, SDK, or Terraform
+checks. Feature branches and pull requests do not trigger GitHub Actions. Expensive
+release-image builds run only while `CONTROLLED_BETA_ENABLED=true`. A successful run
+on `master` triggers the controlled-beta workflow, but
 its deployment job runs only when the `controlled-beta` environment variable
 `CONTROLLED_BETA_ENABLED` is `true` and every required AWS/DNS input exists.
 

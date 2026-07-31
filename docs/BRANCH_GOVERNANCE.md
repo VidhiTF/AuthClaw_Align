@@ -16,9 +16,8 @@
 - Dismiss stale approvals after new commits.
 - Require all conversations to be resolved.
 - Require signed commits where the GitHub plan supports it.
-- Run `ACL-14 Required Checks` after each push to `master`. It remains the stable
-  aggregate for every build, test, dependency/secret scan, integration, compliance,
-  and image-scan gate, but it is not a pre-merge required status check.
+- Run `ACL-14 Required Checks` after each push to `master`. It is the stable,
+  path-aware essential-check gate, but it is not a pre-merge required status check.
 - Do not allow branch deletion.
 
 ## Required GitHub rules for `dev/*`
@@ -32,8 +31,8 @@
 ## GitHub Actions execution policy
 
 - `.github/workflows/ci.yml` runs only for pushes to `master`.
-- `.github/workflows/terraform.yml` runs only for Terraform-related pushes to
-  `master`.
+- Terraform format and validation run inside the master CI only when Terraform files
+  change.
 - `.github/workflows/deploy-controlled-beta.yml` runs only after the master CI
   workflow completes successfully.
 - No workflow uses `pull_request`, `schedule`, or `workflow_dispatch` triggers.
@@ -44,6 +43,14 @@
 This is a post-merge validation model. Contributors must run the documented local
 test suites before requesting review. A failed master CI run blocks release and
 deployment, but it cannot block the merge that caused the failure.
+
+The default workflow uses one runner, detects changed paths without a third-party
+filter action, and runs only the affected backend, gateway, console, agent, audit,
+SDK, or Terraform checks. Relevant code changes retain CodeQL, secret scanning, and
+filesystem/dependency/IaC scanning. Full-stack benchmarks and Playwright belong in
+explicit local/release verification rather than every master push. The six
+release-image build-and-scan jobs run only while
+`CONTROLLED_BETA_ENABLED=true`.
 
 Developers branch from their assigned `dev/*` branch and use
 `feat|fix|chore/<area>/<JIRA-KEY>-slug`, for example

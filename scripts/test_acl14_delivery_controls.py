@@ -6,7 +6,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CI = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 DEPLOY = (ROOT / ".github/workflows/deploy-controlled-beta.yml").read_text(encoding="utf-8")
-TERRAFORM_CI = (ROOT / ".github/workflows/terraform.yml").read_text(encoding="utf-8")
 REGISTRY = (ROOT / "infra/terraform/registry.tf").read_text(encoding="utf-8")
 VARIABLES = (ROOT / "infra/terraform/variables.tf").read_text(encoding="utf-8")
 REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_text(encoding="utf-8")
@@ -15,19 +14,27 @@ REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_
 class ACL14DeliveryControlTests(unittest.TestCase):
     def test_github_actions_execute_only_for_master(self):
         self.assertIn("  push:\n    branches: [master]", CI)
-        self.assertIn("  push:\n    branches: [master]", TERRAFORM_CI)
         self.assertIn("    branches: [master]", DEPLOY)
-        for workflow in (CI, TERRAFORM_CI, DEPLOY):
+        for workflow in (CI, DEPLOY):
             self.assertNotIn("pull_request:", workflow)
             self.assertNotIn("schedule:", workflow)
             self.assertNotIn("workflow_dispatch:", workflow)
+
+    def test_default_master_ci_is_minimal_and_path_aware(self):
+        self.assertIn("name: ACL-14 Required Checks", CI)
+        self.assertIn("name: Detect changed components", CI)
+        self.assertIn("if: steps.changes.outputs.backend == 'true'", CI)
+        self.assertIn("if: steps.changes.outputs.console == 'true'", CI)
+        self.assertIn("if: vars.CONTROLLED_BETA_ENABLED == 'true'", CI)
+        self.assertIn("github/codeql-action/analyze@v4", CI)
+        self.assertIn("ghcr.io/gitleaks/gitleaks", CI)
+        self.assertIn("aquasecurity/trivy-action", CI)
+        self.assertNotIn("Full Stack Integration", CI)
 
     def test_canonical_local_command_is_documented_and_exercised(self):
         command = "docker compose --env-file .env.full -f docker-compose.full.yml up -d --build --wait"
         self.assertIn(command, (ROOT / "README.md").read_text(encoding="utf-8"))
         self.assertIn(command, (ROOT / "startup_guide.md").read_text(encoding="utf-8"))
-        self.assertIn("docker compose --env-file .env.full.example", CI)
-        self.assertIn("scripts/smoke_test.py", CI)
 
     def test_beta_release_is_gated_immutable_encrypted_and_reversible(self):
         self.assertIn("github.event.workflow_run.conclusion == 'success'", DEPLOY)

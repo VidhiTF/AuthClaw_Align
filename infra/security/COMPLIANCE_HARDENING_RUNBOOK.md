@@ -26,7 +26,9 @@ python scripts/no_credential_proof.py infra/security/no_credential_proof.local.j
 
 ## Vulnerability Management
 
-1. Every release must pass CodeQL, dependency audits, secret scan, IaC scan, and container scan.
+1. Retain the master CI CodeQL, dependency/filesystem, secret, and IaC scan evidence.
+   Controlled-beta images are also scanned for high/critical vulnerabilities before
+   they are pushed.
 2. Critical, high, and medium external pentest findings must be closed and retested before release approval.
 3. Findings stay open until the fix commit, retest evidence, and owner approval are attached.
 4. Link the closed finding set to SOC 2 CC7.1 and CC7.3 evidence.
