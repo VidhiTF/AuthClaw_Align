@@ -19,6 +19,18 @@ required cloud resources, credentials, and repository-owner authentication exist
 edge and DNS design. [ADR-0005](0005-acl-11-canonical-agent-api.md) defines the canonical
 agent contract consumed by this delivery baseline.
 
+## 2026-07-31 execution-policy amendment
+
+To minimize GitHub Actions usage, repository automation now executes only for pushes
+to `master`. Pull requests, feature branches, schedules, and manual dispatches do not
+trigger Actions. `ACL-14 Required Checks` is therefore a post-merge release gate rather
+than a merge-blocking status check. Owner review, Code Owner review, resolved
+conversations, linear history, and force-push/deletion protections remain required.
+
+This intentionally changes the pre-merge portion of the original decision below.
+Applicable local tests must be run before review, and a failed master run blocks release
+and controlled-beta deployment.
+
 ## Decision
 
 1. The canonical local startup command is:

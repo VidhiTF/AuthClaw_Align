@@ -1,20 +1,14 @@
 name: Terraform IaC Gates
 
 on:
-  pull_request:
-    paths:
-      - "infra/terraform/**"
-      - ".github/workflows/terraform.yml"
   push:
-    branches: [main, master]
+    branches: [master]
     paths:
       - "infra/terraform/**"
       - ".github/workflows/terraform.yml"
-  workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
   group: authclaw-terraform-${{ github.ref }}

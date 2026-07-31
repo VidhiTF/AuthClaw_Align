@@ -35,8 +35,10 @@ deployment job safely skipped.
 
 ## Branch protection
 
-The CI workflow exposes one stable required context, `ACL-14 Required Checks`, after
-all build, test, secret, dependency, integration, compliance, and image-scan jobs pass.
+The master-only CI workflow exposes one stable post-merge context,
+`ACL-14 Required Checks`, after all build, test, secret, dependency, integration,
+compliance, and image-scan jobs pass. It is release/deployment evidence, not a
+pre-merge required status check.
 An authenticated repository owner can apply the checked-in protection configuration:
 
 ```powershell

@@ -63,9 +63,10 @@ not match.
 
 ## Delivery and controlled beta
 
-CI exposes `ACL-14 Required Checks`, one aggregate status that succeeds only after the
+Master-only CI exposes `ACL-14 Required Checks`, one aggregate status that succeeds only after the
 build, test, secret, dependency, compliance, integration, benchmark, and image-scan jobs
-pass. A successful hard-gate run on `master` triggers the controlled-beta workflow, but
+pass following a push to `master`. Feature branches and pull requests do not trigger
+GitHub Actions. A successful hard-gate run on `master` triggers the controlled-beta workflow, but
 its deployment job runs only when the `controlled-beta` environment variable
 `CONTROLLED_BETA_ENABLED` is `true` and every required AWS/DNS input exists.
 
@@ -99,11 +100,10 @@ See `docs/COMPLIANCE_BOUNDARY.md`, `docs/ARCHITECTURE.md`, and
 - `dev/vidhi` — `services/agent/**` work.
 - `dev/ravi` — `console/**` and console contract-adapter work.
 
-Changes reach `master` through pull requests, passing required CI checks and owner
-review. Feature branches use `feat|fix|chore/<area>/<JIRA-KEY>-slug`, for example
+Changes reach `master` through pull requests and owner review. CI runs after merge on
+`master`, so contributors must run the applicable local tests before review. Feature branches use `feat|fix|chore/<area>/<JIRA-KEY>-slug`, for example
 `feat/infra/ACL-14-encrypted-beta`. The repository owner must apply the checked-in
-protection payload after `ACL-14 Required Checks` has run on `master`; `CODEOWNERS` alone
-does not enforce these rules.
+protection payload; `CODEOWNERS` alone does not enforce these rules.
 
 ## Provenance
 
