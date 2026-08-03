@@ -130,6 +130,9 @@ jobs:
       - name: Backend security and compliance tests
         if: steps.changes.outputs.backend == 'true'
         shell: bash
+        env:
+          DATABASE_URL: postgresql+psycopg://test:test@127.0.0.1:1/authclaw_ci_test
+          OWNER_DATABASE_URL: postgresql+psycopg://test:test@127.0.0.1:1/authclaw_ci_test
         run: |
           python -m venv .ci-backend
           .ci-backend/bin/python -m pip install --require-hashes -r backend/requirements-test.txt
