@@ -20,6 +20,11 @@ class ACL10CryptographyControlTests(unittest.TestCase):
         self.assertIn("certificate_arn   = var.certificate_arn", REGIONAL_STACK)
         self.assertIn('ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"', REGIONAL_STACK)
 
+    def test_production_refuses_the_current_plaintext_service_topology(self):
+        self.assertIn('name = "AUTHCLAW_REQUIRE_SERVICE_TLS"', REGIONAL_STACK)
+        self.assertIn('var.authclaw_env != "production" || alltrue([', REGIONAL_STACK)
+        self.assertIn("Production is blocked until agent, gateway, OPA, and Presidio", REGIONAL_STACK)
+
 
 if __name__ == "__main__":
     unittest.main()

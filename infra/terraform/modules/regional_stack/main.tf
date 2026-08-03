@@ -65,6 +65,7 @@ locals {
 
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
+    { name = "AUTHCLAW_REQUIRE_SERVICE_TLS", value = tostring(var.authclaw_env == "production") },
     { name = "AUTHCLAW_SECRET_PROVIDER", value = "env" },
     { name = "AUTHCLAW_SECRET_KEY_VERSION", value = "v1" },
     { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379" },
@@ -716,6 +717,18 @@ resource "aws_ecs_task_definition" "service" {
       } : {}
     )
   ])
+
+  lifecycle {
+    precondition {
+      condition = var.authclaw_env != "production" || alltrue([
+        startswith(local.internal_agent_url, "https://"),
+        startswith(local.internal_opa_url, "https://"),
+        startswith(local.internal_presidio_url, "https://"),
+        startswith("http://gateway.${local.namespace_name}:8080", "https://")
+      ])
+      error_message = "Production is blocked until agent, gateway, OPA, and Presidio have real internal HTTPS endpoints."
+    }
+  }
 
   tags = var.tags
 }

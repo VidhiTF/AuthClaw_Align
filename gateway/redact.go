@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -732,12 +733,17 @@ func serviceTLSEnforced() bool {
 	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
+func isHTTPSURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	return err == nil && parsed.Scheme == "https" && parsed.Hostname() != ""
+}
+
 func ValidateServiceTLSConfig() error {
 	if !serviceTLSEnforced() {
 		return nil
 	}
 	for _, name := range []string{"OPA_URL", "PRESIDIO_URL"} {
-		if !strings.HasPrefix(strings.TrimSpace(os.Getenv(name)), "https://") {
+		if !isHTTPSURL(os.Getenv(name)) {
 			return fmt.Errorf("%s must use https when service TLS is required", name)
 		}
 	}

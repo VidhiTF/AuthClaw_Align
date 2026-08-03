@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import re
+from urllib.parse import urlparse
 import yaml
 from database import DATABASE_URL
 from services.secret_manager import SecretManager, SecretValidationError, bootstrap_local_process_secrets
@@ -9,6 +10,11 @@ from services.secret_manager import SecretManager, SecretValidationError, bootst
 logger = logging.getLogger("authclaw.startup.validation")
 
 POLICY_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
+def _is_https_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    return parsed.scheme == "https" and bool(parsed.hostname)
 
 
 def _normalize_policy_list(data: dict, key: str) -> list:
@@ -295,8 +301,11 @@ def validate_production_environment() -> list:
 
     if os.getenv("AUTHCLAW_OPA_ENABLED", "true").lower() in {"0", "false", "no", "off"}:
         errors.append("Production requires AUTHCLAW_OPA_ENABLED=true because OPA is the enforcement path.")
-    if not os.getenv("AUTHCLAW_OPA_POLICY_URL"):
+    opa_policy_url = os.getenv("AUTHCLAW_OPA_POLICY_URL", "")
+    if not opa_policy_url:
         errors.append("Production requires AUTHCLAW_OPA_POLICY_URL.")
+    elif not _is_https_url(opa_policy_url):
+        errors.append("Production requires AUTHCLAW_OPA_POLICY_URL to use HTTPS.")
 
     document_storage = os.getenv("AUTHCLAW_DOCUMENT_STORAGE_BACKEND", "local").lower()
     if document_storage not in {"local", "s3"}:

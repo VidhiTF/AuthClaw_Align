@@ -155,6 +155,18 @@ def test_service_tls_boundary_rejects_plaintext_internal_urls(monkeypatch):
     assert "OPA_URL must use https" in str(exc.value)
 
 
+@pytest.mark.parametrize("invalid_url", ["https://", "https:///opa", "not-a-url"])
+def test_service_tls_boundary_rejects_malformed_https_urls(monkeypatch, invalid_url):
+    monkeypatch.setenv("AUTHCLAW_ENV", "staging")
+    monkeypatch.setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true")
+    monkeypatch.setenv("GATEWAY_INTERNAL_URL", invalid_url)
+    monkeypatch.setenv("OPA_URL", "https://opa.internal")
+    monkeypatch.setenv("PRESIDIO_URL", "https://presidio.internal")
+
+    with pytest.raises(RuntimeError, match="GATEWAY_INTERNAL_URL must use https"):
+        validate_production_environment()
+
+
 def test_production_kms_provider_requires_key_identifier(monkeypatch):
     monkeypatch.setenv("AUTHCLAW_ENV", "production")
     monkeypatch.setenv("JWT_SECRET", "a" * 32)
