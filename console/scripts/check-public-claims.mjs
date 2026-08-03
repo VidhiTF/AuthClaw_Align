@@ -84,7 +84,9 @@ async function filesUnder(root) {
 const violations = [];
 let publicSource = "";
 for (const root of roots) {
-  if (!(await stat(root)).isDirectory()) {
+  try {
+    if (!(await stat(root)).isDirectory()) continue;
+  } catch {
     continue;
   }
   for (const file of await filesUnder(root)) {
