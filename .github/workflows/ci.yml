@@ -166,7 +166,7 @@ jobs:
             -r services/agent/requirements-test.txt
           .ci-agent/bin/python -m compileall -q services/agent
           cd services/agent
-          ../../.ci-agent/bin/python -m pytest -p no:cacheprovider tests/test_sensitive_data_detection.py -q
+          ../../.ci-agent/bin/python -m pytest --noconftest -p no:cacheprovider tests/test_sensitive_data_detection.py -q
 
       - name: Python SDK tests
         if: steps.changes.outputs.sdk == 'true'
