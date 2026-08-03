@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
+from app.api.v1.endpoints import cloud as cloud_endpoint
 from app.db.models import CloudConnector
 from app.services import cloud_connectors
 
@@ -46,3 +49,38 @@ def test_serialize_connector_never_returns_encrypted_secret():
     assert payload["metadata"] == {"owner": "acme", "repo": "app"}
     assert "encrypted_secret" not in payload
     assert "token" not in payload
+
+
+def test_cloud_action_sanitizes_provider_errors(monkeypatch, caplog):
+    connector = SimpleNamespace(id=uuid4(), provider="aws")
+    request = SimpleNamespace(
+        state=SimpleNamespace(tenant_id=uuid4(), user_id=uuid4()),
+        headers={"x-request-id": "req-1"},
+    )
+    provider_error = (
+        "AccessDenied for arn:aws:iam::123456789012:user/example while calling ListBuckets"
+    )
+
+    monkeypatch.setattr(cloud_endpoint, "_get_connector", lambda *_: connector)
+    monkeypatch.setattr(
+        cloud_connectors,
+        "run_action",
+        lambda *_: (_ for _ in ()).throw(RuntimeError(provider_error)),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        cloud_endpoint.run_cloud_connector_action(
+            connector.id,
+            "inventory",
+            cloud_endpoint.CloudActionRequest(),
+            request,
+            SimpleNamespace(),
+        )
+
+    assert caught.value.status_code == 502
+    assert caught.value.detail == (
+        "Cloud provider action failed. Check connector permissions and try again."
+    )
+    assert "AccessDenied" not in caught.value.detail
+    assert "arn:aws" not in caught.value.detail
+    assert provider_error in caplog.text
