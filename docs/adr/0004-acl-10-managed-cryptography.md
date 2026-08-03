@@ -59,7 +59,7 @@ Commands:
 
 ```text
 pytest backend/tests/test_secret_crypto.py -q
-python -m unittest discover -s services/agent/smoke_tests -v
+cd services/agent && python -m unittest discover -s smoke_tests -v
 go -C gateway test ./...
 python -m unittest scripts/test_acl10_cryptography_controls.py scripts/test_no_credential_proof.py
 terraform -chdir=infra/terraform validate

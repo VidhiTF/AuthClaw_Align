@@ -42,8 +42,7 @@ The checked-in defaults are for local development only. Production startup is de
 to fail closed when required encryption, signing, SSO, or secret-manager settings are
 missing.
 
-CI validates this Compose model and starts the same full stack before running
-`scripts/smoke_test.py`. See `startup_guide.md` for verification and shutdown commands.
+See `startup_guide.md` for local verification and shutdown commands.
 
 ## Python dependency locks
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from app.api.v1.endpoints.workflows import _verify_mfa_if_enabled
 from app.db.models import CloudConnector, User
 from app.services import cloud_connectors
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -114,4 +116,14 @@ def run_cloud_connector_action(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.exception(
+            "Cloud connector action failed provider=%s action=%s connector_id=%s request_id=%s",
+            connector.provider,
+            action,
+            connector.id,
+            request.headers.get("x-request-id", ""),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Cloud provider action failed. Check connector permissions and try again.",
+        ) from exc

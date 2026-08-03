@@ -1,5 +1,6 @@
 """Startup validation for production Lite deployments."""
 import os
+from urllib.parse import urlparse
 
 
 _DEMO_VALUES = {
@@ -28,6 +29,11 @@ def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _is_https_url(value: str | None) -> bool:
+    parsed = urlparse((value or "").strip())
+    return parsed.scheme == "https" and bool(parsed.hostname)
+
+
 def validate_production_environment() -> None:
     production = is_production()
     require_service_tls = _truthy(
@@ -40,7 +46,7 @@ def validate_production_environment() -> None:
     if require_service_tls:
         for name in ("GATEWAY_INTERNAL_URL", "OPA_URL", "PRESIDIO_URL"):
             value = os.getenv(name, "").strip()
-            if not value.startswith("https://"):
+            if not _is_https_url(value):
                 errors.append(f"{name} must use https when service TLS is required")
 
     if not production:
@@ -91,7 +97,7 @@ def validate_production_environment() -> None:
         errors.append("INTERNAL_LAUNCH_OWNER_EMAIL must be configured")
 
     public_gateway = os.getenv("PUBLIC_GATEWAY_URL") or os.getenv("NEXT_PUBLIC_GATEWAY_URL", "")
-    if public_gateway and not public_gateway.startswith("https://"):
+    if public_gateway and not _is_https_url(public_gateway):
         errors.append("PUBLIC_GATEWAY_URL/NEXT_PUBLIC_GATEWAY_URL must use https:// in production")
 
     oidc_values = {
@@ -102,7 +108,7 @@ def validate_production_environment() -> None:
     if any(oidc_values.values()) and not all(oidc_values.values()):
         missing = ", ".join(name for name, value in oidc_values.items() if not value)
         errors.append(f"OIDC is partially configured; missing {missing}")
-    if oidc_values["OIDC_REDIRECT_URI"] and not oidc_values["OIDC_REDIRECT_URI"].startswith("https://"):
+    if oidc_values["OIDC_REDIRECT_URI"] and not _is_https_url(oidc_values["OIDC_REDIRECT_URI"]):
         errors.append("OIDC_REDIRECT_URI must use https in production")
 
     if errors:

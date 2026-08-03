@@ -722,6 +722,36 @@ func TestValidateServiceTLSConfigAcceptsHTTPSServiceURLs(t *testing.T) {
 	}
 }
 
+func TestValidateServiceTLSConfigRejectsMalformedHTTPSURLs(t *testing.T) {
+	t.Setenv("AUTHCLAW_ENV", "staging")
+	t.Setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true")
+	t.Setenv("PRESIDIO_URL", "https://presidio.internal:3000")
+
+	for _, value := range []string{"https://", "https:///opa", "not-a-url"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("OPA_URL", value)
+			if err := ValidateServiceTLSConfig(); err == nil {
+				t.Fatalf("expected malformed TLS URL %q to be rejected", value)
+			}
+		})
+	}
+}
+
+func TestDefaultHTTPClientRejectsUntrustedTLSCertificate(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	response, err := presidioClientHTTP.Get(server.URL)
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected the default Presidio client to reject an untrusted certificate")
+	}
+}
+
 func TestRedactEngine(t *testing.T) {
 	// 1. Init DB
 	InitDB()
