@@ -222,21 +222,19 @@ export default function FrameworksPage() {
     setLoading(true);
     setError(null);
     try {
-      const [scoreRes, frameworkRes] = await Promise.all([
-        fetch("/api/compliance-scores?persist_snapshot=false"),
-        fetch(`/api/compliance-scores/${activeFramework}`),
-      ]);
-      if (scoreRes.status === 401 || frameworkRes.status === 401) {
+      const scoreRes = await fetch("/api/compliance-scores?persist_snapshot=false");
+      if (scoreRes.status === 401) {
         window.location.href = "/login";
         return;
       }
-      if (!scoreRes.ok || !frameworkRes.ok) throw new Error("Failed to load framework scores");
+      if (!scoreRes.ok) throw new Error("Failed to load framework scores");
       const scoreData = await scoreRes.json() as ComplianceScoreState;
-      const frameworkData = await frameworkRes.json() as FrameworkScore;
-      setScores({
-        ...scoreData,
-        frameworks: scoreData.frameworks.map((item) => item.framework === activeFramework ? frameworkData : item),
-      });
+      const frameworkData = scoreData.frameworks.find((item) => item.framework === activeFramework);
+      if (!frameworkData || frameworkData.generated_at !== scoreData.generated_at
+        || (scoreData.trust_summary && scoreData.trust_summary.generated_at !== scoreData.generated_at)) {
+        throw new Error("Compliance snapshot mismatch");
+      }
+      setScores(scoreData);
       const historyRes = await fetch(`/api/compliance-scores/history?framework=${activeFramework}&days=30`);
       if (historyRes.status === 401) {
         window.location.href = "/login";

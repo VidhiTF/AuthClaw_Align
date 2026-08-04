@@ -84,9 +84,14 @@ async function filesUnder(root) {
 const violations = [];
 let publicSource = "";
 for (const root of roots) {
+  let rootStat;
   try {
-    if (!(await stat(root)).isDirectory()) continue;
-  } catch {
+    rootStat = await stat(root);
+  } catch (error) {
+    if (error?.code === "ENOENT") continue;
+    throw error;
+  }
+  if (!rootStat.isDirectory()) {
     continue;
   }
   for (const file of await filesUnder(root)) {

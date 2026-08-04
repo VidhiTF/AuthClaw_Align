@@ -154,6 +154,24 @@ def disable_my_mfa(body: MFADisableRequest, request: Request, db: Session = Depe
 def list_pending_invites(request: Request, db: Session = Depends(get_tenant_db)):
     """List pending tenant member invites."""
     tenant_id = request.state.tenant_id
+    expired = db.query(OnboardingEmailOTP).filter(
+        OnboardingEmailOTP.tenant_id == tenant_id,
+        OnboardingEmailOTP.status == "pending",
+        OnboardingEmailOTP.purpose == "invite",
+        OnboardingEmailOTP.expires_at < datetime.now(timezone.utc),
+    ).all()
+    if expired:
+        for row in expired:
+            row.status = "expired"
+        db.commit()
+        for row in expired:
+            _emit_invitation_audit(
+                row,
+                "InviteExpired",
+                "invitation_expired",
+                request.headers.get("x-request-id", ""),
+                200,
+            )
     rows = db.query(OnboardingEmailOTP).filter(
         OnboardingEmailOTP.tenant_id == tenant_id,
         OnboardingEmailOTP.status == "pending",

@@ -237,6 +237,8 @@ class DataSubjectRequestService:
         if not user:
             return {"user": None, "api_keys": [], "audit_metadata": []}
 
+        datasets = set(record.scope.get("datasets", ("user", "api_keys", "audit_metadata")))
+
         api_keys = (
             db.query(APIKey)
             .filter(
@@ -267,7 +269,7 @@ class DataSubjectRequestService:
                 "last_login": _timestamp(user.last_login),
                 "created_at": _timestamp(user.created_at),
                 "updated_at": _timestamp(user.updated_at),
-            },
+            } if "user" in datasets else None,
             "api_keys": [
                 {
                     "id": str(key.id),
@@ -283,7 +285,7 @@ class DataSubjectRequestService:
                     "created_at": _timestamp(key.created_at),
                     "updated_at": _timestamp(key.updated_at),
                 }
-                for key in api_keys
+                for key in api_keys if "api_keys" in datasets
             ],
             "audit_metadata": [
                 {
@@ -298,7 +300,7 @@ class DataSubjectRequestService:
                     "frameworks_affected": list(item.frameworks_affected or []),
                     "created_at": _timestamp(item.created_at),
                 }
-                for item in audit_records
+                for item in audit_records if "audit_metadata" in datasets
             ],
         }
 
@@ -387,6 +389,8 @@ class DataSubjectRequestService:
         if not user:
             return {}, {}, []
 
+        datasets = set(record.scope.get("datasets", ("api_keys", "notifications", "onboarding_status")))
+
         tenant_keys = (
             db.query(APIKey)
             .filter(
@@ -406,7 +410,7 @@ class DataSubjectRequestService:
             )
             .count()
         )
-        if key_ids:
+        if key_ids and "api_keys" in datasets:
             db.query(OnboardingEmailOTP).filter(
                 OnboardingEmailOTP.tenant_id == record.tenant_id,
                 OnboardingEmailOTP.api_key_id.in_(key_ids),
@@ -421,19 +425,19 @@ class DataSubjectRequestService:
             ).delete(synchronize_session=False)
 
         deleted = {
-            "api_keys": len(key_ids),
+            "api_keys": len(key_ids) if "api_keys" in datasets else 0,
             "notifications": db.query(Notification)
             .filter(
                 Notification.tenant_id == record.tenant_id,
                 Notification.user_id == user.id,
             )
-            .delete(synchronize_session=False),
+            .delete(synchronize_session=False) if "notifications" in datasets else 0,
             "onboarding_status": db.query(OnboardingStatus)
             .filter(
                 OnboardingStatus.tenant_id == record.tenant_id,
                 OnboardingStatus.user_id == user.id,
             )
-            .delete(synchronize_session=False),
+            .delete(synchronize_session=False) if "onboarding_status" in datasets else 0,
         }
         audit_count = (
             db.query(AuditLogMetadata)

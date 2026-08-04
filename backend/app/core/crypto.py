@@ -62,6 +62,8 @@ def _vault_key_material(version: str) -> str:
     field = os.getenv("VAULT_SECRET_KEY_FIELD", "key")
     if not addr or not token:
         raise RuntimeError("VAULT_ADDR and VAULT_TOKEN are required for AUTHCLAW_SECRET_PROVIDER=vault")
+    if not addr.startswith("https://"):
+        raise RuntimeError("VAULT_ADDR must use https")
 
     response = requests.get(
         f"{addr}/v1/{path}",

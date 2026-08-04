@@ -133,6 +133,22 @@ def test_oidc_authorization_url_includes_state_and_nonce():
     assert "response_type=code" in url
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    ("authorization_endpoint", "token_endpoint", "jwks_uri"),
+)
+def test_oidc_config_rejects_plaintext_endpoint(endpoint):
+    payload = {
+        "issuer": "https://idp.example.com",
+        "client_id": "authclaw-console",
+        "redirect_uri": "https://authclaw.example.com/callback",
+        endpoint: "http://idp.example.com/endpoint",
+    }
+
+    with pytest.raises(ValueError, match="endpoints must use https"):
+        oidc_sso.upsert_config(MagicMock(), "tenant-id", "user-id", payload)
+
+
 def test_oidc_group_role_mapping_uses_highest_privilege_group():
     config = {
         "groups_claim": "groups",
@@ -702,6 +718,42 @@ def test_password_login_rate_limits_before_database_lookup(monkeypatch):
 
     assert exc.value.status_code == 429
     open_database.assert_not_called()
+
+
+def test_failed_password_login_is_audited(monkeypatch):
+    db = MagicMock()
+    tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
+    user = MagicMock(
+        id="00000000-0000-4000-8000-000000000002",
+        password_hash="password-hash",
+    )
+    emit = MagicMock()
+    monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
+    monkeypatch.setattr(
+        auth_endpoints, "_active_users_for_email", lambda *_: [(user, tenant)]
+    )
+    monkeypatch.setattr(auth_endpoints, "verify_password", lambda *_: False)
+    monkeypatch.setattr(auth_endpoints, "_enforce_password_login_rate_limit", lambda *_: None)
+    monkeypatch.setattr(auth_endpoints, "_emit_oidc_audit", emit)
+
+    with pytest.raises(HTTPException) as exc:
+        auth_endpoints.password_login(
+            auth_endpoints.PasswordLoginRequest(
+                email="user@example.com", password="wrong password"
+            ),
+            _request("failed-login"),
+        )
+
+    assert exc.value.status_code == 401
+    emit.assert_called_once_with(
+        tenant_id=str(tenant.id),
+        actor_id=str(user.id),
+        action="password_login_failed",
+        reason="invalid_credentials",
+        request_id="failed-login",
+        response_status=401,
+        provider="password",
+    )
 
 
 def test_password_login_rate_limit_uses_normalized_account_and_direct_peer(monkeypatch):

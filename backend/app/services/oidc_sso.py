@@ -195,8 +195,14 @@ def upsert_config(db: Session, tenant_id: Any, user_id: Any, payload: dict[str, 
     issuer = str(payload.get("issuer") or "").rstrip("/")
     client_id = str(payload.get("client_id") or "").strip()
     redirect_uri = str(payload.get("redirect_uri") or "").strip()
+    endpoint_urls = {
+        name: str(payload.get(name) or "").strip()
+        for name in ("authorization_endpoint", "token_endpoint", "jwks_uri")
+    }
     if not issuer.startswith("https://") or not redirect_uri.startswith("https://"):
         raise ValueError("OIDC issuer and redirect URI must use https")
+    if any(url and not url.startswith("https://") for url in endpoint_urls.values()):
+        raise ValueError("OIDC endpoints must use https")
     if not client_id:
         raise ValueError("OIDC client_id is required")
     tenant_claim = str(payload.get("tenant_claim") or "tenant_id").strip()
@@ -228,9 +234,9 @@ def upsert_config(db: Session, tenant_id: Any, user_id: Any, payload: dict[str, 
         config.encrypted_client_secret = None
     config.redirect_uri = redirect_uri
     config.scopes = scopes
-    config.authorization_endpoint = str(payload.get("authorization_endpoint") or "").strip() or None
-    config.token_endpoint = str(payload.get("token_endpoint") or "").strip() or None
-    config.jwks_uri = str(payload.get("jwks_uri") or "").strip() or None
+    config.authorization_endpoint = endpoint_urls["authorization_endpoint"] or None
+    config.token_endpoint = endpoint_urls["token_endpoint"] or None
+    config.jwks_uri = endpoint_urls["jwks_uri"] or None
     config.email_claim = str(payload.get("email_claim") or "email").strip()
     config.groups_claim = str(payload.get("groups_claim") or "groups").strip()
     config.tenant_claim = tenant_claim

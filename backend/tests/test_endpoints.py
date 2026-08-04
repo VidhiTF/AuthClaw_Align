@@ -189,6 +189,13 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     request_id = created.json()["id"]
     assert created.json()["status"] == "PENDING"
 
+    unsupported_scope = client.post(
+        "/v1/data-subject-requests",
+        json={**payload, "scope": {"unsupported": ["console"]}},
+        headers=owner_a_headers,
+    )
+    assert unsupported_scope.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
     isolated = client.get(
         f"/v1/data-subject-requests/{request_id}",
         headers={"Authorization": f"Bearer {owner_b_key}"},
@@ -239,10 +246,10 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     assert rejected.status_code == status.HTTP_200_OK
     assert rejected.json()["status"] == "REJECTED"
 
-    def approved_request(subject_id: str, request_type: str) -> str:
+    def approved_request(subject_id: str, request_type: str, scope=None) -> str:
         response = client.post(
             "/v1/data-subject-requests",
-            json={**payload, "subject_id": subject_id, "request_type": request_type},
+            json={**payload, "subject_id": subject_id, "request_type": request_type, "scope": scope or payload["scope"]},
             headers=owner_a_headers,
         )
         export_request_id = response.json()["id"]
@@ -258,7 +265,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         ).status_code == status.HTTP_200_OK
         return export_request_id
 
-    export_request_id = approved_request(str(owner_a_id), "EXPORT")
+    export_request_id = approved_request(str(owner_a_id), "EXPORT", {"datasets": ["user"]})
     unauthorized = client.post(
         f"/v1/data-subject-requests/{export_request_id}/export",
         headers={"Authorization": f"Bearer {viewer_a_key}"},
@@ -279,13 +286,14 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     assert artifact["manifest"]["format_version"] == "authclaw.data-subject.export.v1"
     assert artifact["manifest"]["record_counts"] == {
         "users": 1,
-        "api_keys": 1,
+        "api_keys": 0,
         "audit_metadata": 0,
     }
     assert artifact["request_id"] == export_request_id
     assert artifact["tenant_id"] == str(tenant_a_id)
     assert artifact["subject"] == {"id": str(owner_a_id)}
     assert artifact["data"]["user"]["email"] == "owner-a@dsr.test"
+    assert artifact["data"]["api_keys"] == []
     assert "key_hash" not in str(artifact)
     assert owner_a_key not in str(artifact)
     assert artifact["digest"]["algorithm"] == "SHA-256"
@@ -321,7 +329,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         )
     )
     db_session.commit()
-    deletion_request_id = approved_request(str(viewer_a_id), "DELETION")
+    deletion_request_id = approved_request(str(viewer_a_id), "DELETION", {"datasets": ["notifications"]})
     unauthorized_delete = client.post(
         f"/v1/data-subject-requests/{deletion_request_id}/delete",
         headers={"Authorization": f"Bearer {viewer_a_key}"},
@@ -341,7 +349,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     assert deleted.status_code == status.HTTP_200_OK
     deletion_result = deleted.json()
     assert deletion_result["deleted_items"] == {
-        "api_keys": 1,
+        "api_keys": 0,
         "notifications": 1,
         "onboarding_status": 0,
     }
@@ -362,7 +370,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
 
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
     assert db_session.query(User).filter(User.id == viewer_a_id).one().is_active
-    assert db_session.query(APIKey).filter(APIKey.created_by == viewer_a_id).count() == 0
+    assert db_session.query(APIKey).filter(APIKey.created_by == viewer_a_id).count() == 1
     assert db_session.query(Notification).filter(Notification.user_id == viewer_a_id).count() == 0
     assert [event["action"] for event in audit_events] == [
         "request_created",

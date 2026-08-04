@@ -4,7 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.crypto import decrypt_secret, encrypt_deterministic, encrypt_secret, secret_management_status
+from app.core.crypto import (
+    _vault_key_material,
+    decrypt_secret,
+    encrypt_deterministic,
+    encrypt_secret,
+    secret_management_status,
+)
 from app.core.startup_checks import validate_production_environment
 
 
@@ -58,6 +64,14 @@ def test_provider_secret_versioned_key_rotation(monkeypatch):
 
     assert encrypted.startswith("authclaw-secret-v2:env:v2:")
     assert decrypt_secret(encrypted) == "rotated-provider-secret"
+
+
+def test_vault_rejects_plaintext_address(monkeypatch):
+    monkeypatch.setenv("VAULT_ADDR", "http://vault.internal")
+    monkeypatch.setenv("VAULT_TOKEN", "test-token")
+
+    with pytest.raises(RuntimeError, match="VAULT_ADDR must use https"):
+        _vault_key_material("v1")
 
 
 def test_production_env_provider_requires_key_version_and_real_key(monkeypatch):

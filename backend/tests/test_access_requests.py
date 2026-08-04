@@ -73,7 +73,7 @@ def allow_access_request_rate_limit(monkeypatch):
     monkeypatch.setattr(
         access_request_endpoints,
         "deliver_access_request_emails",
-        lambda request: None,
+        lambda request, db=None: None,
     )
 
 
@@ -422,12 +422,51 @@ def test_email_failure_is_best_effort_and_logs_no_pii(monkeypatch, caplog):
         lambda name, value=1: metrics.append((name, value)),
     )
 
-    deliver_access_request_emails(request)
+    db = FakeSession()
+    request.id = uuid4()
+    deliver_access_request_emails(request, db)
 
-    assert len(attempts) == 2
+    assert len(attempts) == 4
     assert metrics.count(("access_request_email_failures_total", 1)) == 2
+    failures = [value for value in db.added if isinstance(value, AccessRequestHistory)]
+    assert len(failures) == 2
+    assert all(value.event_type == "NOTIFICATION_FAILED" for value in failures)
+    assert db.commits == 1
     assert "private@example.com" not in caplog.text
     assert "launch-owner@example.com" not in caplog.text
+
+
+def test_email_retry_recovers_without_failure_record(monkeypatch):
+    attempts = []
+    request = SimpleNamespace(
+        id=uuid4(),
+        reference="AR-SAFE-REFERENCE",
+        business_email="requester@example.com",
+    )
+    db = FakeSession()
+    monkeypatch.setattr(
+        access_requests.settings,
+        "INTERNAL_LAUNCH_OWNER_EMAIL",
+        "launch-owner@example.com",
+    )
+
+    def retry_once(recipient, subject, body):
+        attempts.append(recipient)
+        if attempts.count(recipient) == 1:
+            raise EmailDeliveryError("temporary failure")
+
+    monkeypatch.setattr(access_requests, "send_email", retry_once)
+
+    deliver_access_request_emails(request, db)
+
+    assert attempts == [
+        "launch-owner@example.com",
+        "launch-owner@example.com",
+        "requester@example.com",
+        "requester@example.com",
+    ]
+    assert db.added == []
+    assert db.commits == 0
 
 
 @pytest.mark.parametrize("new_status", ["APPROVED", "REJECTED", "INVITED"])
