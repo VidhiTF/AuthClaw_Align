@@ -70,7 +70,9 @@ def create_access_request(db: Session, payload: AccessRequestCreate) -> AccessRe
     return request
 
 
-def deliver_access_request_emails(request: AccessRequest) -> None:
+def deliver_access_request_emails(
+    request: AccessRequest, db: Session | None = None
+) -> None:
     messages = [
         (
             settings.INTERNAL_LAUNCH_OWNER_EMAIL,
@@ -89,17 +91,37 @@ def deliver_access_request_emails(request: AccessRequest) -> None:
             "access_request_confirmation_sent_total",
         ),
     ]
+    failed_notifications = []
     for recipient, subject, body, metric in messages:
         if not recipient:
             event_backbone.increment_metric("access_request_email_failures_total")
             logger.warning("Access request email delivery failed")
+            failed_notifications.append(metric)
             continue
+        for attempt in range(2):
+            try:
+                send_email(recipient, subject, body)
+                event_backbone.increment_metric(metric)
+                break
+            except Exception:
+                if attempt == 0:
+                    continue
+                event_backbone.increment_metric("access_request_email_failures_total")
+                logger.warning("Access request email delivery failed")
+                failed_notifications.append(metric)
+    if db is not None and failed_notifications:
+        for metric in failed_notifications:
+            db.add(
+                _history(
+                    request,
+                    "NOTIFICATION_FAILED",
+                    metadata={"notification": metric},
+                )
+            )
         try:
-            send_email(recipient, subject, body)
-            event_backbone.increment_metric(metric)
+            db.commit()
         except Exception:
-            event_backbone.increment_metric("access_request_email_failures_total")
-            logger.warning("Access request email delivery failed")
+            db.rollback()
 
 
 def transition_access_request(

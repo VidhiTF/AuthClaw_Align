@@ -35,3 +35,10 @@ test("ACL-19 evidence UI exposes integrity verification metadata", () => {
   assert.match(evidencePage, /integrity_hash/);
   assert.match(evidencePage, /integrity_version/);
 });
+
+
+test("ACL-20 compliance UI rejects mismatched snapshots", () => {
+  assert.match(compliancePage, /frameworkData\.generated_at !== scoreData\.generated_at/);
+  assert.match(compliancePage, /Compliance snapshot mismatch/);
+  assert.doesNotMatch(compliancePage, /Promise\.all\(\[\s*fetch\("\/api\/compliance-scores/);
+});

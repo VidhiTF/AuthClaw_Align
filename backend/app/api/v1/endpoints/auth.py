@@ -398,6 +398,16 @@ def password_login(payload: PasswordLoginRequest, request: Request):
 
         matches = [(user, tenant) for user, tenant in users if verify_password(payload.password, user.password_hash)]
         if not matches:
+            for user, tenant in users:
+                _emit_oidc_audit(
+                    tenant_id=str(tenant.id),
+                    actor_id=str(user.id),
+                    action="password_login_failed",
+                    reason="invalid_credentials",
+                    request_id=request.headers.get("x-request-id", ""),
+                    response_status=401,
+                    provider="password",
+                )
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
         if len(matches) > 1:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email belongs to multiple tenants. Enter tenant name.")

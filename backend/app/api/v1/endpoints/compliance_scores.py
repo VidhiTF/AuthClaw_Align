@@ -81,7 +81,7 @@ def get_compliance_scores(
         db,
         str(request.state.tenant_id),
         persist=persist_snapshot,
-        include_traceability=False,
+        include_traceability=True,
     )
 
 

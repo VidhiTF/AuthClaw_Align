@@ -41,6 +41,14 @@ class DataSubjectRequestCreateRequest(BaseModel):
     request_type: Literal["ACCESS", "EXPORT", "DELETION"]
     scope: Dict[str, Any]
 
+    @field_validator("scope")
+    @classmethod
+    def validate_scope(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        unsupported = set(value) - {"systems", "datasets"}
+        if unsupported:
+            raise ValueError(f"Unsupported scope keys: {', '.join(sorted(unsupported))}")
+        return value
+
 
 class DataSubjectRequestVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")

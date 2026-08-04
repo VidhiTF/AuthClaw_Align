@@ -223,7 +223,7 @@ def _safe_count(query) -> int:
     try:
         return int(query.count())
     except Exception:
-        return 0
+        raise
 
 
 def _framework_audit_count(db: Session, tenant_id: uuid.UUID, framework: str) -> int:
@@ -237,7 +237,7 @@ def _framework_audit_count(db: Session, tenant_id: uuid.UUID, framework: str) ->
             .count()
         )
     except Exception:
-        return 0
+        raise
 
 
 def collect_metrics(db: Session, tenant_id: str, framework: str) -> FrameworkMetrics:
@@ -463,7 +463,7 @@ def _control_traceability(db: Session, tenant_id: str, framework: str, control: 
             ],
         }
     except Exception:
-        return empty
+        raise
 
 
 def score_control(control: dict[str, Any], metrics: FrameworkMetrics) -> dict[str, Any]:
@@ -647,12 +647,17 @@ def score_all_frameworks(
         framework["readiness_level"] != "audit_ready" for framework in frameworks
     ):
         overall_readiness = "monitor"
+    generated_at = datetime.now(tz=timezone.utc).isoformat()
+    for framework in frameworks:
+        framework["generated_at"] = generated_at
+    trust_summary = _build_trust_summary(frameworks)
+    trust_summary["generated_at"] = generated_at
     return {
         "overall_score": overall,
         "readiness_level": overall_readiness,
         "frameworks": frameworks,
-        "trust_summary": _build_trust_summary(frameworks),
-        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "trust_summary": trust_summary,
+        "generated_at": generated_at,
     }
 
 

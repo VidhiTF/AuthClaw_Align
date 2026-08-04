@@ -66,7 +66,7 @@ def submit_access_request(
         raise HTTPException(
             status_code=503, detail="Unable to process request"
         ) from None
-    deliver_access_request_emails(access_request)
+    deliver_access_request_emails(access_request, db)
     return AccessRequestResponse(
         reference=access_request.reference,
         status=access_request.status,

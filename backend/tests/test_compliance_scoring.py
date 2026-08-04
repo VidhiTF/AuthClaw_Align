@@ -1,3 +1,5 @@
+import pytest
+
 from app.services import compliance_scoring
 from app.services.compliance_scoring import FrameworkMetrics
 from app.api.v1.endpoints.compliance_scores import ControlScoreResponse
@@ -147,6 +149,24 @@ def test_score_all_frameworks_can_skip_expensive_traceability(monkeypatch):
     assert len(result["frameworks"]) == 3
     assert all("traceability" not in control for framework in result["frameworks"] for control in framework["controls"])
     assert ControlScoreResponse.model_validate(result["frameworks"][0]["controls"][0]).traceability is None
+    assert {result["generated_at"], result["trust_summary"]["generated_at"], *[item["generated_at"] for item in result["frameworks"]]} == {result["generated_at"]}
+
+
+def test_data_source_failures_are_not_reported_as_zero_or_empty():
+    class FailedQuery:
+        def count(self):
+            raise RuntimeError("data source unavailable")
+
+    class FailedDB:
+        def query(self, *_args):
+            raise RuntimeError("data source unavailable")
+
+    with pytest.raises(RuntimeError, match="data source unavailable"):
+        compliance_scoring._safe_count(FailedQuery())
+    with pytest.raises(RuntimeError, match="data source unavailable"):
+        compliance_scoring._control_traceability(
+            FailedDB(), "00000000-0000-0000-0000-000000000001", "SOC2", compliance_scoring.CONTROL_CATALOG["SOC2"][0]
+        )
 
 
 def test_readiness_levels_are_stable():

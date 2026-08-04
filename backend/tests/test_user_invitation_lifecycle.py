@@ -204,6 +204,23 @@ def test_revoke_pending_invitation(invitation_database):
     assert invitation_database[-1]["action"] == "InviteRevoked"
 
 
+def test_listing_passively_expires_and_audits_invitation(invitation_database):
+    tenant_id, actor_id = _seed_actor()
+    invite_id, _, _ = _seed_invite(tenant_id=tenant_id)
+    with TestingSessionLocal() as db:
+        invite = db.query(OnboardingEmailOTP).filter_by(id=invite_id).one()
+        invite.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+        assert users.list_pending_invites(_request(tenant_id, actor_id), db) == []
+
+    with TestingSessionLocal() as db:
+        assert (
+            db.query(OnboardingEmailOTP).filter_by(id=invite_id).one().status
+            == "expired"
+        )
+    assert invitation_database[-1]["action"] == "InviteExpired"
+
+
 def test_revoke_redeemed_invitation_disables_user_and_keys(invitation_database):
     tenant_id, actor_id = _seed_actor()
     invite_id, target_user_id, raw_key = _seed_invite(tenant_id=tenant_id, status="verified")
