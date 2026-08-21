@@ -187,6 +187,9 @@ services:
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
       JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-change-me}
       SESSION_SECRET: ${SESSION_SECRET:-authclaw-full-local-session-secret}
+      SESSION_SECRET_V1: ${SESSION_SECRET_V1:-authclaw-full-local-session-secret}
+      SESSION_SECRET_V2: ${SESSION_SECRET_V2:-authclaw-full-local-session-secret-v2}
+      AUTHCLAW_SESSION_KEY_VERSION: ${AUTHCLAW_SESSION_KEY_VERSION:-v1}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
       ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       KMS_KEY_ID: ${KMS_KEY_ID:-full-local-key}
@@ -273,6 +276,7 @@ services:
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
       JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-change-me}
       SESSION_SECRET: ${SESSION_SECRET:-authclaw-full-local-session-secret}
+      SESSION_SECRET_V1: ${SESSION_SECRET_V1:-authclaw-full-local-session-secret}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
       GATEWAY_HTTP_LOGGER_ENABLED: ${GATEWAY_HTTP_LOGGER_ENABLED:-true}
       GATEWAY_AUTH_LAST_USED_ENABLED: ${GATEWAY_AUTH_LAST_USED_ENABLED:-true}

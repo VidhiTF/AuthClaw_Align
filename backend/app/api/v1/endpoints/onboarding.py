@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 import secrets
@@ -14,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.auth import get_tenant_db, hash_key, require_scopes
+from app.core.crypto import get_session_key_ring
 from app.core.passwords import hash_password, validate_password
 from app.db.models import (
     APIKey,
@@ -120,12 +122,9 @@ def _owner_sessionmaker():
 OwnerSessionLocal = _owner_sessionmaker()
 
 
-def _otp_hash(email: str, otp: str) -> str:
-    secret = os.getenv("SESSION_SECRET") or os.getenv("JWT_SECRET")
-    if not secret:
-        if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
-            raise RuntimeError("SESSION_SECRET or JWT_SECRET is required in production")
-        secret = "authclaw-lite-dev-secret"
+def _otp_hash(email: str, otp: str, secret: str | None = None) -> str:
+    active, keys = get_session_key_ring()
+    secret = secret or keys[active]
     material = f"{email.strip().lower()}:{otp}:{secret}".encode("utf-8")
     return hashlib.sha256(material).hexdigest()
 
@@ -454,7 +453,10 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
             raise HTTPException(status_code=429, detail=INVALID_INVITATION_DETAIL)
 
         signup_row.attempts += 1
-        if signup_row.otp_hash != _otp_hash(signup_row.email, payload.otp):
+        if not any(
+            hmac.compare_digest(signup_row.otp_hash, _otp_hash(signup_row.email, payload.otp, secret))
+            for secret in get_session_key_ring()[1].values()
+        ):
             db.commit()
             _emit_invitation_audit(
                 signup_row,

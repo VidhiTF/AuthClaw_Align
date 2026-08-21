@@ -78,6 +78,9 @@ func generateRequestID() string {
 func HashKey(key string) string {
 	secret := os.Getenv("API_KEY_HASH_SECRET")
 	if secret == "" {
+		secret = os.Getenv("SESSION_SECRET_V1")
+	}
+	if secret == "" {
 		secret = os.Getenv("SESSION_SECRET")
 	}
 	if secret == "" {
