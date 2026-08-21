@@ -1,7 +1,7 @@
 # Either eligible engineer can review every change.
 * @RaviiTF @VidhiTF @KunalTF
 
-# Component rules retain the same two eligible reviewers.
+# Component rules retain the same reviewer set.
 /gateway/ @RaviiTF @VidhiTF @KunalTF
 /backend/ @RaviiTF @VidhiTF @KunalTF
 /audit_consumer/ @RaviiTF @VidhiTF @KunalTF
