@@ -352,7 +352,7 @@ def create_approval(
             approval_id=approval_id,
             request_id=request_id,
             correlation_id=correlation_id,
-            extra={"risk_level": risk_level, "reason": record["reason"], "expires_at": expires_at.isoformat()},
+            extra={"risk_level": risk_level, "expires_at": expires_at.isoformat()},
         )
     except Exception:
         pass
