@@ -82,6 +82,39 @@ variable "authclaw_env" {
   default     = "staging"
 }
 
+variable "secret_key_version" {
+  description = "Active envelope key version. Keep v1 through legacy migration, then set v2."
+  type        = string
+  default     = "v1"
+
+  validation {
+    condition     = contains(["v1", "v2"], var.secret_key_version)
+    error_message = "secret_key_version must be v1 or v2."
+  }
+}
+
+variable "jwt_key_version" {
+  description = "Active JWT signing key version; both versions remain available for verification overlap."
+  type        = string
+  default     = "v1"
+
+  validation {
+    condition     = contains(["v1", "v2"], var.jwt_key_version)
+    error_message = "jwt_key_version must be v1 or v2."
+  }
+}
+
+variable "session_key_version" {
+  description = "Active console session key version; both versions remain available during rotation."
+  type        = string
+  default     = "v1"
+
+  validation {
+    condition     = contains(["v1", "v2"], var.session_key_version)
+    error_message = "session_key_version must be v1 or v2."
+  }
+}
+
 variable "desired_count_primary" {
   type    = number
   default = 2

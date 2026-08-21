@@ -18,6 +18,11 @@ require_immutable_images = true
 # Use "production" only after regional ACM certificates, SMTP, and HTTPS DNS are configured.
 authclaw_env = "staging"
 
+# Keep v1 until migration 039 completes; set v2 in a subsequent deployment.
+secret_key_version = "v1"
+jwt_key_version     = "v1"
+session_key_version = "v1"
+
 # Keep true for an SRS-style warm standby database. Set false only for isolated regional test stacks.
 enable_cross_region_db_replica = true
 

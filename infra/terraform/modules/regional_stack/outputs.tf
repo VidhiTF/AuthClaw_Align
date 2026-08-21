@@ -71,8 +71,11 @@ output "secret_arns" {
     agent_redaction      = aws_secretsmanager_secret.agent_redaction.arn
     internal_service     = aws_secretsmanager_secret.internal_service.arn
     jwt                  = aws_secretsmanager_secret.jwt.arn
+    jwt_v2               = aws_secretsmanager_secret.jwt_v2.arn
     session              = aws_secretsmanager_secret.session.arn
+    session_v2           = aws_secretsmanager_secret.session_v2.arn
     envelope             = aws_secretsmanager_secret.envelope.arn
+    envelope_v2          = aws_secretsmanager_secret.envelope_v2.arn
   }
 }
 

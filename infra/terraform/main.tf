@@ -25,6 +25,9 @@ module "primary" {
   is_primary            = true
   create_db_replica     = false
   authclaw_env          = var.authclaw_env
+  secret_key_version    = var.secret_key_version
+  jwt_key_version       = var.jwt_key_version
+  session_key_version   = var.session_key_version
   certificate_arn       = var.primary_certificate_arn != "" ? var.primary_certificate_arn : var.certificate_arn
   domain_name           = var.domain_name
   smtp_host             = var.smtp_host
@@ -58,6 +61,9 @@ module "secondary" {
   is_primary            = false
   create_db_replica     = var.enable_cross_region_db_replica
   authclaw_env          = var.authclaw_env
+  secret_key_version    = var.secret_key_version
+  jwt_key_version       = var.jwt_key_version
+  session_key_version   = var.session_key_version
   certificate_arn       = var.secondary_certificate_arn != "" ? var.secondary_certificate_arn : var.certificate_arn
   domain_name           = var.domain_name
   smtp_host             = var.smtp_host

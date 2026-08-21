@@ -42,6 +42,21 @@ variable "authclaw_env" {
   default = "staging"
 }
 
+variable "secret_key_version" {
+  type    = string
+  default = "v1"
+}
+
+variable "jwt_key_version" {
+  type    = string
+  default = "v1"
+}
+
+variable "session_key_version" {
+  type    = string
+  default = "v1"
+}
+
 variable "desired_count" {
   type    = number
   default = 2
