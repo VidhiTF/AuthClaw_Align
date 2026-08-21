@@ -11,7 +11,13 @@ from pydantic import BaseModel, Field
 
 from app.db.models import APIKey, OnboardingEmailOTP, Tenant, User
 from app.schemas.models import UserCreate, UserInviteRequest, UserInviteResponse, UserResponse
-from app.core.auth import get_tenant_db, require_roles, require_scopes
+from app.core.auth import (
+    get_tenant_db,
+    require_roles,
+    require_scopes,
+    set_mfa_credentials,
+    verify_mfa_code,
+)
 from app.api.v1.endpoints.onboarding import (
     OTP_TTL_MINUTES,
     _deliver_otp,
@@ -51,6 +57,10 @@ class MFASetupResponse(MFASecurityResponse):
     qr_code_base64: str
 
 
+class MFASetupRequest(BaseModel):
+    code: str | None = Field(default=None, min_length=6, max_length=64)
+
+
 class MFADisableRequest(BaseModel):
     code: str = Field(min_length=6, max_length=64)
 
@@ -80,20 +90,27 @@ def get_my_security(request: Request, db: Session = Depends(get_tenant_db)):
 
 
 @router.post("/me/mfa/setup", response_model=MFASetupResponse)
-def setup_my_mfa(request: Request, db: Session = Depends(get_tenant_db)):
+def setup_my_mfa(
+    request: Request,
+    body: MFASetupRequest | None = None,
+    db: Session = Depends(get_tenant_db),
+):
     """Enable TOTP MFA for approval-sensitive console actions."""
     user = db.query(User).filter(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
-    ).first()
+    ).with_for_update().first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if user.mfa_enabled and (not body or not body.code or not verify_mfa_code(user, body.code)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current MFA token or backup code required",
+        )
 
     secret = pyotp.random_base32()
     backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(5)]
-    user.mfa_secret = secret
-    user.mfa_backup_codes = backup_codes
-    user.mfa_enabled = True
+    set_mfa_credentials(user, secret, backup_codes)
     db.commit()
 
     totp = pyotp.TOTP(secret)
@@ -126,16 +143,14 @@ def disable_my_mfa(body: MFADisableRequest, request: Request, db: Session = Depe
     user = db.query(User).filter(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
-    ).first()
+    ).with_for_update().first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if not user.mfa_enabled or not user.mfa_secret:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
 
     code = body.code.strip()
-    valid_totp = pyotp.TOTP(user.mfa_secret).verify(code, valid_window=1)
-    valid_backup = code.lower() in (user.mfa_backup_codes or [])
-    if not valid_totp and not valid_backup:
+    if not verify_mfa_code(user, code):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid MFA token or backup code")
 
     user.mfa_enabled = False

@@ -3,6 +3,7 @@ import hmac
 import logging
 import os
 from typing import Generator, List
+import pyotp
 from fastapi import Request, Depends, HTTPException, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -10,6 +11,13 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.db.dependencies import get_db
+from app.core.crypto import (
+    SECRET_ENVELOPE_PREFIX,
+    SECRET_ENVELOPE_V2_PREFIX,
+    decrypt_secret,
+    encrypt_secret,
+    get_session_key_ring,
+)
 
 
 logger = logging.getLogger("auth.middleware")
@@ -17,12 +25,52 @@ logger = logging.getLogger("auth.middleware")
 
 def hash_key(key: str) -> str:
     """Compute a keyed digest of the API key for deterministic lookup."""
-    secret = os.getenv("API_KEY_HASH_SECRET") or os.getenv("SESSION_SECRET") or os.getenv("JWT_SECRET")
+    secret = os.getenv("API_KEY_HASH_SECRET")
+    if not secret:
+        active, session_keys = get_session_key_ring()
+        secret = session_keys.get("v1") or session_keys[active]
     if not secret:
         if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
             raise RuntimeError("API_KEY_HASH_SECRET, SESSION_SECRET, or JWT_SECRET is required in production")
         secret = "authclaw-lite-dev-secret"
     return hmac.digest(secret.encode("utf-8"), key.encode("utf-8"), "sha3_256").hex()
+
+
+def set_mfa_credentials(user, secret: str, backup_codes: list[str]) -> None:
+    user.mfa_secret = encrypt_secret(secret)
+    user.mfa_backup_codes = [
+        hash_key(f"mfa-backup:{code.lower()}") for code in backup_codes
+    ]
+    user.mfa_enabled = True
+
+
+def verify_mfa_code(user, code: str) -> bool:
+    code = code.strip().lower()
+    stored_secret = user.mfa_secret or ""
+    encrypted = stored_secret.startswith(
+        (SECRET_ENVELOPE_PREFIX, SECRET_ENVELOPE_V2_PREFIX)
+    )
+    secret = decrypt_secret(stored_secret) if encrypted else stored_secret
+    if stored_secret and not encrypted:
+        user.mfa_secret = encrypt_secret(stored_secret)
+
+    backup_codes = list(user.mfa_backup_codes or [])
+    normalized_codes = [
+        stored if len(stored) == 64 else hash_key(f"mfa-backup:{stored.lower()}")
+        for stored in backup_codes
+    ]
+    user.mfa_backup_codes = normalized_codes
+    if secret and pyotp.TOTP(secret).verify(code, valid_window=1):
+        return True
+
+    candidate = hash_key(f"mfa-backup:{code}")
+    for index, stored in enumerate(normalized_codes):
+        if hmac.compare_digest(candidate, stored):
+            user.mfa_backup_codes = (
+                normalized_codes[:index] + normalized_codes[index + 1 :]
+            )
+            return True
+    return False
 
 
 def _normalize_role(role: str | None) -> str:
