@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -329,8 +328,7 @@ regex_rules:
 
 		// B. OPA Service Unavailable
 		// Set OPA_URL to bad port
-		os.Setenv("OPA_URL", "http://localhost:9999")
-		defer os.Unsetenv("OPA_URL")
+		t.Setenv("OPA_URL", "http://localhost:9999")
 
 		// Re-seed clean policy
 		cleanPolicy := `model_rules: {blacklist: []}`
