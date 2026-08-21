@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import fs from "fs";
 import path from "path";
+import { sessionKeyRing } from "./session-store.ts";
 
 const STATES_FILE = process.env.AUTHCLAW_OIDC_STATE_STORE_PATH || path.join(/* turbopackIgnore: true */ process.cwd(), ".authclaw", "oidc-states.json");
 
@@ -19,8 +20,8 @@ function writePendingStates(states: Record<string, number>) {
   fs.renameSync(temporary, STATES_FILE);
 }
 
-function stateKey(value: string) {
-  return createHmac("sha256", stateSecret()).update(value).digest("base64url");
+function stateKey(value: string, secret: string) {
+  return createHmac("sha256", secret).update(value).digest("base64url");
 }
 
 export interface OidcState {
@@ -31,18 +32,11 @@ export interface OidcState {
   issuedAt: number;
 }
 
-function stateSecret() {
-  const secret = process.env.SESSION_SECRET;
-  if (!secret && process.env.NODE_ENV === "production") {
-    throw new Error("SESSION_SECRET is required for OIDC state validation");
-  }
-  return secret || "authclaw-local-session-secret";
-}
-
 export function sealOidcState(state: OidcState) {
+  const { active, keys } = sessionKeyRing();
   const payload = Buffer.from(JSON.stringify(state)).toString("base64url");
-  const signature = createHmac("sha256", stateSecret()).update(payload).digest("base64url");
-  return `${payload}.${signature}`;
+  const signature = createHmac("sha256", keys[active]).update(payload).digest("base64url");
+  return `${payload}.${active}.${signature}`;
 }
 
 export function registerOidcState(value: string) {
@@ -51,25 +45,32 @@ export function registerOidcState(value: string) {
   for (const [key, issuedAt] of Object.entries(states)) {
     if (now - issuedAt > 600_000) delete states[key];
   }
-  states[stateKey(value)] = now;
+  const { active, keys } = sessionKeyRing();
+  states[stateKey(value, keys[active])] = now;
   writePendingStates(states);
 }
 
 export function consumeOidcState(value: string) {
   const states = readPendingStates();
-  const key = stateKey(value);
-  const issuedAt = states[key];
+  const keys = Object.values(sessionKeyRing().keys);
+  const key = keys.map((secret) => stateKey(value, secret)).find((candidate) => states[candidate]);
+  const issuedAt = key ? states[key] : undefined;
   if (!issuedAt || Date.now() - issuedAt > 600_000) throw new Error("Invalid OIDC state");
-  delete states[key];
+  delete states[key!];
   writePendingStates(states);
 }
 
 export function openOidcState(value: string): OidcState {
-  const [payload, signature] = value.split(".");
+  const parts = value.split(".");
+  const [payload, version, signature] = parts.length === 3 ? parts : [parts[0], "", parts[1]];
   if (!payload || !signature) throw new Error("Invalid OIDC state");
-  const expected = createHmac("sha256", stateSecret()).update(payload).digest();
   const actual = Buffer.from(signature, "base64url");
-  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+  const { keys } = sessionKeyRing();
+  const candidates = version && keys[version] ? [keys[version]] : version ? [] : Object.values(keys);
+  if (!candidates.some((secret) => {
+    const expected = createHmac("sha256", secret).update(payload).digest();
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  })) {
     throw new Error("Invalid OIDC state");
   }
   const state = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as OidcState;

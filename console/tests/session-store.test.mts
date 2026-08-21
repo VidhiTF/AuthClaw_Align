@@ -7,9 +7,42 @@ import test from "node:test";
 async function loadStore(sessionFile: string) {
   process.env.AUTHCLAW_SESSION_STORE_PATH = sessionFile;
   process.env.SESSION_SECRET = "session-store-test-secret-with-enough-entropy";
+  delete process.env.AUTHCLAW_SESSION_KEY_VERSION;
+  delete process.env.SESSION_SECRET_V1;
+  delete process.env.SESSION_SECRET_V2;
   const { SessionStore } = await import(`../src/lib/session-store.ts?${Date.now()}-${Math.random()}`);
   return new SessionStore();
 }
+
+test("session store reads previous-key credentials after rotation", async () => {
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "authclaw-session-"));
+  const sessionFile = path.join(sessionDir, "sessions.json");
+  const store = await loadStore(sessionFile);
+  const session = store.createSession({
+    apiKey: "acl_rotated_session",
+    userId: "user-1",
+    tenantId: "tenant-1",
+    scopes: ["read"],
+    role: "viewer",
+  });
+
+  process.env.AUTHCLAW_SESSION_KEY_VERSION = "v2";
+  process.env.SESSION_SECRET_V1 = "session-store-test-secret-with-enough-entropy";
+  process.env.SESSION_SECRET_V2 = "new-session-store-test-secret";
+  const { SessionStore } = await import(`../src/lib/session-store.ts?rotated-${Date.now()}`);
+  const rotatedStore = new SessionStore();
+
+  assert.equal(rotatedStore.getSession(session.sessionId)?.apiKey, "acl_rotated_session");
+  const replacement = rotatedStore.createSession({
+    apiKey: "acl_new_session",
+    userId: "user-1",
+    tenantId: "tenant-1",
+    scopes: ["read"],
+    role: "viewer",
+  });
+  const stored = JSON.parse(fs.readFileSync(sessionFile, "utf8"));
+  assert.equal(stored[replacement.sessionId].credentialCiphertext.startsWith("v2."), true);
+});
 
 test("session store encrypts API keys at rest", async () => {
   const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "authclaw-session-"));
