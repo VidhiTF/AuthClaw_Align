@@ -26,8 +26,10 @@ class ACL14DeliveryControlTests(unittest.TestCase):
     def test_default_master_ci_is_minimal_and_path_aware(self):
         self.assertIn("name: ACL-14 Required Checks", CI)
         self.assertIn("name: Detect changed components", CI)
-        self.assertIn("if: steps.changes.outputs.backend == 'true'", CI)
-        self.assertIn("if: steps.changes.outputs.console == 'true'", CI)
+        self.assertIn("if: needs.changes.outputs.backend == 'true'", CI)
+        self.assertIn("if: needs.changes.outputs.console == 'true'", CI)
+        for job in ("Backend Tests", "Gateway Tests", "Agent Tests", "Console Tests and Build", "Security Scans"):
+            self.assertIn(f"name: {job}", CI)
         self.assertIn("github.ref == 'refs/heads/master'", CI)
         self.assertIn("github/codeql-action/analyze@v4", CI)
         self.assertIn("ghcr.io/gitleaks/gitleaks", CI)
