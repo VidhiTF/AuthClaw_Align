@@ -1,5 +1,3 @@
-from datetime import datetime
-import os
 from typing import Any, Dict
 
 from database import engine
@@ -9,9 +7,6 @@ from verify_audit import GENESIS_HASH, create_audit_block, log_agent_event
 
 class AuditAgent:
     def record(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        os.makedirs("logs", exist_ok=True)
-        log_file = os.path.join("logs", "audit.log")
-
         response = state.get("response", "BLOCKED BY POLICY")
         tenant_id = state.get("tenant_id", 1)
         session_id = state.get("session_id", "default")
@@ -20,13 +15,6 @@ class AuditAgent:
         risk_level = state.get("risk_level", "LOW")
         username = state.get("username", "admin_user")
         triggered_policies = state.get("triggered_policies", []) or []
-
-        with open(log_file, "a", encoding="utf-8") as file:
-            file.write(f"\nTime: {datetime.now()}\n")
-            file.write(f"User: {state['message']}\n")
-            file.write(f"Allowed: {allowed}\n")
-            file.write(f"AI: {response}\n")
-            file.write("-" * 50 + "\n")
 
         is_blocked = not allowed
         is_pending_approval = approval_status == "PENDING_APPROVAL"

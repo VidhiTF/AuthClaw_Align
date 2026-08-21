@@ -390,17 +390,8 @@ def redact_sensitive_data_rich(text: str, username: str = "admin_user", tenant_i
     )
 
     triggered_policies = sanitize_finding_metadata(triggered_policies, detector=strong_detector)
-
-    # Standardize all target redactions to [REDACTED] for triggered compliance fields
     if triggered_policies:
-        # Save to /logs/audit.log and print to console
-        os.makedirs("logs", exist_ok=True)
-        log_file = os.path.join("logs", "audit.log")
-        with open(log_file, "a", encoding="utf-8") as f:
-            for trigger in triggered_policies:
-                log_msg = f"Time: {trigger['timestamp']} | Policy: {trigger['policy_name']} ({trigger['policy_type']}) | Matched: {trigger['matched_pattern']} | Redacted: {trigger['redacted_value']} | User: {trigger['username']}"
-                print(f"[POLICY TRIGGERED] {log_msg}", flush=True)
-                f.write(f"\n[POLICY TRIGGERED] {log_msg}\n")
+        print(f"[POLICY TRIGGERED] count={len(triggered_policies)}", flush=True)
 
     return text, triggered_policies
 

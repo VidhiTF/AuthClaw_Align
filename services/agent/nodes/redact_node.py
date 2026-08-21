@@ -59,8 +59,7 @@ def redact_node(state):
         state["triggered_policies"] = []
 
     state["triggered_policies"].extend(triggered)
-
-    print("REDACT NODE:", redacted, state["triggered_policies"])
+    print(f"REDACT NODE: triggered_policy_count={len(triggered)}", flush=True)
 
     state["message"] = redacted
     

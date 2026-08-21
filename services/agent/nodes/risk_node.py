@@ -57,7 +57,6 @@ def risk_node(state: AuthState):
     # Structured JSON log for risk classification
     log_data = {
         "event": "risk_classification",
-        "query": query[:100],
         "risk_level": risk_level,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }

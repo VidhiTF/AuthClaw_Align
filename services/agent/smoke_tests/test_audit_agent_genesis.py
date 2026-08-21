@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import MagicMock, patch
 
 from services.audit_agent import AuditAgent
 from verify_audit import GENESIS_HASH
@@ -8,12 +8,8 @@ from verify_audit import GENESIS_HASH
 class AuditAgentGenesisTests(unittest.TestCase):
     @patch("services.audit_agent.log_agent_event")
     @patch("services.audit_agent.create_audit_block", return_value=1)
-    @patch("services.audit_agent.open", new_callable=mock_open)
-    @patch("services.audit_agent.os.makedirs")
     def test_first_audit_record_uses_genesis_hash(
         self,
-        _makedirs,
-        _open,
         _create_audit_block,
         log_agent_event,
     ):

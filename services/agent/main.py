@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Response, status, Request, UploadFile, File, Form, Depends
 from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -93,6 +94,29 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to stop background document monitoring: {ex}")
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(HTTPException)
+async def sanitized_http_exception(request: Request, exc: HTTPException):
+    if exc.status_code < 500:
+        return await http_exception_handler(request, exc)
+    logger.error(
+        "Request failed status=%s path=%s error_type=%s",
+        exc.status_code,
+        request.url.path,
+        type(exc).__name__,
+    )
+    return JSONResponse(status_code=exc.status_code, content={"detail": "Internal server error"})
+
+
+@app.exception_handler(Exception)
+async def sanitized_unhandled_exception(request: Request, exc: Exception):
+    logger.error(
+        "Unhandled request failure path=%s error_type=%s",
+        request.url.path,
+        type(exc).__name__,
+    )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 def get_allowed_origins() -> List[str]:
     configured = os.getenv("AUTHCLAW_ALLOWED_ORIGINS")
@@ -301,7 +325,8 @@ async def enterprise_gateway_middleware(request: Request, call_next):
                 response.headers["X-RateLimit-Backend"] = limiter_backend
                 return response
             except HTTPException as exc:
-                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+                detail = exc.detail if exc.status_code < 500 else "Internal server error"
+                return JSONResponse(status_code=exc.status_code, content={"detail": detail})
             except Exception as exc:
                 logger.warning("Rate limiter bypassed because fallback-safe middleware failed: %s", exc)
     return await call_next(request)
@@ -1205,7 +1230,7 @@ def create_chat_session(
             )
             conn.commit()
     except Exception as e:
-        logger.error(f"Database error in create_chat_session: {e}", exc_info=True)
+        logger.error("Database error in create_chat_session error_type=%s", type(e).__name__)
 
     return {"status": "success", "session_id": req.session_id, "title": req.title}
 
@@ -1227,7 +1252,7 @@ def get_chat_sessions(
             for row in list_sessions(tenant_id)
         ]
     except Exception as e:
-        logger.error(f"Database error in get_chat_sessions: {e}", exc_info=True)
+        logger.error("Database error in get_chat_sessions error_type=%s", type(e).__name__)
         return []
 
 
@@ -1249,8 +1274,8 @@ def delete_chat_session(
         delete_session_history(session_id, tenant_id)
         return {"status": "success", "message": f"Session {session_id} deleted."}
     except Exception as e:
-        logger.error(f"Database error in delete_chat_session: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        logger.error("Database error in delete_chat_session error_type=%s", type(e).__name__)
+        return {"status": "error", "message": "Session deletion failed"}
 
 @app.delete("/chat/sessions")
 @app.delete("/sessions")
@@ -1259,8 +1284,8 @@ def purge_all_sessions(tenant_id: int = Depends(require_tenant_context)):
         purge_session_history(tenant_id)
         return {"status": "success", "message": "Tenant sessions purged."}
     except Exception as e:
-        logger.error(f"Database error in purge_all_sessions: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        logger.error("Database error in purge_all_sessions error_type=%s", type(e).__name__)
+        return {"status": "error", "message": "Session purge failed"}
 
 
 @app.post("/policies/redact")
@@ -1464,7 +1489,7 @@ async def approve_request(approval_id: str, request: Request):
         approval_id=record["approval_id"],
         request_id=record["request_id"],
         correlation_id=record["correlation_id"],
-        extra={"approved_at": record["approved_at"], "approved_by": approver, "mfa_verified": mfa_verified}
+        extra={"approved_at": record["approved_at"], "mfa_verified": mfa_verified}
     )
 
     # Create blockchain audit record for approval decision
@@ -1548,7 +1573,7 @@ async def reject_request(approval_id: str, request: Request):
         approval_id=record["approval_id"],
         request_id=record["request_id"],
         correlation_id=record["correlation_id"],
-        extra={"rejected_at": record["rejected_at"], "rejected_by": approver}
+        extra={"rejected_at": record["rejected_at"]}
     )
 
     # Create blockchain audit record for rejection decision
@@ -1811,8 +1836,6 @@ async def execute_request(approval_id: str, request: Request):
         request_id=record["request_id"],
         correlation_id=record["correlation_id"],
         extra={
-            "query": query,
-            "response": result.get("response"),
             "execution_request_id": execution.request_id,
         }
     )
@@ -2066,7 +2089,7 @@ def chat_completions(
 
     result = execution.result
     if not result.get("allowed", True):
-        logger.warning(f"Request blocked by policy: '{user_query[:50]}'")
+        logger.warning("Request blocked by policy: request_id=%s", execution.request_id)
         category = result.get("block_category", "data_exfiltration")
         service.format_chat_response(execution)
         return JSONResponse(
@@ -2182,7 +2205,7 @@ def reload_policies_endpoint():
         reload_log = {
             "event": "policy_reload",
             "status": "failed",
-            "message": f"Policies reload failed: {str(e)}"
+            "error_type": type(e).__name__,
         }
         logger.error(json.dumps(reload_log))
         print(json.dumps(reload_log), flush=True)
@@ -2190,7 +2213,7 @@ def reload_policies_endpoint():
             status_code=status.HTTP_400_BAD_REQUEST,
             content={
                 "error": "Failed to reload policies",
-                "details": str(e)
+                "details": "Policy reload failed"
             }
         )
 
@@ -2247,8 +2270,8 @@ def get_readiness():
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         checks["database"] = "healthy"
-    except Exception as exc:
-        checks["database"] = f"unhealthy: {exc}"
+    except Exception:
+        checks["database"] = "unhealthy"
         http_status = 503
 
     if os.getenv("AUTHCLAW_ENV", "development").lower() in {"production", "prod"}:
@@ -3490,7 +3513,7 @@ def compliance_analyze(
     log_audit_event(
         event="compliance_analysis",
         correlation_id="system",
-        extra={"document_id": req.document_id, "doc_name": doc_name, "overall_risk": analysis["overall_risk"]}
+        extra={"document_id": req.document_id, "overall_risk": analysis["overall_risk"]}
     )
     
     return analysis
@@ -3551,7 +3574,7 @@ Question:
             else:
                 logger.warning("Gemini document chat failed: status=%s", res.status_code)
         except Exception as e:
-            logger.warning(f"Gemini doc chat failed: {str(e)}")
+            logger.warning("Gemini document chat failed: error_type=%s", type(e).__name__)
             
     # Fallback to local answering if offline or Gemini failed
     if not answer:
@@ -3577,7 +3600,7 @@ Question:
     log_audit_event(
         event="document_question",
         correlation_id="system",
-        extra={"document_id": req.document_id, "question": req.question}
+        extra={"document_id": req.document_id}
     )
     
     return {
@@ -4743,7 +4766,7 @@ def deliver_auth_email(recipient: str, subject: str, body: str, purpose: str) ->
             detail=f"{purpose} email could not be delivered because SMTP authentication failed."
         ) from exc
     except (smtplib.SMTPSenderRefused, smtplib.SMTPRecipientsRefused) as exc:
-        logger.error("%s SMTP sender or recipient was refused. Check SMTP_FROM and verified sender identity: %s", purpose, exc)
+        logger.error("%s SMTP sender or recipient was refused. Check SMTP_FROM and verified sender identity.", purpose)
         raise HTTPException(
             status_code=503,
             detail=f"{purpose} email could not be delivered because the sender or recipient was refused."

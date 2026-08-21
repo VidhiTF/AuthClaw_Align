@@ -299,13 +299,13 @@ def get_audit_store_status():
     try:
         ch = _get_clickhouse_client()
         ch.query("SELECT 1")
-    except Exception as exc:
+    except Exception:
         return AuditStoreStatusResponse(
             analytics_store="clickhouse",
             chain_of_record="postgres",
             clickhouse_configured=True,
             clickhouse_available=False,
-            detail=f"ClickHouse configured but unavailable: {str(exc)}",
+            detail="ClickHouse configured but unavailable.",
         )
     return AuditStoreStatusResponse(
         analytics_store="clickhouse",

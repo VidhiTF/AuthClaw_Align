@@ -540,8 +540,11 @@ def record_gateway_request(
                 "tokens_out": tokens_out,
                 "created_at": datetime.now().isoformat(),
             })
-    except Exception as e:
-        print(f"Error logging gateway request metrics: {e}", flush=True)
+    except Exception as exc:
+        logger.warning(
+            "Failed to record gateway request metrics: error_type=%s",
+            type(exc).__name__,
+        )
 
 def create_audit_block(
     query: str,

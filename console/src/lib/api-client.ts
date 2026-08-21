@@ -99,7 +99,7 @@ export async function backendFetch(path: string, options: RequestOptions = {}) {
     let errorDetail = "Backend request failed";
     try {
       const errorJson = await response.json();
-      errorDetail = apiErrorMessage(errorJson, errorDetail);
+      if (response.status < 500) errorDetail = apiErrorMessage(errorJson, errorDetail);
     } catch {
       // ignore JSON parse error
     }
@@ -234,8 +234,8 @@ export async function publicBackendJson(
     const response = await fetchBackend(`${BACKEND_URL}${path}`, options);
     const data = tolerantJson ? await response.json().catch(() => ({})) : await response.json();
     return NextResponse.json(data, { status: response.status });
-  } catch (error: unknown) {
-    return NextResponse.json({ [errorKey]: getErrorMessage(error, fallback) }, { status: 500 });
+  } catch {
+    return NextResponse.json({ [errorKey]: fallback }, { status: 500 });
   }
 }
 
@@ -264,8 +264,8 @@ export async function publicBackendPostJson(
       errorKey,
       tolerantJson
     );
-  } catch (error: unknown) {
-    return NextResponse.json({ [errorKey]: getErrorMessage(error, fallback) }, { status: 500 });
+  } catch {
+    return NextResponse.json({ [errorKey]: fallback }, { status: 500 });
   }
 }
 
@@ -287,7 +287,7 @@ export function handleApiError(error: unknown) {
   const message = getErrorMessage(error);
   const isUnauthorized = message.includes("Unauthorized");
   const status = getErrorStatus(error, isUnauthorized ? 401 : 500);
-  const response = NextResponse.json({ error: message }, { status });
+  const response = NextResponse.json({ error: status >= 500 ? "Request failed" : message }, { status });
   if (isUnauthorized) {
     response.cookies.delete("authclaw_session");
   }

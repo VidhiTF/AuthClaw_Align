@@ -136,8 +136,7 @@ export async function POST(request: Request) {
       response: parsed,
       raw: parsed ? undefined : trimBody(responseText),
     });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Gateway test failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+  } catch {
+    return NextResponse.json({ error: "Gateway test failed" }, { status: 500 });
   }
 }

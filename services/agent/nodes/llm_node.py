@@ -168,14 +168,16 @@ def llm_node(state):
     except Exception as e:
         duration = time.perf_counter() - start_time
         print(f"[Provider End] Duration: {duration:.4f}s", flush=True)
-        print(f"LLM Node Provider error: {e}. Returning offline fallback response.")
-        
+        print(
+            f"LLM Node Provider error: error_type={type(e).__name__}. Returning offline fallback response.",
+            flush=True,
+        )
         log_agent_event(
             tenant_id=tenant_id,
             session_id=session_id,
             agent_name="LLM Provider",
             event_type="PROVIDER_FAILOVER",
-            details=f"Primary model connection failed: {str(e)}. Falling back to offline provider response."
+            details="Primary model connection failed. Falling back to offline provider response."
         )
         final_response = _offline_provider_fallback(str(e))
         state["provider_status"] = "offline_fallback"

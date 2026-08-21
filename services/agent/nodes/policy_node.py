@@ -57,8 +57,7 @@ def policy_node(state):
         state["block_reason"] = result.reason
         state["block_category"] = result.category
         state["policy_decision"] = result.policy_decision
-        print(f"POLICY NODE [{result.policy_decision}]: {result.category} - {result.reason}")
-        
+        print(f"POLICY NODE: decision={result.policy_decision}", flush=True)
         log_agent_event(
             tenant_id=tenant_id,
             session_id=session_id,
@@ -78,8 +77,10 @@ def policy_node(state):
         state["risk_level"] = result.risk_level
     if result.policy_versions:
         state["policy_versions"] = result.policy_versions
-    print("POLICY NODE:", allowed, state["triggered_policies"])
-
+    print(
+        f"POLICY NODE: allowed={allowed} triggered_policy_count={len(state['triggered_policies'])}",
+        flush=True,
+    )
     state["allowed"] = allowed
     state["policy_decision"] = result.policy_decision
     

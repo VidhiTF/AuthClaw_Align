@@ -99,7 +99,7 @@ def test_provider_connection(provider: str, payload: Dict[str, Any], live: bool 
             api_base = str(payload.get("api_base") or "https://generativelanguage.googleapis.com").rstrip("/")
             response = requests.get(
                 f"{api_base}/v1beta/models",
-                params={"key": api_key},
+                headers={"x-goog-api-key": api_key},
                 timeout=timeout,
             )
         elif normalized == "anthropic":
