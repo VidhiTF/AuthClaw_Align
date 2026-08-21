@@ -383,6 +383,9 @@ services:
       NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: ${NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES:-false}
       AUTHCLAW_COOKIE_SECURE: ${AUTHCLAW_COOKIE_SECURE:-true}
       SESSION_SECRET: ${SESSION_SECRET:-authclaw-full-local-session-secret}
+      SESSION_SECRET_V1: ${SESSION_SECRET_V1:-authclaw-full-local-session-secret}
+      SESSION_SECRET_V2: ${SESSION_SECRET_V2:-authclaw-full-local-session-secret-v2}
+      AUTHCLAW_SESSION_KEY_VERSION: ${AUTHCLAW_SESSION_KEY_VERSION:-v1}
       NODE_ENV: production
     ports:
       - "${CONSOLE_PORT:-3001}:3001"
