@@ -4392,14 +4392,25 @@ def base64_url_decode(data: str) -> bytes:
     padding = '=' * (4 - len(data) % 4)
     return base64.urlsafe_b64decode(data + padding)
 
+def jwt_key_ring() -> Tuple[str, Dict[str, str]]:
+    active = os.getenv("AUTHCLAW_JWT_KEY_VERSION", "v1").strip() or "v1"
+    keys = {
+        version.lower(): value
+        for name, value in os.environ.items()
+        if name.startswith("JWT_SECRET_V") and (version := name.removeprefix("JWT_SECRET_").lower()) and value
+    }
+    keys.setdefault(active.lower(), JWT_SECRET)
+    return active.lower(), keys
+
 def create_jwt(payload: dict) -> str:
     import hmac
     import hashlib
-    header = {"alg": "HS256", "typ": "JWT"}
+    active, keys = jwt_key_ring()
+    header = {"alg": "HS256", "typ": "JWT", "kid": active}
     header_encoded = base64_url_encode(json.dumps(header).encode('utf-8'))
     payload_encoded = base64_url_encode(json.dumps(payload).encode('utf-8'))
     signature_input = f"{header_encoded}.{payload_encoded}".encode('utf-8')
-    signature = hmac.new(JWT_SECRET.encode('utf-8'), signature_input, hashlib.sha256).digest()
+    signature = hmac.new(keys[active].encode('utf-8'), signature_input, hashlib.sha256).digest()
     signature_encoded = base64_url_encode(signature)
     return f"{header_encoded}.{payload_encoded}.{signature_encoded}"
 
@@ -4411,10 +4422,20 @@ def decode_jwt(token: str) -> dict:
         if len(parts) != 3:
             return None
         header_encoded, payload_encoded, signature_encoded = parts
+        header = json.loads(base64_url_decode(header_encoded).decode('utf-8'))
+        if header.get("alg") != "HS256":
+            return None
         signature_input = f"{header_encoded}.{payload_encoded}".encode('utf-8')
-        signature = hmac.new(JWT_SECRET.encode('utf-8'), signature_input, hashlib.sha256).digest()
-        expected_sig = base64_url_encode(signature)
-        if not hmac.compare_digest(signature_encoded, expected_sig):
+        _, keys = jwt_key_ring()
+        kid = str(header.get("kid") or "").lower()
+        candidates = [keys[kid]] if kid in keys else ([] if kid else list(dict.fromkeys(keys.values())))
+        if not any(
+            hmac.compare_digest(
+                signature_encoded,
+                base64_url_encode(hmac.new(secret.encode('utf-8'), signature_input, hashlib.sha256).digest()),
+            )
+            for secret in candidates
+        ):
             return None
         payload_bytes = base64_url_decode(payload_encoded)
         payload = json.loads(payload_bytes.decode('utf-8'))
