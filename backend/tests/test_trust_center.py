@@ -64,6 +64,8 @@ def test_build_share_export_enforces_framework_scope(monkeypatch):
 
 def test_auditor_otp_binds_access_to_email_and_share(monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "test-trust-center-secret-32-bytes!")
+    monkeypatch.setenv("SESSION_SECRET_V1", "test-trust-center-secret-32-bytes!")
+    monkeypatch.setenv("AUTHCLAW_SESSION_KEY_VERSION", "v1")
     delivered = {}
 
     def fake_send(email, otp, tenant_name, *, purpose):
@@ -85,6 +87,8 @@ def test_auditor_otp_binds_access_to_email_and_share(monkeypatch):
 
     assert issued["email"] == "au*****@example.com"
     assert delivered["email"] == "auditor@example.com"
+    monkeypatch.setenv("SESSION_SECRET_V2", "rotated-trust-center-secret-32-bytes")
+    monkeypatch.setenv("AUTHCLAW_SESSION_KEY_VERSION", "v2")
     trust_center.verify_auditor_access(share, share_token, verified["access_token"])
     with pytest.raises(ValueError, match="does not match"):
         trust_center.verify_auditor_access(share, "tc_other_secret", verified["access_token"])
