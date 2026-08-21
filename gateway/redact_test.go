@@ -539,58 +539,6 @@ func TestGetOrCreateRedactionTokenAppliesRetentionAndPurgesExpired(t *testing.T)
 	}
 }
 
-func TestGetOrCreateRedactionTokenMigratesLegacyCiphertext(t *testing.T) {
-	InitDB()
-	t.Setenv("ENVELOPE_KEY", "test-envelope-key-material-32-bytes!!")
-	t.Setenv("ENCRYPTION_KEY", "")
-	t.Setenv("AUTHCLAW_SECRET_PROVIDER", "env")
-	t.Setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
-	encryptionKey = nil
-	defer func() { encryptionKey = nil }()
-
-	var tenantID string
-	err := DB.QueryRow("INSERT INTO tenants (id, name, tier, status) VALUES (gen_random_uuid(), 'Legacy Token Tenant ' || gen_random_uuid()::text, 'starter', 'active') RETURNING id::text").Scan(&tenantID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer DB.Exec("DELETE FROM redaction_tokens WHERE tenant_id = $1", tenantID)
-	defer DB.Exec("DELETE FROM tenants WHERE id = $1", tenantID)
-
-	legacyCiphertext, err := EncryptDeterministic("legacy@example.com")
-	if err != nil {
-		t.Fatal(err)
-	}
-	const existingToken = "[REDACTED_EMAIL_ADDRESS_legacy]"
-	_, err = DB.Exec(`
-		INSERT INTO redaction_tokens (
-			id, tenant_id, original_value, token_hash, token_value, strategy, entity_type, use_count, created_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, 'mask', 'EMAIL_ADDRESS', 1, NOW())
-	`, tenantID, legacyCiphertext, hashToken(existingToken), existingToken)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	token, err := GetOrCreateRedactionToken(context.Background(), tenantID, "legacy@example.com", "EMAIL_ADDRESS", "mask")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if token != existingToken {
-		t.Fatalf("expected legacy token reuse, got %q", token)
-	}
-
-	var migratedCiphertext, blindIndex string
-	err = DB.QueryRow(`
-		SELECT original_value, original_value_blind_index
-		FROM redaction_tokens WHERE tenant_id = $1
-	`, tenantID).Scan(&migratedCiphertext, &blindIndex)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(migratedCiphertext, secretEnvelopeV2Prefix) || migratedCiphertext == legacyCiphertext || len(blindIndex) != sha256.Size*2 {
-		t.Fatalf("legacy row was not migrated: ciphertext=%q blind_index=%q", migratedCiphertext, blindIndex)
-	}
-}
-
 func TestSecretEnvelopeEncryptionIsRandomizedAndBackwardCompatible(t *testing.T) {
 	t.Setenv("ENVELOPE_KEY", "test-envelope-key-material-32-bytes!!")
 	t.Setenv("ENCRYPTION_KEY", "")
@@ -645,7 +593,8 @@ func TestRedactionBlindIndexIsStableAndTenantScoped(t *testing.T) {
 	first := redactionBlindIndex("tenant-a", "jane@example.com")
 	second := redactionBlindIndex("tenant-a", "jane@example.com")
 	otherTenant := redactionBlindIndex("tenant-b", "jane@example.com")
-	if first != second || first == otherTenant || len(first) != sha256.Size*2 {
+	const expected = "fc10707a35b6db97d9533e8a9651fdbc299fb94585b5d996cc3c45722ef2fcfb"
+	if first != expected || first != second || first == otherTenant || len(first) != sha256.Size*2 {
 		t.Fatalf("unexpected blind indexes: %q %q %q", first, second, otherTenant)
 	}
 }

@@ -799,6 +799,7 @@ func pkcs7Unpad(data []byte) ([]byte, error) {
 	return data[:length-padding], nil
 }
 
+// EncryptDeterministic constructs legacy AES-CBC ciphertext for migration tests only.
 func EncryptDeterministic(plaintext string) (string, error) {
 	if encryptionKey == nil {
 		initEncryptionKey()
@@ -822,6 +823,7 @@ func EncryptDeterministic(plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(combined), nil
 }
 
+// DecryptDeterministic remains read-only compatibility for rolling deployments.
 func DecryptDeterministic(ciphertextStr string) (string, error) {
 	if encryptionKey == nil {
 		initEncryptionKey()
@@ -1117,10 +1119,6 @@ func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, origi
 	if err != nil {
 		return "", err
 	}
-	legacyEncVal, err := EncryptDeterministic(originalValue)
-	if err != nil {
-		return "", err
-	}
 	cacheTTL := redactionTokenCacheTTL()
 	cacheKey := ""
 	if useCache && cacheTTL > 0 {
@@ -1160,12 +1158,12 @@ func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, origi
 			`SELECT id::text, token_value
 			 FROM redaction_tokens
 			 WHERE tenant_id = $1
-			   AND (original_value_blind_index = $2 OR (original_value_blind_index IS NULL AND original_value = $4))
+			   AND original_value_blind_index = $2
 			   AND strategy = $3
 			   AND (expires_at IS NULL OR expires_at > NOW())
 			 LIMIT 1
 			 FOR UPDATE`,
-			tenantID, lookupHash, strategy, legacyEncVal,
+			tenantID, lookupHash, strategy,
 		).Scan(&tokenID, &tokenVal)
 
 		if err == nil {
@@ -1178,15 +1176,13 @@ func getOrCreateRedactionTokenWithRetention(ctx context.Context, tenantID, origi
 			}
 			_, err = tx.ExecContext(ctx,
 				`UPDATE redaction_tokens
-				 SET original_value = CASE WHEN original_value_blind_index IS NULL THEN $4 ELSE original_value END,
-				     original_value_blind_index = $5,
-				     token_value = $6,
-				     token_hash = $7,
+				 SET token_value = $4,
+				     token_hash = $5,
 				     entity_type = COALESCE(entity_type, $3),
 				     last_used_at = NOW(),
 				     use_count = use_count + 1
 				 WHERE tenant_id = $1 AND id = $2::uuid`,
-				tenantID, tokenID, entityType, encVal, lookupHash, tokenVal, hashToken(tokenVal),
+				tenantID, tokenID, entityType, tokenVal, hashToken(tokenVal),
 			)
 			return err
 		}
