@@ -1,19 +1,19 @@
 
 # FastAPI & Web
-fastapi==0.139.0
-uvicorn==0.51.0
+fastapi==0.141.1
+uvicorn==0.52.3
 uvloop==0.22.1 ; sys_platform != "win32" and platform_python_implementation != "PyPy"
 pydantic[email]==2.13.4
-pydantic-settings==2.14.2
+pydantic-settings==2.15.0
 
 # Database
-sqlalchemy==2.0.51
-alembic==1.18.5
+sqlalchemy==2.0.52
+alembic==1.19.1
 # Use available psycopg binary release for Windows compatibility
 psycopg[binary]==3.3.4
 
 # Security & Encryption
-cryptography==49.0.0
+cryptography==50.0.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.32
 PyJWT==2.13.0
@@ -23,18 +23,18 @@ pyotp==2.10.0
 qrcode[pil]==8.2
 
 # Utilities
-python-dotenv==1.2.2
+python-dotenv==1.2.3
 requests==2.34.2
-redis==8.0.1
+redis==8.1.0
 
 # Phase 7 — Audit backbone
-clickhouse-connect==1.4.2
-kafka-python==3.0.7
+clickhouse-connect==1.7.1
+kafka-python==3.0.11
 
 # Phase 8 — LangGraph Compliance Orchestrator
-langgraph==1.2.9
-langchain-core==1.4.9
+langgraph==1.2.11
+langchain-core==1.5.6
 
 # Phase 14 — AWS Connector Framework (boto3 only loaded when AWS_ENABLED=true)
-boto3==1.43.46
-pypdf==6.14.2
+boto3==1.43.73
+pypdf==6.16.1
