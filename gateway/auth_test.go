@@ -103,3 +103,14 @@ func TestHashKeyUsesKeyedDigest(t *testing.T) {
 		t.Fatal("changing the secret should change the digest")
 	}
 }
+
+func TestHashKeyKeepsStableSessionKeyDuringRotation(t *testing.T) {
+	t.Setenv("API_KEY_HASH_SECRET", "")
+	t.Setenv("SESSION_SECRET", "active-session-secret")
+	t.Setenv("SESSION_SECRET_V1", "stable-session-secret")
+	digest := HashKey("acl_test")
+	t.Setenv("SESSION_SECRET", "rotated-session-secret")
+	if HashKey("acl_test") != digest {
+		t.Fatal("session rotation must not invalidate API key hashes")
+	}
+}

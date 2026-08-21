@@ -13,6 +13,7 @@ import jwt
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.crypto import get_session_key_ring
 from app.db.models import Tenant, TrustCenterAccessLog, TrustCenterShare
 from app.services.email_service import demo_otp_visible, send_otp_email
 from app.services import compliance_scoring
@@ -37,12 +38,8 @@ def now_utc() -> datetime:
 
 
 def _session_secret() -> str:
-    secret = os.getenv("SESSION_SECRET") or os.getenv("JWT_SECRET")
-    if secret:
-        return secret
-    if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
-        raise RuntimeError("SESSION_SECRET or JWT_SECRET is required in production")
-    return "authclaw-lite-dev-secret"
+    active, keys = get_session_key_ring()
+    return keys[active]
 
 
 def _metadata_time(value: Any) -> datetime | None:
@@ -52,9 +49,9 @@ def _metadata_time(value: Any) -> datetime | None:
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
-def _auditor_otp_hash(share: TrustCenterShare, otp: str) -> str:
+def _auditor_otp_hash(share: TrustCenterShare, otp: str, secret: str | None = None) -> str:
     material = f"{share.id}:{(share.auditor_email or '').strip().lower()}:{otp}".encode()
-    return hmac.digest(_session_secret().encode(), material, "sha256").hex()
+    return hmac.digest((secret or _session_secret()).encode(), material, "sha256").hex()
 
 
 def mask_email(email: str) -> str:
@@ -103,7 +100,10 @@ def verify_auditor_otp(db: Session, share: TrustCenterShare, raw_share_token: st
         raise ValueError("Verification code is missing or expired")
     if attempts >= AUDITOR_OTP_MAX_ATTEMPTS:
         raise ValueError("Too many invalid verification attempts")
-    if not hmac.compare_digest(expected, _auditor_otp_hash(share, otp.strip())):
+    if not any(
+        hmac.compare_digest(expected, _auditor_otp_hash(share, otp.strip(), secret))
+        for secret in get_session_key_ring()[1].values()
+    ):
         metadata["auditor_otp_attempts"] = attempts + 1
         share.metadata_json = metadata
         db.commit()
@@ -114,6 +114,7 @@ def verify_auditor_otp(db: Session, share: TrustCenterShare, raw_share_token: st
     share.metadata_json = metadata
     db.commit()
     expires = now_utc() + timedelta(minutes=AUDITOR_ACCESS_TTL_MINUTES)
+    active, keys = get_session_key_ring()
     access_token = jwt.encode(
         {
             "sub": str(share.id),
@@ -123,8 +124,9 @@ def verify_auditor_otp(db: Session, share: TrustCenterShare, raw_share_token: st
             "aud": "authclaw-trust-center",
             "exp": expires,
         },
-        _session_secret(),
+        keys[active],
         algorithm="HS256",
+        headers={"kid": active},
     )
     return {"access_token": access_token, "expires_at": expires.isoformat()}
 
@@ -133,13 +135,19 @@ def verify_auditor_access(share: TrustCenterShare, raw_share_token: str, access_
     if not access_token:
         raise ValueError("Auditor email verification is required")
     try:
-        claims = jwt.decode(
-            access_token,
-            _session_secret(),
-            algorithms=["HS256"],
-            audience="authclaw-trust-center",
-        )
-    except jwt.PyJWTError as exc:
+        _, keys = get_session_key_ring()
+        kid = str(jwt.get_unverified_header(access_token).get("kid") or "").lower()
+        candidates = [keys[kid]] if kid in keys else ([] if kid else list(dict.fromkeys(keys.values())))
+        claims = None
+        for secret in candidates:
+            try:
+                claims = jwt.decode(access_token, secret, algorithms=["HS256"], audience="authclaw-trust-center")
+                break
+            except jwt.PyJWTError:
+                continue
+        if claims is None:
+            raise ValueError("invalid token")
+    except (jwt.PyJWTError, ValueError) as exc:
         raise ValueError("Auditor verification has expired or is invalid") from exc
     expected = {
         "sub": str(share.id),

@@ -13,7 +13,7 @@ alembic==1.18.5
 psycopg[binary]==3.3.4
 
 # Security & Encryption
-cryptography==49.0.0
+cryptography==50.0.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.32
 PyJWT==2.13.0

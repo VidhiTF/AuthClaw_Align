@@ -461,7 +461,7 @@ class RedactionToken(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     original_value = Column(Text, nullable=False)  # Encrypted
-    original_value_blind_index = Column(String(64), nullable=True)
+    original_value_blind_index = Column(String(64), nullable=False)
     token_hash = Column(String(255), nullable=False)  # SHA-256 hash of token
     token_value = Column(String(255), nullable=False)  # Synthetic/masked value
     strategy = Column(String(50), nullable=False)  # mask, hash, synthetic

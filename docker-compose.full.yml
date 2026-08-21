@@ -187,6 +187,9 @@ services:
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
       JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-change-me}
       SESSION_SECRET: ${SESSION_SECRET:-authclaw-full-local-session-secret}
+      SESSION_SECRET_V1: ${SESSION_SECRET_V1:-authclaw-full-local-session-secret}
+      SESSION_SECRET_V2: ${SESSION_SECRET_V2:-authclaw-full-local-session-secret-v2}
+      AUTHCLAW_SESSION_KEY_VERSION: ${AUTHCLAW_SESSION_KEY_VERSION:-v1}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
       ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       KMS_KEY_ID: ${KMS_KEY_ID:-full-local-key}
@@ -273,6 +276,7 @@ services:
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
       JWT_SECRET: ${JWT_SECRET:-authclaw-full-local-jwt-secret-change-me}
       SESSION_SECRET: ${SESSION_SECRET:-authclaw-full-local-session-secret}
+      SESSION_SECRET_V1: ${SESSION_SECRET_V1:-authclaw-full-local-session-secret}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
       GATEWAY_HTTP_LOGGER_ENABLED: ${GATEWAY_HTTP_LOGGER_ENABLED:-true}
       GATEWAY_AUTH_LAST_USED_ENABLED: ${GATEWAY_AUTH_LAST_USED_ENABLED:-true}
@@ -319,6 +323,9 @@ services:
       AUTHCLAW_PROVIDER_GEMINI_MODEL: ${MODEL_NAME:-gemini-2.5-flash-lite}
       AUTHCLAW_GO_GATEWAY_URL: http://gateway:8080
       JWT_SECRET: ${AGENT_JWT_SECRET:-authclaw-full-agent-jwt-secret-change-me}
+      JWT_SECRET_V1: ${AGENT_JWT_SECRET_V1:-authclaw-full-agent-jwt-secret-change-me}
+      JWT_SECRET_V2: ${AGENT_JWT_SECRET_V2:-authclaw-full-agent-jwt-secret-v2-change-me}
+      AUTHCLAW_JWT_KEY_VERSION: ${AUTHCLAW_JWT_KEY_VERSION:-v1}
       AUTHCLAW_ENCRYPTION_KEY: ${AGENT_ENCRYPTION_KEY:-YXV0aGNsYXctYWdlbnQtbG9jYWwtZmVybmV0LWtleSE=}
       AUTHCLAW_REDACTION_SALT: ${AGENT_REDACTION_SALT:-authclaw-full-agent-redaction-salt-change-me}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision

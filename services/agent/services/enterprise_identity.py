@@ -767,17 +767,17 @@ def public_jwks() -> Dict[str, Any]:
         except json.JSONDecodeError as exc:
             raise EnterpriseIdentityError("AUTHCLAW_PUBLIC_JWKS is not valid JSON.") from exc
 
-    secret = os.getenv("AUTHCLAW_JWT_SECRET") or os.getenv("JWT_SECRET") or ""
+    version = (os.getenv("AUTHCLAW_JWT_KEY_VERSION") or "v1").strip().lower()
+    secret = os.getenv(f"JWT_SECRET_{version.upper()}") or os.getenv("AUTHCLAW_JWT_SECRET") or os.getenv("JWT_SECRET") or ""
     if not secret:
         return {"keys": []}
-    kid = hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
     return {
         "keys": [
             {
                 "kty": "oct",
                 "use": "sig",
                 "alg": "HS256",
-                "kid": kid,
+                "kid": version,
                 "status": "legacy-local-session-key-not-public",
             }
         ]

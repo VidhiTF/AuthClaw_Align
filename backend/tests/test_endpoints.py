@@ -775,6 +775,7 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
         id=uuid4(),
         tenant_id=tenant_a_id,
         original_value=encrypted_base64,
+        original_value_blind_index="a" * 64,
         token_hash=token_hash,
         token_value="[REDACTED_PERSON_abc]",
         strategy="mask"
