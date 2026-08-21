@@ -1,7 +1,10 @@
-name: AuthClaw Minimal Master CI
+name: AuthClaw Required CI
 
 on:
+  create:
   push:
+    branches: ["**"]
+  pull_request:
     branches: [master]
 
 permissions:
@@ -9,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: authclaw-master-ci
+  group: authclaw-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -22,6 +25,7 @@ env:
 jobs:
   checks:
     name: ACL-14 Required Checks
+    if: github.event_name != 'create' || github.event.ref_type == 'branch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -238,7 +242,7 @@ jobs:
 
   release-images:
     name: Controlled-Beta Release Images
-    if: vars.CONTROLLED_BETA_ENABLED == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CONTROLLED_BETA_ENABLED == 'true'
     needs: checks
     runs-on: ubuntu-latest
     timeout-minutes: 40

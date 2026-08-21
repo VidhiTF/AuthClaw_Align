@@ -12,11 +12,14 @@ REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
-    def test_github_actions_execute_only_for_master(self):
-        self.assertIn("  push:\n    branches: [master]", CI)
+    def test_ci_executes_for_branches_and_master_pull_requests(self):
+        self.assertIn("  create:\n", CI)
+        self.assertIn('  push:\n    branches: ["**"]', CI)
+        self.assertIn("  pull_request:\n    branches: [master]", CI)
+        self.assertIn("if: github.event_name != 'create' || github.event.ref_type == 'branch'", CI)
         self.assertIn("    branches: [master]", DEPLOY)
+        self.assertNotIn("pull_request:", DEPLOY)
         for workflow in (CI, DEPLOY):
-            self.assertNotIn("pull_request:", workflow)
             self.assertNotIn("schedule:", workflow)
             self.assertNotIn("workflow_dispatch:", workflow)
 
@@ -25,7 +28,7 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("name: Detect changed components", CI)
         self.assertIn("if: steps.changes.outputs.backend == 'true'", CI)
         self.assertIn("if: steps.changes.outputs.console == 'true'", CI)
-        self.assertIn("if: vars.CONTROLLED_BETA_ENABLED == 'true'", CI)
+        self.assertIn("github.ref == 'refs/heads/master'", CI)
         self.assertIn("github/codeql-action/analyze@v4", CI)
         self.assertIn("ghcr.io/gitleaks/gitleaks", CI)
         self.assertIn("aquasecurity/trivy-action", CI)
@@ -50,9 +53,10 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("Roll back to previous task definitions", DEPLOY)
         self.assertIn("Reject active deployment alarms", DEPLOY)
 
-    def test_master_protection_requires_review_without_pre_merge_ci(self):
+    def test_master_protection_requires_review_and_pre_merge_ci(self):
         protection = json.loads((ROOT / ".github/branch-protection-master.json").read_text(encoding="utf-8"))
-        self.assertIsNone(protection["required_status_checks"])
+        self.assertTrue(protection["required_status_checks"]["strict"])
+        self.assertIn("ACL-14 Required Checks", protection["required_status_checks"]["contexts"])
         self.assertTrue(protection["enforce_admins"])
         self.assertTrue(protection["required_pull_request_reviews"]["require_code_owner_reviews"])
         self.assertFalse(protection["allow_force_pushes"])
