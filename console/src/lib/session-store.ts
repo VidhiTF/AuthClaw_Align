@@ -24,23 +24,35 @@ type StoredSessionData = Omit<SessionData, "apiKey"> & {
 
 type SessionFileData = Record<string, StoredSessionData | SessionData>;
 
-const CREDENTIAL_CIPHER_VERSION = "v1";
-
-function sessionCredentialKey(): Buffer {
-  const secret = process.env.SESSION_SECRET;
-  if (!secret && process.env.NODE_ENV === "production") {
+export function sessionKeyRing(): { active: string; keys: Record<string, string> } {
+  const active = (process.env.AUTHCLAW_SESSION_KEY_VERSION || "v1").trim().toLowerCase() || "v1";
+  const keys = Object.fromEntries(
+    Object.entries(process.env)
+      .filter(([name, value]) => name.startsWith("SESSION_SECRET_V") && Boolean(value))
+      .map(([name, value]) => [name.slice("SESSION_SECRET_".length).toLowerCase(), value as string])
+  );
+  const secret = process.env.SESSION_SECRET || (process.env.NODE_ENV !== "production" ? "authclaw-local-session-secret" : "");
+  if (!keys[active] && secret) keys[active] = secret;
+  if (!keys[active]) {
     throw new Error("SESSION_SECRET is required to encrypt console session credentials");
   }
-  return createHash("sha256").update(secret || "authclaw-local-session-secret").digest();
+  return { active, keys };
+}
+
+function sessionCredentialKey(version: string): Buffer {
+  const secret = sessionKeyRing().keys[version];
+  if (!secret) throw new Error("Unsupported encrypted session credential");
+  return createHash("sha256").update(secret).digest();
 }
 
 function encryptCredential(value: string): string {
+  const { active } = sessionKeyRing();
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", sessionCredentialKey(), iv);
+  const cipher = createCipheriv("aes-256-gcm", sessionCredentialKey(active), iv);
   const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return [
-    CREDENTIAL_CIPHER_VERSION,
+    active,
     iv.toString("base64url"),
     tag.toString("base64url"),
     ciphertext.toString("base64url"),
@@ -49,12 +61,12 @@ function encryptCredential(value: string): string {
 
 function decryptCredential(value: string): string {
   const [version, iv, tag, ciphertext] = value.split(".");
-  if (version !== CREDENTIAL_CIPHER_VERSION || !iv || !tag || !ciphertext) {
+  if (!version || !iv || !tag || !ciphertext) {
     throw new Error("Unsupported encrypted session credential");
   }
   const decipher = createDecipheriv(
     "aes-256-gcm",
-    sessionCredentialKey(),
+    sessionCredentialKey(version),
     Buffer.from(iv, "base64url")
   );
   decipher.setAuthTag(Buffer.from(tag, "base64url"));

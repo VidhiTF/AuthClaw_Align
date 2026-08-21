@@ -37,3 +37,16 @@ test("OIDC state is single use", () => {
   consumeOidcState(sealed);
   assert.throws(() => consumeOidcState(sealed), /Invalid OIDC state/);
 });
+
+test("OIDC state remains valid across a session-key rotation", () => {
+  process.env.AUTHCLAW_SESSION_KEY_VERSION = "v1";
+  process.env.SESSION_SECRET_V1 = "oidc-state-test-secret";
+  const state = validState();
+  const sealed = sealOidcState(state);
+  registerOidcState(sealed);
+
+  process.env.AUTHCLAW_SESSION_KEY_VERSION = "v2";
+  process.env.SESSION_SECRET_V2 = "new-oidc-state-test-secret";
+  assert.deepEqual(openOidcState(sealed), state);
+  consumeOidcState(sealed);
+});
