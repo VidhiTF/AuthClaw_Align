@@ -14,6 +14,7 @@ from main import app
 from app.db.dependencies import get_db
 from app.db.models import Tenant, User, APIKey, PendingApproval, ApprovalAudit
 from app.core.auth import hash_key
+from app.core.crypto import decrypt_secret
 from app.api.v1.endpoints.workflows import _verify_mfa_if_enabled
 from tests.db_safety import destructive_test_urls
 
@@ -156,6 +157,9 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
     user_db = db_session.query(User).filter(User.id == user_id).first()
     assert backup_code_to_use not in user_db.mfa_backup_codes
     assert len(user_db.mfa_backup_codes) == 4
+    assert decrypt_secret(user_db.mfa_secret) == mfa_data["mfa_secret"]
+    assert all(len(code) == 64 for code in user_db.mfa_backup_codes)
+    assert not set(backup_codes).intersection(user_db.mfa_backup_codes)
 
     audit = db_session.query(ApprovalAudit).filter(ApprovalAudit.approval_id == uuid.UUID(approval_id)).first()
     assert audit is not None

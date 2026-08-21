@@ -19,7 +19,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.core.auth import get_tenant_db, require_scopes
+from app.core.auth import (
+    get_tenant_db,
+    require_scopes,
+    set_mfa_credentials,
+    verify_mfa_code,
+)
 from app.core.startup_checks import is_production
 from app.db.models import PendingApproval, ComplianceWorkflow, User, ApprovalAudit, Tenant
 from app.orchestrator.runner import ComplianceWorkflowRunner
@@ -273,14 +278,7 @@ def _verify_mfa_if_enabled(
             detail="MFA token required: your account has MFA enabled",
         )
 
-    totp = pyotp.TOTP(user.mfa_secret)
-    if totp.verify(totp_code, valid_window=1):
-        return True, datetime.now(timezone.utc)
-
-    # Check backup codes
-    backup_codes = user.mfa_backup_codes or []
-    if totp_code in backup_codes:
-        user.mfa_backup_codes = [c for c in backup_codes if c != totp_code]
+    if verify_mfa_code(user, totp_code):
         return True, datetime.now(timezone.utc)
 
     raise HTTPException(
@@ -306,21 +304,28 @@ def _approval_has_fresh_mfa(approval: PendingApproval) -> bool:
 @router.post("/mfa/setup", status_code=200)
 def mfa_setup(
     request: Request,
+    body: Optional[ApprovalRequest] = None,
     db: Session = Depends(get_tenant_db),
     _auth=require_scopes(["admin"]),
 ):
     """Generate TOTP secret and 5 backup codes for the current admin user."""
     user_id = request.state.user_id
-    user = db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == user_id).with_for_update().first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if user.mfa_enabled and (
+        not body
+        or not body.totp_code
+        or not verify_mfa_code(user, body.totp_code)
+    ):
+        raise HTTPException(
+            status_code=400, detail="Current MFA token or backup code required"
+        )
         
     secret = pyotp.random_base32()
     backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(5)]
     
-    user.mfa_secret = secret
-    user.mfa_backup_codes = backup_codes
-    user.mfa_enabled = True
+    set_mfa_credentials(user, secret, backup_codes)
     db.commit()
     
     totp = pyotp.TOTP(secret)
@@ -400,7 +405,7 @@ def approve_gateway_approval(
     user = db.query(User).filter(
         User.id == user_id,
         User.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(user, request, body)
@@ -550,7 +555,7 @@ def approve_workflow(
     user = db.query(User).filter(
         User.id == user_id,
         User.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
 
