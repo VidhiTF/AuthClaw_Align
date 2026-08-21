@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from app.core.auth import hash_key
 from app.core import oidc
+from app.core.crypto import decrypt_secret
 from app.core.passwords import hash_password, verify_password
 from app.schemas.models import APIKeyCreate, APIKeyRotate
 from app.services import oidc_sso
@@ -36,7 +37,9 @@ def test_mfa_disable_requires_current_code():
     request.state.user_id = user.id
     request.state.tenant_id = user.tenant_id
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = user
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+        user
+    )
 
     with pytest.raises(HTTPException, match="Invalid MFA token"):
         user_endpoints.disable_my_mfa(user_endpoints.MFADisableRequest(code="000000"), request, db)
@@ -51,6 +54,40 @@ def test_mfa_disable_requires_current_code():
     assert response.mfa_enabled is False
     assert user.mfa_secret is None
     assert user.mfa_backup_codes is None
+    db.commit.assert_called_once()
+
+
+def test_mfa_replacement_requires_current_factor_and_protects_credentials():
+    secret = pyotp.random_base32()
+    user = MagicMock(
+        id="00000000-0000-4000-8000-000000000001",
+        tenant_id="00000000-0000-4000-8000-000000000002",
+        email="owner@example.com",
+        role="owner",
+        mfa_enabled=True,
+        mfa_secret=secret,
+        mfa_backup_codes=["backup01"],
+    )
+    request = MagicMock()
+    request.state.user_id = user.id
+    request.state.tenant_id = user.tenant_id
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+        user
+    )
+
+    with pytest.raises(HTTPException, match="Current MFA token"):
+        user_endpoints.setup_my_mfa(request, None, db)
+    db.commit.assert_not_called()
+
+    response = user_endpoints.setup_my_mfa(
+        request,
+        user_endpoints.MFASetupRequest(code=pyotp.TOTP(secret).now()),
+        db,
+    )
+    assert decrypt_secret(user.mfa_secret) == response.mfa_secret
+    assert all(len(code) == 64 for code in user.mfa_backup_codes)
+    assert not set(response.backup_codes).intersection(user.mfa_backup_codes)
     db.commit.assert_called_once()
 
 

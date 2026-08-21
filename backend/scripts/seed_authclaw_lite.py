@@ -128,7 +128,11 @@ def main() -> None:
                 "tenant_id": TENANT_ID,
                 "password_hash": hash_password(RAW_ADMIN_PASSWORD),
                 "mfa_enabled": RAW_ADMIN_TOTP_SECRET is not None,
-                "mfa_secret": RAW_ADMIN_TOTP_SECRET,
+                "mfa_secret": (
+                    encrypt_secret(RAW_ADMIN_TOTP_SECRET)
+                    if RAW_ADMIN_TOTP_SECRET
+                    else None
+                ),
             },
         )
 

@@ -12,6 +12,23 @@ SECRET_ENVELOPE_V2_PREFIX = "authclaw-secret-v2:"
 SUPPORTED_SECRET_PROVIDERS = {"env", "vault", "aws_kms"}
 
 
+def get_session_key_ring() -> tuple[str, dict[str, str]]:
+    active = os.getenv("AUTHCLAW_SESSION_KEY_VERSION", "v1").strip().lower() or "v1"
+    keys = {
+        name.removeprefix("SESSION_SECRET_").lower(): value
+        for name, value in os.environ.items()
+        if name.startswith("SESSION_SECRET_V") and value
+    }
+    fallback = os.getenv("SESSION_SECRET") or os.getenv("JWT_SECRET") or ""
+    if fallback:
+        keys.setdefault(active, fallback)
+    if not keys.get(active):
+        if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
+            raise RuntimeError("SESSION_SECRET is required in production")
+        keys[active] = "authclaw-lite-dev-secret"
+    return active, keys
+
+
 def get_encryption_key() -> bytes:
     """Gets the encryption key and pads/truncates it to 32 bytes (matching Go gateway)"""
     key_str = os.getenv("ENCRYPTION_KEY")
