@@ -229,10 +229,10 @@ class GeminiProvider(BaseProvider):
                 backoff *= 2
 
             except requests.exceptions.ConnectionError as e:
-                msg = f"GEMINI ERROR: Network connection failed — {type(e).__name__}: {str(e)}"
-                logger.error(msg)
-                print(msg, flush=True)
-                traceback.print_exc()
+                logger.error(
+                    "Gemini request failed: category=connection_error error_type=%s",
+                    type(e).__name__,
+                )
                 if attempt == max_retries - 1 or time.time() - start_time >= self.timeout:
                     raise RuntimeError(f"Provider unavailable: Network Error — {str(e)}") from e
                 time.sleep(min(backoff, max(1.0, self.timeout - (time.time() - start_time))))
@@ -240,10 +240,11 @@ class GeminiProvider(BaseProvider):
 
             except requests.exceptions.HTTPError as e:
                 status_code = response.status_code if response else 500
-                msg = f"GEMINI ERROR: HTTP {status_code} — {type(e).__name__}: {str(e)}"
-                logger.error(msg)
-                print(msg, flush=True)
-                traceback.print_exc()
+                logger.error(
+                    "Gemini request failed: category=http_error status=%s error_type=%s",
+                    status_code,
+                    type(e).__name__,
+                )
                 if attempt == max_retries - 1 or time.time() - start_time >= self.timeout:
                     if status_code in (400, 401, 403):
                         raise ValueError(f"Provider not configured: HTTP {status_code}") from e
@@ -260,10 +261,10 @@ class GeminiProvider(BaseProvider):
                 raise  # Already annotated above, propagate directly
 
             except Exception as e:
-                msg = f"GEMINI ERROR: Unexpected exception — {type(e).__name__}: {str(e)}"
-                logger.exception(msg)
-                print(msg, flush=True)
-                traceback.print_exc()
+                logger.error(
+                    "Gemini request failed: category=unexpected_error error_type=%s",
+                    type(e).__name__,
+                )
                 if attempt == max_retries - 1 or time.time() - start_time >= self.timeout:
                     raise RuntimeError(f"Provider unavailable: Unexpected error ({type(e).__name__}: {str(e)})") from e
                 time.sleep(min(backoff, max(1.0, self.timeout - (time.time() - start_time))))

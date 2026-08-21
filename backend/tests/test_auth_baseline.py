@@ -1,11 +1,13 @@
+import asyncio
 import hmac
+import json
 import time
 from unittest.mock import MagicMock
 
 import jwt
 import pyotp
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from app.core.auth import hash_key
 from app.core import oidc
@@ -15,10 +17,20 @@ from app.services import oidc_sso
 from app.services.email_service import send_otp_email
 from app.api.v1.endpoints import auth as auth_endpoints
 from app.api.v1.endpoints import users as user_endpoints
+from main import sanitized_http_exception
 
 
 def _request(request_id="request-1"):
     return MagicMock(headers={"x-request-id": request_id})
+
+
+def test_internal_exception_detail_is_sanitized():
+    request = Request({"type": "http", "method": "GET", "path": "/test", "headers": [], "query_string": b""})
+    response = asyncio.run(sanitized_http_exception(request, HTTPException(500, "password=secret database failure")))
+
+    assert response.status_code == 500
+    assert json.loads(response.body) == {"detail": "Internal server error"}
+    assert b"secret" not in response.body
 
 
 def test_mfa_disable_requires_current_code():

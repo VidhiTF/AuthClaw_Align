@@ -1,4 +1,5 @@
 """AuthClaw Backend - FastAPI Application"""
+import logging
 import os
 from dotenv import load_dotenv
 
@@ -9,8 +10,8 @@ if os.path.exists(env_path):
 else:
     load_dotenv()
 
-from fastapi import FastAPI, Request, Response
-from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +20,7 @@ from app.core.startup_checks import validate_production_environment
 from app.core.crypto import secret_management_status
 
 validate_production_environment()
+logger = logging.getLogger("authclaw.backend")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -26,6 +28,20 @@ app = FastAPI(
     description="AI Governance & Compliance Platform Control Plane",
     version="0.1.0",
 )
+
+
+@app.exception_handler(HTTPException)
+async def sanitized_http_exception(request: Request, exc: HTTPException):
+    if exc.status_code < 500:
+        return await http_exception_handler(request, exc)
+    logger.error("Request failed status=%s path=%s error_type=%s", exc.status_code, request.url.path, type(exc).__name__)
+    return JSONResponse(status_code=exc.status_code, content={"detail": "Internal server error"})
+
+
+@app.exception_handler(Exception)
+async def sanitized_unhandled_exception(request: Request, exc: Exception):
+    logger.error("Unhandled request failure path=%s error_type=%s", request.url.path, type(exc).__name__)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 @app.exception_handler(RequestValidationError)
