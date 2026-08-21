@@ -23,17 +23,25 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
-  checks:
-    name: ACL-14 Required Checks
+  changes:
+    name: Detect Changed Components
     if: github.event_name != 'create' || github.event.ref_type == 'branch'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      backend: ${{ steps.changes.outputs.backend }}
+      audit: ${{ steps.changes.outputs.audit }}
+      agent: ${{ steps.changes.outputs.agent }}
+      sdk: ${{ steps.changes.outputs.sdk }}
+      gateway: ${{ steps.changes.outputs.gateway }}
+      console: ${{ steps.changes.outputs.console }}
+      terraform: ${{ steps.changes.outputs.terraform }}
+      code: ${{ steps.changes.outputs.code }}
+      codeql_languages: ${{ steps.changes.outputs.codeql_languages }}
+      shared: ${{ steps.changes.outputs.shared }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
-
       - name: Detect changed components
         id: changes
         shell: bash
@@ -46,18 +54,14 @@ jobs:
             changed="$(git diff --name-only "$before" "$GITHUB_SHA")"
           fi
           printf '%s\n' "$changed"
-
           matches() { grep -Eq "$1" <<<"$changed"; }
           shared=false
           matches '^(\.github/workflows/ci\.yml|docker-compose\.full\.yml|\.env\.full\.example|scripts/)' && shared=true
-
           component() {
             local name="$1" pattern="$2" value=false
             if [[ "$shared" == true ]] || matches "$pattern"; then value=true; fi
             echo "$name=$value" >> "$GITHUB_OUTPUT"
           }
-
-          component python '^(backend/|audit_consumer/|services/agent/|sdk/python/)'
           component backend '^backend/'
           component audit '^audit_consumer/'
           component agent '^services/agent/'
@@ -65,17 +69,10 @@ jobs:
           component gateway '^gateway/'
           component console '^console/'
           component terraform '^(infra/terraform/|\.github/workflows/deploy-controlled-beta\.yml)'
-
           languages=()
-          if [[ "$shared" == true ]] || matches '^(backend/|audit_consumer/|services/agent/|sdk/python/)'; then
-            languages+=(python)
-          fi
-          if [[ "$shared" == true ]] || matches '^console/'; then
-            languages+=(javascript-typescript)
-          fi
-          if [[ "$shared" == true ]] || matches '^gateway/'; then
-            languages+=(go)
-          fi
+          if [[ "$shared" == true ]] || matches '^(backend/|audit_consumer/|services/agent/|sdk/python/)'; then languages+=(python); fi
+          if [[ "$shared" == true ]] || matches '^console/'; then languages+=(javascript-typescript); fi
+          if [[ "$shared" == true ]] || matches '^gateway/'; then languages+=(go); fi
           if (( ${#languages[@]} )); then
             echo "code=true" >> "$GITHUB_OUTPUT"
             (IFS=,; echo "codeql_languages=${languages[*]}" >> "$GITHUB_OUTPUT")
@@ -85,21 +82,31 @@ jobs:
           fi
           echo "shared=$shared" >> "$GITHUB_OUTPUT"
 
-      - name: Repository policy smoke checks
-        run: |
+  policy:
+    name: Repository Policy
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - run: |
           git diff --check HEAD^
           python3 -m unittest scripts.test_acl14_delivery_controls
 
+  security:
+    name: Security Scans
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
       - name: Scan repository for committed secrets
-        if: steps.changes.outputs.code == 'true' || steps.changes.outputs.terraform == 'true'
         run: >-
-          docker run --rm
-          -v "${{ github.workspace }}:/repo:ro"
+          docker run --rm -v "${{ github.workspace }}:/repo:ro"
           ghcr.io/gitleaks/gitleaks:v8.24.3
           dir --redact --config=/repo/.gitleaks.toml /repo
-
       - name: Scan dependencies, secrets, and infrastructure
-        if: steps.changes.outputs.code == 'true' || steps.changes.outputs.terraform == 'true'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
@@ -111,29 +118,19 @@ jobs:
           format: table
           skip-dirs: ".git,.terraform,node_modules,console/node_modules,backend/.venv,audit_consumer/.venv,backend/.pytest_cache,audit_consumer/.pytest_cache"
 
-      - name: Set up Python
-        if: steps.changes.outputs.python == 'true'
-        uses: actions/setup-python@v6
+  backend:
+    name: Backend Tests
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-
-      - name: Set up Go
-        if: steps.changes.outputs.gateway == 'true'
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: ${{ env.GO_VERSION_FILE }}
-          cache-dependency-path: gateway/go.sum
-
-      - name: Initialize CodeQL
-        if: steps.changes.outputs.code == 'true'
-        uses: github/codeql-action/init@v4
-        with:
-          languages: ${{ steps.changes.outputs.codeql_languages }}
-
-      - name: Backend security and compliance tests
-        if: steps.changes.outputs.backend == 'true'
-        shell: bash
+      - name: Run backend security and compliance tests
         env:
           DATABASE_URL: postgresql+psycopg://test:test@127.0.0.1:1/authclaw_ci_test
           OWNER_DATABASE_URL: postgresql+psycopg://test:test@127.0.0.1:1/authclaw_ci_test
@@ -142,42 +139,72 @@ jobs:
           .ci-backend/bin/python -m pip install --require-hashes -r backend/requirements-test.txt
           cd backend
           ../.ci-backend/bin/python -m pytest -p no:cacheprovider -q \
-            tests/test_auth_baseline.py \
-            tests/test_authorization_matrix.py \
-            tests/test_policy_engine.py \
-            tests/test_acl19_continuous_evidence.py \
-            tests/test_acl25_abuse_privacy_retention.py \
-            tests/test_compliance_scoring.py \
-            tests/test_migration_038.py
+            tests/test_auth_baseline.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
+            tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
+            tests/test_compliance_scoring.py tests/test_migration_038.py
 
-      - name: Audit consumer tests
-        if: steps.changes.outputs.audit == 'true'
-        shell: bash
-        run: |
+  audit:
+    name: Audit Consumer Tests
+    needs: changes
+    if: needs.changes.outputs.audit == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: |
           python -m venv .ci-audit
           .ci-audit/bin/python -m pip install --require-hashes -r audit_consumer/requirements-test.txt
           cd audit_consumer
           ../.ci-audit/bin/python -m pytest -p no:cacheprovider tests/ -q
 
-      - name: Agent compile and sensitive-data tests
-        if: steps.changes.outputs.agent == 'true'
-        shell: bash
-        run: |
+  agent:
+    name: Agent Tests
+    needs: changes
+    if: needs.changes.outputs.agent == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: |
           python -m venv .ci-agent
           .ci-agent/bin/python -m pip install --require-hashes \
-            -r services/agent/requirements.txt \
-            -r services/agent/requirements-model.txt \
+            -r services/agent/requirements.txt -r services/agent/requirements-model.txt \
             -r services/agent/requirements-test.txt
           .ci-agent/bin/python -m compileall -q services/agent
           cd services/agent
           ../../.ci-agent/bin/python -m pytest --noconftest -p no:cacheprovider tests/test_sensitive_data_detection.py -q
 
-      - name: Python SDK tests
-        if: steps.changes.outputs.sdk == 'true'
-        run: python -m unittest discover -s sdk/python -p "test_*.py"
+  sdk:
+    name: Python SDK Tests
+    needs: changes
+    if: needs.changes.outputs.sdk == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m unittest discover -s sdk/python -p "test_*.py"
 
-      - name: Gateway tests
-        if: steps.changes.outputs.gateway == 'true'
+  gateway:
+    name: Gateway Tests
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: gateway/go.sum
+      - name: Run gateway tests
         working-directory: gateway
         env:
           DATABASE_URL: postgresql://test:test@127.0.0.1:1/authclaw_gateway_ci_test
@@ -185,16 +212,20 @@ jobs:
           go test ./... -count=1
           -run '^(TestACL17|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_)'
 
-      - name: Set up Node.js
-        if: steps.changes.outputs.console == 'true'
-        uses: actions/setup-node@v6
+  console:
+    name: Console Tests and Build
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: console/package-lock.json
-
-      - name: Console lint, unit tests, typecheck, and build
-        if: steps.changes.outputs.console == 'true'
+      - name: Run lint, tests, typecheck, audit, and build
         working-directory: console
         env:
           API_URL: http://localhost:8000
@@ -211,18 +242,26 @@ jobs:
           npx tsc --noEmit --pretty false
           npm run build
 
-      - name: Compose contract validation
-        if: steps.changes.outputs.shared == 'true'
-        run: docker compose --env-file .env.full.example -f docker-compose.full.yml config --quiet
+  compose:
+    name: Compose Contract
+    needs: changes
+    if: needs.changes.outputs.shared == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose --env-file .env.full.example -f docker-compose.full.yml config --quiet
 
-      - name: Set up Terraform
-        if: steps.changes.outputs.terraform == 'true'
-        uses: hashicorp/setup-terraform@v4
+  terraform:
+    name: Terraform Validation
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: 1.15.7
-
-      - name: Terraform format and validation
-        if: steps.changes.outputs.terraform == 'true'
+      - name: Run Terraform format and validation
         env:
           AWS_ACCESS_KEY_ID: ci-placeholder
           AWS_SECRET_ACCESS_KEY: ci-placeholder
@@ -233,12 +272,34 @@ jobs:
           terraform -chdir=infra/terraform init -backend=false
           terraform -chdir=infra/terraform validate
 
-      - name: Analyze changed code with CodeQL
-        if: steps.changes.outputs.code == 'true'
-        uses: github/codeql-action/analyze@v4
+  codeql:
+    name: CodeQL Analysis
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ needs.changes.outputs.codeql_languages }}
+      - uses: github/codeql-action/autobuild@v4
+      - uses: github/codeql-action/analyze@v4
         with:
           upload: never
           upload-database: false
+
+  checks:
+    name: ACL-14 Required Checks
+    if: always() && (github.event_name != 'create' || github.event.ref_type == 'branch')
+    needs: [changes, policy, security, backend, audit, agent, sdk, gateway, console, compose, terraform, codeql]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          if [[ "$RESULTS" == *failure* || "$RESULTS" == *cancelled* ]]; then exit 1; fi
 
   release-images:
     name: Controlled-Beta Release Images
@@ -253,47 +314,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - service: backend
-            context: ./backend
-            dockerfile: ./backend/Dockerfile.demo
-          - service: gateway
-            context: ./gateway
-            dockerfile: ./gateway/Dockerfile.demo
-          - service: console
-            context: ./console
-            dockerfile: ./console/Dockerfile
-          - service: agent
-            context: ./services/agent
-            dockerfile: ./services/agent/Dockerfile
-          - service: audit-consumer
-            context: .
-            dockerfile: ./audit_consumer/Dockerfile
-          - service: opa-bundle
-            context: ./infra/opa
-            dockerfile: ./infra/opa/Dockerfile
+          - { service: backend, context: ./backend, dockerfile: ./backend/Dockerfile.demo }
+          - { service: gateway, context: ./gateway, dockerfile: ./gateway/Dockerfile.demo }
+          - { service: console, context: ./console, dockerfile: ./console/Dockerfile }
+          - { service: agent, context: ./services/agent, dockerfile: ./services/agent/Dockerfile }
+          - { service: audit-consumer, context: ., dockerfile: ./audit_consumer/Dockerfile }
+          - { service: opa-bundle, context: ./infra/opa, dockerfile: ./infra/opa/Dockerfile }
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
+      - uses: docker/setup-buildx-action@v4
       - name: Compute lowercase image name
         id: image
         shell: bash
         run: |
           repo="${GITHUB_REPOSITORY,,}"
           echo "name=ghcr.io/$repo/${{ matrix.service }}:ci-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Build release image
-        uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -306,15 +347,11 @@ jobs:
             NEXT_PUBLIC_API_URL=http://localhost:18000/api/v1
             NEXT_PUBLIC_GATEWAY_URL=http://localhost:18080
             NEXT_PUBLIC_AUTHCLAW_DEMO_MODE=true
-
-      - name: Scan release image
-        uses: aquasecurity/trivy-action@v0.36.0
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.image.outputs.name }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
           format: table
-
-      - name: Push scanned release image
-        run: docker push "${{ steps.image.outputs.name }}"
+      - run: docker push "${{ steps.image.outputs.name }}"

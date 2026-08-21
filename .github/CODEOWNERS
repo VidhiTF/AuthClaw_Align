@@ -1,11 +1,11 @@
-# The repository owner is the final reviewer for every change.
-* @AgentsArchitects
+# Either eligible engineer can review every change.
+* @RaviiTF @VidhiTF @KunalTF
 
-# Contributor review routing. Branch protection must still require owner approval.
-/gateway/ @humansaviour2-sketch @AgentsArchitects
-/backend/ @humansaviour2-sketch @AgentsArchitects
-/audit_consumer/ @humansaviour2-sketch @AgentsArchitects
-/infra/ @humansaviour2-sketch @AgentsArchitects
-/.github/ @AgentsArchitects
-/services/agent/ @Vidhi-sharma-kvs @AgentsArchitects
-/console/ @raviiidhakad @AgentsArchitects
+# Component rules retain the same reviewer set.
+/gateway/ @RaviiTF @VidhiTF @KunalTF
+/backend/ @RaviiTF @VidhiTF @KunalTF
+/audit_consumer/ @RaviiTF @VidhiTF @KunalTF
+/infra/ @RaviiTF @VidhiTF @KunalTF
+/.github/ @RaviiTF @VidhiTF @KunalTF
+/services/agent/ @RaviiTF @VidhiTF @KunalTF
+/console/ @RaviiTF @VidhiTF @KunalTF
