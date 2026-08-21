@@ -67,7 +67,9 @@ locals {
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
     { name = "AUTHCLAW_REQUIRE_SERVICE_TLS", value = tostring(var.authclaw_env == "production") },
     { name = "AUTHCLAW_SECRET_PROVIDER", value = "env" },
-    { name = "AUTHCLAW_SECRET_KEY_VERSION", value = "v1" },
+    { name = "AUTHCLAW_SECRET_KEY_VERSION", value = var.secret_key_version },
+    { name = "AUTHCLAW_JWT_KEY_VERSION", value = var.jwt_key_version },
+    { name = "AUTHCLAW_SESSION_KEY_VERSION", value = var.session_key_version },
     { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379" },
     { name = "OPA_URL", value = local.internal_opa_url },
     { name = "PRESIDIO_URL", value = local.internal_presidio_url },
@@ -290,12 +292,27 @@ resource "random_password" "jwt" {
   special = false
 }
 
+resource "random_password" "jwt_v2" {
+  length  = 48
+  special = false
+}
+
 resource "random_password" "session" {
   length  = 48
   special = false
 }
 
+resource "random_password" "session_v2" {
+  length  = 48
+  special = false
+}
+
 resource "random_password" "envelope" {
+  length  = 48
+  special = false
+}
+
+resource "random_password" "envelope_v2" {
   length  = 48
   special = false
 }
@@ -409,6 +426,17 @@ resource "aws_secretsmanager_secret_version" "jwt" {
   secret_string = random_password.jwt.result
 }
 
+resource "aws_secretsmanager_secret" "jwt_v2" {
+  name       = "${var.name}/jwt-secret/v2"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "jwt_v2" {
+  secret_id     = aws_secretsmanager_secret.jwt_v2.id
+  secret_string = random_password.jwt_v2.result
+}
+
 resource "aws_secretsmanager_secret" "session" {
   name       = "${var.name}/session-secret"
   kms_key_id = aws_kms_key.main.arn
@@ -420,6 +448,17 @@ resource "aws_secretsmanager_secret_version" "session" {
   secret_string = random_password.session.result
 }
 
+resource "aws_secretsmanager_secret" "session_v2" {
+  name       = "${var.name}/session-secret/v2"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "session_v2" {
+  secret_id     = aws_secretsmanager_secret.session_v2.id
+  secret_string = random_password.session_v2.result
+}
+
 resource "aws_secretsmanager_secret" "envelope" {
   name       = "${var.name}/envelope-key/v1"
   kms_key_id = aws_kms_key.main.arn
@@ -429,6 +468,17 @@ resource "aws_secretsmanager_secret" "envelope" {
 resource "aws_secretsmanager_secret_version" "envelope" {
   secret_id     = aws_secretsmanager_secret.envelope.id
   secret_string = random_password.envelope.result
+}
+
+resource "aws_secretsmanager_secret" "envelope_v2" {
+  name       = "${var.name}/envelope-key/v2"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "envelope_v2" {
+  secret_id     = aws_secretsmanager_secret.envelope_v2.id
+  secret_string = random_password.envelope_v2.result
 }
 
 resource "aws_secretsmanager_secret" "backend_database_url" {
@@ -592,8 +642,11 @@ resource "aws_iam_role_policy" "task_secrets" {
         ]
         Resource = concat([
           aws_secretsmanager_secret.jwt.arn,
+          aws_secretsmanager_secret.jwt_v2.arn,
           aws_secretsmanager_secret.session.arn,
+          aws_secretsmanager_secret.session_v2.arn,
           aws_secretsmanager_secret.envelope.arn,
+          aws_secretsmanager_secret.envelope_v2.arn,
           aws_secretsmanager_secret.backend_database_url.arn,
           aws_secretsmanager_secret.app_database_url.arn,
           aws_secretsmanager_secret.agent_database_url.arn,
@@ -679,9 +732,15 @@ resource "aws_ecs_task_definition" "service" {
       secrets = concat(
         contains(["backend", "gateway", "console"], each.key) ? [
           { name = "DATABASE_URL", valueFrom = each.key == "backend" ? aws_secretsmanager_secret.backend_database_url.arn : aws_secretsmanager_secret.app_database_url.arn },
-          { name = "JWT_SECRET", valueFrom = aws_secretsmanager_secret.jwt.arn },
-          { name = "SESSION_SECRET", valueFrom = aws_secretsmanager_secret.session.arn },
-          { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn }
+          { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
+          { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
+          { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
+          { name = "SESSION_SECRET", valueFrom = var.session_key_version == "v2" ? aws_secretsmanager_secret.session_v2.arn : aws_secretsmanager_secret.session.arn },
+          { name = "SESSION_SECRET_V1", valueFrom = aws_secretsmanager_secret.session.arn },
+          { name = "SESSION_SECRET_V2", valueFrom = aws_secretsmanager_secret.session_v2.arn },
+          { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
+          { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
+          { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn }
         ] : [],
         contains(["console", "agent"], each.key) ? [
           { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn }
@@ -691,7 +750,9 @@ resource "aws_ecs_task_definition" "service" {
         ] : [],
         each.key == "agent" ? [
           { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn },
-          { name = "JWT_SECRET", valueFrom = aws_secretsmanager_secret.jwt.arn },
+          { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
+          { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
+          { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
           { name = "AUTHCLAW_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.agent_encryption.arn },
           { name = "AUTHCLAW_REDACTION_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
         ] : []
