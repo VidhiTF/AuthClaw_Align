@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_text(encoding="utf-8")
+REGIONAL_OUTPUTS = (ROOT / "infra/terraform/modules/regional_stack/outputs.tf").read_text(encoding="utf-8")
 
 
 class ACL10CryptographyControlTests(unittest.TestCase):
@@ -24,6 +25,12 @@ class ACL10CryptographyControlTests(unittest.TestCase):
         self.assertIn('name = "AUTHCLAW_REQUIRE_SERVICE_TLS"', REGIONAL_STACK)
         self.assertIn('var.authclaw_env != "production" || alltrue([', REGIONAL_STACK)
         self.assertIn("Production is blocked until agent, gateway, OPA, and Presidio", REGIONAL_STACK)
+
+    def test_envelope_rotation_keeps_current_and_previous_keys_available(self):
+        self.assertIn('name = "ENVELOPE_KEY_V1"', REGIONAL_STACK)
+        self.assertIn('name = "ENVELOPE_KEY_V2"', REGIONAL_STACK)
+        self.assertIn("value = var.secret_key_version", REGIONAL_STACK)
+        self.assertIn("envelope_v2", REGIONAL_OUTPUTS)
 
 
 if __name__ == "__main__":
