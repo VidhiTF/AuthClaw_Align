@@ -47,7 +47,7 @@ locals {
     agent = {
       image          = var.container_images.agent
       container_port = 8001
-      command        = ["sh", "-c", "python -m database.migrations && exec uvicorn main:app --host 0.0.0.0 --port 8001"]
+      command        = null
     }
     opa = {
       image          = var.container_images.opa
@@ -282,6 +282,25 @@ resource "random_password" "db" {
   special = false
 }
 
+resource "random_password" "backend_migrator_db" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "backend_app_db" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "agent_migrator_db" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "agent_runtime_db" {
+  length  = 32
+  special = false
+}
 resource "random_password" "jwt" {
   length  = 48
   special = false
@@ -456,6 +475,27 @@ resource "aws_secretsmanager_secret_version" "envelope_v2" {
   secret_string = random_password.envelope_v2.result
 }
 
+resource "aws_secretsmanager_secret" "bootstrap_database_url" {
+  name       = "${var.name}/bootstrap-database-url"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "bootstrap_database_url" {
+  secret_id     = aws_secretsmanager_secret.bootstrap_database_url.id
+  secret_string = "postgresql+psycopg://authclaw:${local.db_password}@${local.db_address}:5432/authclaw?sslmode=require"
+}
+
+resource "aws_secretsmanager_secret" "backend_migration_database_url" {
+  name       = "${var.name}/backend-migration-database-url"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "backend_migration_database_url" {
+  secret_id     = aws_secretsmanager_secret.backend_migration_database_url.id
+  secret_string = "postgresql+psycopg://authclaw_migrator:${random_password.backend_migrator_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
+}
 resource "aws_secretsmanager_secret" "backend_database_url" {
   name       = "${var.name}/backend-database-url"
   kms_key_id = aws_kms_key.main.arn
@@ -464,7 +504,7 @@ resource "aws_secretsmanager_secret" "backend_database_url" {
 
 resource "aws_secretsmanager_secret_version" "backend_database_url" {
   secret_id     = aws_secretsmanager_secret.backend_database_url.id
-  secret_string = "postgresql+psycopg://authclaw:${local.db_password}@${local.db_address}:5432/authclaw?sslmode=require"
+  secret_string = "postgresql+psycopg://authclaw_app:${random_password.backend_app_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
 }
 
 resource "aws_secretsmanager_secret" "app_database_url" {
@@ -475,9 +515,19 @@ resource "aws_secretsmanager_secret" "app_database_url" {
 
 resource "aws_secretsmanager_secret_version" "app_database_url" {
   secret_id     = aws_secretsmanager_secret.app_database_url.id
-  secret_string = "postgresql://authclaw:${local.db_password}@${local.db_address}:5432/authclaw?sslmode=require"
+  secret_string = "postgresql://authclaw_app:${random_password.backend_app_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
 }
 
+resource "aws_secretsmanager_secret" "agent_migration_database_url" {
+  name       = "${var.name}/agent-migration-database-url"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "agent_migration_database_url" {
+  secret_id     = aws_secretsmanager_secret.agent_migration_database_url.id
+  secret_string = "postgresql://authclaw_agent_migrator:${random_password.agent_migrator_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
+}
 resource "aws_secretsmanager_secret" "agent_database_url" {
   name       = "${var.name}/agent-database-url"
   kms_key_id = aws_kms_key.main.arn
@@ -486,7 +536,7 @@ resource "aws_secretsmanager_secret" "agent_database_url" {
 
 resource "aws_secretsmanager_secret_version" "agent_database_url" {
   secret_id     = aws_secretsmanager_secret.agent_database_url.id
-  secret_string = "postgresql://authclaw:${local.db_password}@${local.db_address}:5432/authclaw?sslmode=require"
+  secret_string = "postgresql://authclaw_agent_runtime:${random_password.agent_runtime_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
 }
 
 resource "aws_secretsmanager_secret" "internal_service" {
@@ -622,8 +672,10 @@ resource "aws_iam_role_policy" "task_secrets" {
           aws_secretsmanager_secret.session_v2.arn,
           aws_secretsmanager_secret.envelope.arn,
           aws_secretsmanager_secret.envelope_v2.arn,
-          aws_secretsmanager_secret.backend_database_url.arn,
+          aws_secretsmanager_secret.bootstrap_database_url.arn,
+          aws_secretsmanager_secret.backend_migration_database_url.arn, aws_secretsmanager_secret.backend_database_url.arn,
           aws_secretsmanager_secret.app_database_url.arn,
+          aws_secretsmanager_secret.agent_migration_database_url.arn,
           aws_secretsmanager_secret.agent_database_url.arn,
           aws_secretsmanager_secret.internal_service.arn,
           aws_secretsmanager_secret.agent_encryption.arn,
@@ -682,6 +734,113 @@ resource "aws_lb_listener" "service" {
   }
 }
 
+locals {
+  database_jobs = {
+    bootstrap_prepare = {
+      image   = var.container_images.backend
+      command = ["python", "scripts/bootstrap_database_security.py", "prepare"]
+      environment = [
+        { name = "POSTGRES_DB", value = "authclaw" }
+      ]
+      secrets = [
+        { name = "BOOTSTRAP_DATABASE_URL", valueFrom = aws_secretsmanager_secret.bootstrap_database_url.arn },
+        { name = "BACKEND_MIGRATION_DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_migration_database_url.arn },
+        { name = "BACKEND_DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
+        { name = "AGENT_MIGRATION_DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_migration_database_url.arn },
+        { name = "AGENT_DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn }
+      ]
+    }
+    backend_migrations = {
+      image   = var.container_images.backend
+      command = ["alembic", "upgrade", "head"]
+      environment = [
+        { name = "POSTGRES_APP_USER", value = "authclaw_app" },
+        { name = "AUTHCLAW_ENV", value = var.authclaw_env }
+      ]
+      secrets = [
+        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_migration_database_url.arn },
+        { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
+        { name = "SESSION_SECRET", valueFrom = aws_secretsmanager_secret.session.arn }
+      ]
+    }
+    agent_migrations = {
+      image   = var.container_images.agent
+      command = ["python", "-m", "database.migrations"]
+      environment = [
+        { name = "AUTHCLAW_DATABASE_SCHEMA", value = "agent" }
+      ]
+      secrets = [
+        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_migration_database_url.arn },
+        { name = "MIGRATION_DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_migration_database_url.arn }
+      ]
+    }
+    bootstrap_finalize = {
+      image   = var.container_images.backend
+      command = ["python", "scripts/bootstrap_database_security.py", "finalize"]
+      environment = [
+        { name = "POSTGRES_DB", value = "authclaw" }
+      ]
+      secrets = [
+        { name = "BOOTSTRAP_DATABASE_URL", valueFrom = aws_secretsmanager_secret.bootstrap_database_url.arn },
+        { name = "BACKEND_MIGRATION_DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_migration_database_url.arn },
+        { name = "BACKEND_DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
+        { name = "AGENT_MIGRATION_DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_migration_database_url.arn },
+        { name = "AGENT_DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn }
+      ]
+    }
+    database_security_check = {
+      image   = var.container_images.backend
+      command = ["python", "scripts/verify_database_security.py"]
+      environment = [
+        { name = "BACKEND_MIGRATOR_USER", value = "authclaw_migrator" },
+        { name = "POSTGRES_APP_USER", value = "authclaw_app" },
+        { name = "AGENT_MIGRATOR_USER", value = "authclaw_agent_migrator" },
+        { name = "AGENT_RUNTIME_USER", value = "authclaw_agent_runtime" }
+      ]
+      secrets = [
+        { name = "BOOTSTRAP_DATABASE_URL", valueFrom = aws_secretsmanager_secret.bootstrap_database_url.arn },
+        { name = "BACKEND_DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
+        { name = "AGENT_DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn }
+      ]
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_group" "database_job" {
+  for_each          = local.database_jobs
+  name              = "/authclaw/${var.name}/database-${replace(each.key, "_", "-")}"
+  retention_in_days = 30
+  tags              = var.tags
+}
+
+resource "aws_ecs_task_definition" "database_job" {
+  for_each                 = local.database_jobs
+  family                   = "${var.name}-database-${replace(each.key, "_", "-")}"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.service_cpu
+  memory                   = var.service_memory
+  execution_role_arn       = aws_iam_role.task_execution.arn
+
+  container_definitions = jsonencode([{
+    name        = each.key
+    image       = each.value.image
+    essential   = true
+    command     = each.value.command
+    environment = each.value.environment
+    secrets     = each.value.secrets
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.database_job[each.key].name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "database"
+      }
+    }
+  }])
+
+  tags = var.tags
+}
 resource "aws_ecs_task_definition" "service" {
   for_each = local.service_configs
 
@@ -705,6 +864,9 @@ resource "aws_ecs_task_definition" "service" {
         local.common_environment,
         each.key == "gateway" ? [
           { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
+        ] : [],
+        each.key == "backend" ? [
+          { name = "AUTHCLAW_RUNTIME_DB_ROLE", value = "authclaw_app" }
         ] : [],
         each.key == "agent" ? [
           { name = "AUTHCLAW_DATABASE_SCHEMA", value = "agent" },

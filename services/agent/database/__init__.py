@@ -1,5 +1,4 @@
 import os
-from sqlalchemy import create_engine, event, text
 
 from services.tenant_context import (
     get_current_request_id,
@@ -7,10 +6,11 @@ from services.tenant_context import (
     is_auth_lookup_context,
     is_tenant_context_required,
 )
+from sqlalchemy import create_engine, event
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:vidhi@localhost:5432/authclaw")
 MIGRATION_DATABASE_URL = os.getenv("MIGRATION_DATABASE_URL", DATABASE_URL)
-RUNTIME_DATABASE_ROLE = os.getenv("AUTHCLAW_RUNTIME_DB_ROLE", "").strip()
+EXPECTED_RUNTIME_DATABASE_ROLE = os.getenv("AUTHCLAW_RUNTIME_DB_ROLE", "").strip()
 DATABASE_SCHEMA = os.getenv("AUTHCLAW_DATABASE_SCHEMA", "agent").strip()
 
 
@@ -33,11 +33,6 @@ engine = create_engine(DATABASE_URL, connect_args=_connect_args())
 migration_engine = create_engine(MIGRATION_DATABASE_URL, connect_args=_connect_args())
 
 
-def _quoted_runtime_role() -> str:
-    _validate_identifier(RUNTIME_DATABASE_ROLE, "AUTHCLAW_RUNTIME_DB_ROLE")
-    return engine.dialect.identifier_preparer.quote(RUNTIME_DATABASE_ROLE)
-
-
 def _is_postgres() -> bool:
     return engine.dialect.name == "postgresql"
 
@@ -52,16 +47,21 @@ def _clear_tenant_context_on_checkout(dbapi_connection, connection_record, conne
         return
     cursor = dbapi_connection.cursor()
     try:
-        cursor.execute("RESET ROLE")
         _set_config(cursor, "app.tenant_id", "")
         _set_config(cursor, "app.current_tenant_id", "")
         _set_config(cursor, "app.request_id", "")
         _set_config(cursor, "app.auth_lookup", "")
-        if RUNTIME_DATABASE_ROLE:
-            cursor.execute(f"SET ROLE {_quoted_runtime_role()}")
+        if EXPECTED_RUNTIME_DATABASE_ROLE:
+            _validate_identifier(EXPECTED_RUNTIME_DATABASE_ROLE, "AUTHCLAW_RUNTIME_DB_ROLE")
+            cursor.execute("SELECT session_user, current_user")
+            session_user, current_user = cursor.fetchone()
+            if session_user != EXPECTED_RUNTIME_DATABASE_ROLE or current_user != EXPECTED_RUNTIME_DATABASE_ROLE:
+                raise RuntimeError(
+                    "Agent database identity mismatch: expected session_user = current_user = "
+                    f"{EXPECTED_RUNTIME_DATABASE_ROLE!r}, got {session_user!r} and {current_user!r}."
+                )
     finally:
         cursor.close()
-
 
 @event.listens_for(engine, "before_cursor_execute")
 def _apply_tenant_context(conn, cursor, statement, parameters, context, executemany):

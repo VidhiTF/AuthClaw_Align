@@ -210,7 +210,6 @@ $$;
 
 
 def upgrade():
-    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
     op.execute("ALTER TABLE audit_log_metadata NO FORCE ROW LEVEL SECURITY")
 
     op.add_column(
