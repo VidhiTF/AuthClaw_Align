@@ -47,7 +47,7 @@ locals {
     agent = {
       image          = var.container_images.agent
       container_port = 8001
-      command        = null
+      command        = ["sh", "-c", "python -m database.migrations && exec uvicorn main:app --host 0.0.0.0 --port 8001"]
     }
     opa = {
       image          = var.container_images.opa
@@ -282,11 +282,6 @@ resource "random_password" "db" {
   special = false
 }
 
-resource "random_password" "agent_db" {
-  length  = 32
-  special = false
-}
-
 resource "random_password" "jwt" {
   length  = 48
   special = false
@@ -373,26 +368,6 @@ resource "aws_db_instance" "postgres_replica" {
   deletion_protection    = false
   skip_final_snapshot    = true
   tags                   = merge(var.tags, { Role = "cross-region-read-replica" })
-}
-
-resource "aws_db_instance" "agent" {
-  identifier              = "${var.name}-agent-postgres"
-  engine                  = "postgres"
-  engine_version          = var.db_engine_version
-  instance_class          = var.db_instance_class
-  allocated_storage       = var.db_allocated_storage
-  db_name                 = "authclaw_agent"
-  username                = "authclaw_agent"
-  password                = random_password.agent_db.result
-  db_subnet_group_name    = aws_db_subnet_group.main.name
-  vpc_security_group_ids  = [aws_security_group.data.id]
-  storage_encrypted       = true
-  kms_key_id              = aws_kms_key.main.arn
-  multi_az                = var.is_primary
-  backup_retention_period = 14
-  deletion_protection     = var.is_primary
-  skip_final_snapshot     = !var.is_primary
-  tags                    = merge(var.tags, { Service = "agent" })
 }
 
 resource "aws_elasticache_subnet_group" "main" {
@@ -511,7 +486,7 @@ resource "aws_secretsmanager_secret" "agent_database_url" {
 
 resource "aws_secretsmanager_secret_version" "agent_database_url" {
   secret_id     = aws_secretsmanager_secret.agent_database_url.id
-  secret_string = "postgresql://authclaw_agent:${random_password.agent_db.result}@${aws_db_instance.agent.address}:5432/authclaw_agent?sslmode=require"
+  secret_string = "postgresql://authclaw:${local.db_password}@${local.db_address}:5432/authclaw?sslmode=require"
 }
 
 resource "aws_secretsmanager_secret" "internal_service" {
@@ -726,9 +701,16 @@ resource "aws_ecs_task_definition" "service" {
         containerPort = each.value.container_port
         protocol      = "tcp"
       }]
-      environment = concat(local.common_environment, each.key == "gateway" ? [
-        { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
-      ] : [])
+      environment = concat(
+        local.common_environment,
+        each.key == "gateway" ? [
+          { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
+        ] : [],
+        each.key == "agent" ? [
+          { name = "AUTHCLAW_DATABASE_SCHEMA", value = "agent" },
+          { name = "AUTHCLAW_RUNTIME_DB_ROLE", value = "authclaw_agent_runtime" }
+        ] : []
+      )
       secrets = concat(
         contains(["backend", "gateway", "console"], each.key) ? [
           { name = "DATABASE_URL", valueFrom = each.key == "backend" ? aws_secretsmanager_secret.backend_database_url.arn : aws_secretsmanager_secret.app_database_url.arn },

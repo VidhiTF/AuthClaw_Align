@@ -11,14 +11,30 @@ from services.tenant_context import (
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:vidhi@localhost:5432/authclaw")
 MIGRATION_DATABASE_URL = os.getenv("MIGRATION_DATABASE_URL", DATABASE_URL)
 RUNTIME_DATABASE_ROLE = os.getenv("AUTHCLAW_RUNTIME_DB_ROLE", "").strip()
+DATABASE_SCHEMA = os.getenv("AUTHCLAW_DATABASE_SCHEMA", "agent").strip()
 
-engine = create_engine(DATABASE_URL)
-migration_engine = create_engine(MIGRATION_DATABASE_URL)
+
+def _validate_identifier(value: str, variable: str) -> str:
+    if not value or not value.replace("_", "").isalnum() or value[0].isdigit():
+        raise RuntimeError(f"{variable} must be a simple PostgreSQL identifier.")
+    return value
+
+
+_validate_identifier(DATABASE_SCHEMA, "AUTHCLAW_DATABASE_SCHEMA")
+
+
+def _connect_args() -> dict[str, str]:
+    # Excluding public prevents an unqualified agent query from falling through
+    # to an incompatible backend table in the consolidated database.
+    return {"options": f"-csearch_path={DATABASE_SCHEMA},pg_catalog"}
+
+
+engine = create_engine(DATABASE_URL, connect_args=_connect_args())
+migration_engine = create_engine(MIGRATION_DATABASE_URL, connect_args=_connect_args())
 
 
 def _quoted_runtime_role() -> str:
-    if not RUNTIME_DATABASE_ROLE.replace("_", "").isalnum() or RUNTIME_DATABASE_ROLE[0].isdigit():
-        raise RuntimeError("AUTHCLAW_RUNTIME_DB_ROLE must be a simple PostgreSQL role name.")
+    _validate_identifier(RUNTIME_DATABASE_ROLE, "AUTHCLAW_RUNTIME_DB_ROLE")
     return engine.dialect.identifier_preparer.quote(RUNTIME_DATABASE_ROLE)
 
 

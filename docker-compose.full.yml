@@ -16,21 +16,6 @@ services:
       timeout: 5s
       retries: 10
 
-  agent-postgres:
-    image: postgres:17
-    container_name: authclaw-full-agent-postgres
-    environment:
-      POSTGRES_DB: ${AGENT_POSTGRES_DB:-authclaw_agent}
-      POSTGRES_USER: ${AGENT_POSTGRES_USER:-authclaw_agent}
-      POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:-change-me-agent-local}
-    volumes:
-      - full_agent_postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${AGENT_POSTGRES_USER:-authclaw_agent} -d ${AGENT_POSTGRES_DB:-authclaw_agent}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
   redis:
     image: redis:7
     container_name: authclaw-full-redis
@@ -296,19 +281,37 @@ services:
     volumes:
       - full_gateway_audit_outbox:/var/lib/authclaw-gateway
 
+  agent-migrations:
+    build:
+      context: ./services/agent
+    container_name: authclaw-full-agent-migrations
+    depends_on:
+      backend:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
+      MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
+      AUTHCLAW_DATABASE_SCHEMA: ${AGENT_DATABASE_SCHEMA:-agent}
+      AUTHCLAW_RUNTIME_DB_ROLE: ${AGENT_RUNTIME_DB_ROLE:-authclaw_agent_runtime}
+    command: ["python", "-m", "database.migrations"]
+    restart: "no"
+
   agent:
     build:
       context: ./services/agent
     container_name: authclaw-full-agent
     depends_on:
-      agent-postgres:
-        condition: service_healthy
+      agent-migrations:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       opa:
         condition: service_started
     environment:
-      DATABASE_URL: postgresql://${AGENT_POSTGRES_USER:-authclaw_agent}:${AGENT_POSTGRES_PASSWORD:-change-me-agent-local}@agent-postgres:5432/${AGENT_POSTGRES_DB:-authclaw_agent}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
+      AUTHCLAW_DATABASE_SCHEMA: ${AGENT_DATABASE_SCHEMA:-agent}
       AUTHCLAW_RUNTIME_DB_ROLE: ${AGENT_RUNTIME_DB_ROLE:-authclaw_agent_runtime}
       REDIS_URL: redis://redis:6379
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
@@ -399,6 +402,5 @@ services:
 
 volumes:
   full_postgres_data:
-  full_agent_postgres_data:
   full_clickhouse_data:
   full_gateway_audit_outbox:

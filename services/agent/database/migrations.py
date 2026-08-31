@@ -3,7 +3,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from sqlalchemy import text
-from database import migration_engine
+from database import DATABASE_SCHEMA, migration_engine
 
 logger = logging.getLogger("authclaw.database.migrations")
 
@@ -17,6 +17,7 @@ def _configure_runtime_role(conn) -> None:
 
     quote = conn.dialect.identifier_preparer.quote
     quoted_role = quote(role)
+    quoted_schema = quote(DATABASE_SCHEMA)
     migration_user = conn.execute(text("SELECT session_user")).scalar_one()
     if role == migration_user:
         raise RuntimeError("The Agent runtime role must differ from the migration role.")
@@ -29,11 +30,18 @@ def _configure_runtime_role(conn) -> None:
 
     quoted_migration_user = quote(migration_user)
     conn.execute(text(f"GRANT {quoted_role} TO {quoted_migration_user}"))
-    conn.execute(text(f"GRANT USAGE ON SCHEMA public TO {quoted_role}"))
-    conn.execute(text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {quoted_role}"))
-    conn.execute(text(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {quoted_role}"))
-    conn.execute(text(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quoted_migration_user} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {quoted_role}"))
-    conn.execute(text(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quoted_migration_user} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {quoted_role}"))
+    conn.execute(text(f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {quoted_role}"))
+    conn.execute(text(f"REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM {quoted_role}"))
+    conn.execute(text(f"REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM {quoted_role}"))
+    conn.execute(text(f"REVOKE ALL PRIVILEGES ON SCHEMA public FROM {quoted_role}"))
+    conn.execute(text(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quoted_migration_user} IN SCHEMA public REVOKE ALL ON TABLES FROM {quoted_role}"))
+    conn.execute(text(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quoted_migration_user} IN SCHEMA public REVOKE ALL ON SEQUENCES FROM {quoted_role}"))
+    conn.execute(text(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quoted_migration_user} IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM {quoted_role}"))
+    conn.execute(text(f"GRANT USAGE ON SCHEMA {quoted_schema} TO {quoted_role}"))
+    conn.execute(text(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {quoted_schema} TO {quoted_role}"))
+    conn.execute(text(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {quoted_schema} TO {quoted_role}"))
+    conn.execute(text(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quoted_migration_user} IN SCHEMA {quoted_schema} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {quoted_role}"))
+    conn.execute(text(f"ALTER DEFAULT PRIVILEGES FOR ROLE {quoted_migration_user} IN SCHEMA {quoted_schema} GRANT USAGE, SELECT ON SEQUENCES TO {quoted_role}"))
 
 def run_startup_migrations():
     """
@@ -1505,6 +1513,9 @@ def run_startup_migrations():
     """
     try:
         with migration_engine.connect() as conn:
+            quoted_schema = conn.dialect.identifier_preparer.quote(DATABASE_SCHEMA)
+            conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}"))
+            conn.execute(text(f"SET LOCAL search_path TO {quoted_schema}, pg_catalog"))
             conn.execute(text(migration_sql))
             conn.execute(text(rls_sql))
             conn.execute(text(force_rls_sql))
@@ -1569,3 +1580,7 @@ def seed_data():
     Intentionally empty. Production databases start without demo records.
     """
     pass
+
+
+if __name__ == "__main__":
+    run_startup_migrations()

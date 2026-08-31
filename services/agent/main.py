@@ -31,7 +31,6 @@ from approval_store import (
 )
 from memory import add_message, delete_session_history, get_history, list_sessions, purge_session_history
 
-from database.migrations import run_startup_migrations
 from startup.validation import validate_environment
 from startup.initialization import initialize_provider
 from policy import compile_policy_to_rego, evaluate_opa_policy, get_policy, load_policy
@@ -64,11 +63,6 @@ API_KEY = os.getenv("AUTHCLAW_TEST_API_KEY", "")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. run_startup_migrations()
-    # 2. validate_environment()
-    # 3. initialize_provider()
-    run_startup_migrations()
-
     validate_environment()
     initialize_provider()
     
