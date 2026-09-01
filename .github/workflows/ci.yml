@@ -1,9 +1,8 @@
 name: AuthClaw Required CI
 
 on:
-  create:
   push:
-    branches: ["**"]
+    branches: [master]
   pull_request:
     branches: [master]
 
@@ -25,7 +24,6 @@ env:
 jobs:
   changes:
     name: Detect Changed Components
-    if: github.event_name != 'create' || github.event.ref_type == 'branch'
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.changes.outputs.backend }}
@@ -47,8 +45,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          before='${{ github.event.before }}'
-          if [[ "$before" =~ ^0+$ ]] || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            before='${{ github.event.pull_request.base.sha }}'
+          else
+            before='${{ github.event.before }}'
+          fi
+          if [[ -z "$before" || "$before" =~ ^0+$ ]] || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
             changed="$(git ls-files)"
           else
             changed="$(git diff --name-only "$before" "$GITHUB_SHA")"
@@ -126,7 +128,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -150,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -168,7 +170,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -188,7 +190,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: python -m unittest discover -s sdk/python -p "test_*.py"
@@ -200,7 +202,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ env.GO_VERSION_FILE }}
           cache-dependency-path: gateway/go.sum
@@ -220,7 +222,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -277,20 +279,40 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v7
       - uses: github/codeql-action/init@v4
         with:
           languages: ${{ needs.changes.outputs.codeql_languages }}
       - uses: github/codeql-action/autobuild@v4
-      - uses: github/codeql-action/analyze@v4
+      - name: Analyze source with CodeQL
+        uses: github/codeql-action/analyze@v4
         with:
-          upload: never
+          output: codeql-results
+          upload: ${{ vars.CODEQL_NATIVE_UPLOAD == 'true' && 'always' || 'never' }}
           upload-database: false
+      - name: Enforce CodeQL findings
+        shell: bash
+        run: >-
+          jq -se
+          '[.[].runs[].results[]? | select(.level == "error")] | length == 0'
+          codeql-results/*.sarif
+      - name: Preserve CodeQL results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: codeql-sarif-${{ github.sha }}
+          path: codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 14
 
   checks:
     name: ACL-14 Required Checks
-    if: always() && (github.event_name != 'create' || github.event.ref_type == 'branch')
+    if: always()
     needs: [changes, policy, security, backend, audit, agent, sdk, gateway, console, compose, terraform, codeql]
     runs-on: ubuntu-latest
     steps:
