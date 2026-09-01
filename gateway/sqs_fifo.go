@@ -1,23 +1,41 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 )
+
+const sqsMaxMessageBytes = 1_048_576
+
+type sqsSender interface {
+	SendMessage(context.Context, *sqs.SendMessageInput, ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
+}
 
 type sqsFIFOAuditStream struct {
 	queueURL string
-	client   *http.Client
+	client   sqsSender
+}
+
+func sqsQueueRegion(host string) string {
+	labels := strings.Split(strings.ToLower(host), ".")
+	for i, label := range labels {
+		if (label == "sqs" || strings.HasPrefix(label, "sqs-")) && i+1 < len(labels) {
+			return labels[i+1]
+		}
+	}
+	return ""
 }
 
 func newSQSFIFOAuditStream() (*sqsFIFOAuditStream, error) {
@@ -30,51 +48,56 @@ func newSQSFIFOAuditStream() (*sqsFIFOAuditStream, error) {
 		return nil, fmt.Errorf("SQS_AUDIT_QUEUE_URL must identify a .fifo queue")
 	}
 	host := strings.ToLower(parsed.Hostname())
+	queueRegion := sqsQueueRegion(host)
 	awsHost := strings.HasSuffix(host, ".amazonaws.com") || strings.HasSuffix(host, ".amazonaws.com.cn")
-	if !awsHost || (!strings.Contains(host, ".sqs.") && !strings.HasPrefix(host, "sqs.")) {
-		return nil, fmt.Errorf("SQS_AUDIT_QUEUE_URL must use an AWS SQS endpoint")
+	if !awsHost || queueRegion == "" {
+		return nil, fmt.Errorf("SQS_AUDIT_QUEUE_URL must use a regional AWS SQS endpoint")
 	}
-	return &sqsFIFOAuditStream{
-		queueURL: queueURL,
-		client:   &http.Client{Timeout: 5 * time.Second},
-	}, nil
+	cfg, err := config.LoadDefaultConfig(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("load AWS SDK configuration: %w", err)
+	}
+	if cfg.Region != "" && !strings.EqualFold(cfg.Region, queueRegion) {
+		return nil, fmt.Errorf("SQS queue region %q does not match AWS SDK region %q", queueRegion, cfg.Region)
+	}
+	cfg.Region = queueRegion
+	return &sqsFIFOAuditStream{queueURL: queueURL, client: sqs.NewFromConfig(cfg)}, nil
 }
 
 func (s *sqsFIFOAuditStream) Enabled() bool { return true }
+
+func canonicalAuditRecordID(value string) (string, error) {
+	compact := strings.ReplaceAll(strings.TrimSpace(value), "-", "")
+	if len(value) != 36 || len(compact) != 32 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return "", fmt.Errorf("SQS FIFO audit_record_id must be a canonical UUID")
+	}
+	if _, err := hex.DecodeString(compact); err != nil {
+		return "", fmt.Errorf("SQS FIFO audit_record_id must be a canonical UUID")
+	}
+	return strings.ToLower(value), nil
+}
 
 func (s *sqsFIFOAuditStream) send(ctx context.Context, tenantID, recordID string, payload []byte) error {
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(recordID) == "" {
 		return fmt.Errorf("SQS FIFO audit publish requires tenant_id and audit_record_id")
 	}
-	if len(tenantID) > 128 || len(recordID) > 128 {
-		return fmt.Errorf("SQS FIFO tenant_id and audit_record_id must not exceed 128 characters")
-	}
-	form := url.Values{
-		"Action":                 {"SendMessage"},
-		"Version":                {"2012-11-05"},
-		"MessageBody":            {string(payload)},
-		"MessageGroupId":         {tenantID},
-		"MessageDeduplicationId": {recordID},
-	}
-	body := []byte(form.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.queueURL, bytes.NewReader(body))
+	canonicalID, err := canonicalAuditRecordID(recordID)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if err := SignAWSRequest(req, body, "sqs"); err != nil {
-		return err
+	if len(tenantID) > 128 {
+		return fmt.Errorf("SQS FIFO tenant_id must not exceed 128 characters")
 	}
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return err
+	if len(payload) > sqsMaxMessageBytes {
+		return fmt.Errorf("SQS audit message exceeds %d-byte limit", sqsMaxMessageBytes)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("SQS SendMessage failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
-	}
-	return nil
+	_, err = s.client.SendMessage(ctx, &sqs.SendMessageInput{
+		QueueUrl:               aws.String(s.queueURL),
+		MessageBody:            aws.String(string(payload)),
+		MessageGroupId:         aws.String(tenantID),
+		MessageDeduplicationId: aws.String(canonicalID),
+	})
+	return err
 }
 
 func (s *sqsFIFOAuditStream) PublishEvent(event *AuditEvent) error {

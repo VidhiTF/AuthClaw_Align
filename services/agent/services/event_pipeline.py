@@ -87,7 +87,6 @@ class EventPipeline:
                     record["topic"],
                     event,
                     serialized=record["payload"],
-                    audit_record_id=str(record["event_id"]),
                 )
                 if self.clickhouse_enabled:
                     self._write_clickhouse(event)
