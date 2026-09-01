@@ -37,7 +37,7 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("vars.CODEQL_NATIVE_UPLOAD == 'true'", CI)
         self.assertIn("upload-database: false", CI)
         self.assertIn("name: Enforce CodeQL findings", CI)
-        self.assertIn("actions/upload-artifact@v4", CI)
+        self.assertIn("actions/upload-artifact@v6", CI)
         self.assertIn("ghcr.io/gitleaks/gitleaks", CI)
         self.assertIn("aquasecurity/trivy-action", CI)
         self.assertNotIn("Full Stack Integration", CI)
