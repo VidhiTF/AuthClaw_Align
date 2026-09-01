@@ -2,6 +2,8 @@
 
 This kit supports **Task 1**: establish a production-ready baseline for AuthClaw’s
 current Kafka audit stream before any transport migration.
+For **Task 2**, it can also produce a reproducible repository-only inventory for
+ordering/replay/retention assumptions used by the ADR process.
 
 ## Scope covered
 
@@ -39,6 +41,31 @@ current Kafka audit stream before any transport migration.
 - Optional for DB/replay checks: `psql`
 - Optional for AWS cost/operations: `aws` CLI + `jq`
 
+## Task 2 inventory mode (repository-only)
+
+Set `AUDIT_STREAM_REPO_INVENTORY=1` to run only reproducible code-scan evidence
+without any Kafka, DB, or AWS API calls:
+
+```bash
+AUTHCLAW_BASELINE_ENV=local \
+AUDIT_STREAM_REPO_INVENTORY=1 \
+./scripts/kafka-baseline/collect_kafka_audit_baseline.sh ./artifacts/kafka-baseline
+```
+
+Task 2 outputs:
+
+- `audit_stream_inventory.json` (machine-readable)
+- `audit_stream_inventory_sources.txt` (scan references)
+- `kafka_audit_adr_input.md` (concise ADR-input report)
+
+These artifacts are designed to be reproducible from the repository and include explicit
+`LIVE-EVIDENCE-PENDING` notes where production measurements are required.
+
+Committed Task 2 snapshots are maintained at:
+
+- `docs/adr/kafka-audit-stream-inventory.json`
+- `docs/adr/KAFKA_AUDIT_STREAM_ADR_INPUT.md`
+
 ## Quick start (local dry-run)
 
 ```bash
@@ -75,4 +102,3 @@ All collection inputs are stored in:
 - `metrics_window.txt`
 
 No command can mutate Kafka state; all commands are observations or read-only queries.
-

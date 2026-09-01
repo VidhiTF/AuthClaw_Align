@@ -26,6 +26,9 @@
 - `replay_and_dedup_sql.md`
 - `retention_and_replay_signals.txt`
 - `aws_cost_and_ops.md`
+- `audit_stream_inventory.json`
+- `audit_stream_inventory_sources.txt`
+- `kafka_audit_adr_input.md`
 
 ## KPI results
 
@@ -63,9 +66,16 @@
   - Cost and operational overhead comparisons prepared?
 - Recommendation:
 
+## Task 2 evidence review (required for ADR inputs)
+
+- `audit_stream_inventory.json`: complete when all code paths are present and reproducible from repo scan.
+- `kafka_audit_adr_input.md`: expected to include `LIVE-EVIDENCE-PENDING` markers for:
+  - live lag/error/replay throughput,
+  - live DLQ/retry volume,
+  - live topic replication and offset behavior confirmation.
+
 ## Blockers / follow-ups
 
 - Unmeasured KPI:
 - Root cause for missing data:
 - Required re-run actions:
-

@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-09-01T06:01:32Z",
+  "environment": "repository-only",
+  "evidence_class": "static repository scan; no deployed measurements",
+  "generator": "scripts/kafka-baseline/collect_kafka_audit_baseline.sh",
+  "producers": [
+    {
+      "id": "gateway_kafka_audit_writer",
+      "components": ["gateway/kafka.go"],
+      "topics": ["audit.events", "audit.deadletter"],
+      "message_key": "tenant_id",
+      "code_refs": [
+        "gateway/kafka.go:PublishAuditEvent",
+        "gateway/kafka.go:PublishAuditOutboxPayload",
+        "gateway/kafka.go:PublishToDLQ"
+      ]
+    },
+    {
+      "id": "backend_outbox_publisher",
+      "components": [
+        "backend/app/services/event_backbone.py",
+        "backend/app/services/findings_service.py",
+        "backend/app/services/evidence_service.py",
+        "backend/app/api/v1/endpoints/auth.py",
+        "backend/app/api/v1/endpoints/onboarding.py",
+        "backend/app/api/v1/endpoints/users.py",
+        "backend/app/services/data_subject_requests.py",
+        "backend/app/orchestrator/runner.py"
+      ],
+      "topics": ["audit.events", "audit.deadletter"],
+      "message_key": "tenant_id",
+      "code_refs": [
+        "backend/app/services/event_backbone.py:publish_audit_event",
+        "backend/app/services/event_backbone.py:publish_pending_audit_events",
+        "backend/app/services/event_backbone.py:tenant_key"
+      ]
+    },
+    {
+      "id": "agent_service_publisher",
+      "components": ["services/agent/services/event_pipeline.py"],
+      "topics": ["authclaw-audit-events", "authclaw-dead-letter-events"],
+      "message_key": "tenant_id",
+      "code_refs": [
+        "services/agent/services/event_pipeline.py:publish_events",
+        "services/agent/services/event_pipeline.py:publish_events_to_kafka",
+        "services/agent/services/event_pipeline.py:process_batch"
+      ]
+    }
+  ],
+  "consumers": [
+    {
+      "id": "authclaw_audit_consumer",
+      "component": "audit_consumer/consumer.py",
+      "topics": ["gateway.traffic", "audit.events"],
+      "required_consumer_group": "authclaw-audit-consumer",
+      "offset_reset": "earliest",
+      "commit_model": "commit blocked by retryable mirror or DLQ side-effect failures",
+      "code_refs": [
+        "audit_consumer/consumer.py:KafkaConsumer",
+        "audit_consumer/consumer.py:process_message",
+        "audit_consumer/consumer.py:SequenceGapError",
+        "audit_consumer/consumer.py:RetryableMirrorError"
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "name": "gateway.traffic",
+      "declared_partitions": 12,
+      "declared_retention_days": 7,
+      "declared_key": "tenant_id",
+      "runtime_replication": "LIVE-EVIDENCE-PENDING",
+      "code_refs": ["infra/kafka/topics.yaml", "audit_consumer/event_backbone.py"]
+    },
+    {
+      "name": "audit.events",
+      "declared_partitions": 12,
+      "declared_retention_days": 30,
+      "declared_key": "tenant_id",
+      "runtime_replication": "LIVE-EVIDENCE-PENDING",
+      "code_refs": ["infra/kafka/topics.yaml", "audit_consumer/event_backbone.py"]
+    },
+    {
+      "name": "audit.deadletter",
+      "declared_partitions": 6,
+      "declared_retention_days": 90,
+      "declared_key": "tenant_id",
+      "runtime_replication": "LIVE-EVIDENCE-PENDING",
+      "code_refs": ["infra/kafka/topics.yaml", "audit_consumer/event_backbone.py"]
+    }
+  ],
+  "requirements": {
+    "ordering": {
+      "scope": "per-tenant",
+      "global_ordering": "not evidenced by repository code",
+      "basis": "tenant_id message keys and explicit tenant_sequence validation",
+      "code_refs": [
+        "backend/app/services/event_backbone.py:tenant_sequence",
+        "audit_consumer/consumer.py:SequenceGapError",
+        "gateway/kafka.go:PublishAuditEvent"
+      ]
+    },
+    "replay": {
+      "implemented_behaviors": [
+        "PostgreSQL audit outbox republishing",
+        "consumer starts at earliest retained offset for a new/reset group",
+        "consumer seeks to the same offset after retryable sequence failures",
+        "manual DLQ reprocessing path"
+      ],
+      "business_usage": "LIVE-EVIDENCE-PENDING",
+      "code_dependencies": [
+        "backend/app/services/event_backbone.py",
+        "gateway/kafka.go",
+        "gateway/audit.go",
+        "audit_consumer/consumer.py",
+        "services/agent/services/event_pipeline.py"
+      ]
+    },
+    "retention": {
+      "configured_topic_values_are_requirements": false,
+      "required_business_period": "LIVE-EVIDENCE-PENDING",
+      "required_consumer_recovery_window": "LIVE-EVIDENCE-PENDING",
+      "required_compliance_period": "LIVE-EVIDENCE-PENDING"
+    },
+    "retry_and_dlq": {
+      "model": "producer/consumer retries plus outbox and tenant-keyed DLQ",
+      "agent_checkpointing": true,
+      "actual_retry_volume": "LIVE-EVIDENCE-PENDING",
+      "actual_dlq_volume": "LIVE-EVIDENCE-PENDING",
+      "code_refs": [
+        "gateway/kafka.go:PublishToDLQ",
+        "backend/app/services/event_backbone.py:AUDIT_DLQ_TOPIC",
+        "audit_consumer/consumer.py:dlq_publish",
+        "services/agent/services/event_pipeline.py:checkpoint_table"
+      ]
+    }
+  },
+  "deployed_evidence_pending": [
+    "actual topics, partitions, replication factors and retention overrides",
+    "active consumer groups and ownership",
+    "consumer lag and throughput by partition",
+    "producer delivery failures and retry rate",
+    "DLQ ingress, age, disposition and replay volume",
+    "actual replay/seek/reset usage and incident history",
+    "tenant traffic distribution and hot-key behavior",
+    "required retention by compliance and consumer recovery objective",
+    "infrastructure cost and operational overhead"
+  ]
+}

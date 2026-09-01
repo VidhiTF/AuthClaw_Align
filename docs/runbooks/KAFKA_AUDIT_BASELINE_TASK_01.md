@@ -9,6 +9,7 @@ transport migration decision. This is the gating evidence for ADRs comparing Kaf
 
 - `scripts/kafka-baseline/collect_kafka_audit_baseline.sh`
 - `scripts/kafka-baseline/README.md`
+- `scripts/kafka-baseline/kafka_baseline_results_template.md`
 - `infra/observability/kafka_baseline_prometheus_dashboard.json`
 - `infra/observability/acl21-alerts.yml`
 
@@ -47,6 +48,19 @@ transport migration decision. This is the gating evidence for ADRs comparing Kaf
    - environment (`staging`/`production`)
    - representative load window
    - operator and command versions.
+6. For Task 2, also run repository-only inventory:
+
+   - `AUTHCLAW_BASELINE_ENV=local`
+   - `AUDIT_STREAM_REPO_INVENTORY=1`
+   - `./scripts/kafka-baseline/collect_kafka_audit_baseline.sh ./artifacts/kafka-baseline`
+
+   Required Task 2 artifacts:
+   - `audit_stream_inventory.json`
+   - `audit_stream_inventory_sources.txt`
+   - `kafka_audit_adr_input.md`
+
+   Review and commit the first and third artifacts as the snapshots in `docs/adr/`;
+   retain the timestamped source scan with the baseline evidence bundle.
 
 ## KPI mapping
 
@@ -122,3 +136,12 @@ transport migration decision. This is the gating evidence for ADRs comparing Kaf
   blocked with blocker reason.
 - Findings directly cited in ADR input for Kafka vs Kinesis vs SQS FIFO.
 
+## Task 2 output interpretation
+
+- `audit_stream_inventory.json` is the machine-readable inventory for:
+  - producers and consumers
+  - key strategy and ordering assumptions
+  - replay/dependency graph and DLQ/retry paths
+  - topics/retention/replay policy references
+- `kafka_audit_adr_input.md` summarizes those findings into a reviewer-friendly ADR input.
+- Deployment-only fields are intentionally marked as `LIVE-EVIDENCE-PENDING`.
