@@ -13,6 +13,7 @@ output "primary" {
     kms_key_arn       = module.primary.kms_key_arn
     secret_arns       = module.primary.secret_arns
     service_namespace = module.primary.service_discovery_namespace
+    audit_sqs         = module.primary.audit_sqs
   }
 }
 
@@ -32,6 +33,7 @@ output "secondary" {
     kms_key_arn           = module.secondary[0].kms_key_arn
     secret_arns           = module.secondary[0].secret_arns
     service_namespace     = module.secondary[0].service_discovery_namespace
+    audit_sqs             = module.secondary[0].audit_sqs
   } : null
 }
 

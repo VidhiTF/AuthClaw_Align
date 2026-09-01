@@ -30,6 +30,7 @@ output "alarm_names" {
   value = concat(
     values(aws_cloudwatch_metric_alarm.unhealthy_hosts)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.ecs_cpu)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name,
   )
 }
 
@@ -81,4 +82,16 @@ output "secret_arns" {
 
 output "service_discovery_namespace" {
   value = aws_service_discovery_private_dns_namespace.main.name
+}
+
+output "audit_sqs" {
+  value = {
+    queue_url          = try(aws_sqs_queue.audit[0].url, null)
+    queue_arn          = try(aws_sqs_queue.audit[0].arn, null)
+    dlq_url            = try(aws_sqs_queue.audit_dlq[0].url, null)
+    dlq_arn            = try(aws_sqs_queue.audit_dlq[0].arn, null)
+    producer_role_arns = { for service, role in aws_iam_role.audit_sqs_producer : service => role.arn }
+    consumer_role_arn  = try(aws_iam_role.audit_sqs_consumer[0].arn, null)
+    alarm_names        = values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name
+  }
 }

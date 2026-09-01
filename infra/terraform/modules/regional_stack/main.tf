@@ -716,6 +716,7 @@ resource "aws_ecs_task_definition" "service" {
   cpu                      = var.service_cpu
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = lookup(local.audit_sqs_task_role_arns, each.key, null)
 
   container_definitions = jsonencode([
     merge({
@@ -726,7 +727,7 @@ resource "aws_ecs_task_definition" "service" {
         containerPort = each.value.container_port
         protocol      = "tcp"
       }]
-      environment = concat(local.common_environment, each.key == "gateway" ? [
+      environment = concat(local.common_environment, contains(tolist(local.audit_sqs_producer_services), each.key) ? local.audit_sqs_producer_environment : [], each.key == "gateway" ? [
         { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
       ] : [])
       secrets = concat(
@@ -854,13 +855,14 @@ resource "aws_ecs_task_definition" "audit_consumer" {
   cpu                      = var.service_cpu
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = lookup(local.audit_sqs_task_role_arns, "audit_consumer", null)
 
   container_definitions = jsonencode([
     {
       name      = "audit_consumer"
       image     = var.container_images.audit_consumer
       essential = true
-      environment = concat(local.common_environment, [
+      environment = concat(local.common_environment, local.audit_sqs_environment, local.audit_sqs_consumer_environment, [
         { name = "KAFKA_TOPICS", value = "gateway.traffic,audit.events" },
         { name = "KAFKA_DLQ_TOPIC", value = "audit.deadletter" },
         { name = "AUDIT_CONSUMER_METRICS_PORT", value = "9108" },
