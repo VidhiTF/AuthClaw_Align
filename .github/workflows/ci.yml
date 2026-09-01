@@ -289,7 +289,26 @@ jobs:
         with:
           languages: ${{ needs.changes.outputs.codeql_languages }}
       - uses: github/codeql-action/autobuild@v4
-      - uses: github/codeql-action/analyze@v4
+      - name: Analyze source with CodeQL
+        uses: github/codeql-action/analyze@v4
+        with:
+          output: codeql-results
+          upload: ${{ vars.CODEQL_NATIVE_UPLOAD == 'true' && 'always' || 'never' }}
+          upload-database: false
+      - name: Enforce CodeQL findings
+        shell: bash
+        run: >-
+          jq -se
+          '[.[].runs[].results[]? | select(.level == "error")] | length == 0'
+          codeql-results/*.sarif
+      - name: Preserve CodeQL results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif-${{ github.sha }}
+          path: codeql-results/*.sarif
+          if-no-files-found: error
+          retention-days: 14
 
   checks:
     name: ACL-14 Required Checks
