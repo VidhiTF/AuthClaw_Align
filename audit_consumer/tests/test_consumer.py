@@ -129,5 +129,3 @@ def test_exact_duplicate_replay_is_skipped(monkeypatch):
     insert = configure(monkeypatch, exists=True)
     _process_message(MagicMock(), event())
     insert.assert_not_called()
-
-
