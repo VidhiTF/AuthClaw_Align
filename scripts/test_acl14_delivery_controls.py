@@ -12,11 +12,12 @@ REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
-    def test_ci_executes_for_branches_and_master_pull_requests(self):
-        self.assertIn("  create:\n", CI)
-        self.assertIn('  push:\n    branches: ["**"]', CI)
+    def test_ci_executes_for_master_and_master_pull_requests(self):
+        self.assertNotIn("  create:\n", CI)
+        self.assertIn("  push:\n    branches: [master]", CI)
         self.assertIn("  pull_request:\n    branches: [master]", CI)
-        self.assertIn("if: github.event_name != 'create' || github.event.ref_type == 'branch'", CI)
+        self.assertIn('if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]', CI)
+        self.assertIn("before='${{ github.event.pull_request.base.sha }}'", CI)
         self.assertIn("    branches: [master]", DEPLOY)
         self.assertNotIn("pull_request:", DEPLOY)
         for workflow in (CI, DEPLOY):
@@ -32,6 +33,9 @@ class ACL14DeliveryControlTests(unittest.TestCase):
             self.assertIn(f"name: {job}", CI)
         self.assertIn("github.ref == 'refs/heads/master'", CI)
         self.assertIn("github/codeql-action/analyze@v4", CI)
+        self.assertIn("security-events: write", CI)
+        self.assertNotIn("upload: never", CI)
+        self.assertNotIn("upload-database: false", CI)
         self.assertIn("ghcr.io/gitleaks/gitleaks", CI)
         self.assertIn("aquasecurity/trivy-action", CI)
         self.assertNotIn("Full Stack Integration", CI)
