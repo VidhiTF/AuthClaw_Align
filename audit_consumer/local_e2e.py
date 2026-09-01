@@ -10,10 +10,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ from transport import AuditMessage
 
 TENANT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 TENANT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+TENANT_PREFIX = "70000000-0000-4000-8000"
 
 
 @dataclass
@@ -70,7 +73,7 @@ def _event(tenant_id: str, sequence: int, prefix: str, prior_hash: str = "GENESI
         "idempotency_key": f"local-e2e:{record_id}",
         "chain_version": 2,
         "canonical_payload": canonical_payload,
-        "timestamp": datetime(2026, 9, 1, 0, sequence, tzinfo=timezone.utc).isoformat(),
+        "timestamp": (datetime(2026, 9, 1, tzinfo=timezone.utc) + timedelta(seconds=sequence)).isoformat(),
         "actor_id": "local-e2e",
         "actor_type": "harness",
         "action": "audit.transport.verify",
@@ -204,11 +207,265 @@ def _write_report(path: Path, results: list[dict[str, Any]], commands: list[str]
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, round((len(ordered) - 1) * pct))
+    return round(ordered[index] * 1000, 3)
+
+
+def _benchmark_events(
+    *,
+    event_count: int,
+    tenant_count: int,
+    tenant_skew: float,
+    payload_size: int,
+) -> list[dict[str, Any]]:
+    tails = defaultdict(lambda: "GENESIS")
+    sequences = defaultdict(int)
+    events = []
+    hot_cutoff = max(1, int(event_count * tenant_skew))
+    for index in range(event_count):
+        tenant_index = 1 if index < hot_cutoff else (index % tenant_count) + 1
+        tenant_id = f"{TENANT_PREFIX}-{tenant_index:012d}"
+        sequences[tenant_id] += 1
+        event = _event(tenant_id, sequences[tenant_id], f"{tenant_index:08d}-0000-4000-8000", tails[tenant_id])
+        if payload_size:
+            event["padding"] = "x" * max(0, payload_size - len(json.dumps(event, sort_keys=True)))
+        tails[tenant_id] = event["integrity_hash"]
+        events.append(event)
+    return events
+
+
+def _resource_usage() -> dict[str, Any]:
+    names = [
+        "authclaw-audit-e2e-kafka",
+        "authclaw-audit-e2e-clickhouse",
+        "authclaw-audit-e2e-localstack",
+    ]
+    try:
+        output = subprocess.check_output(
+            ["docker", "stats", "--no-stream", "--format", "{{json .}}", *names],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+        rows = [json.loads(line) for line in output.splitlines() if line.strip()]
+        if rows:
+            return {"available": True, "source": "docker stats --no-stream", "containers": rows}
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "available": False,
+        "source": "docker stats not collected by harness; use compose command in evidence for container-level sampling",
+    }
+
+
+def _benchmark_transport(name: str, events: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
+    store = Store()
+    _install_store(store)
+    publish_latencies: list[float] = []
+    e2e_latencies: list[float] = []
+    attempts = defaultdict(int)
+    acked: list[str] = []
+    retried: list[str] = []
+    dlq: list[str] = []
+    published_at: dict[str, float] = {}
+    pending: list[AuditMessage] = []
+    transient_every = round(1 / args.transient_failure_rate) if args.transient_failure_rate > 0 else 0
+    duplicate_every = round(1 / args.duplicate_delivery_rate) if args.duplicate_delivery_rate > 0 else 0
+    start = time.perf_counter()
+    sent_messages = 0
+    for index, event in enumerate(events, start=1):
+        tick = time.perf_counter()
+        record_id = event["id"]
+        published_at[record_id] = tick
+        pending.append(AuditMessage(value=event, offset=index, _position=None, group_id=event["tenant_id"]))
+        sent_messages += 1
+        if duplicate_every and index % duplicate_every == 0:
+            pending.append(AuditMessage(value=dict(event), offset=index, _position=None, group_id=event["tenant_id"]))
+            sent_messages += 1
+        if transient_every and index % transient_every == 0:
+            store.fail_once.add(record_id)
+        publish_latencies.append(time.perf_counter() - tick)
+
+    publish_end = time.perf_counter()
+    recovery_start = publish_end
+    for _round in range(1, 8):
+        if not pending:
+            break
+        next_pending: list[AuditMessage] = []
+        failed_groups: set[str] = set()
+        for message in pending:
+            record_id = str(message.value.get("id", ""))
+            group_id = message.group_id
+            if group_id in failed_groups:
+                next_pending.append(message)
+                continue
+            attempts[record_id] += 1
+            try:
+                consumer._process_message(None, message.value)
+                acked.append(record_id)
+                e2e_latencies.append(time.perf_counter() - published_at[record_id])
+            except (SequenceGapError, RetryableMirrorError):
+                retried.append(record_id)
+                failed_groups.add(group_id)
+                next_pending.append(message)
+            except InvalidAuditEvent:
+                if name == "kafka" or attempts[record_id] >= 3:
+                    dlq.append(record_id)
+                    acked.append(record_id)
+                else:
+                    retried.append(record_id)
+                    failed_groups.add(group_id)
+                    next_pending.append(message)
+        pending = next_pending
+    end = time.perf_counter()
+
+    rows_by_tenant: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in store.rows:
+        rows_by_tenant[row["tenant_id"]].append(row)
+    ordered = {
+        tenant: sorted(rows, key=lambda row: row["tenant_sequence"])
+        for tenant, rows in rows_by_tenant.items()
+    }
+    chain_valid = {
+        tenant: all(item["valid"] for item in verify_chain(rows))
+        for tenant, rows in ordered.items()
+    }
+    ordering_valid = all(
+        [row["tenant_sequence"] for row in rows] == list(range(1, len(rows) + 1))
+        for rows in ordered.values()
+    )
+    durable_ids = {row["record_id"] for row in store.rows}
+    duplicate_count = sent_messages - len(events)
+    return {
+        "transport": name,
+        "mode": "LOCAL-SIMULATION",
+        "event_size_bytes": len(json.dumps(events[0], sort_keys=True).encode("utf-8")) if events else 0,
+        "published_events": len(events),
+        "durable_events": len(store.rows),
+        "publish_throughput_eps": round(len(events) / max(publish_end - start, 0.000001), 2),
+        "consumer_throughput_eps": round(len(store.rows) / max(end - publish_end, 0.000001), 2),
+        "publish_latency_ms": {"p50": _percentile(publish_latencies, 0.50), "p95": _percentile(publish_latencies, 0.95), "p99": _percentile(publish_latencies, 0.99)},
+        "end_to_end_latency_ms": {"p50": _percentile(e2e_latencies, 0.50), "p95": _percentile(e2e_latencies, 0.95), "p99": _percentile(e2e_latencies, 0.99)},
+        "backlog_drain_recovery_ms": round((end - recovery_start) * 1000, 3),
+        "retry_count": len(retried),
+        "duplicate_delivery_count": duplicate_count,
+        "failure_count": len(dlq),
+        "ordering_violations": 0 if ordering_valid else 1,
+        "hash_chain_violations": sum(0 if valid else 1 for valid in chain_valid.values()),
+        "missing_events": len(set(event["id"] for event in events) - durable_ids),
+        "unexplained_duplicates": max(0, len(store.rows) - len(durable_ids)),
+        "final_chain_heads": {tenant: rows[-1]["integrity_hash"] for tenant, rows in ordered.items() if rows},
+        "per_tenant_sequence": {tenant: [row["tenant_sequence"] for row in rows] for tenant, rows in ordered.items()},
+        "container_resources": _resource_usage(),
+        "integrity_passed": ordering_valid and all(chain_valid.values()) and not pending and len(store.rows) == len(set(event["id"] for event in events)),
+    }
+
+
+def _write_benchmark(markdown_path: Path, json_path: Path, payload: dict[str, Any]) -> None:
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    lines = [
+        "# Audit transport local benchmark",
+        "",
+        "Mode: `LOCAL-SIMULATION`.",
+        "",
+        "These LocalStack/Redpanda/local harness results cannot determine AWS cost, production capacity, or the final transport decision.",
+        "",
+        f"Commit: `{payload['commit']}`",
+        f"Started: `{payload['started_at']}`",
+        f"Completed: `{payload['completed_at']}`",
+        "",
+        "## Configuration",
+        "",
+        "```json",
+        json.dumps(payload["configuration"], indent=2, sort_keys=True),
+        "```",
+        "",
+        "## Results",
+        "",
+        "| Transport | Published | Durable | Publish eps | Consumer eps | E2E p95 ms | Retries | Duplicates | Failures | Integrity |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for result in payload["results"]:
+        lines.append(
+            f"| {result['transport']} | {result['published_events']} | {result['durable_events']} | "
+            f"{result['publish_throughput_eps']} | {result['consumer_throughput_eps']} | "
+            f"{result['end_to_end_latency_ms']['p95']} | {result['retry_count']} | "
+            f"{result['duplicate_delivery_count']} | {result['failure_count']} | "
+            f"{'PASS' if result['integrity_passed'] else 'FAIL'} |"
+        )
+    lines.extend(["", "## Commands used", "", *[f"- `{command}`" for command in payload["commands"]], ""])
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _run_benchmark(args: argparse.Namespace) -> int:
+    started = datetime.now(tz=timezone.utc).isoformat()
+    events = _benchmark_events(
+        event_count=args.event_count,
+        tenant_count=args.tenant_count,
+        tenant_skew=args.tenant_skew,
+        payload_size=args.payload_size,
+    )
+    results = [_benchmark_transport(transport, events, args) for transport in ["kafka", "sqs_fifo"]]
+    completed = datetime.now(tz=timezone.utc).isoformat()
+    try:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    except Exception:  # noqa: BLE001
+        commit = "unknown"
+    payload = {
+        "mode": "LOCAL-SIMULATION",
+        "started_at": started,
+        "completed_at": completed,
+        "commit": commit,
+        "environment": {
+            "python": sys.version.split()[0],
+            "platform": sys.platform,
+        },
+        "configuration": {
+            "event_count": args.event_count,
+            "tenant_count": args.tenant_count,
+            "tenant_skew": args.tenant_skew,
+            "payload_size": args.payload_size,
+            "producer_concurrency": args.producer_concurrency,
+            "consumer_concurrency": args.consumer_concurrency,
+            "transient_failure_rate": args.transient_failure_rate,
+            "duplicate_delivery_rate": args.duplicate_delivery_rate,
+        },
+        "commands": [
+            "docker compose -p authclaw-audit-e2e -f docker-compose.yml -f docker-compose.audit-e2e.yml --profile audit-e2e up -d kafka kafka-init clickhouse localstack",
+            "python audit_consumer/local_e2e.py --benchmark --transport both",
+            "docker compose -p authclaw-audit-e2e -f docker-compose.yml -f docker-compose.audit-e2e.yml --profile audit-e2e down --remove-orphans",
+        ],
+        "results": results,
+    }
+    _write_benchmark(Path(args.benchmark_markdown), Path(args.benchmark_json), payload)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0 if all(result["integrity_passed"] for result in results) else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--transport", choices=["kafka", "sqs_fifo", "both", "local_fallback"], default="both")
     parser.add_argument("--evidence", default="infra/security/audit-transport-local-e2e.md")
+    parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--benchmark-json", default="infra/security/audit-transport-local-benchmark.json")
+    parser.add_argument("--benchmark-markdown", default="infra/security/audit-transport-local-benchmark.md")
+    parser.add_argument("--event-count", type=int, default=200)
+    parser.add_argument("--tenant-count", type=int, default=4)
+    parser.add_argument("--tenant-skew", type=float, default=0.5)
+    parser.add_argument("--payload-size", type=int, default=512)
+    parser.add_argument("--producer-concurrency", type=int, default=2)
+    parser.add_argument("--consumer-concurrency", type=int, default=2)
+    parser.add_argument("--transient-failure-rate", type=float, default=0.02)
+    parser.add_argument("--duplicate-delivery-rate", type=float, default=0.05)
     args = parser.parse_args()
+    if args.benchmark:
+        return _run_benchmark(args)
     transports = ["kafka", "sqs_fifo"] if args.transport == "both" else [args.transport]
     if args.transport == "local_fallback":
         transports = ["kafka"]
