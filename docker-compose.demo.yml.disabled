@@ -18,21 +18,6 @@ services:
       timeout: 5s
       retries: 10
 
-  agent-postgres:
-    image: postgres:17
-    container_name: authclaw-demo-agent-postgres
-    environment:
-      POSTGRES_DB: ${AGENT_POSTGRES_DB:-authclaw_agent}
-      POSTGRES_USER: ${AGENT_POSTGRES_USER:-authclaw_agent}
-      POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:-change-me-agent-local}
-    volumes:
-      - demo_agent_postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${AGENT_POSTGRES_USER:-authclaw_agent} -d ${AGENT_POSTGRES_DB:-authclaw_agent}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
   redis:
     image: redis:7
     container_name: authclaw-demo-redis
@@ -110,8 +95,8 @@ services:
       BEDROCK_ENABLED: ${BEDROCK_ENABLED:-false}
       AWS_SECRETS_MANAGER_ENABLED: ${AWS_SECRETS_MANAGER_ENABLED:-false}
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-demo}
-      JWT_SECRET: ${JWT_SECRET:-demo-change-me}
-      SESSION_SECRET: ${SESSION_SECRET:-demo-change-me}
+      JWT_SECRET: ${JWT_SECRET:-authclaw-demo-secret-change-me-32-bytes}
+      SESSION_SECRET: ${SESSION_SECRET:-authclaw-demo-secret-change-me-32-bytes}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-demo-api-key-hash-change-me}
       ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       KMS_KEY_ID: ${KMS_KEY_ID:-demo-local-key}
@@ -133,7 +118,7 @@ services:
       GATEWAY_ESTIMATED_COST_PER_1K_REQUESTS_USD: ${GATEWAY_ESTIMATED_COST_PER_1K_REQUESTS_USD:-1}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
-    command: ["sh", "-c", "DATABASE_URL=\"$$OWNER_DATABASE_URL\" alembic upgrade head && DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$APP_DATABASE_URL\" python -m uvicorn main:app --host 0.0.0.0 --port 8000"]
+    command: ["sh", "-c", "DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$OWNER_DATABASE_URL\" alembic upgrade head && DATABASE_URL=\"$$OWNER_DATABASE_URL\" python scripts/ensure_app_db_role.py && DATABASE_URL=\"$$APP_DATABASE_URL\" python -m uvicorn main:app --host 0.0.0.0 --port 8000"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()\""]
       interval: 10s
@@ -173,8 +158,8 @@ services:
       AWS_ENABLED: ${AWS_ENABLED:-false}
       BEDROCK_ENABLED: ${BEDROCK_ENABLED:-false}
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-demo}
-      JWT_SECRET: ${JWT_SECRET:-demo-change-me}
-      SESSION_SECRET: ${SESSION_SECRET:-demo-change-me}
+      JWT_SECRET: ${JWT_SECRET:-authclaw-demo-secret-change-me-32-bytes}
+      SESSION_SECRET: ${SESSION_SECRET:-authclaw-demo-secret-change-me-32-bytes}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-demo-api-key-hash-change-me}
       AUDIT_FAIL_CLOSED: ${AUDIT_FAIL_CLOSED:-false}
       AUDIT_OUTBOX_PATH: /var/lib/authclaw-gateway/audit-outbox.ndjson
@@ -188,19 +173,37 @@ services:
     volumes:
       - demo_gateway_audit_outbox:/var/lib/authclaw-gateway
 
+  agent-migrations:
+    build:
+      context: ./services/agent
+    container_name: authclaw-demo-agent-migrations
+    depends_on:
+      backend:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
+      MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
+      AUTHCLAW_DATABASE_SCHEMA: ${AGENT_DATABASE_SCHEMA:-agent}
+      AUTHCLAW_RUNTIME_DB_ROLE: ${AGENT_RUNTIME_DB_ROLE:-authclaw_agent_runtime}
+    command: ["python", "-m", "database.migrations"]
+    restart: "no"
+
   agent:
     build:
       context: ./services/agent
     container_name: authclaw-demo-agent
     depends_on:
-      agent-postgres:
-        condition: service_healthy
+      agent-migrations:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       opa:
         condition: service_started
     environment:
-      DATABASE_URL: postgresql://${AGENT_POSTGRES_USER:-authclaw_agent}:${AGENT_POSTGRES_PASSWORD:-change-me-agent-local}@agent-postgres:5432/${AGENT_POSTGRES_DB:-authclaw_agent}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
+      AUTHCLAW_DATABASE_SCHEMA: ${AGENT_DATABASE_SCHEMA:-agent}
       AUTHCLAW_RUNTIME_DB_ROLE: ${AGENT_RUNTIME_DB_ROLE:-authclaw_agent_runtime}
       REDIS_URL: redis://redis:6379
       AUTHCLAW_ENV: demo
@@ -213,9 +216,9 @@ services:
       AUTHCLAW_PROVIDER_GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       AUTHCLAW_PROVIDER_GEMINI_API_BASE: ${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}
       AUTHCLAW_PROVIDER_GEMINI_MODEL: ${MODEL_NAME:-gemini-2.5-flash-lite}
-      JWT_SECRET: ${JWT_SECRET:-demo-change-me}
+      JWT_SECRET: ${JWT_SECRET:-authclaw-demo-secret-change-me-32-bytes}
       AUTHCLAW_ENCRYPTION_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
-      AUTHCLAW_REDACTION_SALT: ${SESSION_SECRET:-demo-change-me}
+      AUTHCLAW_REDACTION_SALT: ${SESSION_SECRET:-authclaw-demo-secret-change-me-32-bytes}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
       AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-demo-internal-service-secret-change-me}
     ports:
@@ -253,12 +256,11 @@ services:
       NEXT_PUBLIC_AUTHCLAW_DEMO_MODE: ${NEXT_PUBLIC_AUTHCLAW_DEMO_MODE:-true}
       NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES: ${NEXT_PUBLIC_ENABLE_EXPERIMENTAL_SURFACES:-false}
       AUTHCLAW_COOKIE_SECURE: ${AUTHCLAW_COOKIE_SECURE:-false}
-      SESSION_SECRET: ${SESSION_SECRET:-demo-change-me}
+      SESSION_SECRET: ${SESSION_SECRET:-authclaw-demo-secret-change-me-32-bytes}
       NODE_ENV: production
     ports:
       - "${CONSOLE_PORT:-3001}:3001"
 
 volumes:
   demo_postgres_data:
-  demo_agent_postgres_data:
   demo_gateway_audit_outbox:
