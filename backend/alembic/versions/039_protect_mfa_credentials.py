@@ -23,9 +23,9 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column(
-        "users",
-        sa.Column("mfa_backup_codes", sa.ARRAY(sa.String()), nullable=True),
+    # Some local databases received this column from the old role bootstrap.
+    op.execute(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_backup_codes VARCHAR[]"
     )
     op.alter_column(
         "users",

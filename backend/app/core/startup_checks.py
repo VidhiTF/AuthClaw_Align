@@ -1,5 +1,6 @@
 """Startup validation for production Lite deployments."""
 import os
+from ipaddress import ip_address
 from urllib.parse import urlparse
 
 
@@ -34,6 +35,18 @@ def _is_https_url(value: str | None) -> bool:
     return parsed.scheme == "https" and bool(parsed.hostname)
 
 
+def _is_secure_sidecar_url(value: str | None) -> bool:
+    parsed = urlparse((value or "").strip())
+    if parsed.scheme == "https" and parsed.hostname:
+        return True
+    if parsed.scheme != "http" or not parsed.hostname:
+        return False
+    try:
+        return ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def validate_production_environment() -> None:
     production = is_production()
     require_service_tls = _truthy(
@@ -46,8 +59,10 @@ def validate_production_environment() -> None:
     if require_service_tls:
         for name in ("GATEWAY_INTERNAL_URL", "OPA_URL", "PRESIDIO_URL"):
             value = os.getenv(name, "").strip()
-            if not _is_https_url(value):
-                errors.append(f"{name} must use https when service TLS is required")
+            valid = _is_https_url(value) if name == "GATEWAY_INTERNAL_URL" else _is_secure_sidecar_url(value)
+            if not valid:
+                requirement = "https" if name == "GATEWAY_INTERNAL_URL" else "https or task-local loopback http"
+                errors.append(f"{name} must use {requirement} when service TLS is required")
 
     if not production:
         if errors:

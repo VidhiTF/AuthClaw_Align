@@ -23,6 +23,12 @@ module "primary" {
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
   container_images                     = var.container_images
   desired_count                        = var.desired_count_primary
+  gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
+  gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
+  backend_sidecar_task_cpu             = var.backend_sidecar_task_cpu
+  backend_sidecar_task_memory          = var.backend_sidecar_task_memory
+  agent_sidecar_task_cpu               = var.agent_sidecar_task_cpu
+  agent_sidecar_task_memory            = var.agent_sidecar_task_memory
   is_primary                           = true
   create_db_replica                    = false
   authclaw_env                         = var.authclaw_env
@@ -71,6 +77,12 @@ module "secondary" {
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
   container_images                     = var.container_images
   desired_count                        = var.desired_count_secondary
+  gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
+  gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
+  backend_sidecar_task_cpu             = var.backend_sidecar_task_cpu
+  backend_sidecar_task_memory          = var.backend_sidecar_task_memory
+  agent_sidecar_task_cpu               = var.agent_sidecar_task_cpu
+  agent_sidecar_task_memory            = var.agent_sidecar_task_memory
   is_primary                           = false
   create_db_replica                    = var.enable_cross_region_db_replica
   authclaw_env                         = var.authclaw_env

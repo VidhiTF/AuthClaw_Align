@@ -166,7 +166,17 @@ def test_service_tls_boundary_rejects_plaintext_internal_urls(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         validate_production_environment()
 
-    assert "OPA_URL must use https" in str(exc.value)
+    assert "OPA_URL must use https or task-local loopback http" in str(exc.value)
+
+
+def test_service_tls_boundary_accepts_task_local_sidecars(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_ENV", "staging")
+    monkeypatch.setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true")
+    monkeypatch.setenv("GATEWAY_INTERNAL_URL", "https://gateway.internal")
+    monkeypatch.setenv("OPA_URL", "http://127.0.0.1:8181")
+    monkeypatch.setenv("PRESIDIO_URL", "http://127.0.0.1:3000")
+
+    validate_production_environment()
 
 
 @pytest.mark.parametrize("invalid_url", ["https://", "https:///opa", "not-a-url"])

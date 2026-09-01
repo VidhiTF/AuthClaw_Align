@@ -53,19 +53,6 @@ def main() -> None:
                 """
             )
         )
-        conn.execute(
-            text(
-                """
-                DO $$
-                BEGIN
-                    IF to_regclass('public.users') IS NOT NULL THEN
-                        ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_backup_codes VARCHAR[];
-                    END IF;
-                END
-                $$;
-                """
-            )
-        )
         conn.execute(text(f"ALTER ROLE {app_user} NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;"))
         conn.execute(text(f"GRANT CONNECT ON DATABASE {database_name} TO {app_user};"))
         conn.execute(text(f"GRANT USAGE ON SCHEMA public TO {app_user};"))

@@ -2,11 +2,15 @@ FROM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149a
 
 ARG OPA_VERSION=v1.18.2
 RUN CGO_ENABLED=0 go install github.com/open-policy-agent/opa@${OPA_VERSION}
+WORKDIR /src
+COPY healthcheck.go .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /healthcheck ./healthcheck.go
 
 FROM scratch
 
 WORKDIR /policies
 COPY --from=builder /go/bin/opa /opa
+COPY --from=builder /healthcheck /healthcheck
 COPY authclaw.rego /policies/authclaw.rego
 
 EXPOSE 8181

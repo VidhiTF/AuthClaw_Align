@@ -65,18 +65,21 @@ output "kms_key_arn" {
 
 output "secret_arns" {
   value = {
-    backend_database_url = aws_secretsmanager_secret.backend_database_url.arn
-    app_database_url     = aws_secretsmanager_secret.app_database_url.arn
-    agent_database_url   = aws_secretsmanager_secret.agent_database_url.arn
-    agent_encryption     = aws_secretsmanager_secret.agent_encryption.arn
-    agent_redaction      = aws_secretsmanager_secret.agent_redaction.arn
-    internal_service     = aws_secretsmanager_secret.internal_service.arn
-    jwt                  = aws_secretsmanager_secret.jwt.arn
-    jwt_v2               = aws_secretsmanager_secret.jwt_v2.arn
-    session              = aws_secretsmanager_secret.session.arn
-    session_v2           = aws_secretsmanager_secret.session_v2.arn
-    envelope             = aws_secretsmanager_secret.envelope.arn
-    envelope_v2          = aws_secretsmanager_secret.envelope_v2.arn
+    bootstrap_database_url         = aws_secretsmanager_secret.bootstrap_database_url.arn
+    backend_migration_database_url = aws_secretsmanager_secret.backend_migration_database_url.arn
+    backend_database_url           = aws_secretsmanager_secret.backend_database_url.arn
+    app_database_url               = aws_secretsmanager_secret.app_database_url.arn
+    agent_migration_database_url   = aws_secretsmanager_secret.agent_migration_database_url.arn
+    agent_database_url             = aws_secretsmanager_secret.agent_database_url.arn
+    agent_encryption               = aws_secretsmanager_secret.agent_encryption.arn
+    agent_redaction                = aws_secretsmanager_secret.agent_redaction.arn
+    internal_service               = aws_secretsmanager_secret.internal_service.arn
+    jwt                            = aws_secretsmanager_secret.jwt.arn
+    jwt_v2                         = aws_secretsmanager_secret.jwt_v2.arn
+    session                        = aws_secretsmanager_secret.session.arn
+    session_v2                     = aws_secretsmanager_secret.session_v2.arn
+    envelope                       = aws_secretsmanager_secret.envelope.arn
+    envelope_v2                    = aws_secretsmanager_secret.envelope_v2.arn
   }
 }
 
@@ -102,4 +105,18 @@ output "audit_sqs" {
     consumer_role_arn  = try(aws_iam_role.audit_sqs_consumer[0].arn, null)
     alarm_names        = values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name
   }
+}
+
+output "database_job_task_definition_arns" {
+  value = { for key, task in aws_ecs_task_definition.database_job : key => task.arn }
+}
+
+output "database_job_execution_order" {
+  value = [
+    "bootstrap_prepare",
+    "backend_migrations",
+    "agent_migrations",
+    "bootstrap_finalize",
+    "database_security_check",
+  ]
 }

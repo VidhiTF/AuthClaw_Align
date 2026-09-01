@@ -89,6 +89,42 @@ variable "service_memory" {
   default = 1024
 }
 
+variable "gateway_sidecar_task_cpu" {
+  description = "Fargate CPU units for the combined Gateway, OPA, and Presidio task."
+  type        = number
+  default     = 2048
+}
+
+variable "gateway_sidecar_task_memory" {
+  description = "Fargate memory in MiB for the combined Gateway, OPA, and Presidio task."
+  type        = number
+  default     = 4096
+}
+
+variable "backend_sidecar_task_cpu" {
+  description = "Fargate CPU units for the Backend and Presidio task."
+  type        = number
+  default     = 2048
+}
+
+variable "backend_sidecar_task_memory" {
+  description = "Fargate memory in MiB for the Backend and Presidio task."
+  type        = number
+  default     = 4096
+}
+
+variable "agent_sidecar_task_cpu" {
+  description = "Fargate CPU units for the Agent and OPA task."
+  type        = number
+  default     = 1024
+}
+
+variable "agent_sidecar_task_memory" {
+  description = "Fargate memory in MiB for the Agent and OPA task."
+  type        = number
+  default     = 2048
+}
+
 variable "db_instance_class" {
   type    = string
   default = "db.t4g.medium"

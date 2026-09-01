@@ -131,6 +131,36 @@ variable "desired_count_secondary" {
   default = 1
 }
 
+variable "gateway_sidecar_task_cpu" {
+  type    = number
+  default = 2048
+}
+
+variable "gateway_sidecar_task_memory" {
+  type    = number
+  default = 4096
+}
+
+variable "backend_sidecar_task_cpu" {
+  type    = number
+  default = 2048
+}
+
+variable "backend_sidecar_task_memory" {
+  type    = number
+  default = 4096
+}
+
+variable "agent_sidecar_task_cpu" {
+  type    = number
+  default = 1024
+}
+
+variable "agent_sidecar_task_memory" {
+  type    = number
+  default = 2048
+}
+
 variable "enable_secondary" {
   description = "Create the secondary regional stack."
   type        = bool

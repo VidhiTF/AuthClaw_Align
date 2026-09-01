@@ -79,6 +79,13 @@ def normalize_database_url(url: str) -> str:
     return url
 
 
+def set_tenant_context(conn, tenant_id: uuid.UUID) -> None:
+    conn.execute(
+        text("SELECT set_config('app.current_tenant_id', :tenant_id, true)"),
+        {"tenant_id": str(tenant_id)},
+    )
+
+
 def main() -> None:
     database_url = normalize_database_url(
         os.getenv("DATABASE_URL", "postgresql+psycopg://authclaw:authclaw@localhost:5432/authclaw")
@@ -87,7 +94,7 @@ def main() -> None:
     key_hash = hash_key(RAW_API_KEY)
 
     with engine.begin() as conn:
-        conn.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(TENANT_ID)})
+        set_tenant_context(conn, TENANT_ID)
 
         conn.execute(
             text("""
@@ -102,6 +109,7 @@ def main() -> None:
             {"id": TENANT_ID},
         )
 
+        set_tenant_context(conn, SECONDARY_TENANT_ID)
         conn.execute(
             text("""
             INSERT INTO tenants (id, name, tier, status)
@@ -111,6 +119,7 @@ def main() -> None:
             {"id": SECONDARY_TENANT_ID},
         )
 
+        set_tenant_context(conn, TENANT_ID)
         conn.execute(
             text("""
             INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, mfa_secret, is_active)
@@ -137,6 +146,7 @@ def main() -> None:
         )
 
         for user_id, email, role in ROLE_USERS:
+            set_tenant_context(conn, TENANT_ID)
             conn.execute(
                 text("""
                 INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, is_active)
@@ -155,6 +165,7 @@ def main() -> None:
                     "role": role,
                 },
             )
+            set_tenant_context(conn, SECONDARY_TENANT_ID)
             conn.execute(
                 text("""
                 INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, is_active)
@@ -174,6 +185,7 @@ def main() -> None:
                 },
             )
 
+        set_tenant_context(conn, TENANT_ID)
         conn.execute(
             text("""
             INSERT INTO api_keys (id, tenant_id, key_hash, name, description, scopes, is_active, expires_at, created_by)
