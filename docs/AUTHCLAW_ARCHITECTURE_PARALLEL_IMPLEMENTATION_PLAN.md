@@ -251,4 +251,3 @@ The implementation plan must not rely on these outdated or unsupported assumptio
 - **Incorrect:** Moving to Graviton is only a small task-definition edit. ARM64 image builds and ECS EC2 infrastructure are required.
 - **Unproven:** The two PostgreSQL databases are accidental merge residue. Their separation is deliberate in the current Compose and Terraform configuration, even though the original design reason is not recorded.
 - **Unsupported:** Current latency is already close to the proposed limit. A benchmark harness exists, but no committed production baseline proves this claim.
-

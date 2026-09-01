@@ -552,4 +552,3 @@ These items may follow an explicitly limited internal/staging deployment, but sh
 - `.github/workflows/ci.yml`: current tests, image builds, and vulnerability scans.
 - `.github/workflows/deploy-controlled-beta.yml`: digest-based ECR promotion and controlled-beta Terraform deployment.
 - `docs/adr/0002-aws-url-environment-boundary.md`: intended public edge, environment isolation, deployment, and rollback boundary.
-
