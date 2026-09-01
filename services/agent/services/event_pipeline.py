@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy import text
 
 from database import engine
+from services.audit_transport import AuditTopics, make_audit_publisher
 
 
 def _truthy(name: str, default: bool = False) -> bool:
@@ -20,16 +21,20 @@ def _truthy(name: str, default: bool = False) -> bool:
 
 class EventPipeline:
     def __init__(self) -> None:
-        self.kafka_rest_url = os.getenv("KAFKA_REST_URL", "").rstrip("/")
-        self.kafka_audit_topic = os.getenv("KAFKA_AUDIT_TOPIC", os.getenv("AUTHCLAW_AUDIT_TOPIC", "authclaw-audit-events"))
-        self.kafka_analytics_topic = os.getenv("KAFKA_ANALYTICS_TOPIC", "authclaw-analytics-events")
-        self.kafka_dlq_topic = os.getenv("KAFKA_DLQ_TOPIC", "authclaw-dead-letter-events")
+        topics = AuditTopics.from_environment()
+        self.audit_topic = topics.audit
+        self.analytics_topic = topics.analytics
+        self.dlq_topic = topics.dlq
         self.clickhouse_enabled = _truthy("AUTHCLAW_CLICKHOUSE_ENABLED", True)
         self.max_attempts = int(os.getenv("AUTHCLAW_EVENT_DELIVERY_ATTEMPTS", "3"))
         self.timeout = float(os.getenv("AUTHCLAW_EVENT_DELIVERY_TIMEOUT_SECONDS", "1.5"))
+        self.audit_publisher = make_audit_publisher(
+            timeout=self.timeout,
+            required=_truthy("AUTHCLAW_REQUIRE_KAFKA", False),
+        )
 
     def record_and_deliver(self, event: Dict[str, Any], stream: str = "audit") -> Dict[str, Any]:
-        topic = self.kafka_audit_topic if stream == "audit" else self.kafka_analytics_topic
+        topic = self.audit_topic if stream == "audit" else self.analytics_topic
         event_id = self._event_id(event)
         tenant_id = self._event_tenant(event)
         payload = json.dumps(event, sort_keys=True, default=str)
@@ -78,7 +83,7 @@ class EventPipeline:
 
         for attempt in range(attempts + 1, self.max_attempts + 1):
             try:
-                self._publish_kafka_rest(record["topic"], event)
+                self.audit_publisher.publish(record["topic"], event)
                 if self.clickhouse_enabled:
                     self._write_clickhouse(event)
                 delivered = True
@@ -133,7 +138,7 @@ class EventPipeline:
                         "event_id": event_id,
                         "tenant_id": record["tenant_id"],
                         "stream": record["stream"],
-                        "topic": self.kafka_dlq_topic,
+                        "topic": self.dlq_topic,
                         "payload": record["payload"],
                         "error_message": error_message,
                         "attempts": attempts,
@@ -239,31 +244,11 @@ class EventPipeline:
             by_stream[stream][status] = int(count or 0)
             by_stream[stream]["max_attempts"] = max(by_stream[stream]["max_attempts"], int(attempts or 0))
         return {
-            "kafka_rest_configured": bool(self.kafka_rest_url),
+            "kafka_rest_configured": self.audit_publisher.configured,
             "clickhouse_enabled": self.clickhouse_enabled,
             "streams": by_stream,
             "checkpoints": [dict(row._mapping) for row in checkpoints],
         }
-
-    def _publish_kafka_rest(self, topic: str, event: Dict[str, Any]) -> None:
-        if not self.kafka_rest_url:
-            if _truthy("AUTHCLAW_REQUIRE_KAFKA", False):
-                raise RuntimeError("Kafka REST/MSK endpoint is required but KAFKA_REST_URL is not configured")
-            return
-        endpoint = f"{self.kafka_rest_url}/topics/{urllib.parse.quote(topic)}"
-        body = json.dumps({"records": [{"value": event}]}, default=str).encode("utf-8")
-        request = urllib.request.Request(
-            endpoint,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/vnd.kafka.json.v2+json",
-                "Accept": "application/vnd.kafka.v2+json",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:  # nosec B310
-            if response.status < 200 or response.status >= 300:
-                raise RuntimeError(f"Kafka REST returned {response.status}")
 
     def _write_clickhouse(self, event: Dict[str, Any]) -> None:
         base_url = os.getenv("CLICKHOUSE_HTTP_URL")

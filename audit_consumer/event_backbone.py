@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from transport import (
+    AUDIT_DLQ_TOPIC,
+    AUDIT_EVENTS_TOPIC,
+    DEFAULT_CONSUMER_TOPICS,
+    GATEWAY_TRAFFIC_TOPIC,
+)
+
 
 @dataclass(frozen=True)
 class TopicSpec:
@@ -14,10 +21,6 @@ class TopicSpec:
     replay_policy: str
     key_field: str
 
-
-GATEWAY_TRAFFIC_TOPIC = "gateway.traffic"
-AUDIT_EVENTS_TOPIC = "audit.events"
-AUDIT_DLQ_TOPIC = "audit.deadletter"
 
 TOPICS = {
     GATEWAY_TRAFFIC_TOPIC: TopicSpec(
@@ -45,6 +48,3 @@ TOPICS = {
         key_field="tenant_id",
     ),
 }
-
-
-DEFAULT_CONSUMER_TOPICS = [GATEWAY_TRAFFIC_TOPIC, AUDIT_EVENTS_TOPIC]
