@@ -1,0 +1,82 @@
+{
+  "checks": [
+    {
+      "evidence": "queue attributes were not collected",
+      "name": "audit queue attributes",
+      "raw": null,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "evidence": "Terraform alarm names unavailable",
+      "name": "SQS alarms",
+      "raw": null,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "evidence": "consumer role unavailable",
+      "name": "consumer cannot send",
+      "raw": null,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "evidence": "live AWS collection not requested",
+      "name": "SQS VPC endpoint",
+      "raw": null,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "evidence": "cluster or service names unavailable",
+      "name": "ECS services/task definitions",
+      "raw": {},
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "evidence": "confirm audit_stream_transport remains kafka until approved cutover",
+      "name": "Kafka rollback/default remains configured",
+      "raw": null,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "evidence": "compare deployed task definition images with intended release digest",
+      "name": "commit/image digest match",
+      "raw": null,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "evidence": "record canary IDs, tenant sequence and final chain after explicit deployment canary",
+      "name": "canary audit chain",
+      "raw": null,
+      "status": "LIVE-EVIDENCE-PENDING"
+    }
+  ],
+  "collected_at": "2026-09-01T10:31:01.995561+00:00",
+  "collection_errors": {
+    "alarms": "live AWS collection not requested",
+    "dlq": "live AWS collection not requested",
+    "endpoint": "live AWS collection not requested",
+    "queue": "live AWS collection not requested"
+  },
+  "commands": [
+    "terraform output -json > terraform-output.json",
+    "python scripts/sqs_audit_deployment_readiness.py --terraform-output-json terraform-output.json --live",
+    "aws sqs get-queue-attributes --attribute-names All",
+    "aws cloudwatch describe-alarms --alarm-names <audit_sqs.alarm_names>",
+    "aws iam simulate-principal-policy for producer/consumer task roles",
+    "aws ec2 describe-vpc-endpoints --vpc-endpoint-ids <network_path.interface_endpoint_ids.sqs>",
+    "aws ecs describe-services and describe-task-definition for backend/gateway/agent/audit_consumer"
+  ],
+  "inputs": {
+    "cluster": "",
+    "dlq_url": "",
+    "queue_url": "",
+    "sqs_endpoint_id": null
+  },
+  "mode": "LIVE-EVIDENCE-PENDING",
+  "region": "LIVE-EVIDENCE-PENDING",
+  "safety": {
+    "never_consumes_or_deletes_ordinary_queue_messages": true,
+    "never_performs_cutover": true,
+    "read_only_by_default": true,
+    "run_canary_requested": false
+  }
+}
