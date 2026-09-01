@@ -35,6 +35,7 @@ jobs:
       gateway: ${{ steps.changes.outputs.gateway }}
       console: ${{ steps.changes.outputs.console }}
       terraform: ${{ steps.changes.outputs.terraform }}
+      audit_transport: ${{ steps.changes.outputs.audit_transport }}
       code: ${{ steps.changes.outputs.code }}
       codeql_languages: ${{ steps.changes.outputs.codeql_languages }}
       shared: ${{ steps.changes.outputs.shared }}
@@ -69,6 +70,11 @@ jobs:
           component gateway '^gateway/'
           component console '^console/'
           component terraform '^(infra/terraform/|\.github/workflows/deploy-controlled-beta\.yml)'
+          if [[ "$shared" == true ]] || matches '^(audit_consumer/|gateway/(audit_transport|kafka|sqs_fifo|audit).*|backend/app/services/audit_transport.py|services/agent/services/audit_transport.py|infra/terraform/(modules/regional_stack/(sqs_audit|main|variables|outputs)\.tf|main\.tf|variables\.tf|outputs\.tf)|scripts/(assert_audit_transport_plan|sqs_audit_deployment_readiness)\.py|docker-compose\.audit-e2e\.yml)'; then
+            echo "audit_transport=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "audit_transport=false" >> "$GITHUB_OUTPUT"
+          fi
           languages=()
           if [[ "$shared" == true ]] || matches '^(backend/|audit_consumer/|services/agent/|sdk/python/)'; then languages+=(python); fi
           if [[ "$shared" == true ]] || matches '^console/'; then languages+=(javascript-typescript); fi
@@ -141,12 +147,12 @@ jobs:
           ../.ci-backend/bin/python -m pytest -p no:cacheprovider -q \
             tests/test_auth_baseline.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
             tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
-            tests/test_compliance_scoring.py tests/test_migration_038.py
+            tests/test_compliance_scoring.py tests/test_migration_038.py tests/test_audit_transport_contract.py
 
   audit:
     name: Audit Consumer Tests
     needs: changes
-    if: needs.changes.outputs.audit == 'true'
+    if: needs.changes.outputs.audit_transport == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -159,6 +165,7 @@ jobs:
           .ci-audit/bin/python -m pip install --require-hashes -r audit_consumer/requirements-test.txt
           cd audit_consumer
           ../.ci-audit/bin/python -m pytest -p no:cacheprovider tests/ -q
+          ../.ci-audit/bin/python local_e2e.py --transport both --evidence ../infra/security/audit-transport-ci-e2e.md
 
   agent:
     name: Agent Tests
@@ -179,7 +186,7 @@ jobs:
             -r services/agent/requirements-test.txt
           .ci-agent/bin/python -m compileall -q services/agent
           cd services/agent
-          ../../.ci-agent/bin/python -m pytest --noconftest -p no:cacheprovider tests/test_sensitive_data_detection.py -q
+          ../../.ci-agent/bin/python -m pytest --noconftest -p no:cacheprovider tests/test_sensitive_data_detection.py tests/test_audit_transport_contract.py -q
 
   sdk:
     name: Python SDK Tests
@@ -210,7 +217,7 @@ jobs:
           DATABASE_URL: postgresql://test:test@127.0.0.1:1/authclaw_gateway_ci_test
         run: >-
           go test ./... -count=1
-          -run '^(TestACL17|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_)'
+          -run '^(TestACL17|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream)'
 
   console:
     name: Console Tests and Build
@@ -271,6 +278,30 @@ jobs:
           terraform -chdir=infra/terraform fmt -check -recursive
           terraform -chdir=infra/terraform init -backend=false
           terraform -chdir=infra/terraform validate
+          cat > infra/terraform/ci.auto.tfvars.json <<'JSON'
+          {
+            "ci_skip_aws_validation": true,
+            "enable_secondary": false,
+            "enable_cross_region_db_replica": false,
+            "primary_availability_zones": ["us-east-1a", "us-east-1b"],
+            "container_images": {
+              "agent": "example.com/authclaw/agent:test",
+              "backend": "example.com/authclaw/backend:test",
+              "gateway": "example.com/authclaw/gateway:test",
+              "console": "example.com/authclaw/console:test",
+              "audit_consumer": "example.com/authclaw/audit-consumer:test",
+              "opa": "openpolicyagent/opa:test",
+              "presidio": "mcr.microsoft.com/presidio-analyzer:test"
+            }
+          }
+          JSON
+          terraform -chdir=infra/terraform plan -input=false -lock=false -out=kafka.tfplan -var=audit_stream_transport=kafka
+          terraform -chdir=infra/terraform show -json kafka.tfplan > kafka-plan.json
+          python scripts/assert_audit_transport_plan.py kafka infra/terraform/kafka-plan.json
+          terraform -chdir=infra/terraform plan -input=false -lock=false -out=sqs.tfplan -var=audit_stream_transport=sqs_fifo
+          terraform -chdir=infra/terraform show -json sqs.tfplan > sqs-plan.json
+          python scripts/assert_audit_transport_plan.py sqs_fifo infra/terraform/sqs-plan.json
+          python scripts/sqs_audit_deployment_readiness.py --output-json infra/security/sqs-audit-ci-pending.json --output-md infra/security/sqs-audit-ci-pending.md
 
   codeql:
     name: CodeQL Analysis
