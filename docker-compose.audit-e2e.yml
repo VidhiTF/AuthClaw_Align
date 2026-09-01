@@ -1,0 +1,21 @@
+services:
+  kafka:
+    container_name: authclaw-audit-e2e-kafka
+
+  kafka-init:
+    container_name: authclaw-audit-e2e-kafka-init
+
+  clickhouse:
+    container_name: authclaw-audit-e2e-clickhouse
+
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: authclaw-audit-e2e-localstack
+    profiles:
+      - audit-e2e
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      SQS_ENDPOINT_STRATEGY: path
+    ports:
+      - "4566:4566"
