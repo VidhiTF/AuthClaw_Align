@@ -96,8 +96,9 @@ def _parse_timestamp(raw) -> datetime:
 
 def stable_record_id(payload: dict) -> str:
     """Return the provided event id or a deterministic UUID for replayed payloads."""
-    if payload.get("id"):
-        return str(payload["id"])
+    record_id = payload.get("audit_record_id") or payload.get("record_id") or payload.get("id")
+    if record_id:
+        return str(record_id)
     identity = {
         "tenant_id": payload.get("tenant_id", ""),
         "request_id": payload.get("request_id", ""),
@@ -181,6 +182,9 @@ def main():
         for batch in consumer.poll(timeout_ms=1000):
             for message in batch:
                 try:
+                    consumer.begin(message)
+                    if message.validation_error is not None:
+                        raise message.validation_error
                     _process_message(ch_client, message.value)
                     consumer.ack(message)
                 except (SequenceGapError, RetryableMirrorError) as exc:
@@ -191,6 +195,10 @@ def main():
                     break
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Failed to process message: %s", exc)
+                    if consumer.redrive_failures:
+                        consumer.retry(message)
+                        metrics.increment("audit_consumer_retries_total")
+                        break
                     try:
                         consumer.publish_dlq(message.value or {}, str(exc))
                         metrics.increment("audit_consumer_dlq_published_total")
