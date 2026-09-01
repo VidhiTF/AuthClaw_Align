@@ -25,6 +25,12 @@ variable "availability_zones" {
   default     = []
 }
 
+variable "enable_private_aws_endpoints" {
+  description = "Route supported AWS service traffic privately through VPC gateway and interface endpoints."
+  type        = bool
+  default     = true
+}
+
 variable "container_images" {
   type = object({
     agent          = string
@@ -224,6 +230,7 @@ variable "audit_sqs_backlog_alarm_threshold" {
   type    = number
   default = 1000
 }
+
 variable "clickhouse_host" {
   type    = string
   default = ""

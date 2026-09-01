@@ -84,6 +84,14 @@ output "service_discovery_namespace" {
   value = aws_service_discovery_private_dns_namespace.main.name
 }
 
+output "network_path" {
+  value = {
+    nat_gateway_ids        = values(aws_nat_gateway.main)[*].id
+    gateway_endpoint_ids   = { for key, endpoint in aws_vpc_endpoint.gateway : key => endpoint.id }
+    interface_endpoint_ids = { for key, endpoint in aws_vpc_endpoint.interface : key => endpoint.id }
+  }
+}
+
 output "audit_sqs" {
   value = {
     queue_url          = try(aws_sqs_queue.audit[0].url, null)

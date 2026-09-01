@@ -50,6 +50,12 @@ variable "secondary_availability_zones" {
   default     = []
 }
 
+variable "enable_private_aws_endpoints" {
+  description = "Create private S3, DynamoDB, ECR, CloudWatch Logs, Secrets Manager, and KMS VPC endpoints in each regional stack."
+  type        = bool
+  default     = true
+}
+
 variable "container_images" {
   description = "Container images for AuthClaw runtime services."
   type = object({
@@ -275,6 +281,7 @@ variable "audit_sqs_backlog_alarm_threshold" {
   type    = number
   default = 1000
 }
+
 variable "clickhouse_host" {
   description = "Optional managed ClickHouse host for audit query acceleration."
   type        = string
