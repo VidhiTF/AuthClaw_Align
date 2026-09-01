@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import re
+from ipaddress import ip_address
 from urllib.parse import urlparse
 import yaml
 from database import DATABASE_URL
@@ -12,9 +13,16 @@ logger = logging.getLogger("authclaw.startup.validation")
 POLICY_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
-def _is_https_url(value: str) -> bool:
+def _is_secure_sidecar_url(value: str) -> bool:
     parsed = urlparse(value.strip())
-    return parsed.scheme == "https" and bool(parsed.hostname)
+    if parsed.scheme == "https" and parsed.hostname:
+        return True
+    if parsed.scheme != "http" or not parsed.hostname:
+        return False
+    try:
+        return ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _normalize_policy_list(data: dict, key: str) -> list:
@@ -304,8 +312,8 @@ def validate_production_environment() -> list:
     opa_policy_url = os.getenv("AUTHCLAW_OPA_POLICY_URL", "")
     if not opa_policy_url:
         errors.append("Production requires AUTHCLAW_OPA_POLICY_URL.")
-    elif not _is_https_url(opa_policy_url):
-        errors.append("Production requires AUTHCLAW_OPA_POLICY_URL to use HTTPS.")
+    elif not _is_secure_sidecar_url(opa_policy_url):
+        errors.append("Production requires AUTHCLAW_OPA_POLICY_URL to use HTTPS or task-local loopback HTTP.")
 
     document_storage = os.getenv("AUTHCLAW_DOCUMENT_STORAGE_BACKEND", "local").lower()
     if document_storage not in {"local", "s3"}:

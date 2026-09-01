@@ -30,7 +30,6 @@ jobs:
       AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
       BETA_CERTIFICATE_ARN: ${{ vars.BETA_CERTIFICATE_ARN }}
       BETA_DOMAIN_NAME: ${{ vars.BETA_DOMAIN_NAME }}
-      BETA_PRESIDIO_IMAGE: ${{ vars.BETA_PRESIDIO_IMAGE }}
       SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
@@ -49,13 +48,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in AWS_REGION AWS_ROLE_ARN BETA_CERTIFICATE_ARN BETA_DOMAIN_NAME BETA_PRESIDIO_IMAGE TF_STATE_BUCKET TF_STATE_KMS_KEY_ID; do
+          for name in AWS_REGION AWS_ROLE_ARN BETA_CERTIFICATE_ARN BETA_DOMAIN_NAME TF_STATE_BUCKET TF_STATE_KMS_KEY_ID; do
             [[ -n "${!name}" ]] || { echo "::error::Missing controlled-beta variable ${name}"; exit 1; }
           done
-          [[ "$BETA_PRESIDIO_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || {
-            echo "::error::BETA_PRESIDIO_IMAGE must be pinned by sha256 digest"
-            exit 1
-          }
 
       - name: Configure short-lived AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.2.3
@@ -143,7 +138,7 @@ jobs:
           console="$(promote console "ghcr.io/$repo/console:ci-$SOURCE_SHA")"
           audit_consumer="$(promote audit-consumer "ghcr.io/$repo/audit-consumer:ci-$SOURCE_SHA")"
           opa="$(promote opa-bundle "ghcr.io/$repo/opa-bundle:ci-$SOURCE_SHA")"
-          presidio="$(promote presidio "$BETA_PRESIDIO_IMAGE")"
+          presidio="$(promote presidio "ghcr.io/$repo/presidio:ci-$SOURCE_SHA")"
 
           jq -n \
             --arg agent "$agent" --arg backend "$backend" --arg gateway "$gateway" --arg console "$console" \

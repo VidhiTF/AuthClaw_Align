@@ -219,7 +219,11 @@ func TestAnalyzePromptWithFallbackTimesOutUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results := analyzePromptWithFallback(context.Background(), client, "Contact jane@example.com for support.", nil)
+			results, err := analyzePromptWithFallback(context.Background(), client, "Contact jane@example.com for support.", nil)
+			if err != nil {
+				errs <- err.Error()
+				return
+			}
 			for _, result := range results {
 				if result.EntityType == "EMAIL_ADDRESS" {
 					return
@@ -279,7 +283,9 @@ func TestPresidioAnalyzeRequestIncludesCustomNERRecognizers(t *testing.T) {
 	defer server.Close()
 
 	client := &PresidioClient{BaseURL: server.URL}
-	_ = analyzePromptWithFallback(context.Background(), client, "Insurance INS-ABCD1234", nil)
+	if _, err := analyzePromptWithFallback(context.Background(), client, "Insurance INS-ABCD1234", nil); err != nil {
+		t.Fatalf("analyze prompt: %v", err)
+	}
 
 	req := <-seen
 	foundEntity := false
@@ -301,6 +307,26 @@ func TestPresidioAnalyzeRequestIncludesCustomNERRecognizers(t *testing.T) {
 	}
 	if !foundRecognizer {
 		t.Fatalf("custom recognizer was not sent to Presidio: %#v", req.AdHocRecognizers)
+	}
+}
+
+func TestAnalyzePromptFailsClosedInProductionWhenPresidioFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	t.Setenv("AUTHCLAW_ENV", "production")
+	t.Setenv("PRESIDIO_FAIL_CLOSED", "")
+	t.Setenv("REDACTION_LOCAL_ANALYZER_ONLY", "false")
+
+	client := &PresidioClient{BaseURL: server.URL}
+	results, err := analyzePromptWithFallback(context.Background(), client, "Contact jane@example.com", nil)
+	if err == nil {
+		t.Fatal("expected Presidio failure to block production redaction")
+	}
+	if results != nil {
+		t.Fatalf("expected no fallback results in fail-closed mode, got %#v", results)
 	}
 }
 
@@ -668,6 +694,35 @@ func TestValidateServiceTLSConfigAcceptsHTTPSServiceURLs(t *testing.T) {
 
 	if err := ValidateServiceTLSConfig(); err != nil {
 		t.Fatalf("expected HTTPS service URLs to pass, got %v", err)
+	}
+}
+
+func TestValidateServiceTLSConfigAcceptsLoopbackHTTP(t *testing.T) {
+	t.Setenv("AUTHCLAW_ENV", "production")
+	t.Setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true")
+	t.Setenv("OPA_URL", "http://127.0.0.1:8181")
+	t.Setenv("PRESIDIO_URL", "http://127.0.0.1:3000")
+
+	if err := ValidateServiceTLSConfig(); err != nil {
+		t.Fatalf("expected loopback HTTP service URLs to pass, got %v", err)
+	}
+}
+
+func TestValidateServiceTLSConfigRejectsNonLoopbackHTTP(t *testing.T) {
+	t.Setenv("AUTHCLAW_ENV", "production")
+	t.Setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true")
+	t.Setenv("PRESIDIO_URL", "http://127.0.0.1:3000")
+
+	for _, value := range []string{
+		"http://opa.internal:8181",
+		"http://10.0.0.10:8181",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("OPA_URL", value)
+			if err := ValidateServiceTLSConfig(); err == nil {
+				t.Fatalf("expected non-loopback HTTP URL %q to be rejected", value)
+			}
+		})
 	}
 }
 

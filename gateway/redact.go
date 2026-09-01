@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -142,6 +143,14 @@ func presidioFailureCooldown() time.Duration {
 
 func presidioSlowLogThreshold() time.Duration {
 	return envDurationMillis("PRESIDIO_SLOW_LOG_MS", 500*time.Millisecond, 100*time.Millisecond, 10*time.Second)
+}
+
+func presidioFailClosedEnabled() bool {
+	value := strings.TrimSpace(os.Getenv("PRESIDIO_FAIL_CLOSED"))
+	if value == "" {
+		return isProductionEnv()
+	}
+	return envBool("PRESIDIO_FAIL_CLOSED", true)
 }
 
 func envBoundedInt(name string, fallback, min, max int) int {
@@ -490,19 +499,26 @@ func (c *PresidioClient) Analyze(ctx context.Context, text string, customRules [
 	return results, nil
 }
 
-func analyzePromptWithFallback(ctx context.Context, presidio *PresidioClient, prompt string, customRules []RegexRule) []AnalyzeResult {
+func analyzePromptWithFallback(ctx context.Context, presidio *PresidioClient, prompt string, customRules []RegexRule) ([]AnalyzeResult, error) {
 	start := time.Now()
 	redactionAnalyzeRequestsTotal.Add(1)
 	if envBool("REDACTION_LOCAL_ANALYZER_ONLY", false) {
-		return fallbackAnalyze(prompt, customRules)
+		return fallbackAnalyze(prompt, customRules), nil
 	}
 	if presidioIsOffline(presidio.BaseURL) {
+		if presidioFailClosedEnabled() {
+			return nil, fmt.Errorf("presidio analyzer unavailable during failure cooldown")
+		}
 		results := fallbackAnalyze(prompt, customRules)
 		redactionPresidioFallbackTotal.Add(1)
-		return results
+		return results, nil
 	}
 	release, acquired := acquirePresidioSlot(ctx)
 	if !acquired {
+		if presidioFailClosedEnabled() {
+			redactionPresidioTimeoutTotal.Add(1)
+			return nil, fmt.Errorf("presidio analyzer concurrency limit reached")
+		}
 		fallbackStart := time.Now()
 		results := fallbackAnalyze(prompt, customRules)
 		redactionPresidioFallbackTotal.Add(1)
@@ -513,7 +529,7 @@ func analyzePromptWithFallback(ctx context.Context, presidio *PresidioClient, pr
 			len([]rune(prompt)),
 			len(results),
 		)
-		return results
+		return results, nil
 	}
 	defer release()
 
@@ -524,12 +540,21 @@ func analyzePromptWithFallback(ctx context.Context, presidio *PresidioClient, pr
 	duration := time.Since(start)
 	if err != nil {
 		markPresidioFailure(presidio.BaseURL)
-		fallbackStart := time.Now()
-		results = fallbackAnalyze(prompt, customRules)
-		redactionPresidioFallbackTotal.Add(1)
 		if analyzeCtx.Err() != nil || strings.Contains(strings.ToLower(err.Error()), "timeout") || strings.Contains(strings.ToLower(err.Error()), "deadline") {
 			redactionPresidioTimeoutTotal.Add(1)
 		}
+		if presidioFailClosedEnabled() {
+			log.Printf(
+				"[REDACTION] analyzer=presidio status=fail_closed duration_ms=%d prompt_chars=%d err=%v",
+				duration.Milliseconds(),
+				len([]rune(prompt)),
+				err,
+			)
+			return nil, fmt.Errorf("presidio analyzer failed: %w", err)
+		}
+		fallbackStart := time.Now()
+		results = fallbackAnalyze(prompt, customRules)
+		redactionPresidioFallbackTotal.Add(1)
 		log.Printf(
 			"[REDACTION] analyzer=presidio status=fallback duration_ms=%d fallback_duration_ms=%d prompt_chars=%d err=%v",
 			duration.Milliseconds(),
@@ -537,7 +562,7 @@ func analyzePromptWithFallback(ctx context.Context, presidio *PresidioClient, pr
 			len([]rune(prompt)),
 			err,
 		)
-		return results
+		return results, nil
 	}
 
 	results = appendCustomRuleAnalyzeResults(results, prompt, customRules)
@@ -553,7 +578,7 @@ func analyzePromptWithFallback(ctx context.Context, presidio *PresidioClient, pr
 			len(results),
 		)
 	}
-	return results
+	return results, nil
 }
 
 func byteIndexToRuneIndex(text string, byteIndex int) int {
@@ -733,9 +758,19 @@ func serviceTLSEnforced() bool {
 	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
-func isHTTPSURL(value string) bool {
+func isSecureServiceURL(value string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(value))
-	return err == nil && parsed.Scheme == "https" && parsed.Hostname() != ""
+	if err != nil || parsed.Hostname() == "" {
+		return false
+	}
+	if parsed.Scheme == "https" {
+		return true
+	}
+	if parsed.Scheme != "http" {
+		return false
+	}
+	ip := net.ParseIP(parsed.Hostname())
+	return ip != nil && ip.IsLoopback()
 }
 
 func ValidateServiceTLSConfig() error {
@@ -743,8 +778,8 @@ func ValidateServiceTLSConfig() error {
 		return nil
 	}
 	for _, name := range []string{"OPA_URL", "PRESIDIO_URL"} {
-		if !isHTTPSURL(os.Getenv(name)) {
-			return fmt.Errorf("%s must use https when service TLS is required", name)
+		if !isSecureServiceURL(os.Getenv(name)) {
+			return fmt.Errorf("%s must use https or task-local loopback http when service TLS is required", name)
 		}
 	}
 	return nil
@@ -1323,7 +1358,10 @@ func RedactPrompts(ctx context.Context, tenantID string, prompts []string, custo
 	redactedPrompts := make([]string, len(prompts))
 
 	for i, prompt := range prompts {
-		results := analyzePromptWithFallback(ctx, presidio, prompt, customRules)
+		results, analyzeErr := analyzePromptWithFallback(ctx, presidio, prompt, customRules)
+		if analyzeErr != nil {
+			return nil, nil, analyzeErr
+		}
 		redacted, promptTokenMap, err := redactTextWithResults(ctx, tenantID, prompt, customRules, runtimeConfig, results)
 		if err != nil {
 			return nil, nil, err
