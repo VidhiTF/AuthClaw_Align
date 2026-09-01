@@ -13,8 +13,8 @@ locals {
   api_base_url          = "${local.public_scheme}://${local.public_host}:8000"
   gateway_base_url      = "${local.public_scheme}://${local.public_host}:8080"
   internal_agent_url    = "http://agent.${local.namespace_name}:8001"
-  internal_opa_url      = "http://opa.${local.namespace_name}:8181"
-  internal_presidio_url = "http://presidio.${local.namespace_name}:3000"
+  internal_opa_url      = "http://127.0.0.1:8181"
+  internal_presidio_url = "http://127.0.0.1:3000"
   db_password           = var.db_password != "" ? var.db_password : random_password.db.result
   db_address            = var.create_db_replica ? aws_db_instance.postgres_replica[0].address : aws_db_instance.postgres_primary[0].address
   db_arn                = var.create_db_replica ? aws_db_instance.postgres_replica[0].arn : aws_db_instance.postgres_primary[0].arn
@@ -49,19 +49,23 @@ locals {
       container_port = 8001
       command        = null
     }
+  }
+
+  legacy_sidecar_services = {
     opa = {
       image          = var.container_images.opa
       container_port = 8181
-      command        = ["run", "--server", "--addr=0.0.0.0:8181"]
+      command        = ["run", "--server", "--addr=0.0.0.0:8181", "/policies"]
     }
     presidio = {
       image          = var.container_images.presidio
       container_port = 3000
-      command        = null
+      command        = ["poetry", "run", "gunicorn", "-w", "1", "-b", "0.0.0.0:3000", "app:create_app()"]
     }
   }
 
-  service_configs = merge(local.public_services, local.private_services)
+  service_configs         = merge(local.public_services, local.private_services)
+  task_definition_configs = merge(local.service_configs, local.legacy_sidecar_services)
 
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
@@ -627,7 +631,7 @@ resource "aws_service_discovery_service" "service" {
 }
 
 resource "aws_cloudwatch_log_group" "service" {
-  for_each          = toset(concat(keys(local.service_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
+  for_each          = toset(concat(keys(local.task_definition_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
   name              = "/authclaw/${var.name}/${each.key}"
   retention_in_days = 30
   tags              = var.tags
@@ -842,7 +846,7 @@ resource "aws_ecs_task_definition" "database_job" {
   tags = var.tags
 }
 resource "aws_ecs_task_definition" "service" {
-  for_each = local.service_configs
+  for_each = local.task_definition_configs
 
   family                   = "${var.name}-${each.key}"
   requires_compatibilities = ["FARGATE"]
@@ -927,11 +931,295 @@ resource "aws_ecs_task_definition" "service" {
     precondition {
       condition = var.authclaw_env != "production" || alltrue([
         startswith(local.internal_agent_url, "https://"),
-        startswith(local.internal_opa_url, "https://"),
-        startswith(local.internal_presidio_url, "https://"),
+        local.internal_opa_url == "http://127.0.0.1:8181",
+        local.internal_presidio_url == "http://127.0.0.1:3000",
         startswith("http://gateway.${local.namespace_name}:8080", "https://")
       ])
-      error_message = "Production is blocked until agent, gateway, OPA, and Presidio have real internal HTTPS endpoints."
+      error_message = "Production requires HTTPS for remote agent/gateway calls and exact task-local loopback HTTP endpoints for OPA and Presidio."
+    }
+  }
+
+  tags = var.tags
+}
+
+resource "aws_ecs_task_definition" "gateway_with_sidecars" {
+  family                   = "${var.name}-gateway-sidecars"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.gateway_sidecar_task_cpu
+  memory                   = var.gateway_sidecar_task_memory
+  execution_role_arn       = aws_iam_role.task_execution.arn
+
+  container_definitions = jsonencode([
+    {
+      name              = "gateway"
+      image             = var.container_images.gateway
+      essential         = true
+      cpu               = 768
+      memory            = 1280
+      memoryReservation = 1024
+      portMappings = [{
+        containerPort = 8080
+        protocol      = "tcp"
+      }]
+      environment = concat(local.common_environment, [
+        { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" },
+        { name = "PRESIDIO_FAIL_CLOSED", value = "true" }
+      ])
+      secrets = [
+        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.app_database_url.arn },
+        { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
+        { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
+        { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
+        { name = "SESSION_SECRET", valueFrom = var.session_key_version == "v2" ? aws_secretsmanager_secret.session_v2.arn : aws_secretsmanager_secret.session.arn },
+        { name = "SESSION_SECRET_V1", valueFrom = aws_secretsmanager_secret.session.arn },
+        { name = "SESSION_SECRET_V2", valueFrom = aws_secretsmanager_secret.session_v2.arn },
+        { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
+        { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
+        { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn },
+        { name = "REDACTION_HASH_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
+      ]
+      dependsOn = [
+        { containerName = "opa", condition = "HEALTHY" },
+        { containerName = "presidio", condition = "HEALTHY" }
+      ]
+      healthCheck = {
+        command     = ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health >/dev/null || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 30
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service["gateway"].name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "gateway"
+        }
+      }
+    },
+    {
+      name              = "opa"
+      image             = var.container_images.opa
+      essential         = true
+      cpu               = 256
+      memory            = 384
+      memoryReservation = 256
+      command           = ["run", "--server", "--addr=127.0.0.1:8181", "/policies"]
+      healthCheck = {
+        command     = ["CMD", "/healthcheck"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 10
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service["opa"].name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "gateway-opa"
+        }
+      }
+    },
+    {
+      name              = "presidio"
+      image             = var.container_images.presidio
+      essential         = true
+      cpu               = 768
+      memory            = 2048
+      memoryReservation = 1536
+      healthCheck = {
+        command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/health >/dev/null || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 60
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service["presidio"].name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "gateway-presidio"
+        }
+      }
+    }
+  ])
+
+  lifecycle {
+    precondition {
+      condition     = local.internal_opa_url == "http://127.0.0.1:8181" && local.internal_presidio_url == "http://127.0.0.1:3000"
+      error_message = "Gateway sidecars must use the exact task-local OPA and Presidio loopback endpoints."
+    }
+  }
+
+  tags = var.tags
+}
+
+resource "aws_ecs_task_definition" "backend_with_presidio" {
+  family                   = "${var.name}-backend-presidio"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.backend_sidecar_task_cpu
+  memory                   = var.backend_sidecar_task_memory
+  execution_role_arn       = aws_iam_role.task_execution.arn
+
+  container_definitions = jsonencode([
+    {
+      name              = "backend"
+      image             = var.container_images.backend
+      essential         = true
+      cpu               = 768
+      memory            = 1536
+      memoryReservation = 1024
+      portMappings = [{
+        containerPort = 8000
+        protocol      = "tcp"
+      }]
+      environment = local.common_environment
+      secrets = [
+        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
+        { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
+        { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
+        { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
+        { name = "SESSION_SECRET", valueFrom = var.session_key_version == "v2" ? aws_secretsmanager_secret.session_v2.arn : aws_secretsmanager_secret.session.arn },
+        { name = "SESSION_SECRET_V1", valueFrom = aws_secretsmanager_secret.session.arn },
+        { name = "SESSION_SECRET_V2", valueFrom = aws_secretsmanager_secret.session_v2.arn },
+        { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
+        { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
+        { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn }
+      ]
+      dependsOn = [{ containerName = "presidio", condition = "HEALTHY" }]
+      healthCheck = {
+        command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 30
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service["backend"].name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "backend"
+        }
+      }
+    },
+    {
+      name              = "presidio"
+      image             = var.container_images.presidio
+      essential         = true
+      cpu               = 1024
+      memory            = 2048
+      memoryReservation = 1536
+      healthCheck = {
+        command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/health >/dev/null || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 60
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service["presidio"].name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "backend-presidio"
+        }
+      }
+    }
+  ])
+
+  lifecycle {
+    precondition {
+      condition     = local.internal_presidio_url == "http://127.0.0.1:3000"
+      error_message = "Backend must use its task-local Presidio loopback endpoint."
+    }
+  }
+
+  tags = var.tags
+}
+
+resource "aws_ecs_task_definition" "agent_with_opa" {
+  family                   = "${var.name}-agent-opa"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.agent_sidecar_task_cpu
+  memory                   = var.agent_sidecar_task_memory
+  execution_role_arn       = aws_iam_role.task_execution.arn
+
+  container_definitions = jsonencode([
+    {
+      name              = "agent"
+      image             = var.container_images.agent
+      essential         = true
+      cpu               = 768
+      memory            = 1536
+      memoryReservation = 1024
+      portMappings = [{
+        containerPort = 8001
+        protocol      = "tcp"
+      }]
+      environment = local.common_environment
+      secrets = [
+        { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn },
+        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn },
+        { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
+        { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
+        { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
+        { name = "AUTHCLAW_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.agent_encryption.arn },
+        { name = "AUTHCLAW_REDACTION_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
+      ]
+      dependsOn = [{ containerName = "opa", condition = "HEALTHY" }]
+      healthCheck = {
+        command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/agent/health/ready', timeout=3)\""]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 30
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service["agent"].name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "agent"
+        }
+      }
+    },
+    {
+      name              = "opa"
+      image             = var.container_images.opa
+      essential         = true
+      cpu               = 256
+      memory            = 384
+      memoryReservation = 256
+      command           = ["run", "--server", "--addr=127.0.0.1:8181", "/policies"]
+      healthCheck = {
+        command     = ["CMD", "/healthcheck"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 10
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service["opa"].name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "agent-opa"
+        }
+      }
+    }
+  ])
+
+  lifecycle {
+    precondition {
+      condition     = local.internal_opa_url == "http://127.0.0.1:8181"
+      error_message = "Agent must use its task-local OPA loopback endpoint."
     }
   }
 
@@ -943,7 +1231,7 @@ resource "aws_ecs_service" "public" {
 
   name            = "${var.name}-${each.key}"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.service[each.key].arn
+  task_definition = each.key == "gateway" ? aws_ecs_task_definition.gateway_with_sidecars.arn : each.key == "backend" ? aws_ecs_task_definition.backend_with_presidio.arn : aws_ecs_task_definition.service[each.key].arn
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
@@ -972,7 +1260,7 @@ resource "aws_ecs_service" "private" {
 
   name            = "${var.name}-${each.key}"
   cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.service[each.key].arn
+  task_definition = each.key == "agent" ? aws_ecs_task_definition.agent_with_opa.arn : aws_ecs_task_definition.service[each.key].arn
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 

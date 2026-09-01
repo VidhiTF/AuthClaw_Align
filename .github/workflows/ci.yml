@@ -342,6 +342,7 @@ jobs:
           - { service: agent, context: ./services/agent, dockerfile: ./services/agent/Dockerfile }
           - { service: audit-consumer, context: ., dockerfile: ./audit_consumer/Dockerfile }
           - { service: opa-bundle, context: ./infra/opa, dockerfile: ./infra/opa/Dockerfile }
+          - { service: presidio, context: ./infra/presidio, dockerfile: ./infra/presidio/Dockerfile }
     steps:
       - uses: actions/checkout@v7
       - uses: docker/login-action@v4
