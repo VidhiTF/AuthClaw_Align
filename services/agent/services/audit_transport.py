@@ -38,7 +38,14 @@ class AuditPublisher(Protocol):
     @property
     def configured(self) -> bool: ...
 
-    def publish(self, topic: str, event: Dict[str, Any]) -> None: ...
+    def publish(
+        self,
+        topic: str,
+        event: Dict[str, Any],
+        *,
+        serialized: str | None = None,
+        audit_record_id: str | None = None,
+    ) -> None: ...
 
 
 class KafkaRestAuditPublisher:
@@ -51,7 +58,14 @@ class KafkaRestAuditPublisher:
     def configured(self) -> bool:
         return bool(self._url)
 
-    def publish(self, topic: str, event: Dict[str, Any]) -> None:
+    def publish(
+        self,
+        topic: str,
+        event: Dict[str, Any],
+        *,
+        serialized: str | None = None,
+        audit_record_id: str | None = None,
+    ) -> None:
         if not self._url:
             if self._required:
                 raise RuntimeError(
@@ -74,10 +88,65 @@ class KafkaRestAuditPublisher:
                 raise RuntimeError(f"Kafka REST returned {response.status}")
 
 
+class SQSFIFOAuditPublisher:
+    def __init__(self) -> None:
+        self._queue_url = os.getenv("SQS_AUDIT_QUEUE_URL", "").strip()
+        self._client = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._queue_url)
+
+    def publish(
+        self,
+        topic: str,
+        event: Dict[str, Any],
+        *,
+        serialized: str | None = None,
+        audit_record_id: str | None = None,
+    ) -> None:
+        parsed = urllib.parse.urlparse(self._queue_url)
+        if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
+            raise RuntimeError("SQS_AUDIT_QUEUE_URL must be an absolute HTTPS FIFO queue URL")
+        if not parsed.path.rsplit("/", 1)[-1].endswith(".fifo"):
+            raise RuntimeError("SQS_AUDIT_QUEUE_URL must identify a .fifo queue")
+        host = (parsed.hostname or "").lower()
+        if not host.endswith((".amazonaws.com", ".amazonaws.com.cn")) or not (
+            host.startswith("sqs.") or ".sqs." in host
+        ):
+            raise RuntimeError("SQS_AUDIT_QUEUE_URL must use an AWS SQS endpoint")
+        tenant_id = str(event.get("tenant_id") or "")
+        record_id = str(
+            audit_record_id
+            or event.get("audit_record_id")
+            or event.get("record_id")
+            or event.get("id")
+            or ""
+        )
+        if not tenant_id or not record_id:
+            raise RuntimeError("SQS FIFO audit publish requires tenant_id and audit_record_id")
+        if len(tenant_id) > 128 or len(record_id) > 128:
+            raise RuntimeError(
+                "SQS FIFO tenant_id and audit_record_id must not exceed 128 characters"
+            )
+        if self._client is None:
+            import boto3
+
+            self._client = boto3.client("sqs")
+        self._client.send_message(
+            QueueUrl=self._queue_url,
+            MessageBody=serialized if serialized is not None else json.dumps(event, sort_keys=True, default=str),
+            MessageGroupId=tenant_id,
+            MessageDeduplicationId=record_id,
+        )
+
+
 def make_audit_publisher(*, timeout: float, required: bool) -> AuditPublisher:
     transport = os.getenv("AUDIT_STREAM_TRANSPORT", "kafka").strip().lower() or "kafka"
+    if transport == "sqs_fifo":
+        return SQSFIFOAuditPublisher()
     if transport != "kafka":
         raise RuntimeError(
-            f"unsupported AUDIT_STREAM_TRANSPORT {transport!r}; supported value: kafka"
+            f"unsupported AUDIT_STREAM_TRANSPORT {transport!r}; supported values: kafka, sqs_fifo"
         )
     return KafkaRestAuditPublisher(timeout=timeout, required=required)

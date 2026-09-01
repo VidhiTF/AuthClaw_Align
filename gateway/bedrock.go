@@ -38,12 +38,13 @@ func sha256Hex(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// SignBedrockRequest applies AWS SigV4 signing to an outbound HTTP request.
+// SignAWSRequest applies AWS SigV4 signing to an outbound HTTP request.
 // Reads credentials exclusively from environment variables.
 // Modifies the Authorization and x-amz-* headers in-place.
-func SignBedrockRequest(req *http.Request, bodyBytes []byte) error {
+func SignAWSRequest(req *http.Request, bodyBytes []byte, service string) error {
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	sessionToken := os.Getenv("AWS_SESSION_TOKEN")
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
 		region = "us-east-1"
@@ -55,7 +56,9 @@ func SignBedrockRequest(req *http.Request, bodyBytes []byte) error {
 		)
 	}
 
-	service := "bedrock"
+	if strings.TrimSpace(service) == "" {
+		return fmt.Errorf("AWS signing service is required")
+	}
 	now := time.Now().UTC()
 	amzDate := now.Format("20060102T150405Z")
 	dateStamp := now.Format("20060102")
@@ -71,6 +74,9 @@ func SignBedrockRequest(req *http.Request, bodyBytes []byte) error {
 	req.Header.Set("host", host)
 	req.Header.Set("x-amz-date", amzDate)
 	req.Header.Set("x-amz-content-sha256", bodyHash)
+	if sessionToken != "" {
+		req.Header.Set("x-amz-security-token", sessionToken)
+	}
 
 	// Canonical headers (sorted lowercase)
 	canonicalHeaders := fmt.Sprintf(
@@ -78,6 +84,10 @@ func SignBedrockRequest(req *http.Request, bodyBytes []byte) error {
 		host, bodyHash, amzDate,
 	)
 	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
+	if sessionToken != "" {
+		canonicalHeaders += fmt.Sprintf("x-amz-security-token:%s\n", sessionToken)
+		signedHeaders += ";x-amz-security-token"
+	}
 
 	canonicalURI := req.URL.Path
 	if canonicalURI == "" {
@@ -117,6 +127,10 @@ func SignBedrockRequest(req *http.Request, bodyBytes []byte) error {
 	req.Header.Set("Authorization", authHeader)
 
 	return nil
+}
+
+func SignBedrockRequest(req *http.Request, bodyBytes []byte) error {
+	return SignAWSRequest(req, bodyBytes, "bedrock")
 }
 
 // CheckBedrockUsageLimits reads current usage from Postgres for the tenant.

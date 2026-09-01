@@ -40,8 +40,16 @@ func InitAuditTransport() error {
 	if transport == "" {
 		transport = "kafka"
 	}
+	if transport == "sqs_fifo" {
+		adapter, err := newSQSFIFOAuditStream()
+		if err != nil {
+			return err
+		}
+		activeAuditStream = adapter
+		return nil
+	}
 	if transport != "kafka" {
-		return fmt.Errorf("unsupported AUDIT_STREAM_TRANSPORT %q; supported value: kafka", transport)
+		return fmt.Errorf("unsupported AUDIT_STREAM_TRANSPORT %q; supported values: kafka, sqs_fifo", transport)
 	}
 	adapter := &kafkaAuditStream{topics: auditTopics{
 		events: auditTopic("KAFKA_AUDIT_TOPIC", defaultAuditEventsTopic),

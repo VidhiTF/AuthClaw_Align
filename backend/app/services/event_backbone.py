@@ -131,7 +131,11 @@ def publish_pending_audit_events(
         )
         for row in pending:
             try:
-                producer.publish(tenant_key(tenant_id), row.event_payload)
+                producer.publish(
+                    tenant_key(tenant_id),
+                    row.event_payload,
+                    audit_record_id=str(row.record_id),
+                )
                 row.published_at = datetime.now(tz=timezone.utc)
                 row.publish_attempts += 1
                 row.last_error = None
