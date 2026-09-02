@@ -1,6 +1,6 @@
 locals {
   audit_sqs_enabled           = var.audit_stream_transport == "sqs_fifo"
-  audit_sqs_producer_services = toset(["backend", "gateway", "agent"])
+  audit_sqs_producer_services = toset(["backend", "gateway"])
   audit_sqs_environment = [
     { name = "AUDIT_STREAM_TRANSPORT", value = var.audit_stream_transport },
   ]
@@ -199,6 +199,8 @@ resource "aws_cloudwatch_metric_alarm" "audit_sqs" {
   statistic           = "Maximum"
   threshold           = each.value.threshold
   treat_missing_data  = "notBreaching"
+  alarm_actions       = var.audit_sqs_alarm_action_arns
+  ok_actions          = var.audit_sqs_alarm_action_arns
 
   dimensions = {
     QueueName = each.value.queue

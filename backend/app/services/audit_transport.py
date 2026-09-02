@@ -55,6 +55,7 @@ class KafkaAuditPublisher:
 class SQSFIFOAuditPublisher:
     def __init__(self) -> None:
         self._queue_url = os.getenv("SQS_AUDIT_QUEUE_URL", "").strip()
+        self._endpoint_url = os.getenv("SQS_ENDPOINT_URL", "").strip()
         self._client = None
 
     def publish(
@@ -64,7 +65,13 @@ class SQSFIFOAuditPublisher:
         audit_record_id: str | None = None,
     ) -> None:
         parsed = urlparse(self._queue_url)
-        if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
+        local_endpoint = os.getenv("AUTHCLAW_ALLOW_LOCAL_AWS_ENDPOINTS", "").lower() in {"1", "true", "yes"}
+        local_host = (parsed.hostname or "").lower()
+        local_url = local_endpoint and parsed.scheme == "http" and (
+            local_host in {"localhost", "127.0.0.1", "localstack", "localhost.localstack.cloud"}
+            or local_host.endswith(".localhost.localstack.cloud")
+        )
+        if not ((parsed.scheme == "https" or local_url) and parsed.netloc) or parsed.query or parsed.fragment:
             raise RuntimeError("SQS_AUDIT_QUEUE_URL must be an absolute HTTPS FIFO queue URL")
         if not parsed.path.rsplit("/", 1)[-1].endswith(".fifo"):
             raise RuntimeError("SQS_AUDIT_QUEUE_URL must identify a .fifo queue")
@@ -74,13 +81,16 @@ class SQSFIFOAuditPublisher:
             (i for i, label in enumerate(labels) if label == "sqs" or label.startswith("sqs-")),
             -1,
         )
-        if (
+        if local_endpoint and self._endpoint_url:
+            queue_region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+        elif (
             not host.endswith((".amazonaws.com", ".amazonaws.com.cn"))
             or sqs_index < 0
             or sqs_index + 1 >= len(labels)
         ):
             raise RuntimeError("SQS_AUDIT_QUEUE_URL must use a regional AWS SQS endpoint")
-        queue_region = labels[sqs_index + 1]
+        else:
+            queue_region = labels[sqs_index + 1]
         tenant_key = str(tenant_id or "")
         record_id = str(
             audit_record_id
@@ -108,7 +118,7 @@ class SQSFIFOAuditPublisher:
                 raise RuntimeError(
                     f"SQS queue region {queue_region!r} does not match AWS SDK region {session.region_name!r}"
                 )
-            self._client = session.client("sqs", region_name=queue_region)
+            self._client = session.client("sqs", region_name=queue_region, endpoint_url=self._endpoint_url or None)
         self._client.send_message(
             QueueUrl=self._queue_url,
             MessageBody=body,

@@ -139,6 +139,13 @@ def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
 
 def _queue_region(queue_url: str) -> str:
     parsed = urlparse(queue_url)
+    if os.getenv("AUTHCLAW_ALLOW_LOCAL_AWS_ENDPOINTS", "").lower() in {"1", "true", "yes"}:
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme == "http" and (
+            host in {"localhost", "127.0.0.1", "localstack", "localhost.localstack.cloud"}
+            or host.endswith(".localhost.localstack.cloud")
+        ) and parsed.path.endswith(".fifo"):
+            return os.getenv("AWS_DEFAULT_REGION", "us-east-1")
     labels = (parsed.hostname or "").split(".")
     if (
         parsed.scheme != "https"
@@ -179,6 +186,7 @@ class SQSFIFOAuditConsumer:
             raise RuntimeError("sqs_fifo transport requires boto3") from exc
 
         self._queue_url = os.getenv("SQS_AUDIT_QUEUE_URL", "").strip()
+        self._endpoint_url = os.getenv("SQS_ENDPOINT_URL", "").strip()
         if not self._queue_url:
             raise RuntimeError("SQS_AUDIT_QUEUE_URL is required for sqs_fifo transport")
         queue_region = _queue_region(self._queue_url)
@@ -186,7 +194,7 @@ class SQSFIFOAuditConsumer:
         configured_region = session.region_name
         if configured_region and configured_region != queue_region:
             raise RuntimeError("AWS configured region does not match SQS_AUDIT_QUEUE_URL")
-        self._client = session.client("sqs", region_name=queue_region)
+        self._client = session.client("sqs", region_name=queue_region, endpoint_url=self._endpoint_url or None)
         self._long_poll = _bounded_int("SQS_LONG_POLL_SECONDS", 20, 1, 20)
         self._batch_size = _bounded_int("SQS_MAX_MESSAGES", 10, 1, 10)
         self._visibility = _bounded_int("SQS_VISIBILITY_TIMEOUT_SECONDS", 60, 10, 43200)

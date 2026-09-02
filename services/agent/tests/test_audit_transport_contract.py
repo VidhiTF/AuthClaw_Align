@@ -1,56 +1,40 @@
-import sys
-import types
-
 import pytest
 
 from services import audit_transport
 
-QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789012/authclaw-audit.fifo"
-TENANT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-RECORD = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+def test_agent_legacy_audit_ignores_canonical_transport_sqs(monkeypatch):
+    monkeypatch.setenv("AUDIT_STREAM_TRANSPORT", "sqs_fifo")
+    monkeypatch.delenv("AGENT_AUDIT_STREAM_TRANSPORT", raising=False)
+
+    publisher = audit_transport.make_audit_publisher(timeout=1, required=False)
+
+    assert isinstance(publisher, audit_transport.KafkaRestAuditPublisher)
 
 
-class FakeSQS:
-    def __init__(self):
-        self.sent = []
+def test_agent_legacy_event_shape_has_no_canonical_chain_fields():
+    event = {
+        "event_type": "policy_decision",
+        "request_id": "req-agent-1",
+        "tenant_id": 42,
+        "agent_name": "Policy Agent",
+        "details": {"decision": "allow"},
+    }
 
-    def send_message(self, **kwargs):
-        self.sent.append(kwargs)
-
-
-def install_boto3(monkeypatch, client):
-    class Session:
-        region_name = "us-east-1"
-
-        def client(self, service, region_name=None):
-            assert service == "sqs"
-            assert region_name == "us-east-1"
-            return client
-
-    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(session=types.SimpleNamespace(Session=Session)))
+    assert "audit_record_id" not in event
+    assert "tenant_sequence" not in event
+    assert "prior_hash" not in event
 
 
-def test_agent_sqs_preserves_canonical_uuid(monkeypatch):
-    client = FakeSQS()
-    install_boto3(monkeypatch, client)
-    monkeypatch.setenv("SQS_AUDIT_QUEUE_URL", QUEUE_URL)
+def test_agent_legacy_audit_rejects_sqs_until_canonical_records_exist(monkeypatch):
+    monkeypatch.setenv("AGENT_AUDIT_STREAM_TRANSPORT", "sqs_fifo")
 
-    audit_transport.SQSFIFOAuditPublisher().publish("audit.events", {"id": RECORD, "tenant_id": TENANT})
-
-    assert client.sent[0]["MessageGroupId"] == TENANT
-    assert client.sent[0]["MessageDeduplicationId"] == RECORD
-
-
-def test_agent_sqs_rejects_invalid_canonical_uuid(monkeypatch):
-    install_boto3(monkeypatch, FakeSQS())
-    monkeypatch.setenv("SQS_AUDIT_QUEUE_URL", QUEUE_URL)
-
-    with pytest.raises(RuntimeError, match="canonical UUID"):
-        audit_transport.SQSFIFOAuditPublisher().publish("audit.events", {"id": "not-a-uuid", "tenant_id": TENANT})
+    with pytest.raises(RuntimeError, match="legacy audit events must remain on Kafka"):
+        audit_transport.make_audit_publisher(timeout=1, required=False)
 
 
 def test_agent_unsupported_transport_fails_closed(monkeypatch):
-    monkeypatch.setenv("AUDIT_STREAM_TRANSPORT", "kinesis")
+    monkeypatch.setenv("AGENT_AUDIT_STREAM_TRANSPORT", "kinesis")
 
-    with pytest.raises(RuntimeError, match="unsupported AUDIT_STREAM_TRANSPORT"):
+    with pytest.raises(RuntimeError, match="unsupported AGENT_AUDIT_STREAM_TRANSPORT"):
         audit_transport.make_audit_publisher(timeout=1, required=False)

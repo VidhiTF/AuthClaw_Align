@@ -1140,7 +1140,9 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
         containerPort = 8000
         protocol      = "tcp"
       }]
-      environment = local.common_environment
+      environment = concat(local.common_environment, [
+        { name = "AGENT_AUDIT_STREAM_TRANSPORT", value = "kafka" }
+      ])
       secrets = [
         { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
         { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },

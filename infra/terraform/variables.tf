@@ -312,6 +312,23 @@ variable "audit_sqs_backlog_alarm_threshold" {
   default = 1000
 }
 
+variable "audit_sqs_alarm_action_arns" {
+  description = "Approved SNS/action ARNs for SQS audit alarms. Required for production-like SQS deployments."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = var.audit_stream_transport != "sqs_fifo" || (!var.audit_sqs_require_alarm_actions && var.authclaw_env != "production") || length(var.audit_sqs_alarm_action_arns) > 0
+    error_message = "production-like sqs_fifo audit transport requires at least one audit_sqs_alarm_action_arns entry."
+  }
+}
+
+variable "audit_sqs_require_alarm_actions" {
+  description = "Require SQS alarm actions for production-like plan validation."
+  type        = bool
+  default     = false
+}
+
 variable "clickhouse_host" {
   description = "Optional managed ClickHouse host for audit query acceleration."
   type        = string

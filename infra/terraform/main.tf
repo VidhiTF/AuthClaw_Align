@@ -51,6 +51,8 @@ module "primary" {
   audit_sqs_dlq_age_alarm_seconds      = var.audit_sqs_dlq_age_alarm_seconds
   audit_sqs_main_age_alarm_seconds     = var.audit_sqs_main_age_alarm_seconds
   audit_sqs_backlog_alarm_threshold    = var.audit_sqs_backlog_alarm_threshold
+  audit_sqs_alarm_action_arns          = var.audit_sqs_alarm_action_arns
+  audit_sqs_require_alarm_actions      = var.audit_sqs_require_alarm_actions
   clickhouse_host                      = var.clickhouse_host
   clickhouse_port                      = var.clickhouse_port
   clickhouse_db                        = var.clickhouse_db
@@ -105,6 +107,8 @@ module "secondary" {
   audit_sqs_dlq_age_alarm_seconds      = var.audit_sqs_dlq_age_alarm_seconds
   audit_sqs_main_age_alarm_seconds     = var.audit_sqs_main_age_alarm_seconds
   audit_sqs_backlog_alarm_threshold    = var.audit_sqs_backlog_alarm_threshold
+  audit_sqs_alarm_action_arns          = var.audit_sqs_alarm_action_arns
+  audit_sqs_require_alarm_actions      = var.audit_sqs_require_alarm_actions
   clickhouse_host                      = var.clickhouse_host
   clickhouse_port                      = var.clickhouse_port
   clickhouse_db                        = var.clickhouse_db

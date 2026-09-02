@@ -110,7 +110,8 @@ def alarm_checks(alarms: list[dict[str, Any]], expected_names: list[str]) -> lis
     checks = []
     for name in expected_names:
         alarm = by_name.get(name)
-        checks.append(check(f"alarm {name}", PASS if alarm and alarm.get("ActionsEnabled") is True else FAIL, "alarm exists and actions are enabled", alarm))
+        actions = (alarm or {}).get("AlarmActions") or []
+        checks.append(check(f"alarm {name}", PASS if alarm and alarm.get("ActionsEnabled") is True and actions else FAIL, "alarm exists, actions are enabled and AlarmActions is non-empty", alarm))
     return checks
 
 
@@ -141,11 +142,14 @@ def ecs_checks(cluster: str, services: dict[str, str], queue_url: str, role_arns
         secrets = [item.get("name") for container in task.get("containerDefinitions", []) for item in container.get("secrets", [])]
         expected_role = consumer_role if service_key == "audit_consumer" else role_arns.get(service_key)
         static_creds = any(name in env or name in secrets for name in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"])
-        checks.append(check(f"ECS {service_key} task role", PASS if expected_role and task.get("taskRoleArn") == expected_role else (PENDING if not task else FAIL), task_reason or reason or "taskRoleArn must match Terraform audit SQS role", task.get("taskRoleArn")))
-        if service_key in {"backend", "gateway", "agent", "audit_consumer"}:
+        if service_key in {"backend", "gateway", "audit_consumer"}:
+            checks.append(check(f"ECS {service_key} task role", PASS if expected_role and task.get("taskRoleArn") == expected_role else (PENDING if not task else FAIL), task_reason or reason or "taskRoleArn must match Terraform audit SQS role", task.get("taskRoleArn")))
+        if service_key in {"backend", "gateway", "audit_consumer"}:
             checks.append(check(f"ECS {service_key} transport env", PASS if env.get("AUDIT_STREAM_TRANSPORT") in {"kafka", "sqs_fifo"} else (PENDING if not task else FAIL), "AUDIT_STREAM_TRANSPORT must be present and valid", env))
-        if service_key in {"backend", "gateway", "agent"}:
+        if service_key in {"backend", "gateway"}:
             checks.append(check(f"ECS {service_key} queue URL env", PASS if env.get("AUDIT_STREAM_TRANSPORT") == "kafka" or env.get("SQS_AUDIT_QUEUE_URL") == queue_url else (PENDING if not task else FAIL), "SQS_AUDIT_QUEUE_URL required only in SQS mode", env))
+        if service_key == "agent":
+            checks.append(check("ECS agent legacy audit remains Kafka", PASS if env.get("AGENT_AUDIT_STREAM_TRANSPORT", "kafka") == "kafka" and "SQS_AUDIT_QUEUE_URL" not in env else (PENDING if not task else FAIL), "legacy agent audit must not be directed to canonical SQS", env))
         checks.append(check(f"ECS {service_key} no static AWS credentials", PASS if task and not static_creds else (PENDING if not task else FAIL), "task definition must not expose static AWS credential env/secrets", {"environment": env, "secrets": secrets}))
     return checks
 

@@ -39,7 +39,8 @@ class FakeSession:
     def __init__(self, client):
         self._client = client
 
-    def client(self, service, region_name=None):
+    def client(self, service, region_name=None, endpoint_url=None):
+        del endpoint_url
         assert service == "sqs"
         assert region_name == "us-east-1"
         return self._client

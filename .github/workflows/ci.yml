@@ -168,6 +168,10 @@ jobs:
           cd audit_consumer
           ../.ci-audit/bin/python -m pytest -p no:cacheprovider tests/ -q
           ../.ci-audit/bin/python local_e2e.py --transport both --evidence ../infra/security/audit-transport-ci-e2e.md
+          cd ..
+          trap 'docker compose -p authclaw-audit-e2e -f docker-compose.yml -f docker-compose.audit-e2e.yml --profile audit-e2e down --remove-orphans' EXIT
+          docker compose -p authclaw-audit-e2e -f docker-compose.yml -f docker-compose.audit-e2e.yml --profile audit-e2e up -d kafka kafka-init clickhouse localstack
+          .ci-audit/bin/python audit_consumer/local_e2e.py --real-adapters --evidence infra/security/audit-transport-ci-real-e2e.md
 
   agent:
     name: Agent Tests
@@ -303,6 +307,11 @@ jobs:
           terraform -chdir=infra/terraform plan -input=false -lock=false -out=sqs.tfplan -var=audit_stream_transport=sqs_fifo
           terraform -chdir=infra/terraform show -json sqs.tfplan > infra/terraform/sqs-plan.json
           python scripts/assert_audit_transport_plan.py sqs_fifo infra/terraform/sqs-plan.json
+          if terraform -chdir=infra/terraform plan -input=false -lock=false -var=audit_stream_transport=sqs_fifo -var=audit_sqs_require_alarm_actions=true; then
+            echo "::error::production sqs_fifo plan must require audit_sqs_alarm_action_arns"
+            exit 1
+          fi
+          terraform -chdir=infra/terraform plan -input=false -lock=false -out=sqs-prod.tfplan -var=audit_stream_transport=sqs_fifo -var=audit_sqs_require_alarm_actions=true -var='audit_sqs_alarm_action_arns=["arn:aws:sns:us-east-1:123456789012:authclaw-audit-alerts"]'
           python scripts/sqs_audit_deployment_readiness.py --output-json infra/security/sqs-audit-ci-pending.json --output-md infra/security/sqs-audit-ci-pending.md
 
   codeql:

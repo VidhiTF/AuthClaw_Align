@@ -13,6 +13,7 @@ import json
 import subprocess
 import sys
 import time
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ import consumer
 from consumer import InvalidAuditEvent, RetryableMirrorError, SequenceGapError
 from hash_chain import verify_chain
 from transport import AuditMessage
+from transport import KafkaAuditConsumer, SQSFIFOAuditConsumer
 
 TENANT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 TENANT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -175,6 +177,191 @@ def _process_transport(name: str) -> dict[str, Any]:
     }
 
 
+
+def _drain_adapter(name: str, adapter: Any, ch_client: Any, expected: int) -> dict[str, Any]:
+    acked: list[str] = []
+    retried: list[str] = []
+    dlq: list[str] = []
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        for batch in adapter.poll(timeout_ms=1000):
+            failed_groups: set[str] = set()
+            for message in batch:
+                record_id = str(message.value.get("id", ""))
+                if message.group_id in failed_groups:
+                    continue
+                try:
+                    adapter.begin(message)
+                    if message.validation_error is not None:
+                        raise message.validation_error
+                    consumer._process_message(ch_client, message.value)
+                    adapter.ack(message)
+                    acked.append(record_id)
+                except (SequenceGapError, RetryableMirrorError):
+                    adapter.retry(message)
+                    retried.append(record_id)
+                    failed_groups.add(message.group_id)
+                    break
+                except InvalidAuditEvent:
+                    dlq.append(record_id)
+                    adapter.retry(message)
+                    failed_groups.add(message.group_id)
+                    break
+        durable = ch_client.query("SELECT count() FROM authclaw.audit_events").result_rows[0][0]
+        if durable >= expected:
+            break
+    adapter.close()
+    rows = [
+        {"record_id": row[0], "tenant_id": row[1], "tenant_sequence": row[2], "canonical_payload": row[3], "integrity_hash": row[4]}
+        for row in ch_client.query(
+            "SELECT toString(record_id), toString(tenant_id), tenant_sequence, canonical_payload, integrity_hash "
+            "FROM authclaw.audit_events ORDER BY tenant_id, tenant_sequence"
+        ).result_rows
+    ]
+    rows_by_tenant: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        rows_by_tenant[row["tenant_id"]].append(row)
+    return {
+        "transport": name,
+        "mode": "LOCAL-SIMULATION",
+        "adapter_path": "REAL-LOCAL-TRANSPORT",
+        "input_events": expected,
+        "durable_events": len(rows),
+        "durable_ids": [row["record_id"] for row in rows],
+        "per_tenant_sequence": {
+            tenant: [row["tenant_sequence"] for row in sorted(rows, key=lambda row: row["tenant_sequence"])]
+            for tenant, rows in rows_by_tenant.items()
+        },
+        "final_chain_heads": {tenant: sorted(items, key=lambda row: row["tenant_sequence"])[-1]["integrity_hash"] for tenant, items in rows_by_tenant.items()},
+        "acked_ids": acked,
+        "retry_ids": retried,
+        "dlq_ids": dlq,
+        "chain_valid": {
+            tenant: all(item["valid"] for item in verify_chain(sorted(rows, key=lambda row: row["tenant_sequence"])))
+            for tenant, rows in rows_by_tenant.items()
+        },
+    }
+
+
+def _process_real_adapters() -> list[dict[str, Any]]:
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    from backend.app.services import audit_transport as backend_transport
+    from clickhouse_writer import get_client
+
+    events = _fixture_events()[:4]
+    deadline = time.time() + 30
+    while True:
+        try:
+            ch_client = get_client("localhost", 8123, "authclaw", "authclaw", "authclaw")
+            break
+        except Exception:
+            if time.time() >= deadline:
+                raise
+            time.sleep(1)
+    ch_client.command("TRUNCATE TABLE authclaw.audit_events")
+    topic = f"audit.e2e.{int(time.time())}"
+    os.environ.setdefault("KAFKA_BROKERS", "localhost:9092")
+    os.environ["KAFKA_AUDIT_TOPIC"] = topic
+    os.environ["KAFKA_TOPICS"] = topic
+    os.environ["KAFKA_GROUP_ID"] = f"authclaw-audit-e2e-{int(time.time())}"
+    backend_transport.AUDIT_EVENTS_TOPIC = topic
+    kafka_pub = backend_transport.KafkaAuditPublisher()
+    for event in events:
+        kafka_pub.publish(event["tenant_id"], event, event["id"])
+    kafka_pub.publish(events[0]["tenant_id"], events[0], events[0]["id"])
+    kafka_result = _drain_adapter("kafka", KafkaAuditConsumer(lambda *_args: None), ch_client, len(events))
+    kafka_result["duplicates_collapsed"] = kafka_result["durable_events"] == len(events)
+
+    agent_spec = importlib.util.spec_from_file_location(
+        "agent_audit_transport", repo_root / "services" / "agent" / "services" / "audit_transport.py"
+    )
+    agent_transport = importlib.util.module_from_spec(agent_spec)
+    assert agent_spec and agent_spec.loader
+    sys.modules[agent_spec.name] = agent_transport
+    agent_spec.loader.exec_module(agent_transport)
+    os.environ["KAFKA_REST_URL"] = "http://localhost:8082"
+    legacy_event = {"event_type": "agent.decision", "request_id": "legacy-request", "tenant_id": 7}
+    from kafka.admin import KafkaAdminClient, NewTopic
+
+    admin = KafkaAdminClient(bootstrap_servers="localhost:9092")
+    try:
+        admin.create_topics([NewTopic(agent_transport.AGENT_LEGACY_AUDIT_EVENTS_TOPIC, 1, 1)])
+    except Exception:
+        pass
+    admin.close()
+    agent_publisher = agent_transport.make_audit_publisher(timeout=5, required=True)
+    deadline = time.time() + 30
+    while True:
+        try:
+            agent_publisher.publish(agent_transport.AGENT_LEGACY_AUDIT_EVENTS_TOPIC, legacy_event)
+            break
+        except Exception:
+            if time.time() >= deadline:
+                raise
+            time.sleep(1)
+    kafka_result["legacy_agent_kafka_shape"] = legacy_event
+
+    import boto3
+
+    os.environ["AUTHCLAW_ALLOW_LOCAL_AWS_ENDPOINTS"] = "true"
+    os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+    os.environ.setdefault("AWS_ACCESS_KEY_ID", "test")
+    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "test")
+    os.environ["SQS_ENDPOINT_URL"] = os.getenv("SQS_ENDPOINT_URL", "http://localhost:4566")
+    sqs = boto3.client("sqs", region_name=os.environ["AWS_DEFAULT_REGION"], endpoint_url=os.environ["SQS_ENDPOINT_URL"])
+    suffix = str(time.time_ns())
+    dlq_url = sqs.create_queue(
+        QueueName=f"authclaw-audit-e2e-dlq-{suffix}.fifo",
+        Attributes={"FifoQueue": "true", "ContentBasedDeduplication": "false"},
+    )["QueueUrl"]
+    dlq_arn = sqs.get_queue_attributes(QueueUrl=dlq_url, AttributeNames=["QueueArn"])["Attributes"]["QueueArn"]
+    queue_name = f"authclaw-audit-e2e-{suffix}.fifo"
+    queue_url = sqs.create_queue(
+        QueueName=queue_name,
+        Attributes={
+            "FifoQueue": "true", "ContentBasedDeduplication": "false", "VisibilityTimeout": "10",
+            "RedrivePolicy": json.dumps({"deadLetterTargetArn": dlq_arn, "maxReceiveCount": 2}),
+        },
+    )["QueueUrl"]
+    os.environ["SQS_AUDIT_QUEUE_URL"] = queue_url
+    ch_client.command("TRUNCATE TABLE authclaw.audit_events")
+    sqs_pub = backend_transport.SQSFIFOAuditPublisher()
+    for event in events:
+        sqs_pub.publish(event["tenant_id"], event, event["id"])
+    sqs_pub.publish(events[0]["tenant_id"], events[0], events[0]["id"])
+    sqs_result = _drain_adapter("sqs_fifo", SQSFIFOAuditConsumer(lambda *_args: None), ch_client, len(events))
+    sqs_result["duplicates_collapsed"] = sqs_result["durable_events"] == len(events)
+
+    poison = _fixture_events()[6]
+    sqs_pub.publish(poison["tenant_id"], poison, poison["id"])
+    os.environ["SQS_LONG_POLL_SECONDS"] = "1"
+    os.environ["SQS_VISIBILITY_TIMEOUT_SECONDS"] = "10"
+    poison_consumer = SQSFIFOAuditConsumer(lambda *_args: None)
+    receives = 0
+    deadline = time.time() + 30
+    while receives < 2 and time.time() < deadline:
+        for batch in poison_consumer.poll(timeout_ms=1000):
+            for message in batch:
+                receives += 1
+                try:
+                    poison_consumer.begin(message)
+                    consumer._process_message(ch_client, message.value)
+                except InvalidAuditEvent:
+                    poison_consumer.retry(message)
+    deadline = time.time() + 15
+    dlq_messages: list[dict[str, Any]] = []
+    while not dlq_messages and time.time() < deadline:
+        poison_consumer.poll(timeout_ms=1000)
+        dlq_messages = sqs.receive_message(QueueUrl=dlq_url, WaitTimeSeconds=1).get("Messages", [])
+    poison_consumer.close()
+    sqs_result["transient_retried_and_committed"] = receives >= 2
+    sqs_result["poison_reached_dlq"] = bool(dlq_messages)
+    return [kafka_result, sqs_result]
+
+
 def _write_report(path: Path, results: list[dict[str, Any]], commands: list[str]) -> None:
     lines = [
         "# Audit transport local E2E comparison",
@@ -196,9 +383,9 @@ def _write_report(path: Path, results: list[dict[str, Any]], commands: list[str]
                 transport=result["transport"],
                 input_events=result["input_events"],
                 durable_events=result["durable_events"],
-                dup="PASS" if result["duplicates_collapsed"] else "FAIL",
-                retry="PASS" if result["transient_retried_and_committed"] else "FAIL",
-                dlq="PASS" if result["poison_reached_dlq"] else "FAIL",
+                dup="PASS" if result.get("duplicates_collapsed") else "N/A",
+                retry="PASS" if result.get("transient_retried_and_committed") else "N/A",
+                dlq="PASS" if result.get("poison_reached_dlq") else "N/A",
                 chains="PASS" if all(result["chain_valid"].values()) else "FAIL",
             )
         )
@@ -453,6 +640,7 @@ def main() -> int:
     parser.add_argument("--transport", choices=["kafka", "sqs_fifo", "both", "local_fallback"], default="both")
     parser.add_argument("--evidence", default="infra/security/audit-transport-local-e2e.md")
     parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--real-adapters", action="store_true")
     parser.add_argument("--benchmark-json", default="infra/security/audit-transport-local-benchmark.json")
     parser.add_argument("--benchmark-markdown", default="infra/security/audit-transport-local-benchmark.md")
     parser.add_argument("--event-count", type=int, default=200)
@@ -466,18 +654,27 @@ def main() -> int:
     args = parser.parse_args()
     if args.benchmark:
         return _run_benchmark(args)
-    transports = ["kafka", "sqs_fifo"] if args.transport == "both" else [args.transport]
-    if args.transport == "local_fallback":
-        transports = ["kafka"]
-    results = [_process_transport(transport) for transport in transports]
+    if args.real_adapters:
+        results = _process_real_adapters()
+    else:
+        transports = ["kafka", "sqs_fifo"] if args.transport == "both" else [args.transport]
+        if args.transport == "local_fallback":
+            transports = ["kafka"]
+        results = [_process_transport(transport) for transport in transports]
     commands = [
         "docker compose -p authclaw-audit-e2e -f docker-compose.yml -f docker-compose.audit-e2e.yml --profile audit-e2e up -d kafka kafka-init clickhouse localstack",
-        f"python audit_consumer/local_e2e.py --transport {args.transport} --evidence {args.evidence}",
+        f"python audit_consumer/local_e2e.py {'--real-adapters' if args.real_adapters else f'--transport {args.transport}'} --evidence {args.evidence}",
         "docker compose -p authclaw-audit-e2e -f docker-compose.yml -f docker-compose.audit-e2e.yml --profile audit-e2e down --remove-orphans",
     ]
     _write_report(Path(args.evidence), results, commands)
     print(json.dumps(results, indent=2, sort_keys=True))
-    return 0 if all(all(result["chain_valid"].values()) and result["poison_reached_dlq"] for result in results) else 1
+    return 0 if all(
+        all(result["chain_valid"].values())
+        and result["durable_events"] == result["input_events"]
+        and (result.get("adapter_path") or result.get("poison_reached_dlq"))
+        and (result["transport"] != "sqs_fifo" or result.get("poison_reached_dlq"))
+        for result in results
+    ) else 1
 
 
 if __name__ == "__main__":

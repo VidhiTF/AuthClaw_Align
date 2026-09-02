@@ -21,3 +21,6 @@ if mode == "sqs_fifo":
     missing = [name for name in required if not any(name in addr for addr in addresses)]
     if missing:
         raise SystemExit(f"sqs_fifo plan missing required resources: {missing}")
+    agent_roles = [addr for addr in addresses if "aws_iam_role.audit_sqs_producer" in addr and '["agent"]' in addr]
+    if agent_roles:
+        raise SystemExit(f"agent must not receive canonical SQS producer role: {agent_roles}")
