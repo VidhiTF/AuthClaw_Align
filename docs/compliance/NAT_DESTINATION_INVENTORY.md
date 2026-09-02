@@ -22,7 +22,7 @@ This is the required evidence format for every AuthClaw public-egress dependency
 | ECS workloads | Secrets Manager | Interface endpoint | Implemented |
 | ECS workloads | KMS | Interface endpoint | Implemented |
 | VPC workloads | S3 | Gateway endpoint | Implemented |
-| VPC workloads | DynamoDB | Gateway endpoint | Implemented; no new task-role permissions granted |
+| VPC workloads | DynamoDB | Not provisioned | No confirmed runtime dependency; add only with an explicit workload requirement and least-privilege IAM review |
 
 ## Authoritative Evidence
 

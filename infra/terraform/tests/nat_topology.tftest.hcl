@@ -61,8 +61,8 @@ run "single_nat_for_lower_environments" {
   }
 
   assert {
-    condition     = toset(keys(output.primary.gateway_endpoint_route_table_ids)) == toset(["s3", "dynamodb"])
-    error_message = "S3 and DynamoDB gateway endpoints must both exist."
+    condition     = toset(keys(output.primary.gateway_endpoint_route_table_ids)) == toset(["s3"])
+    error_message = "Only the confirmed S3 gateway endpoint must exist."
   }
 
   assert {

@@ -51,7 +51,7 @@ variable "secondary_availability_zones" {
 }
 
 variable "enable_private_aws_endpoints" {
-  description = "Create private S3, DynamoDB, ECR, CloudWatch Logs, Secrets Manager, and KMS VPC endpoints in each regional stack."
+  description = "Create private S3, ECR, CloudWatch Logs, Secrets Manager, and KMS VPC endpoints in each regional stack."
   type        = bool
   default     = true
 }
