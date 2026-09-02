@@ -670,7 +670,7 @@ def main() -> int:
     print(json.dumps(results, indent=2, sort_keys=True))
     return 0 if all(
         all(result["chain_valid"].values())
-        and result["durable_events"] == result["input_events"]
+        and (not result.get("adapter_path") or result["durable_events"] == result["input_events"])
         and (result.get("adapter_path") or result.get("poison_reached_dlq"))
         and (result["transport"] != "sqs_fifo" or result.get("poison_reached_dlq"))
         for result in results

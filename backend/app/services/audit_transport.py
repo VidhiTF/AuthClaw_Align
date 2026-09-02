@@ -118,7 +118,8 @@ class SQSFIFOAuditPublisher:
                 raise RuntimeError(
                     f"SQS queue region {queue_region!r} does not match AWS SDK region {session.region_name!r}"
                 )
-            self._client = session.client("sqs", region_name=queue_region, endpoint_url=self._endpoint_url or None)
+            client_options = {"endpoint_url": self._endpoint_url} if self._endpoint_url else {}
+            self._client = session.client("sqs", region_name=queue_region, **client_options)
         self._client.send_message(
             QueueUrl=self._queue_url,
             MessageBody=body,
