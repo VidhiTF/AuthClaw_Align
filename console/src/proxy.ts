@@ -1,9 +1,23 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { authenticateSessionCookie } from "@/lib/session-auth";
 
 export function proxy(request: NextRequest) {
   const path = request.nextUrl.pathname;
+  const unsafeMethod = !["GET", "HEAD", "OPTIONS"].includes(request.method);
+  if (path.startsWith("/api/") && unsafeMethod) {
+    const origin = request.headers.get("origin");
+    const host = request.headers.get("x-forwarded-host") || request.headers.get("host");
+    const fetchSite = request.headers.get("sec-fetch-site");
+    let originHost = "";
+    try {
+      originHost = origin ? new URL(origin).host : "";
+    } catch {
+      return NextResponse.json({ error: "Invalid request origin" }, { status: 403 });
+    }
+    if ((originHost && originHost !== host) || (fetchSite && !["same-origin", "none"].includes(fetchSite))) {
+      return NextResponse.json({ error: "Cross-site request rejected" }, { status: 403 });
+    }
+  }
   const publicMarketingFiles = new Set([
     "/",
     "/product",
@@ -48,8 +62,7 @@ export function proxy(request: NextRequest) {
 
   // 2. Extract session cookie
   const sessionCookie = request.cookies.get("authclaw_session")?.value;
-  const session = authenticateSessionCookie(sessionCookie);
-  const sessionRole = session?.role.toLowerCase() || "viewer";
+  const session = Boolean(sessionCookie?.startsWith("acl_session_"));
 
   // 3. Handle redirects
   if (!session && !isPublicPath) {
@@ -65,18 +78,6 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL("/connect", request.url));
   }
 
-  const readOnlyRoles = new Set(["viewer", "developer", "operator"]);
-  const readOnlyBlockedPaths = ["/connect", "/gateway", "/policies", "/aws", "/settings"];
-  if (
-    session &&
-    readOnlyRoles.has(sessionRole) &&
-    readOnlyBlockedPaths.some(
-      (blockedPath) => path === blockedPath || path.startsWith(`${blockedPath}/`),
-    )
-  ) {
-    return NextResponse.redirect(new URL("/overview", request.url));
-  }
-
   return NextResponse.next();
 }
 
@@ -89,6 +90,6 @@ export const config = {
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
      */
-    "/((?!api|_next/static|_next/image|favicon.ico).*)",
+    "/((?!_next/static|_next/image|favicon.ico).*)",
   ],
 };

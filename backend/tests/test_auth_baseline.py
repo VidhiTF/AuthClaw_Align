@@ -2,6 +2,7 @@ import asyncio
 import hmac
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import jwt
@@ -21,8 +22,22 @@ from app.api.v1.endpoints import users as user_endpoints
 from main import sanitized_http_exception
 
 
+def _identity(user, tenant):
+    return SimpleNamespace(
+        user_id=user.id,
+        tenant_id=tenant.id,
+        tenant_name=tenant.name,
+        email=getattr(user, "email", "user@example.com"),
+        password_hash=user.password_hash,
+        role=getattr(user, "role", "viewer"),
+        platform_role=getattr(user, "platform_role", "NONE"),
+        mfa_enabled=getattr(user, "mfa_enabled", False),
+    )
+
 def _request(request_id="request-1"):
-    return MagicMock(headers={"x-request-id": request_id})
+    request = MagicMock(headers={"x-request-id": request_id})
+    request.client.host = "127.0.0.1"
+    return request
 
 
 def test_internal_exception_detail_is_sanitized():
@@ -427,7 +442,7 @@ def test_oidc_rejects_replayed_id_token_from_previous_nonce(monkeypatch):
 def test_oidc_invalid_token_returns_sanitized_401(monkeypatch):
     db = MagicMock()
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
-    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback", "email_claim": "email"}
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
     monkeypatch.setattr(oidc_sso, "exchange_code", lambda *_: {"id_token": "invalid"})
@@ -454,7 +469,7 @@ def test_oidc_invalid_token_returns_sanitized_401(monkeypatch):
 def test_oidc_internal_error_returns_generic_response_and_is_logged(monkeypatch, caplog):
     db = MagicMock()
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
-    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback", "email_claim": "email"}
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
     monkeypatch.setattr(oidc_sso, "exchange_code", MagicMock(side_effect=ValueError("sensitive provider detail")))
@@ -481,7 +496,7 @@ def test_password_reset_delivery_error_is_generic_and_logged(monkeypatch, caplog
     db = MagicMock()
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001", name="tenant")
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
-    monkeypatch.setattr(auth_endpoints, "_active_users_for_email", lambda *_: [(MagicMock(), tenant)])
+    monkeypatch.setattr(auth_endpoints, "_active_users_for_email", lambda *_: [SimpleNamespace(tenant_id=tenant.id, tenant_name=tenant.name)])
     monkeypatch.setattr(
         auth_endpoints,
         "_deliver_otp",
@@ -507,7 +522,7 @@ def test_password_reset_delivery_error_is_generic_and_logged(monkeypatch, caplog
 def test_oidc_policy_rejection_returns_403(monkeypatch, error, reason):
     db = MagicMock()
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
-    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback", "email_claim": "email"}
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
     monkeypatch.setattr(oidc_sso, "exchange_code", lambda *_: {"id_token": "token"})
@@ -555,14 +570,16 @@ def test_oidc_policy_rejection_returns_403(monkeypatch, error, reason):
 def test_oidc_user_authorization_failure_is_generic_and_rolled_back(monkeypatch, error, reason):
     db = MagicMock()
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
-    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback", "email_claim": "email"}
     issue_console_key = MagicMock()
     emit = MagicMock()
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
     monkeypatch.setattr(oidc_sso, "exchange_code", lambda *_: {"id_token": "token"})
-    monkeypatch.setattr(oidc_sso, "validate_id_token", lambda *_: {"sub": "subject"})
+    monkeypatch.setattr(oidc_sso, "validate_id_token", lambda *_: {"sub": "subject", "email": "user@example.com"})
+    monkeypatch.setattr(oidc_sso, "role_from_claims", lambda *_: "viewer")
     monkeypatch.setattr(oidc_sso, "map_user", MagicMock(side_effect=error))
+    db.execute.side_effect = error
     monkeypatch.setattr(oidc_sso, "issue_console_key", issue_console_key)
     monkeypatch.setattr(auth_endpoints, "_emit_oidc_audit", emit)
 
@@ -597,7 +614,7 @@ def test_oidc_user_authorization_failure_is_generic_and_rolled_back(monkeypatch,
 def test_oidc_rejects_redirect_uri_mismatch(monkeypatch):
     db = MagicMock()
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
-    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback", "email_claim": "email"}
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
     emit = MagicMock()
@@ -639,7 +656,7 @@ def test_oidc_rejects_redirect_uri_mismatch(monkeypatch):
 def test_oidc_validation_failure_emits_categorical_audit(monkeypatch, error, reason):
     db = MagicMock()
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
-    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback", "email_claim": "email"}
     emit = MagicMock()
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
@@ -673,14 +690,16 @@ def test_oidc_success_emits_actor_and_tenant_audit(monkeypatch):
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001")
     tenant.name = "tenant"
     user = MagicMock(id="00000000-0000-4000-8000-000000000002", email="user@example.com")
-    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback"}
+    config = {"redirect_uri": "https://app.example.com/api/auth/oidc/callback", "email_claim": "email"}
     emit = MagicMock()
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(auth_endpoints, "_oidc_callback_config", lambda *_: (tenant, config))
     monkeypatch.setattr(oidc_sso, "exchange_code", lambda *_: {"id_token": "token"})
-    monkeypatch.setattr(oidc_sso, "validate_id_token", lambda *_: {"sub": "subject"})
+    monkeypatch.setattr(oidc_sso, "validate_id_token", lambda *_: {"sub": "subject", "email": "user@example.com"})
+    monkeypatch.setattr(oidc_sso, "role_from_claims", lambda *_: "viewer")
     monkeypatch.setattr(oidc_sso, "map_user", lambda *_: (user, "viewer"))
     monkeypatch.setattr(oidc_sso, "issue_console_key", lambda *_: ("api-key", ["read"]))
+    db.execute.return_value.one.return_value = SimpleNamespace(user_id=user.id, email=user.email, role="viewer")
     monkeypatch.setattr(auth_endpoints, "_emit_oidc_audit", emit)
 
     auth_endpoints.oidc_callback(
@@ -727,7 +746,7 @@ def test_password_login_preserves_persisted_invitation_role(monkeypatch, role, s
         role=role,
     )
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
-    monkeypatch.setattr(auth_endpoints, "_active_users_for_email", lambda *_args: [(user, tenant)])
+    monkeypatch.setattr(auth_endpoints, "_active_users_for_email", lambda *_args: [_identity(user, tenant)])
     monkeypatch.setattr(auth_endpoints, "verify_password", lambda *_: True)
     monkeypatch.setattr(auth_endpoints, "_enforce_password_login_rate_limit", lambda *_: None)
 
@@ -745,8 +764,7 @@ def test_password_login_preserves_persisted_invitation_role(monkeypatch, role, s
     assert response.role == role
     assert response.scopes == scopes
     assert user.role == role
-    assert response.api_key.startswith("acl_console_")
-    db.add.assert_called_once()
+    assert response.session_token.startswith("acl_session_")
     db.commit.assert_called_once()
 
 
@@ -779,7 +797,7 @@ def test_failed_password_login_is_audited(monkeypatch):
     emit = MagicMock()
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(
-        auth_endpoints, "_active_users_for_email", lambda *_: [(user, tenant)]
+        auth_endpoints, "_active_users_for_email", lambda *_: [_identity(user, tenant)]
     )
     monkeypatch.setattr(auth_endpoints, "verify_password", lambda *_: False)
     monkeypatch.setattr(auth_endpoints, "_enforce_password_login_rate_limit", lambda *_: None)
@@ -827,7 +845,6 @@ def test_oidc_audit_event_contains_no_sensitive_authentication_material(monkeypa
         "publish_audit_event",
         lambda _producer, _tenant_id, event: published.append(event),
     )
-    monkeypatch.setattr(auth_endpoints, "_oidc_kafka_producer", None)
 
     auth_endpoints._emit_oidc_audit(
         tenant_id="tenant-1",

@@ -87,15 +87,19 @@ def test_admin_write_session_passes_operational_guards():
     )
 
 
-def test_only_owner_can_create_tenant():
+def test_only_platform_admin_can_create_tenant():
     route = _route(tenants_router, "", "POST")
 
     with pytest.raises(HTTPException) as exc:
-        _check_dependencies(route, role="admin", scopes=["admin", "read", "write"])
+        _check_dependencies(route, role="owner", scopes=["admin", "read", "write"])
 
     assert exc.value.status_code == 403
-    _check_dependencies(route, role="owner", scopes=["admin", "read", "write"])
-
+    _check_dependencies(
+        route,
+        role="viewer",
+        scopes=["platform.admin"],
+        platform_role="ADMIN",
+    )
 
 @pytest.mark.parametrize("role", ["developer", "operator"])
 def test_read_only_roles_can_be_invited(role):
@@ -351,29 +355,19 @@ def test_tenant_without_platform_admin_can_be_suspended():
 
 def test_authentication_middleware_exposes_platform_role(monkeypatch):
     resolved = SimpleNamespace(
-        id=uuid4(),
+        credential_id=uuid4(),
         tenant_id=uuid4(),
         scopes=["platform.admin"],
-        created_by=uuid4(),
-    )
-    principal = SimpleNamespace(
+        user_id=uuid4(),
         role="viewer",
         platform_role="ADMIN",
-        is_active=True,
+        user_is_active=True,
         tenant_status="active",
     )
     resolved_result = MagicMock()
     resolved_result.first.return_value = resolved
-    principal_result = MagicMock()
-    principal_result.first.return_value = principal
     db = MagicMock()
-    db.execute.side_effect = [
-        resolved_result,
-        MagicMock(),
-        principal_result,
-        MagicMock(),
-        MagicMock(),
-    ]
+    db.execute.return_value = resolved_result
     monkeypatch.setattr(auth, "SessionLocal", lambda: db)
     monkeypatch.setenv("API_KEY_HASH_SECRET", "test-secret")
     request = Request(

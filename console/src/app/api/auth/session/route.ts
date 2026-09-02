@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { authenticateSessionCookie } from "@/lib/session-auth";
 
 export async function GET() {
   try {
@@ -9,19 +8,22 @@ export async function GET() {
     if (!sessionToken) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    const payload = JSON.parse(sessionToken);
-    const session = authenticateSessionCookie(sessionToken);
-    if (!session) {
+    const backend = await fetch(
+      `${process.env.API_URL || "http://localhost:8000"}/v1/auth/me`,
+      { headers: { Authorization: `Bearer ${sessionToken}` }, cache: "no-store" },
+    );
+    if (!backend.ok) {
       const response = NextResponse.json({ error: "Unauthorized: Session expired or invalid" }, { status: 401 });
       response.cookies.delete("authclaw_session");
       return response;
     }
+    const principal = await backend.json();
     return NextResponse.json({
-      ...payload,
-      userId: session.userId,
-      tenantId: session.tenantId,
-      scopes: session.scopes,
-      role: session.role,
+      userId: principal.id,
+      tenantId: principal.tenant_id,
+      email: principal.email,
+      role: principal.role,
+      scopes: ["read", "write", "admin"],
     });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { sessionStore } from "@/lib/session-store";
 import { sessionCookieOptions } from "@/lib/cookie-options";
 
 const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
@@ -18,26 +17,8 @@ export async function POST(request: Request) {
       return NextResponse.json(data, { status: response.status });
     }
 
-    const session = sessionStore.createSession({
-      apiKey: data.api_key,
-      userId: data.user_id,
-      tenantId: data.tenant_id,
-      scopes: data.scopes,
-      role: data.role,
-    });
-
-    const cookiePayload = {
-      sessionId: session.sessionId,
-      userId: data.user_id,
-      tenantId: data.tenant_id,
-      tenantName: data.tenant_name,
-      scopes: data.scopes,
-      role: data.role,
-      email: data.email,
-    };
-
     const nextResponse = NextResponse.json(data);
-    nextResponse.cookies.set("authclaw_session", JSON.stringify(cookiePayload), {
+    nextResponse.cookies.set("authclaw_session", data.session_token, {
       ...sessionCookieOptions(60 * 60 * 24),
     });
     return nextResponse;

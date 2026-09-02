@@ -1,17 +1,47 @@
+import hashlib
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from sqlalchemy import text
 from database import DATABASE_SCHEMA, migration_engine
+from services.secret_manager import SecretManager
 
 logger = logging.getLogger("authclaw.database.migrations")
 
+
+def encrypt_legacy_totp_secrets(conn) -> None:
+    """Convert every legacy TOTP value to authenticated ciphertext in-place."""
+    manager = SecretManager()
+    for table_name in ("tenants", "tenant_users", "onboarding_registrations"):
+        rows = conn.execute(text(
+            f"SELECT id, totp_secret FROM {table_name} "
+            "WHERE totp_secret IS NOT NULL "
+            "AND totp_secret NOT LIKE 'v2:aes256gcm:%' "
+            "AND totp_secret NOT LIKE 'v3:envelope:%'"
+        )).all()
+        for row_id, plaintext in rows:
+            ciphertext = manager.encrypt_for_database(plaintext)
+            conn.execute(
+                text(f"UPDATE {table_name} SET totp_secret = :ciphertext WHERE id = :id"),
+                {"ciphertext": ciphertext, "id": row_id},
+            )
 
 def run_startup_migrations():
     """
     Runs database migrations to create and seed all required tables.
     Fails application startup if migrations fail.
     """
+    context_secret = os.getenv("AGENT_RLS_CONTEXT_SECRET", "").strip()
+    environment = os.getenv("AUTHCLAW_ENV", "development").lower()
+    if not context_secret:
+        if environment in {"production", "prod"}:
+            raise RuntimeError("AGENT_RLS_CONTEXT_SECRET is required in production")
+        context_secret = "authclaw-local-agent-rls-context-secret"
+    if environment in {"production", "prod"} and "change-me" in context_secret.lower():
+        raise RuntimeError("AGENT_RLS_CONTEXT_SECRET must not use a placeholder in production")
+    context_secret_hash = hashlib.sha256(context_secret.encode("utf-8")).hexdigest()
+
     migration_sql = """
     -- Core Audit Logs
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -186,6 +216,18 @@ def run_startup_migrations():
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP;
+
+    -- TOTP seeds are encrypted application ciphertext, which exceeds legacy VARCHAR(32).
+    ALTER TABLE tenants ALTER COLUMN totp_secret TYPE TEXT;
+    ALTER TABLE tenant_users ALTER COLUMN totp_secret TYPE TEXT;
+    ALTER TABLE onboarding_registrations ALTER COLUMN totp_secret TYPE TEXT;
+
+    -- The migration role owns these tables but FORCE RLS also constrains owners.
+    -- Disable FORCE only inside this transaction so legacy plaintext can be
+    -- converted before FORCE is restored below. Any failure rolls this back.
+    ALTER TABLE tenants NO FORCE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_users NO FORCE ROW LEVEL SECURITY;
+    ALTER TABLE onboarding_registrations NO FORCE ROW LEVEL SECURITY;
 
     -- Persistent Refresh Token Lifecycle
     CREATE TABLE IF NOT EXISTS auth_refresh_tokens (
@@ -1124,308 +1166,439 @@ def run_startup_migrations():
     CREATE INDEX IF NOT EXISTS idx_chat_messages_tenant_session ON chat_messages(tenant_id, session_id);
     """
     rls_sql = """
+    CREATE TABLE IF NOT EXISTS auth_context_secret (
+        singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+        secret bytea NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+    );
+    INSERT INTO auth_context_secret (singleton, secret)
+        VALUES (true, decode(:context_secret_hash, 'hex'))
+        ON CONFLICT (singleton) DO UPDATE SET secret = EXCLUDED.secret;
+    REVOKE ALL ON auth_context_secret FROM PUBLIC;
+
+    CREATE OR REPLACE FUNCTION set_agent_context(p_tenant_id text)
+    RETURNS void LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, agent AS $$
+    DECLARE v_payload text; v_signature text; v_secret bytea;
+    BEGIN
+        SELECT secret INTO STRICT v_secret
+          FROM agent.auth_context_secret WHERE singleton;
+        v_payload := p_tenant_id || '|' || txid_current()::text;
+        v_signature := encode(
+            public.hmac(v_payload::bytea, v_secret, 'sha256'), 'hex'
+        );
+        PERFORM set_config(
+            'app.agent_auth_context', v_payload || '|' || v_signature, true
+        );
+    END $$;
+
+    DROP FUNCTION IF EXISTS bind_agent_context(text);
+
+    CREATE OR REPLACE FUNCTION bind_agent_context(
+        p_tenant_id text, p_request_id text, p_proof text
+    )
+    RETURNS void LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, agent AS $$
+    DECLARE v_secret bytea; v_expected text;
+    BEGIN
+        SELECT secret INTO STRICT v_secret
+          FROM agent.auth_context_secret WHERE singleton;
+        v_expected := encode(public.hmac(
+            convert_to(p_tenant_id || '|' || p_request_id, 'UTF8'),
+            v_secret, 'sha256'), 'hex');
+        IF p_request_id IS NULL OR p_request_id = '' OR
+           v_expected <> p_proof THEN
+            RAISE EXCEPTION 'invalid tenant context proof';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM agent.tenants t
+             WHERE t.id::text = p_tenant_id AND t.status = 'active'
+        ) THEN RAISE EXCEPTION 'invalid tenant context'; END IF;
+        PERFORM agent.set_agent_context(p_tenant_id);
+    END $$;
+
+    CREATE OR REPLACE FUNCTION agent_current_tenant_id()
+    RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, agent AS $$
+    DECLARE
+        v_context text := current_setting('app.agent_auth_context', true);
+        v_payload text; v_expected text; v_secret bytea;
+    BEGIN
+        IF v_context IS NULL OR v_context = '' THEN RETURN NULL; END IF;
+        v_payload := split_part(v_context, '|', 1) || '|' ||
+                     split_part(v_context, '|', 2);
+        IF split_part(v_context, '|', 2) <> txid_current()::text THEN
+            RETURN NULL;
+        END IF;
+        SELECT secret INTO STRICT v_secret
+          FROM agent.auth_context_secret WHERE singleton;
+        v_expected := encode(
+            public.hmac(v_payload::bytea, v_secret, 'sha256'), 'hex'
+        );
+        IF v_expected <> split_part(v_context, '|', 3) THEN RETURN NULL; END IF;
+        RETURN split_part(v_context, '|', 1);
+    EXCEPTION WHEN OTHERS THEN RETURN NULL;
+    END $$;
+    REVOKE ALL ON FUNCTION set_agent_context(text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION bind_agent_context(text, text, text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION agent_current_tenant_id() FROM PUBLIC;
+
     ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_audit_logs ON audit_logs;
     CREATE POLICY tenant_isolation_audit_logs ON audit_logs
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE gateway_requests ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_gateway_requests ON gateway_requests;
     CREATE POLICY tenant_isolation_gateway_requests ON gateway_requests
-        USING (tenant_id = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE gateway_routes ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_gateway_routes ON gateway_routes;
     CREATE POLICY tenant_isolation_gateway_routes ON gateway_routes
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
+
+    CREATE OR REPLACE FUNCTION resolve_tenant_api_key(p_key_hash text)
+    RETURNS integer LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, agent AS $$
+    DECLARE v_tenant_id integer;
+    BEGIN
+        UPDATE agent.tenant_api_keys
+           SET last_used_at = NOW()
+         WHERE key_hash = p_key_hash AND revoked_at IS NULL
+           AND (expires_at IS NULL OR expires_at > NOW())
+         RETURNING tenant_id INTO v_tenant_id;
+        RETURN v_tenant_id;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION resolve_tenant_domain(p_domain text)
+    RETURNS integer LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, agent AS $$
+        SELECT id FROM agent.tenants
+         WHERE lower(domain) = lower(p_domain) AND status = 'active' LIMIT 1
+    $$;
+
+    CREATE OR REPLACE FUNCTION upsert_control_plane_tenant(
+        p_name text, p_control_plane_id text
+    ) RETURNS integer LANGUAGE sql SECURITY DEFINER
+    SET search_path = pg_catalog, agent AS $$
+        INSERT INTO agent.tenants (name, status, control_plane_id)
+        VALUES (p_name, 'active', p_control_plane_id)
+        ON CONFLICT (control_plane_id) DO UPDATE SET status = 'active'
+        RETURNING id
+    $$;
+
+    CREATE OR REPLACE FUNCTION load_oidc_login_state(p_state_hash text)
+    RETURNS SETOF agent.oidc_login_states LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, agent AS $$
+        SELECT * FROM agent.oidc_login_states
+         WHERE state_hash = p_state_hash AND used_at IS NULL
+           AND expires_at > NOW() LIMIT 1
+    $$;
+
+    CREATE OR REPLACE FUNCTION load_oidc_jwks(
+        p_provider_id integer, p_allow_stale boolean, p_cutoff_seconds integer
+    ) RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path = pg_catalog, agent AS $$
+        SELECT jwks_json::jsonb FROM agent.oidc_jwks_cache
+         WHERE provider_id = p_provider_id
+           AND (
+               (NOT p_allow_stale AND expires_at > NOW()) OR
+               (p_allow_stale AND refreshed_at >
+                    NOW() - (p_cutoff_seconds * INTERVAL '1 second'))
+           )
+         LIMIT 1
+    $$;
+
+    REVOKE ALL ON FUNCTION resolve_tenant_api_key(text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION resolve_tenant_domain(text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION upsert_control_plane_tenant(text, text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION load_oidc_login_state(text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION load_oidc_jwks(integer, boolean, integer) FROM PUBLIC;
+
+    ALTER TABLE onboarding_registrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE onboarding_registrations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_onboarding_registrations
+        ON onboarding_registrations;
 
     ALTER TABLE tenant_users ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_tenant_users ON tenant_users;
     CREATE POLICY tenant_isolation_tenant_users ON tenant_users
         USING (
-            tenant_id::text = COALESCE(NULLIF(current_setting('app.current_tenant_id', true), ''), NULLIF(current_setting('app.tenant_id', true), ''))
-            OR current_setting('app.auth_lookup', true) = 'on'
+            tenant_id::text = agent.agent_current_tenant_id()
         )
-        WITH CHECK (tenant_id::text = COALESCE(NULLIF(current_setting('app.current_tenant_id', true), ''), NULLIF(current_setting('app.tenant_id', true), '')));
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE tenant_api_keys ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_tenant_api_keys ON tenant_api_keys;
     CREATE POLICY tenant_isolation_tenant_api_keys ON tenant_api_keys
         USING (
-            tenant_id::text = current_setting('app.tenant_id', true)
-            OR current_setting('app.auth_lookup', true) = 'on'
+            tenant_id::text = agent.agent_current_tenant_id()
         )
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE auth_refresh_tokens ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_auth_refresh_tokens ON auth_refresh_tokens;
     CREATE POLICY tenant_isolation_auth_refresh_tokens ON auth_refresh_tokens
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE auth_mfa_sessions ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_auth_mfa_sessions ON auth_mfa_sessions;
     CREATE POLICY tenant_isolation_auth_mfa_sessions ON auth_mfa_sessions
         USING (
-            tenant_id::text = current_setting('app.tenant_id', true)
-            OR current_setting('app.auth_lookup', true) = 'on'
+            tenant_id::text = agent.agent_current_tenant_id()
         )
         WITH CHECK (
-            tenant_id::text = current_setting('app.tenant_id', true)
-            OR current_setting('app.auth_lookup', true) = 'on'
+            tenant_id::text = agent.agent_current_tenant_id()
         );
 
     ALTER TABLE auth_password_reset_tokens ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_auth_password_reset_tokens ON auth_password_reset_tokens;
     CREATE POLICY tenant_isolation_auth_password_reset_tokens ON auth_password_reset_tokens
         USING (
-            tenant_id::text = current_setting('app.tenant_id', true)
-            OR current_setting('app.auth_lookup', true) = 'on'
+            tenant_id::text = agent.agent_current_tenant_id()
         )
         WITH CHECK (
-            tenant_id::text = current_setting('app.tenant_id', true)
-            OR current_setting('app.auth_lookup', true) = 'on'
+            tenant_id::text = agent.agent_current_tenant_id()
         );
 
     ALTER TABLE tenant_identity_providers ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_tenant_identity_providers ON tenant_identity_providers;
     CREATE POLICY tenant_isolation_tenant_identity_providers ON tenant_identity_providers
         USING (
-            tenant_id::text = current_setting('app.tenant_id', true)
-            OR current_setting('app.auth_lookup', true) = 'on'
+            tenant_id::text = agent.agent_current_tenant_id()
         )
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE oidc_login_states ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_oidc_login_states ON oidc_login_states;
     CREATE POLICY tenant_isolation_oidc_login_states ON oidc_login_states
         USING (
-            tenant_id::text = current_setting('app.tenant_id', true)
-            OR current_setting('app.auth_lookup', true) = 'on'
+            tenant_id::text = agent.agent_current_tenant_id()
         )
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE oidc_jwks_cache ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_oidc_jwks_cache ON oidc_jwks_cache;
     CREATE POLICY tenant_isolation_oidc_jwks_cache ON oidc_jwks_cache
         USING (
-            tenant_id::text = current_setting('app.tenant_id', true)
-            OR current_setting('app.auth_lookup', true) = 'on'
+            tenant_id::text = agent.agent_current_tenant_id()
         )
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE oidc_user_sessions ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_oidc_user_sessions ON oidc_user_sessions;
     CREATE POLICY tenant_isolation_oidc_user_sessions ON oidc_user_sessions
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE tenant_credentials ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_tenant_credentials ON tenant_credentials;
     CREATE POLICY tenant_isolation_tenant_credentials ON tenant_credentials
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE agent_events ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_agent_events ON agent_events;
     CREATE POLICY tenant_isolation_agent_events ON agent_events
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE gateway_approvals ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_gateway_approvals ON gateway_approvals;
     CREATE POLICY tenant_isolation_gateway_approvals ON gateway_approvals
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE approval_audit_events ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_approval_audit_events ON approval_audit_events;
     CREATE POLICY tenant_isolation_approval_audit_events ON approval_audit_events
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE usage_events ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_usage_events ON usage_events;
     CREATE POLICY tenant_isolation_usage_events ON usage_events
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE policies ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_policies ON policies;
     CREATE POLICY tenant_isolation_policies ON policies
-        USING (tenant_id::text = COALESCE(NULLIF(current_setting('app.current_tenant_id', true), ''), NULLIF(current_setting('app.tenant_id', true), '')))
-        WITH CHECK (tenant_id::text = COALESCE(NULLIF(current_setting('app.current_tenant_id', true), ''), NULLIF(current_setting('app.tenant_id', true), '')));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE policy_audit_history ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_policy_audit_history ON policy_audit_history;
     CREATE POLICY tenant_isolation_policy_audit_history ON policy_audit_history
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE policy_versions ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_policy_versions ON policy_versions;
     CREATE POLICY tenant_isolation_policy_versions ON policy_versions
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE policy_change_approvals ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_policy_change_approvals ON policy_change_approvals;
     CREATE POLICY tenant_isolation_policy_change_approvals ON policy_change_approvals
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE policy_simulation_results ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_policy_simulation_results ON policy_simulation_results;
     CREATE POLICY tenant_isolation_policy_simulation_results ON policy_simulation_results
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE policy_evaluation_audit ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_policy_evaluation_audit ON policy_evaluation_audit;
     CREATE POLICY tenant_isolation_policy_evaluation_audit ON policy_evaluation_audit
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE knowledge_documents ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_knowledge_documents ON knowledge_documents;
     CREATE POLICY tenant_isolation_knowledge_documents ON knowledge_documents
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE knowledge_chunks ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_knowledge_chunks ON knowledge_chunks;
     CREATE POLICY tenant_isolation_knowledge_chunks ON knowledge_chunks
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_documents ON documents;
     CREATE POLICY tenant_isolation_documents ON documents
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE document_findings ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_document_findings ON document_findings;
     CREATE POLICY tenant_isolation_document_findings ON document_findings
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE document_scans ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_document_scans ON document_scans;
     CREATE POLICY tenant_isolation_document_scans ON document_scans
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE document_audits ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_document_audits ON document_audits;
     CREATE POLICY tenant_isolation_document_audits ON document_audits
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE chat_sessions ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_chat_sessions ON chat_sessions;
     CREATE POLICY tenant_isolation_chat_sessions ON chat_sessions
-        USING (tenant_id::text = COALESCE(NULLIF(current_setting('app.current_tenant_id', true), ''), NULLIF(current_setting('app.tenant_id', true), '')))
-        WITH CHECK (tenant_id::text = COALESCE(NULLIF(current_setting('app.current_tenant_id', true), ''), NULLIF(current_setting('app.tenant_id', true), '')));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_chat_messages ON chat_messages;
     CREATE POLICY tenant_isolation_chat_messages ON chat_messages
-        USING (tenant_id::text = COALESCE(NULLIF(current_setting('app.current_tenant_id', true), ''), NULLIF(current_setting('app.tenant_id', true), '')))
-        WITH CHECK (tenant_id::text = COALESCE(NULLIF(current_setting('app.current_tenant_id', true), ''), NULLIF(current_setting('app.tenant_id', true), '')));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE secrets ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_secrets ON secrets;
     CREATE POLICY tenant_isolation_secrets ON secrets
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE compliance_evidence ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_compliance_evidence ON compliance_evidence;
     CREATE POLICY tenant_isolation_compliance_evidence ON compliance_evidence
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE compliance_control_evidence ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_compliance_control_evidence ON compliance_control_evidence;
     CREATE POLICY tenant_isolation_compliance_control_evidence ON compliance_control_evidence
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE compliance_control_scores ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_compliance_control_scores ON compliance_control_scores;
     CREATE POLICY tenant_isolation_compliance_control_scores ON compliance_control_scores
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE compliance_score_changes ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_compliance_score_changes ON compliance_score_changes;
     CREATE POLICY tenant_isolation_compliance_score_changes ON compliance_score_changes
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE event_delivery_records ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_event_delivery_records ON event_delivery_records;
     CREATE POLICY tenant_isolation_event_delivery_records ON event_delivery_records
-        USING (tenant_id IS NULL OR tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id IS NULL OR tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE event_dead_letters ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_event_dead_letters ON event_dead_letters;
     CREATE POLICY tenant_isolation_event_dead_letters ON event_dead_letters
-        USING (tenant_id IS NULL OR tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id IS NULL OR tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE rate_limit_events ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_rate_limit_events ON rate_limit_events;
     CREATE POLICY tenant_isolation_rate_limit_events ON rate_limit_events
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE worker_throttle_events ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_worker_throttle_events ON worker_throttle_events;
     CREATE POLICY tenant_isolation_worker_throttle_events ON worker_throttle_events
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE remediation_connectors ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_remediation_connectors ON remediation_connectors;
     CREATE POLICY tenant_isolation_remediation_connectors ON remediation_connectors
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE remediation_findings ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_remediation_findings ON remediation_findings;
     CREATE POLICY tenant_isolation_remediation_findings ON remediation_findings
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE remediation_plans ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_remediation_plans ON remediation_plans;
     CREATE POLICY tenant_isolation_remediation_plans ON remediation_plans
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE remediation_worker_runs ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_remediation_worker_runs ON remediation_worker_runs;
     CREATE POLICY tenant_isolation_remediation_worker_runs ON remediation_worker_runs
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE worker_credential_leases ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_worker_credential_leases ON worker_credential_leases;
     CREATE POLICY tenant_isolation_worker_credential_leases ON worker_credential_leases
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
     ALTER TABLE remediation_worker_audit_events ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_remediation_worker_audit_events ON remediation_worker_audit_events;
     CREATE POLICY tenant_isolation_remediation_worker_audit_events ON remediation_worker_audit_events
-        USING (tenant_id::text = current_setting('app.tenant_id', true))
-        WITH CHECK (tenant_id::text = current_setting('app.tenant_id', true));
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
     """
     force_rls_sql = """
     ALTER TABLE audit_logs FORCE ROW LEVEL SECURITY;
@@ -1477,10 +1650,16 @@ def run_startup_migrations():
     """
     try:
         with migration_engine.connect() as conn:
+            conn.execute(text("SET LOCAL lock_timeout = '15s'"))
+            conn.execute(text("SET LOCAL statement_timeout = '120s'"))
+            conn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended('authclaw.database.security', 0))")
+            )
             quoted_schema = conn.dialect.identifier_preparer.quote(DATABASE_SCHEMA)
             conn.execute(text(f"SET LOCAL search_path TO {quoted_schema}, pg_catalog"))
             conn.execute(text(migration_sql))
-            conn.execute(text(rls_sql))
+            encrypt_legacy_totp_secrets(conn)
+            conn.execute(text(rls_sql), {"context_secret_hash": context_secret_hash})
             conn.execute(text(force_rls_sql))
             conn.execute(text("""
                 INSERT INTO tenant_users (

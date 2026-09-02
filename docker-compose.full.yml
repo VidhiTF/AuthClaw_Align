@@ -126,9 +126,7 @@ services:
     restart: "no"
 
   database-bootstrap:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.demo
+    image: authclaw_monorepo-backend:latest
     container_name: authclaw-full-database-bootstrap
     depends_on:
       postgres:
@@ -148,9 +146,7 @@ services:
     restart: "no"
 
   backend-migrations:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.demo
+    image: authclaw_monorepo-backend:latest
     container_name: authclaw-full-backend-migrations
     depends_on:
       database-bootstrap:
@@ -164,9 +160,7 @@ services:
     restart: "no"
 
   database-grants:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.demo
+    image: authclaw_monorepo-backend:latest
     container_name: authclaw-full-database-grants
     depends_on:
       backend-migrations:
@@ -188,10 +182,7 @@ services:
     restart: "no"
 
   database-security-check:
-    profiles: ["security"]
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.demo
+    image: authclaw_monorepo-backend:latest
     container_name: authclaw-full-database-security-check
     depends_on:
       database-grants:
@@ -204,9 +195,28 @@ services:
       POSTGRES_APP_USER: ${POSTGRES_APP_USER:-authclaw_app}
       AGENT_MIGRATOR_USER: ${AGENT_MIGRATOR_USER:-authclaw_agent_migrator}
       AGENT_RUNTIME_USER: ${AGENT_RUNTIME_USER:-authclaw_agent_runtime}
+      AGENT_RLS_CONTEXT_SECRET: ${AGENT_RLS_CONTEXT_SECRET:-authclaw-full-agent-rls-context-secret-change-me}
+      AUTHCLAW_ENCRYPTION_KEY: ${AUTHCLAW_ENCRYPTION_KEY:-${AGENT_ENCRYPTION_KEY:-YXV0aGNsYXctYWdlbnQtbG9jYWwtZmVybmV0LWtleSE=}}
     command: ["python", "scripts/verify_database_security.py"]
     restart: "no"
+  demo-seed:
+    profiles: ["demo-seed"]
+    image: authclaw_monorepo-backend:latest
+    container_name: authclaw-full-demo-seed
+    depends_on:
+      database-security-check:
+        condition: service_completed_successfully
+    environment:
+      DEMO_SEED_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
+      AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
+      ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
+      API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
+      AUTHCLAW_LITE_DEMO_PASSWORD: ${AUTHCLAW_LITE_DEMO_PASSWORD:-AuthClawDemo!234}
+    command: ["python", "scripts/seed_authclaw_lite.py"]
+    restart: "no"
+
   backend:
+    image: authclaw_monorepo-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile.demo
@@ -215,7 +225,7 @@ services:
       - path: .env.local
         required: false
     depends_on:
-      database-grants:
+      database-security-check:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
@@ -376,24 +386,27 @@ services:
       - full_gateway_audit_outbox:/var/lib/authclaw-gateway
 
   agent-migrations:
-    build:
-      context: ./services/agent
+    image: authclaw_monorepo-agent:latest
     container_name: authclaw-full-agent-migrations
     depends_on:
-      database-bootstrap:
+      backend-migrations:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: postgresql://${AGENT_MIGRATOR_USER:-authclaw_agent_migrator}:${AGENT_MIGRATOR_PASSWORD:-authclaw_agent_migrator}@postgres:5432/${POSTGRES_DB:-authclaw}
       MIGRATION_DATABASE_URL: postgresql://${AGENT_MIGRATOR_USER:-authclaw_agent_migrator}:${AGENT_MIGRATOR_PASSWORD:-authclaw_agent_migrator}@postgres:5432/${POSTGRES_DB:-authclaw}
       AUTHCLAW_DATABASE_SCHEMA: ${AGENT_DATABASE_SCHEMA:-agent}
+      AGENT_RLS_CONTEXT_SECRET: ${AGENT_RLS_CONTEXT_SECRET:-authclaw-full-agent-rls-context-secret-change-me}
+      AUTHCLAW_ENCRYPTION_KEY: ${AUTHCLAW_ENCRYPTION_KEY:-${AGENT_ENCRYPTION_KEY:-YXV0aGNsYXctYWdlbnQtbG9jYWwtZmVybmV0LWtleSE=}}
+      AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
     command: ["python", "-m", "database.migrations"]
     restart: "no"
   agent:
+    image: authclaw_monorepo-agent:latest
     build:
       context: ./services/agent
     container_name: authclaw-full-agent
     depends_on:
-      database-grants:
+      database-security-check:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
@@ -402,6 +415,8 @@ services:
     environment:
       DATABASE_URL: postgresql://${AGENT_RUNTIME_USER:-authclaw_agent_runtime}:${AGENT_RUNTIME_PASSWORD:-authclaw_agent_runtime}@postgres:5432/${POSTGRES_DB:-authclaw}
       AUTHCLAW_DATABASE_SCHEMA: ${AGENT_DATABASE_SCHEMA:-agent}
+      AGENT_RLS_CONTEXT_SECRET: ${AGENT_RLS_CONTEXT_SECRET:-authclaw-full-agent-rls-context-secret-change-me}
+      AUTHCLAW_ENCRYPTION_KEY: ${AUTHCLAW_ENCRYPTION_KEY:-${AGENT_ENCRYPTION_KEY:-YXV0aGNsYXctYWdlbnQtbG9jYWwtZmVybmV0LWtleSE=}}
       AUTHCLAW_RUNTIME_DB_ROLE: ${AGENT_RUNTIME_USER:-authclaw_agent_runtime}
       REDIS_URL: redis://redis:6379
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
@@ -419,7 +434,6 @@ services:
       JWT_SECRET_V1: ${AGENT_JWT_SECRET_V1:-authclaw-full-agent-jwt-secret-change-me}
       JWT_SECRET_V2: ${AGENT_JWT_SECRET_V2:-authclaw-full-agent-jwt-secret-v2-change-me}
       AUTHCLAW_JWT_KEY_VERSION: ${AUTHCLAW_JWT_KEY_VERSION:-v1}
-      AUTHCLAW_ENCRYPTION_KEY: ${AGENT_ENCRYPTION_KEY:-YXV0aGNsYXctYWdlbnQtbG9jYWwtZmVybmV0LWtleSE=}
       AUTHCLAW_REDACTION_SALT: ${AGENT_REDACTION_SALT:-authclaw-full-agent-redaction-salt-change-me}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
       AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-full-internal-service-secret-change-me}

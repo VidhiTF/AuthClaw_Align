@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { sessionCookieOptions } from "@/lib/cookie-options";
-import { sessionStore } from "@/lib/session-store";
 import { consumeOidcState, openOidcState, type OidcState } from "@/lib/oidc-state";
 
 const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
@@ -70,24 +69,8 @@ export async function GET(request: Request) {
     return fail(GENERIC_AUTH_FAILURE);
   }
 
-  const session = sessionStore.createSession({
-    apiKey: data.api_key,
-    userId: data.user_id,
-    tenantId: data.tenant_id,
-    scopes: data.scopes,
-    role: data.role,
-  });
-  const cookiePayload = {
-    sessionId: session.sessionId,
-    userId: data.user_id,
-    tenantId: data.tenant_id,
-    tenantName: data.tenant_name,
-    scopes: data.scopes,
-    role: data.role,
-    email: data.email,
-  };
   const response = NextResponse.redirect(`${url.origin}/overview`);
-  response.cookies.set("authclaw_session", JSON.stringify(cookiePayload), {
+  response.cookies.set("authclaw_session", data.session_token, {
     ...sessionCookieOptions(60 * 60 * 24),
   });
   response.cookies.delete("authclaw_oidc_state");

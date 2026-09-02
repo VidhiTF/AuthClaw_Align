@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import hmac
 import logging
 import os
@@ -10,11 +11,12 @@ from datetime import datetime, timedelta, timezone
 
 import redis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, hash_key, require_scopes
+from app.db.session import SessionLocal
 from app.core.crypto import get_session_key_ring
 from app.core.passwords import hash_password, validate_password
 from app.db.models import (
@@ -104,22 +106,9 @@ def _invalid_invitation() -> HTTPException:
     return HTTPException(status_code=400, detail=INVALID_INVITATION_DETAIL)
 
 
-def _normalize_database_url(url: str) -> str:
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg://", 1)
-    return url
-
-
-def _owner_sessionmaker():
-    database_url = _normalize_database_url(
-        os.getenv("OWNER_DATABASE_URL")
-        or os.getenv("DATABASE_URL", "postgresql+psycopg://authclaw:authclaw@localhost:5432/authclaw")
-    )
-    engine = create_engine(database_url, pool_pre_ping=True)
-    return sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-
-OwnerSessionLocal = _owner_sessionmaker()
+# Compatibility name retained for focused tests; this is always the
+# least-privileged runtime factory and never reads OWNER_DATABASE_URL.
+OwnerSessionLocal = SessionLocal
 
 
 def _otp_hash(email: str, otp: str, secret: str | None = None) -> str:
@@ -179,6 +168,10 @@ def _generate_otp() -> str:
 
 def _generate_gateway_key() -> str:
     return "acl_live_" + secrets.token_urlsafe(24)
+
+
+def _generate_session_token() -> str:
+    return "acl_session_" + secrets.token_urlsafe(32)
 
 
 def _scopes_for_role(role: str) -> list[str]:
@@ -269,6 +262,37 @@ def resend(payload: OnboardingResendRequest, request: Request):
 
     db = OwnerSessionLocal()
     try:
+        active_key, session_keys = get_session_key_ring()
+        preauth = db.execute(
+            text(
+                """
+                SELECT outcome, tenant_id, email, tenant_name
+                  FROM authn.prepare_onboarding_invite_resend(
+                    :signup_id, :otp, :secret, :expires_at,
+                    :max_resends, :cooldown_seconds
+                  )
+                """
+            ),
+            {
+                "signup_id": str(payload.signup_id),
+                "otp": otp,
+                "secret": session_keys[active_key],
+                "expires_at": expires_at,
+                "max_resends": OTP_MAX_RESENDS,
+                "cooldown_seconds": OTP_RESEND_COOLDOWN_SECONDS,
+            },
+        ).one()
+        if preauth.outcome != "valid":
+            db.rollback()
+            if preauth.outcome == "cooldown":
+                raise HTTPException(status_code=429, detail="Please wait before resending")
+            if preauth.outcome == "too_many":
+                raise HTTPException(status_code=429, detail="Too many verification code resends")
+            _emit_invitation_audit(
+                None, "InviteRedemptionFailed", "invitation_not_pending",
+                request_id, 400,
+            )
+            raise _invalid_invitation()
         signup_row = (
             db.query(OnboardingEmailOTP)
             .filter(OnboardingEmailOTP.id == payload.signup_id)
@@ -308,18 +332,6 @@ def resend(payload: OnboardingResendRequest, request: Request):
             90000,
             "Too many verification code resends from this network today.",
         )
-
-        next_resend_at = _next_resend_at(signup_row.sent_at)
-        if next_resend_at > now:
-            raise HTTPException(status_code=429, detail=f"Please wait until {next_resend_at.isoformat()} before resending")
-        if signup_row.resend_count >= OTP_MAX_RESENDS:
-            raise HTTPException(status_code=429, detail="Too many verification code resends")
-
-        signup_row.otp_hash = _otp_hash(signup_row.email, otp)
-        signup_row.expires_at = expires_at
-        signup_row.sent_at = now
-        signup_row.resend_count += 1
-        signup_row.attempts = 0
 
         delivery, dev_otp = _deliver_otp(signup_row.email, otp, signup_row.tenant_name)
         signup_row.last_delivery = delivery
@@ -387,6 +399,51 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
             validate_password(payload.password)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        preauth = db.execute(
+            text(
+                """
+                SELECT outcome, tenant_id, email, tenant_name, invited_role
+                  FROM authn.consume_onboarding_invite_for_otp(
+                    :signup_id, :otp, :secrets, :max_attempts, :terms_version,
+                    :privacy_version
+                  )
+                """
+            ),
+            {
+                "signup_id": str(payload.signup_id),
+                "otp": payload.otp,
+                "secrets": list(get_session_key_ring()[1].values()),
+                "max_attempts": OTP_MAX_ATTEMPTS,
+                "terms_version": payload.terms_version,
+                "privacy_version": payload.privacy_notice_version,
+            },
+        ).one()
+        if preauth.outcome != "valid":
+            db.commit()
+            signup_row = (
+                db.query(OnboardingEmailOTP)
+                .filter(OnboardingEmailOTP.id == payload.signup_id)
+                .first()
+            )
+            reason = {
+                "invalid": "invalid_verification_code",
+                "expired": "invitation_expired",
+                "locked": "attempt_limit_exceeded",
+                "tenant_unavailable": "invitation_tenant_unavailable",
+                "not_found": "invitation_not_found",
+            }.get(preauth.outcome, "invitation_not_pending")
+            if preauth.outcome == "expired":
+                _emit_invitation_audit(
+                    signup_row, "InviteExpired", reason, request_id, 400
+                )
+            _emit_invitation_audit(
+                signup_row, "InviteRedemptionFailed", reason, request_id,
+                429 if preauth.outcome == "locked" else 400,
+            )
+            if preauth.outcome == "locked":
+                raise HTTPException(status_code=429, detail=INVALID_INVITATION_DETAIL)
+            raise _invalid_invitation()
 
         signup_row = (
             db.query(OnboardingEmailOTP)
@@ -501,7 +558,6 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
                 )
                 raise _invalid_invitation()
 
-            db.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(tenant.id)})
             invited_role = signup_row.invited_role or "viewer"
             user = db.query(User).filter(
                 User.tenant_id == tenant.id,
@@ -538,6 +594,25 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
                 created_by=user.id,
             )
             db.add(api_key)
+            db.flush()
+            session_token = _generate_session_token()
+            db.execute(
+                text(
+                    """
+                    SELECT authn.create_session(
+                        :token_hash, :tenant_id, :user_id, 'onboarding',
+                        :expires_at, CAST(:metadata AS jsonb)
+                    )
+                    """
+                ),
+                {
+                    "token_hash": _api_key_hash(session_token),
+                    "tenant_id": str(tenant.id),
+                    "user_id": str(user.id),
+                    "expires_at": now + timedelta(hours=24),
+                    "metadata": json.dumps({"request_id": request_id}),
+                },
+            )
             signup_row.status = "verified"
             signup_row.verified_at = now
             signup_row.api_key_id = api_key.id
@@ -569,6 +644,7 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
                 role=user.role,
                 scopes=scopes,
                 api_key=raw_api_key,
+                session_token=session_token,
                 gateway_url=gateway_url,
                 provider=DEFAULT_PROVIDER,
                 model=DEFAULT_MODEL,
@@ -595,7 +671,6 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
         db.rollback()
         raise
     finally:
-        db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
         db.close()
 
 
