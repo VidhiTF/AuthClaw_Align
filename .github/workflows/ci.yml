@@ -37,6 +37,7 @@ jobs:
       code: ${{ steps.changes.outputs.code }}
       codeql_languages: ${{ steps.changes.outputs.codeql_languages }}
       shared: ${{ steps.changes.outputs.shared }}
+      runtime_images: ${{ steps.changes.outputs.runtime_images }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -60,6 +61,9 @@ jobs:
           matches() { grep -Eq "$1" <<<"$changed"; }
           shared=false
           matches '^(\.github/workflows/ci\.yml|docker-compose\.full\.yml|\.env\.full\.example|scripts/)' && shared=true
+          runtime_images=false
+          matches '^(\.github/workflows/ci\.yml|docker-compose[^/]*\.yml|scripts/p0_04_build_smoke\.ps1|backend/|audit_consumer/|services/agent/|gateway/|console/|infra/(opa|presidio)/)' && runtime_images=true
+          echo "runtime_images=$runtime_images" >> "$GITHUB_OUTPUT"
           component() {
             local name="$1" pattern="$2" value=false
             if [[ "$shared" == true ]] || matches "$pattern"; then value=true; fi
@@ -350,10 +354,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  arm64-images:
+    name: ARM64 Runtime Images
+    needs: changes
+    if: needs.changes.outputs.runtime_images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v4
+      - name: Build and smoke-test ARM64 runtime images
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/p0_04_build_smoke.ps1 -Platform linux/arm64 -Service all
+
   checks:
     name: ACL-14 Required Checks
     if: always()
-    needs: [changes, policy, security, backend, audit, agent, sdk, gateway, console, compose, terraform, codeql]
+    needs: [changes, policy, security, backend, audit, agent, sdk, gateway, console, compose, terraform, codeql, arm64-images]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all required jobs
