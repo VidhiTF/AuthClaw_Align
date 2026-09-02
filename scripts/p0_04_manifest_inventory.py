@@ -45,6 +45,7 @@ CI_WORKFLOWS = [
 ]
 
 REQUIRED_SERVICES = set(SERVICE_DOCKERFILES)
+DEPLOYABLE_SERVICES = {"backend", "agent", "gateway", "console", "audit_consumer"}
 SERVICE_ALIASES = {"audit-consumer": "audit_consumer", "opa-bundle": "opa"}
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 AWS_PENDING = ["fargate_placement", "image_resolution", "task_startup", "service_stabilization", "health_checks", "logs", "alarms", "deployed_image_digest", "live_rollback"]
@@ -264,7 +265,7 @@ def rollout_readiness(args: argparse.Namespace) -> tuple[Dict[str, object], bool
             immutable = set(images) == REQUIRED_SERVICES and all(re.search(r"@sha256:[0-9a-f]{64}$", str(image)) for image in images.values())
             add("immutable_terraform_images", "PASS" if immutable else "FAIL", "all seven intended images must use @sha256")
             architectures = tfvars.get("service_cpu_architectures", {})
-            staged = args.selected_service in REQUIRED_SERVICES and architectures.get(args.selected_service) == "ARM64" and all(architectures.get(service, "X86_64") == "X86_64" for service in REQUIRED_SERVICES - {args.selected_service})
+            staged = args.selected_service in DEPLOYABLE_SERVICES and architectures.get(args.selected_service) == "ARM64" and all(architectures.get(service, "X86_64") == "X86_64" for service in REQUIRED_SERVICES - {args.selected_service})
             add("staged_architecture", "PASS" if staged else "FAIL", f"{args.selected_service}=ARM64; unselected=X86_64")
         except (OSError, TypeError, json.JSONDecodeError) as exc:
             add("immutable_terraform_images", "FAIL", str(exc))

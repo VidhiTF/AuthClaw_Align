@@ -59,6 +59,7 @@ All deployment fields below remain `LIVE-EVIDENCE-PENDING` until an authorized A
 Before rollout, require green required CI, the matching release manifest artifacts,
 immutable multi-architecture `name@sha256:<index>` image references, no active ECS
 deployment, and a record of the current X86_64 task-definition revision and image digest.
+OPA and Presidio inherit their host task architecture and are not independently rollable.
 
 1. Start with one non-production service. Change only its `container_images` digest and
    `service_cpu_architectures` entry to `ARM64`; leave every unselected entry X86_64.
