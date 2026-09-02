@@ -204,7 +204,7 @@ resource "aws_route_table_association" "private" {
 }
 
 resource "aws_vpc_endpoint" "gateway" {
-  for_each = var.enable_private_aws_endpoints ? toset(["s3", "dynamodb"]) : toset([])
+  for_each = var.enable_private_aws_endpoints ? toset(["s3"]) : toset([])
 
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${var.region}.${each.value}"

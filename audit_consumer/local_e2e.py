@@ -335,10 +335,60 @@ def _process_real_adapters() -> list[dict[str, Any]]:
     sqs_result = _drain_adapter("sqs_fifo", SQSFIFOAuditConsumer(lambda *_args: None), ch_client, len(events))
     sqs_result["duplicates_collapsed"] = sqs_result["durable_events"] == len(events)
 
-    poison = _fixture_events()[6]
-    sqs_pub.publish(poison["tenant_id"], poison, poison["id"])
+    transient = _fixture_events()[5]
+    sqs_pub.publish(transient["tenant_id"], transient, transient["id"])
     os.environ["SQS_LONG_POLL_SECONDS"] = "1"
     os.environ["SQS_VISIBILITY_TIMEOUT_SECONDS"] = "10"
+    transient_consumer = SQSFIFOAuditConsumer(lambda *_args: None)
+    transient_receives = 0
+    transient_committed = False
+    deadline = time.time() + 30
+    while not transient_committed and time.time() < deadline:
+        for batch in transient_consumer.poll(timeout_ms=1000):
+            for message in batch:
+                transient_receives += 1
+                try:
+                    transient_consumer.begin(message)
+                    processing_client = ch_client
+                    if transient_receives == 1:
+                        class FailOnceClickHouse:
+                            def query(self, *_args, **_kwargs):
+                                raise ConnectionError("LOCAL-SIMULATION temporary ClickHouse outage")
+
+                        processing_client = FailOnceClickHouse()
+                    consumer._process_message(processing_client, message.value)
+                    transient_consumer.ack(message)
+                    transient_committed = True
+                except RetryableMirrorError:
+                    transient_consumer.retry(message)
+    transient_consumer.close()
+    transient_persisted = bool(ch_client.query(
+        f"SELECT count() FROM authclaw.audit_events WHERE record_id = '{transient['id']}'"
+    ).result_rows[0][0])
+    if transient_persisted:
+        rows = ch_client.query(
+            "SELECT toString(record_id), toString(tenant_id), tenant_sequence, canonical_payload, integrity_hash "
+            "FROM authclaw.audit_events ORDER BY tenant_id, tenant_sequence"
+        ).result_rows
+        sqs_result["input_events"] += 1
+        sqs_result["durable_events"] = len(rows)
+        sqs_result["durable_ids"] = [row[0] for row in rows]
+        sqs_result["per_tenant_sequence"] = {
+            tenant: [row[2] for row in rows if row[1] == tenant] for tenant in {row[1] for row in rows}
+        }
+        sqs_result["final_chain_heads"] = {
+            tenant: [row[4] for row in rows if row[1] == tenant][-1] for tenant in {row[1] for row in rows}
+        }
+        sqs_result["chain_valid"] = {
+            tenant: all(item["valid"] for item in verify_chain([
+                {"record_id": row[0], "tenant_id": row[1], "tenant_sequence": row[2],
+                 "canonical_payload": row[3], "integrity_hash": row[4]}
+                for row in rows if row[1] == tenant
+            ])) for tenant in {row[1] for row in rows}
+        }
+
+    poison = _fixture_events()[6]
+    sqs_pub.publish(poison["tenant_id"], poison, poison["id"])
     poison_consumer = SQSFIFOAuditConsumer(lambda *_args: None)
     receives = 0
     deadline = time.time() + 30
@@ -357,7 +407,15 @@ def _process_real_adapters() -> list[dict[str, Any]]:
         poison_consumer.poll(timeout_ms=1000)
         dlq_messages = sqs.receive_message(QueueUrl=dlq_url, WaitTimeSeconds=1).get("Messages", [])
     poison_consumer.close()
-    sqs_result["transient_retried_and_committed"] = receives >= 2
+    sqs_result["transient_retried_and_committed"] = (
+        transient_receives >= 2 and transient_committed and transient_persisted
+    )
+    sqs_result["transient_receive_count"] = transient_receives
+    sqs_result["transient_durable_id"] = transient["id"] if transient_persisted else ""
+    sqs_result["transient_acknowledged"] = transient_committed
+    if transient_committed:
+        sqs_result["acked_ids"].append(transient["id"])
+    sqs_result["retry_ids"] = [transient["id"]] if transient_receives >= 2 else []
     sqs_result["poison_reached_dlq"] = bool(dlq_messages)
     return [kafka_result, sqs_result]
 

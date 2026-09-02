@@ -5,6 +5,8 @@ import sys
 mode = sys.argv[1]
 plan = json.load(open(sys.argv[2], encoding="utf-8"))
 addresses = {item["address"] for item in plan.get("resource_changes", [])}
+if any('aws_vpc_endpoint.gateway["dynamodb"]' in addr for addr in addresses):
+    raise SystemExit("plan must not create a DynamoDB endpoint without a confirmed runtime dependency")
 
 sqs = {addr for addr in addresses if "aws_sqs_queue.audit" in addr or "audit_sqs" in addr or 'aws_vpc_endpoint.interface["sqs"]' in addr}
 required = [

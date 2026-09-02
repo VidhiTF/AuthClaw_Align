@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from transport import SQSFIFOAuditConsumer, make_audit_consumer  # noqa: E402
+from transport import AuditMessage, KafkaAuditConsumer, SQSFIFOAuditConsumer, make_audit_consumer  # noqa: E402
 
 
 TENANT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -103,6 +103,22 @@ def test_sqs_fifo_selection_receives_bounded_long_poll_batch(monkeypatch):
     assert "MessageGroupId" in client.receive_kwargs["MessageSystemAttributeNames"]
     assert "MessageDeduplicationId" in client.receive_kwargs["MessageSystemAttributeNames"]
     assert "ApproximateReceiveCount" in client.receive_kwargs["MessageSystemAttributeNames"]
+
+
+def test_kafka_multi_partition_failure_does_not_commit_unprocessed_offset(monkeypatch):
+    offset = MagicMock(side_effect=lambda value, metadata: (value, metadata))
+    monkeypatch.setitem(sys.modules, "kafka.structs", types.SimpleNamespace(OffsetAndMetadata=offset))
+    client = MagicMock()
+    consumer = KafkaAuditConsumer.__new__(KafkaAuditConsumer)
+    consumer._consumer = client
+    processed_partition = ("audit.events", 0)
+    failed_partition = ("audit.events", 1)
+
+    consumer.ack(AuditMessage({}, 4, processed_partition))
+    consumer.retry(AuditMessage({}, 9, failed_partition))
+
+    client.commit.assert_called_once_with({processed_partition: (5, "")})
+    client.seek.assert_called_once_with(failed_partition, 9)
 
 
 def test_sqs_fifo_ack_deletes_only_after_processing(monkeypatch):

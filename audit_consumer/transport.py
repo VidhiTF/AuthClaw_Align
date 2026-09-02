@@ -95,8 +95,10 @@ class KafkaAuditConsumer:
             )
         return batches
 
-    def ack(self, _message: AuditMessage) -> None:
-        self._consumer.commit()
+    def ack(self, message: AuditMessage) -> None:
+        from kafka.structs import OffsetAndMetadata
+
+        self._consumer.commit({message._position: OffsetAndMetadata(message.offset + 1, "")})
 
     def begin(self, _message: AuditMessage) -> None:
         return None
