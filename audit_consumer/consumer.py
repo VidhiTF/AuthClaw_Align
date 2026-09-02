@@ -12,12 +12,10 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dotenv import load_dotenv
-from kafka import KafkaConsumer, KafkaProducer
-
 from clickhouse_writer import audit_event_exists, get_client, get_tenant_tail, insert_audit_event
-from event_backbone import AUDIT_DLQ_TOPIC, DEFAULT_CONSUMER_TOPICS
 from hash_chain import standardize_uuid, standardize_timestamp
 from metrics import metrics
+from transport import make_audit_consumer
 
 load_dotenv()
 
@@ -27,15 +25,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("audit_consumer")
 
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:9092").split(",")
-KAFKA_TOPICS = [
-    topic.strip()
-    for topic in os.getenv("KAFKA_TOPICS", ",".join(DEFAULT_CONSUMER_TOPICS)).split(",")
-    if topic.strip()
-]
-# Consumer group — all replicas of this service share offset progress.
-KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "authclaw-audit-consumer")
-KAFKA_DLQ_TOPIC = os.getenv("KAFKA_DLQ_TOPIC", AUDIT_DLQ_TOPIC)
 METRICS_PORT = int(os.getenv("AUDIT_CONSUMER_METRICS_PORT", "9108"))
 
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
@@ -49,7 +38,7 @@ class SequenceGapError(RuntimeError):
 
 
 class RetryableMirrorError(RuntimeError):
-    """Kafka offset must remain uncommitted until infrastructure recovers."""
+    """Transport position must remain unacknowledged until infrastructure recovers."""
 
 
 class InvalidAuditEvent(ValueError):
@@ -95,66 +84,6 @@ def _handle_signal(signum, _frame):
 signal.signal(signal.SIGTERM, _handle_signal)
 signal.signal(signal.SIGINT, _handle_signal)
 
-def _make_dlq_producer() -> KafkaProducer:
-    """Create a synchronous Kafka producer for DLQ writes."""
-    return KafkaProducer(
-        bootstrap_servers=KAFKA_BROKERS,
-        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        key_serializer=lambda k: k.encode("utf-8") if k else b"",
-        acks=1,
-    )
-
-
-def publish_to_dlq(
-    producer: KafkaProducer,
-    original_payload: dict,
-    error_reason: str,
-) -> None:
-    """
-    Publish a failed message to audit.deadletter.
-
-    Envelope schema:
-      original_payload  — the raw dict that failed processing
-      error_reason      — human-readable exception/description
-      failed_at         — ISO-8601 UTC timestamp
-      tenant_id         — extracted from payload if available
-      request_id        — extracted from payload if available
-    """
-    tenant_id = original_payload.get("tenant_id", "")
-    request_id = original_payload.get("request_id", "")
-
-    envelope = {
-        "original_payload": original_payload,
-        "error_reason": error_reason,
-        "failed_at": datetime.now(tz=timezone.utc).isoformat(),
-        "tenant_id": tenant_id,
-        "request_id": request_id,
-    }
-    try:
-        future = producer.send(
-            KAFKA_DLQ_TOPIC,
-            key=tenant_id or None,
-            value=envelope,
-        )
-        future.get(timeout=5)  # synchronous confirm for reliability
-        logger.warning(
-            "[DLQ] Published failed event to %s (tenant=%s reason=%s)",
-            KAFKA_DLQ_TOPIC,
-            tenant_id,
-            error_reason,
-        )
-        metrics.increment("audit_consumer_dlq_published_total")
-    except Exception as dlq_exc:  # noqa: BLE001
-        # DLQ publish itself failed — log and continue; never swallow original error silently.
-        logger.error(
-            "[DLQ] Failed to publish to %s: %s (original reason: %s)",
-            KAFKA_DLQ_TOPIC,
-            dlq_exc,
-            error_reason,
-        )
-        metrics.increment("audit_consumer_dlq_publish_failures_total")
-
-
 def _parse_timestamp(raw) -> datetime:
     """Parse ISO-8601 or epoch timestamp into a UTC-aware datetime."""
     if isinstance(raw, (int, float)):
@@ -167,8 +96,9 @@ def _parse_timestamp(raw) -> datetime:
 
 def stable_record_id(payload: dict) -> str:
     """Return the provided event id or a deterministic UUID for replayed payloads."""
-    if payload.get("id"):
-        return str(payload["id"])
+    record_id = payload.get("audit_record_id") or payload.get("record_id") or payload.get("id")
+    if record_id:
+        return str(record_id)
     identity = {
         "tenant_id": payload.get("tenant_id", ""),
         "request_id": payload.get("request_id", ""),
@@ -185,7 +115,7 @@ def stable_record_id(payload: dict) -> str:
 
 def normalise_event(payload: dict) -> dict:
     """
-    Map a raw Kafka message payload (AuditEvent from Go gateway) to the
+    Map a raw audit-stream payload (AuditEvent from Go gateway) to the
     ClickHouse row schema, including request_id.
     """
     return {
@@ -218,39 +148,14 @@ def normalise_event(payload: dict) -> dict:
         "integrity_hash": payload.get("integrity_hash", ""),
     }
 
-def _observe_consumer_lag(consumer: KafkaConsumer, records) -> None:
-    try:
-        for topic_partition, messages in records.items():
-            if not messages:
-                continue
-            end_offset = consumer.end_offsets([topic_partition])[topic_partition]
-            lag = max(0, end_offset - messages[-1].offset - 1)
-            metrics.set_gauge(
-                f"audit_consumer_lag_{topic_partition.topic}_{topic_partition.partition}",
-                lag,
-            )
-    except Exception as exc:
-        logger.warning("Unable to observe Kafka consumer lag: %s", exc)
-
-
 def main():
+    consumer = make_audit_consumer(metrics.set_gauge)
     logger.info(
-        "Connecting to Kafka brokers=%s topics=%s group=%s",
-        KAFKA_BROKERS,
-        KAFKA_TOPICS,
-        KAFKA_GROUP_ID,
-    )
-    consumer = KafkaConsumer(
-        *KAFKA_TOPICS,
-        bootstrap_servers=KAFKA_BROKERS,
-        group_id=KAFKA_GROUP_ID,
-        value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-        auto_offset_reset="earliest",
-        enable_auto_commit=False,
+        "Connecting audit transport topics=%s group=%s",
+        consumer.topics,
+        consumer.group_id,
     )
     metrics_server = _start_metrics_server()
-
-    dlq_producer = _make_dlq_producer()
 
     logger.info(
         "Connecting to ClickHouse host=%s port=%s db=%s",
@@ -268,33 +173,41 @@ def main():
 
     logger.info(
         "Audit consumer started — group=%s DLQ=%s",
-        KAFKA_GROUP_ID,
-        KAFKA_DLQ_TOPIC,
+        consumer.group_id,
+        consumer.dlq_topic,
     )
 
     while _running:
         # Poll with a 1-second timeout so SIGTERM is handled promptly.
-        records = consumer.poll(timeout_ms=1000)
-        _observe_consumer_lag(consumer, records)
-        for topic_partition, messages in records.items():
-            for message in messages:
+        for batch in consumer.poll(timeout_ms=1000):
+            for message in batch:
                 try:
+                    consumer.begin(message)
+                    if message.validation_error is not None:
+                        raise message.validation_error
                     _process_message(ch_client, message.value)
-                    consumer.commit()
+                    consumer.ack(message)
                 except (SequenceGapError, RetryableMirrorError) as exc:
                     logger.warning("Deferring audit mirror offset %s: %s", message.offset, exc)
-                    consumer.seek(topic_partition, message.offset)
+                    consumer.retry(message)
                     metrics.increment("audit_consumer_retries_total")
                     time.sleep(0.25)
                     break
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Failed to process message: %s", exc)
-                    publish_to_dlq(dlq_producer, message.value or {}, str(exc))
-                    consumer.commit()
+                    if consumer.redrive_failures:
+                        consumer.retry(message)
+                        metrics.increment("audit_consumer_retries_total")
+                        break
+                    try:
+                        consumer.publish_dlq(message.value or {}, str(exc))
+                        metrics.increment("audit_consumer_dlq_published_total")
+                    except Exception as dlq_exc:  # noqa: BLE001
+                        logger.error("DLQ publish failed: %s", dlq_exc)
+                        metrics.increment("audit_consumer_dlq_publish_failures_total")
+                    consumer.ack(message)
 
     logger.info("Audit consumer stopped")
-    dlq_producer.flush()
-    dlq_producer.close()
     consumer.close()
     if metrics_server:
         metrics_server.shutdown()

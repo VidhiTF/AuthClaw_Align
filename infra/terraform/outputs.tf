@@ -15,6 +15,8 @@ output "primary" {
     database_job_task_definition_arns = module.primary.database_job_task_definition_arns
     database_job_execution_order      = module.primary.database_job_execution_order
     service_namespace                 = module.primary.service_discovery_namespace
+    network_path                      = module.primary.network_path
+    audit_sqs                         = module.primary.audit_sqs
   }
 }
 
@@ -36,6 +38,8 @@ output "secondary" {
     database_job_task_definition_arns = module.secondary[0].database_job_task_definition_arns
     database_job_execution_order      = module.secondary[0].database_job_execution_order
     service_namespace                 = module.secondary[0].service_discovery_namespace
+    network_path                      = module.secondary[0].network_path
+    audit_sqs                         = module.secondary[0].audit_sqs
   } : null
 }
 

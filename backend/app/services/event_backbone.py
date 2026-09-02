@@ -8,9 +8,13 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-AUDIT_EVENTS_TOPIC = "audit.events"
-AUDIT_DLQ_TOPIC = "audit.deadletter"
-GATEWAY_TRAFFIC_TOPIC = "gateway.traffic"
+from app.services.audit_transport import (
+    AUDIT_DLQ_TOPIC,
+    AUDIT_EVENTS_TOPIC,
+    GATEWAY_TRAFFIC_TOPIC,
+    AuditPublisher,
+    make_audit_publisher,
+)
 
 _EVENT_NAMESPACE = uuid.UUID("3bd78033-64da-4a48-bd4f-9c105da706c7")
 _metrics: defaultdict[str, int] = defaultdict(int)
@@ -71,20 +75,12 @@ def increment_metric(name: str, value: int = 1) -> None:
     _metrics[name] += value
 
 
-def make_kafka_producer() -> Any:
-    import os
-    from kafka import KafkaProducer  # type: ignore[import-untyped]
-
-    brokers = os.getenv("KAFKA_BROKERS", "localhost:9092").split(",")
-    return KafkaProducer(
-        bootstrap_servers=brokers,
-        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        key_serializer=lambda k: k.encode("utf-8") if k else b"",
-        acks=1,
-    )
+def make_kafka_producer() -> AuditPublisher:
+    """Backward-compatible constructor; returns the configured audit publisher."""
+    return make_audit_publisher()
 
 
-def publish_audit_event(producer: Any, tenant_id: str, event: dict[str, Any]) -> Exception | None:
+def publish_audit_event(producer: AuditPublisher | None, tenant_id: str, event: dict[str, Any]) -> Exception | None:
     if exc := persist_audit_event(event):
         increment_metric("backend_audit_postgres_failures_total")
         return exc
@@ -94,7 +90,7 @@ def publish_audit_event(producer: Any, tenant_id: str, event: dict[str, Any]) ->
 
 
 def publish_pending_audit_events(
-    producer: Any,
+    producer: AuditPublisher,
     tenant_id: str,
     *,
     limit: int = 100,
@@ -135,12 +131,11 @@ def publish_pending_audit_events(
         )
         for row in pending:
             try:
-                future = producer.send(
-                    AUDIT_EVENTS_TOPIC,
-                    key=tenant_key(tenant_id),
-                    value=row.event_payload,
+                producer.publish(
+                    tenant_key(tenant_id),
+                    row.event_payload,
+                    audit_record_id=str(row.record_id),
                 )
-                future.get(timeout=5)
                 row.published_at = datetime.now(tz=timezone.utc)
                 row.publish_attempts += 1
                 row.last_error = None

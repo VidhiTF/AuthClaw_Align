@@ -4,8 +4,18 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  discovered_azs        = length(var.availability_zones) > 0 ? var.availability_zones : data.aws_availability_zones.available[0].names
-  azs                   = slice(local.discovered_azs, 0, var.az_count)
+  discovered_azs = length(var.availability_zones) > 0 ? var.availability_zones : data.aws_availability_zones.available[0].names
+  azs            = slice(local.discovered_azs, 0, var.az_count)
+  az_map         = { for idx, az in local.azs : tostring(idx) => az }
+  is_production  = contains(["prod", "production"], lower(var.environment))
+  nat_azs        = local.is_production ? local.az_map : { "0" = local.azs[0] }
+  interface_endpoint_services = merge({
+    ecr_api        = "ecr.api"
+    ecr_dkr        = "ecr.dkr"
+    logs           = "logs"
+    secretsmanager = "secretsmanager"
+    kms            = "kms"
+  }, var.audit_stream_transport == "sqs_fifo" ? { sqs = "sqs" } : {})
   namespace_name        = "${var.name}.local"
   listener_protocol     = "HTTPS"
   public_scheme         = "https"
@@ -121,7 +131,7 @@ resource "aws_internet_gateway" "main" {
 }
 
 resource "aws_subnet" "public" {
-  for_each = { for idx, az in local.azs : idx => az }
+  for_each = local.az_map
 
   vpc_id                  = aws_vpc.main.id
   availability_zone       = each.value
@@ -131,7 +141,7 @@ resource "aws_subnet" "public" {
 }
 
 resource "aws_subnet" "private" {
-  for_each = { for idx, az in local.azs : idx => az }
+  for_each = local.az_map
 
   vpc_id            = aws_vpc.main.id
   availability_zone = each.value
@@ -140,14 +150,18 @@ resource "aws_subnet" "private" {
 }
 
 resource "aws_eip" "nat" {
+  for_each = local.nat_azs
+
   domain = "vpc"
-  tags   = merge(var.tags, { Name = "${var.name}-nat-eip" })
+  tags   = merge(var.tags, { Name = "${var.name}-nat-eip-${each.value}" })
 }
 
 resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = values(aws_subnet.public)[0].id
-  tags          = merge(var.tags, { Name = "${var.name}-nat" })
+  for_each = local.nat_azs
+
+  allocation_id = aws_eip.nat[each.key].id
+  subnet_id     = aws_subnet.public[each.key].id
+  tags          = merge(var.tags, { Name = "${var.name}-nat-${each.value}" })
   depends_on    = [aws_internet_gateway.main]
 }
 
@@ -169,20 +183,35 @@ resource "aws_route_table_association" "public" {
 }
 
 resource "aws_route_table" "private" {
+  for_each = aws_subnet.private
+
   vpc_id = aws_vpc.main.id
-  tags   = merge(var.tags, { Name = "${var.name}-private-rt" })
+  tags   = merge(var.tags, { Name = "${var.name}-private-rt-${each.value.availability_zone}" })
 }
 
 resource "aws_route" "private_nat" {
-  route_table_id         = aws_route_table.private.id
+  for_each = aws_route_table.private
+
+  route_table_id         = each.value.id
   destination_cidr_block = "0.0.0.0/0"
-  nat_gateway_id         = aws_nat_gateway.main.id
+  nat_gateway_id         = aws_nat_gateway.main[local.is_production ? each.key : "0"].id
 }
 
 resource "aws_route_table_association" "private" {
   for_each       = aws_subnet.private
   subnet_id      = each.value.id
-  route_table_id = aws_route_table.private.id
+  route_table_id = aws_route_table.private[each.key].id
+}
+
+resource "aws_vpc_endpoint" "gateway" {
+  for_each = var.enable_private_aws_endpoints ? toset(["s3"]) : toset([])
+
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.region}.${each.value}"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = values(aws_route_table.private)[*].id
+
+  tags = merge(var.tags, { Name = "${var.name}-${each.value}-endpoint" })
 }
 
 resource "aws_security_group" "alb" {
@@ -249,6 +278,37 @@ resource "aws_security_group" "app" {
   }
 
   tags = var.tags
+}
+
+resource "aws_security_group" "vpc_endpoints" {
+  count = var.enable_private_aws_endpoints ? 1 : 0
+
+  name        = "${var.name}-vpc-endpoints"
+  description = "HTTPS access to private AWS service endpoints from AuthClaw workloads"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "AWS API HTTPS from ECS workloads"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app.id]
+  }
+
+  tags = merge(var.tags, { Name = "${var.name}-vpc-endpoints" })
+}
+
+resource "aws_vpc_endpoint" "interface" {
+  for_each = var.enable_private_aws_endpoints ? local.interface_endpoint_services : {}
+
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.region}.${each.value}"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = values(aws_subnet.private)[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
+  private_dns_enabled = true
+
+  tags = merge(var.tags, { Name = "${var.name}-${replace(each.value, ".", "-")}-endpoint" })
 }
 
 resource "aws_security_group" "data" {
@@ -854,6 +914,7 @@ resource "aws_ecs_task_definition" "service" {
   cpu                      = var.service_cpu
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = lookup(local.audit_sqs_task_role_arns, each.key, null)
 
   container_definitions = jsonencode([
     merge({
@@ -866,6 +927,7 @@ resource "aws_ecs_task_definition" "service" {
       }]
       environment = concat(
         local.common_environment,
+        contains(tolist(local.audit_sqs_producer_services), each.key) ? local.audit_sqs_producer_environment : [],
         each.key == "gateway" ? [
           { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
         ] : [],
@@ -1078,7 +1140,9 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
         containerPort = 8000
         protocol      = "tcp"
       }]
-      environment = local.common_environment
+      environment = concat(local.common_environment, [
+        { name = "AGENT_AUDIT_STREAM_TRANSPORT", value = "kafka" }
+      ])
       secrets = [
         { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
         { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
@@ -1286,13 +1350,14 @@ resource "aws_ecs_task_definition" "audit_consumer" {
   cpu                      = var.service_cpu
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = lookup(local.audit_sqs_task_role_arns, "audit_consumer", null)
 
   container_definitions = jsonencode([
     {
       name      = "audit_consumer"
       image     = var.container_images.audit_consumer
       essential = true
-      environment = concat(local.common_environment, [
+      environment = concat(local.common_environment, local.audit_sqs_environment, local.audit_sqs_consumer_environment, [
         { name = "KAFKA_TOPICS", value = "gateway.traffic,audit.events" },
         { name = "KAFKA_DLQ_TOPIC", value = "audit.deadletter" },
         { name = "AUDIT_CONSUMER_METRICS_PORT", value = "9108" },

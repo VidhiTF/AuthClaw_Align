@@ -14,11 +14,6 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
-const (
-	kafkaAuditEventsTopic = "audit.events"
-	kafkaAuditDLQTopic    = "audit.deadletter"
-)
-
 type kafkaMessageWriter interface {
 	WriteMessages(context.Context, ...kafka.Message) error
 	Close() error
@@ -34,9 +29,13 @@ var kafkaPublishFailures atomic.Uint64
 var kafkaDLQPublished atomic.Uint64
 var kafkaDLQPublishFailures atomic.Uint64
 
-// InitKafkaProducer configures the Kafka writers using KAFKA_BROKERS env var.
+type kafkaAuditStream struct {
+	topics auditTopics
+}
+
+// Init configures the Kafka writers using KAFKA_BROKERS env var.
 // If the variable is unset, producers are left nil and events fall back to stdout.
-func InitKafkaProducer() {
+func (k *kafkaAuditStream) Init() {
 	brokers := os.Getenv("KAFKA_BROKERS")
 	if strings.TrimSpace(brokers) == "" {
 		log.Println("Kafka producers disabled; audit events will use local fallbacks")
@@ -47,7 +46,7 @@ func InitKafkaProducer() {
 
 	kafkaWriter = &kafka.Writer{
 		Addr:                   kafka.TCP(brokerList...),
-		Topic:                  kafkaAuditEventsTopic,
+		Topic:                  k.topics.events,
 		Balancer:               &kafka.Hash{},
 		BatchTimeout:           10 * time.Millisecond,
 		Async:                  false,
@@ -62,7 +61,7 @@ func InitKafkaProducer() {
 
 	kafkaDLQWriter = &kafka.Writer{
 		Addr:                   kafka.TCP(brokerList...),
-		Topic:                  kafkaAuditDLQTopic,
+		Topic:                  k.topics.dlq,
 		Balancer:               &kafka.Hash{},
 		BatchTimeout:           10 * time.Millisecond,
 		Async:                  true,
@@ -70,15 +69,17 @@ func InitKafkaProducer() {
 		Completion: func(messages []kafka.Message, err error) {
 			if err != nil {
 				kafkaDLQPublishFailures.Add(1)
-				log.Printf("[DLQ] Failed to publish to %s asynchronously: %v", kafkaAuditDLQTopic, err)
+				log.Printf("[DLQ] Failed to publish to %s asynchronously: %v", k.topics.dlq, err)
 				return
 			}
 			kafkaDLQPublished.Add(uint64(len(messages)))
 		},
 	}
 
-	log.Printf("Kafka producers initialised (brokers: %s, topics: %s, %s)", brokers, kafkaAuditEventsTopic, kafkaAuditDLQTopic)
+	log.Printf("Kafka producers initialised (brokers: %s, topics: %s, %s)", brokers, k.topics.events, k.topics.dlq)
 }
+
+func (k *kafkaAuditStream) Enabled() bool { return kafkaWriter != nil }
 
 func auditEventKafkaMessage(event *AuditEvent, payload []byte) kafka.Message {
 	return kafka.Message{
@@ -93,7 +94,7 @@ func auditEventKafkaMessage(event *AuditEvent, payload []byte) kafka.Message {
 }
 
 // PublishAuditEvent writes one committed outbox event to Kafka.
-func PublishAuditEvent(event *AuditEvent) error {
+func (k *kafkaAuditStream) PublishEvent(event *AuditEvent) error {
 	if kafkaWriter == nil {
 		return nil // Kafka not configured — caller falls back to stdout
 	}
@@ -116,7 +117,7 @@ func PublishAuditEvent(event *AuditEvent) error {
 	return nil
 }
 
-func PublishAuditOutboxPayload(tenantID string, payload []byte) error {
+func (k *kafkaAuditStream) PublishOutboxPayload(tenantID string, payload []byte) error {
 	if kafkaWriter == nil {
 		return nil
 	}
@@ -167,7 +168,7 @@ type DLQMessage struct {
 
 // PublishToDLQ writes a failed message envelope to the audit.deadletter topic.
 // It is non-blocking: write errors are only logged.
-func PublishToDLQ(originalPayload []byte, errorReason, tenantID, requestID string) {
+func (k *kafkaAuditStream) PublishDLQ(originalPayload []byte, errorReason, tenantID, requestID string) {
 	if kafkaDLQWriter == nil {
 		log.Printf("[DLQ] Writer not initialised — dropping failed message (reason: %s)", errorReason)
 		return
@@ -192,15 +193,15 @@ func PublishToDLQ(originalPayload []byte, errorReason, tenantID, requestID strin
 
 	if err := kafkaDLQWriter.WriteMessages(ctx, dlqKafkaMessage(dlq, envelope)); err != nil {
 		kafkaDLQPublishFailures.Add(1)
-		log.Printf("[DLQ] Failed to publish to audit.deadletter: %v", err)
+		log.Printf("[DLQ] Failed to publish to %s: %v", k.topics.dlq, err)
 	} else {
 		kafkaDLQPublished.Add(1)
-		log.Printf("[DLQ] Published failed event to audit.deadletter (tenant=%s reason=%s)", tenantID, errorReason)
+		log.Printf("[DLQ] Published failed event to %s (tenant=%s reason=%s)", k.topics.dlq, tenantID, errorReason)
 	}
 }
 
-// CloseKafkaProducer gracefully flushes and closes both Kafka writers on shutdown.
-func CloseKafkaProducer() {
+// Close gracefully flushes and closes both Kafka writers on shutdown.
+func (k *kafkaAuditStream) Close() {
 	for _, w := range []kafkaMessageWriter{kafkaWriter, kafkaDLQWriter} {
 		if w != nil {
 			if err := w.Close(); err != nil {

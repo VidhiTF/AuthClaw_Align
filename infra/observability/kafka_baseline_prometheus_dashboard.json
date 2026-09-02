@@ -1,0 +1,138 @@
+{
+  "title": "AuthClaw Kafka Audit Baseline",
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "version": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Gateway audit outbox backlog",
+      "targets": [
+        {
+          "expr": "authclaw_gateway_audit_outbox_backlog",
+          "legendFormat": "audit_outbox_backlog"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PROM" }
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway outbox age (seconds)",
+      "targets": [
+        {
+          "expr": "authclaw_gateway_audit_outbox_oldest_age_seconds",
+          "legendFormat": "outbox_oldest_age_seconds"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PROM" }
+    },
+    {
+      "type": "timeseries",
+      "title": "Backend outbox published / backlog",
+      "targets": [
+        {
+          "expr": "backend_audit_outbox_published_total",
+          "legendFormat": "backend_audit_outbox_published_total"
+        },
+        {
+          "expr": "backend_audit_outbox_backlog",
+          "legendFormat": "backend_audit_outbox_backlog"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PROM" }
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway Kafka publish / DLQ failure counters",
+      "targets": [
+        {
+          "expr": "authclaw_gateway_kafka_publish_failures_total",
+          "legendFormat": "kafka_publish_failures"
+        },
+        {
+          "expr": "authclaw_gateway_kafka_dlq_published_total",
+          "legendFormat": "kafka_dlq_published"
+        },
+        {
+          "expr": "authclaw_gateway_kafka_dlq_publish_failures_total",
+          "legendFormat": "kafka_dlq_publish_failures"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PROM" }
+    },
+    {
+      "type": "timeseries",
+      "title": "Audit consumer lag and retries",
+      "targets": [
+        {
+          "expr": "audit_consumer_lag_*",
+          "legendFormat": "lag {{topic}}/{{partition}}"
+        },
+        {
+          "expr": "audit_consumer_retries_total",
+          "legendFormat": "audit_consumer_retries_total"
+        },
+        {
+          "expr": "audit_consumer_dlq_published_total",
+          "legendFormat": "dlq_published"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PROM" }
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer mirror fidelity",
+      "targets": [
+        {
+          "expr": "audit_consumer_sequence_gaps_total",
+          "legendFormat": "sequence_gaps"
+        },
+        {
+          "expr": "audit_consumer_verification_failures_total",
+          "legendFormat": "verification_failures"
+        },
+        {
+          "expr": "audit_consumer_mirror_drift_total",
+          "legendFormat": "mirror_drift"
+        },
+        {
+          "expr": "audit_consumer_clickhouse_inserts_total",
+          "legendFormat": "clickhouse_inserts"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PROM" }
+    },
+    {
+      "type": "timeseries",
+      "title": "Event delivery and retry pressure",
+      "targets": [
+        {
+          "expr": "backend_audit_publish_failures_total",
+          "legendFormat": "backend_publish_failures"
+        },
+        {
+          "expr": "audit_consumer_clickhouse_insert_failures_total",
+          "legendFormat": "clickhouse_insert_failures"
+        },
+        {
+          "expr": "authclaw_gateway_audit_postgres_failures_total",
+          "legendFormat": "gateway_postgres_failures"
+        },
+        {
+          "expr": "authclaw_gateway_audit_idempotency_collisions_total",
+          "legendFormat": "idempotency_collisions"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "PROM" }
+    },
+    {
+      "type": "text",
+      "title": "Baseline metadata",
+      "options": {
+        "content": "Use this dashboard during representative-load baseline runs only. Record environment and window in runbook artifacts.",
+        "mode": "markdown"
+      }
+    }
+  ]
+}

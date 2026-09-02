@@ -36,9 +36,11 @@ func main() {
 	// Initialize database
 	InitDB()
 
-	// Initialize Kafka producer (non-fatal if Kafka is unavailable)
-	InitKafkaProducer()
-	defer CloseKafkaProducer()
+	// Kafka is the default audit transport; missing brokers retain the local fallback.
+	if err := InitAuditTransport(); err != nil {
+		log.Fatalf("Invalid audit transport configuration: %v", err)
+	}
+	defer CloseAuditTransport()
 
 	r := chi.NewRouter()
 

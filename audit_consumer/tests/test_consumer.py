@@ -14,7 +14,6 @@ from consumer import (  # noqa: E402
     SequenceGapError,
     _process_message,
     normalise_event,
-    publish_to_dlq,
 )
 
 
@@ -130,16 +129,3 @@ def test_exact_duplicate_replay_is_skipped(monkeypatch):
     insert = configure(monkeypatch, exists=True)
     _process_message(MagicMock(), event())
     insert.assert_not_called()
-
-
-def test_dlq_preserves_original_event_and_tenant_key():
-    producer = MagicMock()
-    producer.send.return_value.get.return_value = None
-    payload = event()
-
-    publish_to_dlq(producer, payload, "invalid proof")
-
-    call = producer.send.call_args
-    assert call.args[0] == "audit.deadletter"
-    assert call.kwargs["key"] == TENANT
-    assert call.kwargs["value"]["original_payload"] == payload

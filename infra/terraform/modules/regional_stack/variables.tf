@@ -25,6 +25,12 @@ variable "availability_zones" {
   default     = []
 }
 
+variable "enable_private_aws_endpoints" {
+  description = "Route supported AWS service traffic privately through VPC gateway and interface endpoints."
+  type        = bool
+  default     = true
+}
+
 variable "container_images" {
   type = object({
     agent          = string
@@ -168,6 +174,114 @@ variable "smtp_from" {
 variable "kafka_brokers" {
   type    = string
   default = ""
+}
+
+variable "audit_stream_transport" {
+  description = "Audit stream transport. Kafka remains the rollback default; sqs_fifo creates SQS FIFO resources."
+  type        = string
+  default     = "kafka"
+
+  validation {
+    condition     = contains(["kafka", "sqs_fifo"], var.audit_stream_transport)
+    error_message = "audit_stream_transport must be kafka or sqs_fifo."
+  }
+}
+
+variable "audit_sqs_max_receive_count" {
+  type    = number
+  default = 5
+
+  validation {
+    condition     = var.audit_sqs_max_receive_count >= 2 && var.audit_sqs_max_receive_count <= 20
+    error_message = "audit_sqs_max_receive_count must be between 2 and 20."
+  }
+}
+
+variable "audit_sqs_retention_seconds" {
+  type    = number
+  default = 1209600
+
+  validation {
+    condition     = var.audit_sqs_retention_seconds >= 60 && var.audit_sqs_retention_seconds <= 1209600
+    error_message = "audit_sqs_retention_seconds must be within AWS SQS limits."
+  }
+}
+
+variable "audit_sqs_dlq_retention_seconds" {
+  type    = number
+  default = 1209600
+
+  validation {
+    condition     = var.audit_sqs_dlq_retention_seconds >= 60 && var.audit_sqs_dlq_retention_seconds <= 1209600
+    error_message = "audit_sqs_dlq_retention_seconds must be within AWS SQS limits."
+  }
+}
+
+variable "audit_sqs_long_poll_seconds" {
+  type    = number
+  default = 20
+
+  validation {
+    condition     = var.audit_sqs_long_poll_seconds >= 1 && var.audit_sqs_long_poll_seconds <= 20
+    error_message = "audit_sqs_long_poll_seconds must be between 1 and 20."
+  }
+}
+
+variable "audit_sqs_max_messages" {
+  type    = number
+  default = 10
+
+  validation {
+    condition     = var.audit_sqs_max_messages >= 1 && var.audit_sqs_max_messages <= 10
+    error_message = "audit_sqs_max_messages must be between 1 and 10."
+  }
+}
+
+variable "audit_sqs_visibility_timeout_seconds" {
+  type    = number
+  default = 60
+
+  validation {
+    condition     = var.audit_sqs_visibility_timeout_seconds >= 10 && var.audit_sqs_visibility_timeout_seconds <= 43200
+    error_message = "audit_sqs_visibility_timeout_seconds must be within AWS SQS limits."
+  }
+}
+
+variable "audit_sqs_dlq_depth_alarm_threshold" {
+  type    = number
+  default = 0
+}
+
+variable "audit_sqs_dlq_age_alarm_seconds" {
+  type    = number
+  default = 300
+}
+
+variable "audit_sqs_main_age_alarm_seconds" {
+  type    = number
+  default = 300
+}
+
+variable "audit_sqs_backlog_alarm_threshold" {
+  type    = number
+  default = 1000
+}
+
+variable "audit_sqs_alarm_action_arns" {
+  description = "Approved SNS/action ARNs for SQS audit alarms. Required for production-like SQS deployments."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = var.audit_stream_transport != "sqs_fifo" || (!var.audit_sqs_require_alarm_actions && var.authclaw_env != "production") || length(var.audit_sqs_alarm_action_arns) > 0
+    error_message = "production-like sqs_fifo audit transport requires at least one audit_sqs_alarm_action_arns entry."
+  }
+}
+
+variable "audit_sqs_require_alarm_actions" {
+  description = "Require SQS alarm actions for production-like plan validation."
+  type        = bool
+  default     = false
 }
 
 variable "clickhouse_host" {

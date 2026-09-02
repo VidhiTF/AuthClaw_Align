@@ -13,3 +13,7 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8001
 
 In the consolidated deployment the service is internal. The control plane remains the
 authority for identity, tenants and access decisions.
+
+Legacy agent audit events stay on Kafka through `AGENT_AUDIT_STREAM_TRANSPORT=kafka`.
+Do not enable agent SQS transport until the agent emits canonical committed audit
+records with ACL-21 `audit_record_id`, tenant sequence and prior-hash-chain fields.

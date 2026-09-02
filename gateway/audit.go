@@ -132,15 +132,15 @@ func EmitAuditEvent(event *AuditEvent) error {
 		return nil
 	}
 
-	// Attempt Kafka publish first.
+	// Attempt transport publish first.
 	if err := publishPendingAuditOutbox(event.TenantID, 100); err != nil {
-		log.Printf("[AUDIT] Kafka serialisation error: %v — falling back to stdout", err)
+		log.Printf("[AUDIT] transport publish error: %v — falling back to stdout", err)
 		logToStdout(event)
 		return nil
 	}
 
-	// If kafkaWriter is nil (not configured), also log to stdout as fallback.
-	if kafkaWriter == nil {
+	// If the configured transport is unavailable, also log to stdout as fallback.
+	if !AuditTransportEnabled() {
 		logToStdout(event)
 	}
 	return nil
@@ -251,7 +251,7 @@ func persistAuditMetadata(event *AuditEvent) error {
 }
 
 func publishPendingAuditOutbox(tenantID string, limit int) error {
-	if kafkaWriter == nil || DB == nil {
+	if !AuditTransportEnabled() || DB == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
