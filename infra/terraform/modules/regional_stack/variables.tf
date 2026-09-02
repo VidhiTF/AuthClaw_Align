@@ -43,6 +43,11 @@ variable "container_images" {
   })
 }
 
+variable "service_cpu_architectures" {
+  type    = map(string)
+  default = {}
+}
+
 variable "authclaw_env" {
   type    = string
   default = "staging"

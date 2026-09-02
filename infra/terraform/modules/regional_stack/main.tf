@@ -886,6 +886,11 @@ resource "aws_ecs_task_definition" "database_job" {
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
 
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = lookup(var.service_cpu_architectures, each.key == "agent_migrations" ? "agent" : "backend", "X86_64")
+  }
+
   container_definitions = jsonencode([{
     name        = each.key
     image       = each.value.image
@@ -915,6 +920,11 @@ resource "aws_ecs_task_definition" "service" {
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
   task_role_arn            = lookup(local.audit_sqs_task_role_arns, each.key, null)
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = lookup(var.service_cpu_architectures, each.key, "X86_64")
+  }
 
   container_definitions = jsonencode([
     merge({
@@ -1011,6 +1021,11 @@ resource "aws_ecs_task_definition" "gateway_with_sidecars" {
   cpu                      = var.gateway_sidecar_task_cpu
   memory                   = var.gateway_sidecar_task_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = lookup(var.service_cpu_architectures, "gateway", "X86_64")
+  }
 
   container_definitions = jsonencode([
     {
@@ -1128,6 +1143,11 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
   memory                   = var.backend_sidecar_task_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
 
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = lookup(var.service_cpu_architectures, "backend", "X86_64")
+  }
+
   container_definitions = jsonencode([
     {
       name              = "backend"
@@ -1214,6 +1234,11 @@ resource "aws_ecs_task_definition" "agent_with_opa" {
   cpu                      = var.agent_sidecar_task_cpu
   memory                   = var.agent_sidecar_task_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = lookup(var.service_cpu_architectures, "agent", "X86_64")
+  }
 
   container_definitions = jsonencode([
     {
@@ -1351,6 +1376,11 @@ resource "aws_ecs_task_definition" "audit_consumer" {
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
   task_role_arn            = lookup(local.audit_sqs_task_role_arns, "audit_consumer", null)
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = lookup(var.service_cpu_architectures, "audit_consumer", "X86_64")
+  }
 
   container_definitions = jsonencode([
     {
