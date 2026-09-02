@@ -410,6 +410,9 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
       - uses: docker/setup-buildx-action@v4
       - name: Compute lowercase image name
         id: image
@@ -417,12 +420,20 @@ jobs:
         run: |
           repo="${GITHUB_REPOSITORY,,}"
           echo "name=ghcr.io/$repo/${{ matrix.service }}:ci-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Initialize immutable digest evidence
+        shell: bash
+        run: >-
+          jq -n --arg service '${{ matrix.service }}' --arg image '${{ steps.image.outputs.name }}'
+          --arg tag "ci-${GITHUB_SHA}" --arg commit "$GITHUB_SHA" --arg timestamp "$(date -u +%FT%TZ)"
+          '{service:$service,image_reference:$image,release_tag:$tag,manifest_list_digest:"",linux_amd64_digest:"",linux_arm64_digest:"",source_commit_sha:$commit,timestamp:$timestamp,status:"FAIL"}'
+          > release-manifest-evidence.json
       - uses: docker/build-push-action@v7
+        id: build
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          load: true
-          push: false
+          platforms: linux/amd64,linux/arm64
+          push: true
           tags: ${{ steps.image.outputs.name }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=min,scope=${{ matrix.service }}
@@ -430,6 +441,20 @@ jobs:
             NEXT_PUBLIC_API_URL=http://localhost:18000/api/v1
             NEXT_PUBLIC_GATEWAY_URL=http://localhost:18080
             NEXT_PUBLIC_AUTHCLAW_DEMO_MODE=true
+      - name: Verify manifest and capture immutable digests
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          INDEX_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$INDEX_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          manifest="$(docker buildx imagetools inspect "$IMAGE@$INDEX_DIGEST" --raw)"
+          jq -e '(.mediaType == "application/vnd.oci.image.index.v1+json" or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json") and (.manifests | type == "array")' <<<"$manifest" >/dev/null
+          amd64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0] // empty' <<<"$manifest")"
+          arm64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest][0] // empty' <<<"$manifest")"
+          [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ && "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
+          jq -n --arg service '${{ matrix.service }}' --arg image "$IMAGE" --arg tag "ci-${GITHUB_SHA}" --arg index "$INDEX_DIGEST" --arg amd64 "$amd64" --arg arm64 "$arm64" --arg commit "$GITHUB_SHA" --arg timestamp "$(date -u +%FT%TZ)" '{service:$service,image_reference:$image,release_tag:$tag,manifest_list_digest:$index,linux_amd64_digest:$amd64,linux_arm64_digest:$arm64,source_commit_sha:$commit,timestamp:$timestamp,status:"PASS"}' > release-manifest-evidence.json
       - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.image.outputs.name }}
@@ -437,4 +462,11 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
-      - run: docker push "${{ steps.image.outputs.name }}"
+      - name: Preserve immutable digest evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-manifest-evidence-${{ github.sha }}-${{ matrix.service }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-manifest-evidence.json
+          if-no-files-found: error
+          retention-days: 14
