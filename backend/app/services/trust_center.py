@@ -247,7 +247,6 @@ def resolve_share_token(db: Session, raw_token: str) -> tuple[TrustCenterShare |
     if not result:
         return None, "not_found"
     tenant_id = result.tenant_id
-    db.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(tenant_id)})
     share = (
         db.query(TrustCenterShare)
         .filter(TrustCenterShare.id == result.id, TrustCenterShare.tenant_id == tenant_id)

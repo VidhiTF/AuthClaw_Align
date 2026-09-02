@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { sessionStore } from "@/lib/session-store";
 import { sessionCookieOptions } from "@/lib/cookie-options";
 
 export async function POST() {
@@ -9,12 +8,13 @@ export async function POST() {
 
   if (sessionToken) {
     try {
-      const sessionPayload = JSON.parse(sessionToken);
-      if (sessionPayload.sessionId) {
-        sessionStore.deleteSession(sessionPayload.sessionId);
-      }
+      await fetch(`${process.env.API_URL || "http://localhost:8000"}/v1/auth/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionToken}` },
+        cache: "no-store",
+      });
     } catch {
-      // ignore parsing error
+      // Always clear the browser cookie even if the backend is unavailable.
     }
   }
 

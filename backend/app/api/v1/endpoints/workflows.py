@@ -464,6 +464,29 @@ def reject_gateway_approval(
     return _approval_response(approval)
 
 
+@router.get("", response_model=list[WorkflowResponse])
+def list_workflows(
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    _auth=require_scopes(["read"]),
+):
+    """List recent workflows inside the authenticated tenant boundary."""
+    tenant_id = str(request.state.tenant_id)
+    rows = (
+        db.query(ComplianceWorkflow.workflow_id)
+        .filter(ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id))
+        .order_by(ComplianceWorkflow.started_at.desc())
+        .limit(50)
+        .all()
+    )
+    runner = ComplianceWorkflowRunner(db)
+    return [
+        WorkflowResponse(**result)
+        for row in rows
+        if (result := runner.get_status(row.workflow_id, tenant_id)) is not None
+    ]
+
+
 @router.get("/{workflow_id}", response_model=WorkflowResponse)
 def get_workflow(
     workflow_id: str,

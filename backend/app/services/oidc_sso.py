@@ -10,7 +10,9 @@ from urllib.parse import urlencode
 
 import jwt
 import requests
+from sqlalchemy import text
 from sqlalchemy.orm import Session
+from types import SimpleNamespace
 
 from app.api.v1.endpoints.onboarding import _scopes_for_role
 from app.core.auth import hash_key
@@ -161,21 +163,44 @@ def serialize_config(config: TenantOIDCConfig | None) -> dict[str, Any]:
 
 
 def public_config(db: Session, tenant_name: str | None = None) -> tuple[Tenant | None, dict[str, Any] | None]:
+    lookup = None
     if tenant_name:
-        tenant = db.query(Tenant).filter(Tenant.name.ilike(tenant_name.strip()), Tenant.status == "active").first()
-        if tenant:
-            row = db.query(TenantOIDCConfig).filter(
-                TenantOIDCConfig.tenant_id == tenant.id,
-                TenantOIDCConfig.status == "active",
-            ).first()
-            if row:
-                return tenant, {**serialize_config(row), "source": "tenant"}
+        lookup = db.execute(
+            text(
+                "SELECT tenant_id, tenant_name, config "
+                "FROM authn.lookup_oidc_config(:tenant_name)"
+            ),
+            {"tenant_name": tenant_name},
+        ).first()
+        if lookup and lookup.config:
+            config = dict(lookup.config)
+            encrypted_secret = config.pop("encrypted_client_secret", None)
+            config["client_secret"] = (
+                decrypt_secret(encrypted_secret) if encrypted_secret else ""
+            )
+            config.update(_endpoints(config))
+            config.update({
+                "enabled": True,
+                "source": "tenant",
+                "has_client_secret": bool(encrypted_secret),
+            })
+            tenant = SimpleNamespace(id=lookup.tenant_id, name=lookup.tenant_name)
+            return tenant, config
     env = env_config()
     if env:
-        tenant = None
         mapped_name = tenant_name or env.get("tenant_name")
-        if mapped_name:
-            tenant = db.query(Tenant).filter(Tenant.name.ilike(mapped_name), Tenant.status == "active").first()
+        if mapped_name and (not lookup or lookup.tenant_name != mapped_name):
+            lookup = db.execute(
+                text(
+                    "SELECT tenant_id, tenant_name, config "
+                    "FROM authn.lookup_oidc_config(:tenant_name)"
+                ),
+                {"tenant_name": mapped_name},
+            ).first()
+        tenant = (
+            SimpleNamespace(id=lookup.tenant_id, name=lookup.tenant_name)
+            if lookup else None
+        )
         return tenant, env
     return None, None
 

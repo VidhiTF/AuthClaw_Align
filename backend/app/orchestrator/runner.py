@@ -96,11 +96,6 @@ def _persist_state_to_db(db: Session, state: ComplianceState) -> None:
     """Write the current workflow state snapshot to PostgreSQL."""
     workflow_id = state.get("workflow_id", "")
     tenant_id = state.get("tenant_id", "")
-    if tenant_id:
-        db.execute(
-            text("SELECT set_config('app.current_tenant_id', :tid, false)"),
-            {"tid": tenant_id},
-        )
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id
     ).first()
@@ -147,12 +142,6 @@ def _create_approval_in_db(
 ) -> str:
     """Create a pending_approvals record for HITL review."""
     approval_id = str(uuid.uuid4())
-
-    # Set tenant context for RLS before querying users table
-    db.execute(
-        text("SELECT set_config('app.current_tenant_id', :tid, false)"),
-        {"tid": tenant_id},
-    )
 
     if requester_id:
         resolved_requester_id = uuid.UUID(str(requester_id))
@@ -390,14 +379,8 @@ class ComplianceWorkflowRunner:
             updated_at=now,
         )
 
-        # Set tenant context for RLS, create record, then clear
-        self.db.execute(
-            text("SELECT set_config('app.current_tenant_id', :tid, false)"),
-            {"tid": tenant_id},
-        )
         self.db.add(db_workflow)
         self.db.commit()
-        self.db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
 
         emit_audit_event(workflow_id, tenant_id, request_id or "",
                          "START→GATHER_EVIDENCE", "workflow_start", "running")

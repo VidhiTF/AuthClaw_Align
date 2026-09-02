@@ -33,6 +33,7 @@ from memory import add_message, delete_session_history, get_history, list_sessio
 
 from startup.validation import validate_environment
 from startup.initialization import initialize_provider
+from database import validate_database_security
 from policy import compile_policy_to_rego, evaluate_opa_policy, get_policy, load_policy
 from services.gateway_service import (
     GatewayProviderConfigurationError,
@@ -52,7 +53,7 @@ from services.enterprise_identity import (
     set_provider_enabled,
     upsert_provider_config,
 )
-from services.tenant_context import auth_lookup_context, get_current_tenant_id, tenant_context
+from services.tenant_context import get_current_tenant_id, tenant_context
 from services.control_plane_auth import verify_control_plane_request
 
 # Set up basic logging
@@ -64,6 +65,7 @@ API_KEY = os.getenv("AUTHCLAW_TEST_API_KEY", "")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_environment()
+    validate_database_security()
     initialize_provider()
     
     # 4. Start background compliance watcher for watched_documents folder.
@@ -437,6 +439,13 @@ def encrypt_secret(raw_value: str) -> str:
 def decrypt_secret(encrypted_value: str) -> str:
     return SecretManager().decrypt_from_database(encrypted_value)
 
+def decrypt_totp_secret(stored_value: Optional[str]) -> Optional[str]:
+    if not stored_value:
+        return None
+    if stored_value.startswith(("v2:aes256gcm:", "v3:envelope:")):
+        return decrypt_secret(stored_value)
+    return stored_value
+
 def resolve_tenant(x_api_key: str, authorization: str = None) -> int:
     context_tenant_id = get_current_tenant_id()
     if context_tenant_id is not None:
@@ -463,27 +472,12 @@ def resolve_tenant(x_api_key: str, authorization: str = None) -> int:
     # 3. Check in database
     from database import engine
     from sqlalchemy import text
-    with auth_lookup_context(), engine.connect() as conn:
-        row = conn.execute(
-            text("""
-                SELECT tenant_id
-                FROM tenant_api_keys
-                WHERE key_hash = :h
-                  AND revoked_at IS NULL
-                  AND (expires_at IS NULL OR expires_at > NOW())
-            """),
-            {"h": h}
-        ).fetchone()
-        if not row:
+    with engine.begin() as conn:
+        tenant_id = conn.execute(
+            text("SELECT resolve_tenant_api_key(:h)"), {"h": h}
+        ).scalar()
+        if tenant_id is None:
             raise HTTPException(status_code=401, detail="Invalid API Key.")
-        
-        tenant_id = row[0]
-        # Update last_used_at
-        conn.execute(
-            text("UPDATE tenant_api_keys SET last_used_at = NOW() WHERE key_hash = :h"),
-            {"h": h}
-        )
-        conn.commit()
         return tenant_id
 
 
@@ -567,14 +561,11 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
         if not principal:
             raise HTTPException(status_code=401, detail="Invalid control-plane signature.")
         from database import engine
-        with auth_lookup_context(), engine.begin() as conn:
+        with engine.begin() as conn:
             tenant_id = conn.execute(
                 text(
                     """
-                    INSERT INTO tenants (name, status, control_plane_id)
-                    VALUES (:name, 'active', :control_plane_id)
-                    ON CONFLICT (control_plane_id) DO UPDATE SET status = 'active'
-                    RETURNING id
+                    SELECT upsert_control_plane_tenant(:name, :control_plane_id)
                     """
                 ),
                 {
@@ -613,8 +604,13 @@ async def tenant_database_context_middleware(request: Request, call_next):
     if not _is_public_or_auth_path(request.url.path):
         try:
             tenant_id = _tenant_id_from_request_headers(request)
-        except HTTPException:
-            tenant_id = None
+        except HTTPException as exc:
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
+            response.headers["X-Request-ID"] = request_id
+            return response
     request.state.correlation_id = request_id
     request.state.tenant_id = tenant_id
 
@@ -628,9 +624,10 @@ async def tenant_database_context_middleware(request: Request, call_next):
 
 def _rbac_enforcement_enabled() -> bool:
     explicit = os.getenv("AUTHCLAW_ENABLE_RBAC_ENFORCEMENT")
-    if explicit is not None:
+    automated_test = bool(os.getenv("PYTEST_CURRENT_TEST")) or env_bool("AUTHCLAW_AUTOMATED_TEST_MODE", False)
+    if explicit is not None and automated_test:
         return explicit.strip().lower() in {"1", "true", "yes", "on"}
-    return os.getenv("AUTHCLAW_ENV", "development").lower() in {"production", "prod"}
+    return True
 
 
 @app.middleware("http")
@@ -763,7 +760,7 @@ def _approval_totp_secret(record: dict, user_payload: dict) -> Optional[str]:
                 {"user_id": user_id, "tenant_id": tenant_id},
             ).scalar()
             if secret:
-                return secret
+                return decrypt_totp_secret(secret)
         if username:
             secret = conn.execute(
                 text("""
@@ -776,11 +773,12 @@ def _approval_totp_secret(record: dict, user_payload: dict) -> Optional[str]:
                 {"email": username, "tenant_id": tenant_id},
             ).scalar()
             if secret:
-                return secret
-        return conn.execute(
+                return decrypt_totp_secret(secret)
+        secret = conn.execute(
             text("SELECT totp_secret FROM tenants WHERE id = :id"),
-            {"id": tenant_id}
+            {"id": tenant_id},
         ).scalar()
+        return decrypt_totp_secret(secret)
 
 def _verify_approval_stage_mfa(record: dict, user_payload: dict, payload: dict, stage: str, expiry_at: str) -> Tuple[bool, str, int]:
     mfa_code = payload.get("mfa_code") if isinstance(payload, dict) else None
@@ -2261,8 +2259,7 @@ def get_readiness():
     try:
         from database import engine
         from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        validate_database_security()
         checks["database"] = "healthy"
     except Exception:
         checks["database"] = "unhealthy"
@@ -4606,12 +4603,10 @@ def _tenant_id_from_domain(domain: Optional[str]) -> Optional[int]:
     from database import engine
     from sqlalchemy import text
 
-    with auth_lookup_context(), engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT id FROM tenants WHERE lower(domain) = lower(:domain) AND status = 'active' LIMIT 1"),
-            {"domain": domain},
-        ).fetchone()
-    return row[0] if row else None
+    with engine.connect() as conn:
+        return conn.execute(
+            text("SELECT resolve_tenant_domain(:domain)"), {"domain": domain}
+        ).scalar()
 
 
 def _public_oidc_providers_for_tenant(tenant_id: int) -> List[dict]:
@@ -4978,7 +4973,7 @@ def activate_verified_registration(conn, registration) -> int:
     domain = registration._mapping["domain"]
     full_name = registration._mapping["full_name"]
     password_hash = registration._mapping["password_hash"]
-    totp_secret = registration._mapping["totp_secret"]
+    totp_secret = encrypt_secret(decrypt_totp_secret(registration._mapping["totp_secret"]))
     mfa_enabled = not disable_mfa_for_testing()
 
     tenant_id = conn.execute(

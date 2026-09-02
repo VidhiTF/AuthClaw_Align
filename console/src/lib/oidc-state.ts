@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import fs from "fs";
 import path from "path";
-import { sessionKeyRing } from "./session-store.ts";
+import { sessionKeyRing } from "./session-keys.ts";
 
 const STATES_FILE = process.env.AUTHCLAW_OIDC_STATE_STORE_PATH || path.join(/* turbopackIgnore: true */ process.cwd(), ".authclaw", "oidc-states.json");
 

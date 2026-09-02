@@ -1,4 +1,6 @@
 """SQLAlchemy session management"""
+from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 
 from sqlalchemy import create_engine, event, text
@@ -15,6 +17,39 @@ engine = create_engine(
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+_database_auth_context: ContextVar[tuple[str, str] | None] = ContextVar(
+    "database_auth_context", default=None
+)
+
+
+@contextmanager
+def database_auth_context(kind: str, credential_hash: str):
+    if kind not in {"api_key", "session"} or not credential_hash:
+        raise ValueError("A validated database credential is required")
+    token = _database_auth_context.set((kind, credential_hash))
+    try:
+        yield
+    finally:
+        _database_auth_context.reset(token)
+
+
+@event.listens_for(Session, "after_begin")
+def bind_authenticated_database_context(_session, _transaction, connection) -> None:
+    auth_context = _database_auth_context.get()
+    if auth_context is None or connection.dialect.name != "postgresql":
+        return
+    kind, credential_hash = auth_context
+    resolver = (
+        "authn.bind_session_context"
+        if kind == "session"
+        else "authn.bind_api_key_context"
+    )
+    bound = connection.execute(
+        text(f"SELECT tenant_id FROM {resolver}(:credential_hash)"),
+        {"credential_hash": credential_hash},
+    ).first()
+    if not bound:
+        raise RuntimeError("Authenticated database context expired")
 
 
 @event.listens_for(engine, "checkout")
@@ -33,14 +68,3 @@ def verify_runtime_database_identity(dbapi_connection, _connection_record, _conn
             )
     finally:
         cursor.close()
-
-
-@event.listens_for(Session, "after_begin")
-def apply_tenant_context(session: Session, _transaction, connection) -> None:
-    """Reapply tenant RLS context whenever commit/rollback starts a new transaction."""
-    tenant_id = session.info.get("tenant_id")
-    if tenant_id:
-        connection.execute(
-            text("SELECT set_config('app.current_tenant_id', :tenant_id, true)"),
-            {"tenant_id": str(tenant_id)},
-        )

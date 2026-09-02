@@ -3,6 +3,8 @@ import os
 from ipaddress import ip_address
 from urllib.parse import urlparse
 
+from sqlalchemy import text
+
 
 _DEMO_VALUES = {
     "change-this-demo-jwt-secret",
@@ -129,3 +131,58 @@ def validate_production_environment() -> None:
     if errors:
         joined = "; ".join(errors)
         raise RuntimeError(f"Production environment validation failed: {joined}")
+
+def validate_database_security(connection) -> None:
+    """Refuse startup when the authentication/RLS boundary is incomplete."""
+    if connection.dialect.name != "postgresql":
+        return
+
+    expected_revision = os.getenv("AUTHCLAW_EXPECTED_DB_REVISION", "041")
+    failures: list[str] = []
+    if not connection.execute(
+        text("SELECT EXISTS (SELECT 1 FROM public.alembic_version WHERE version_num = :revision)"),
+        {"revision": expected_revision},
+    ).scalar_one():
+        failures.append(f"missing Alembic revision {expected_revision}")
+
+    function_security = connection.execute(text("""
+        SELECT
+            r.rolname = 'authclaw_auth_definer' AS correct_owner,
+            p.prosecdef AS security_definer,
+            NOT EXISTS (
+                SELECT 1
+                FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+                WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+            ) AS public_execute_revoked
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        JOIN pg_roles r ON r.oid = p.proowner
+        WHERE n.nspname = 'authn'
+          AND p.proname = 'bind_session_context'
+          AND pg_get_function_identity_arguments(p.oid) = 'p_token_hash text'
+    """)).mappings().first()
+    if not function_security or not all(function_security.values()):
+        failures.append("authn.bind_session_context ownership/ACL is insecure")
+
+    if connection.execute(
+        text("SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname = current_user")
+    ).scalar_one():
+        failures.append("runtime database role can bypass RLS")
+
+    missing_rls = connection.execute(text("""
+        SELECT count(*)
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind = 'r'
+          AND EXISTS (
+              SELECT 1 FROM pg_attribute a
+              WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped
+          )
+          AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)
+    """)).scalar_one()
+    if missing_rls:
+        failures.append(f"{missing_rls} tenant tables lack forced RLS")
+
+    if failures:
+        raise RuntimeError("Database security validation failed: " + "; ".join(failures))

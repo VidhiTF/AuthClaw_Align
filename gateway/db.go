@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -11,6 +12,55 @@ import (
 )
 
 var DB *sql.DB
+var skipDatabaseSecurityValidationForTests bool
+
+// ValidateDatabaseSecurity refuses startup against a stale or insecure database.
+func ValidateDatabaseSecurity() error {
+	var secure bool
+	err := DB.QueryRow(`
+		SELECT
+			EXISTS (SELECT 1 FROM public.alembic_version WHERE version_num = '041')
+			AND EXISTS (
+				SELECT 1
+				FROM pg_proc p
+				JOIN pg_namespace n ON n.oid = p.pronamespace
+				JOIN pg_roles r ON r.oid = p.proowner
+				WHERE n.nspname = 'authn'
+				  AND p.proname IN ('bind_session_context', 'bind_api_key_context')
+				  AND p.prosecdef
+				  AND r.rolname = 'authclaw_auth_definer'
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
+					WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+				  )
+				GROUP BY n.nspname
+				HAVING count(*) = 2
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM pg_roles
+				WHERE rolname = current_user AND (rolsuper OR rolbypassrls)
+			)
+			AND NOT EXISTS (
+				SELECT 1
+				FROM pg_class c
+				JOIN pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname = 'public' AND c.relkind = 'r'
+				  AND EXISTS (
+					SELECT 1 FROM pg_attribute a
+					WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped
+				  )
+				  AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)
+			)
+	`).Scan(&secure)
+	if err != nil {
+		return fmt.Errorf("database security validation query failed: %w", err)
+	}
+	if !secure {
+		return fmt.Errorf("database security validation failed")
+	}
+	return nil
+}
 
 // InitDB initializes the database connection
 func InitDB() {
@@ -33,6 +83,13 @@ func InitDB() {
 
 	if err = DB.Ping(); err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	if !skipDatabaseSecurityValidationForTests {
+		err = ValidateDatabaseSecurity()
+	}
+	if err != nil {
+		log.Fatalf("Refusing startup: %v", err)
 	}
 
 	maxOpenConns := envInt("GATEWAY_DB_MAX_OPEN_CONNS", 25)

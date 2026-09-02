@@ -91,11 +91,6 @@ def create_evidence(
     linked_workflow_id : When provided, an EvidenceLink of type "workflow" is also created.
     """
     evidence_id = uuid.uuid4()
-    db.execute(
-        text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"),
-        {"tenant_id": str(tenant_id)},
-    )
-
     created_at = datetime.now(tz=timezone.utc)
     record = EvidenceRecord(
         id=evidence_id,
@@ -140,10 +135,6 @@ def create_evidence(
 
     try:
         db.commit()
-        db.execute(
-            text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"),
-            {"tenant_id": str(tenant_id)},
-        )
         db.refresh(record)
     except Exception as exc:
         db.rollback()
@@ -291,12 +282,6 @@ def link_evidence(
         eid = uuid.UUID(evidence_id)
     except ValueError as exc:
         raise ValueError(f"Invalid evidence_id: {evidence_id}") from exc
-
-    db.execute(
-        text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"),
-        {"tenant_id": str(tenant_id)},
-    )
-
     link = EvidenceLink(
         id=uuid.uuid4(),
         tenant_id=uuid.UUID(tenant_id),

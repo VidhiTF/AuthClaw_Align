@@ -9,7 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, database_auth_context
 from app.db.dependencies import get_db
 from app.core.crypto import (
     SECRET_ENVELOPE_PREFIX,
@@ -120,81 +120,80 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Invalid Authorization Format. Expected: Bearer <key>"}
             )
 
-        api_key = parts[1]
-        key_hash = hash_key(api_key)
+        credential = parts[1]
+        credential_hash = hash_key(credential)
+        credential_kind = (
+            "session" if credential.startswith("acl_session_") else "api_key"
+        )
+        resolver = (
+            "authn.bind_session_context"
+            if credential_kind == "session"
+            else "authn.bind_api_key_context"
+        )
 
         db = SessionLocal()
         try:
-            # Query the resolve_api_key function (bypasses RLS due to SECURITY DEFINER)
             result = db.execute(
-                text("SELECT id, tenant_id, scopes, created_by FROM resolve_api_key(:key_hash)"),
-                {"key_hash": key_hash}
+                text(
+                    f"SELECT credential_id, tenant_id, scopes, user_id, role, "
+                    f"platform_role, user_is_active, tenant_status "
+                    f"FROM {resolver}(:credential_hash)"
+                ),
+                {"credential_hash": credential_hash},
             ).first()
 
             if not result:
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"detail": "Unauthorized: Invalid or expired API Key"}
+                    content={"detail": "Unauthorized: Invalid or expired credential"}
                 )
-
-            db.execute(
-                text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"),
-                {"tenant_id": str(result.tenant_id)},
-            )
-            principal = db.execute(
-                text(
-                    """
-                    SELECT u.role, u.platform_role, u.is_active, t.status AS tenant_status
-                    FROM users u
-                    JOIN tenants t ON t.id = u.tenant_id
-                    WHERE u.id = :user_id AND u.tenant_id = :tenant_id
-                    """
-                ),
-                {"user_id": str(result.created_by), "tenant_id": str(result.tenant_id)},
-            ).first()
-
-            if not principal or not principal.is_active:
+            if not result.user_is_active:
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     content={"detail": "Unauthorized: User is inactive or not found"}
                 )
             tenant_lifecycle_path = canonical_path in {"/v1/tenants/current", "/v1/tenants/current/status"}
-            if principal.tenant_status != "active" and not tenant_lifecycle_path:
+            if result.tenant_status != "active" and not tenant_lifecycle_path:
                 return JSONResponse(
                     status_code=status.HTTP_403_FORBIDDEN,
                     content={"detail": "Forbidden: Tenant is not active"}
                 )
 
-            db.execute(
-                text(
-                    """
-                    UPDATE api_keys
-                    SET last_used = NOW(),
-                        last_used_ip = :ip,
-                        last_used_user_agent = :user_agent,
-                        last_used_request_id = :request_id,
-                        updated_at = NOW()
-                    WHERE id = :api_key_id
-                    """
-                ),
-                {
-                    "api_key_id": str(result.id),
-                    "ip": request.client.host if request.client else "",
-                    "user_agent": request.headers.get("user-agent", "")[:512],
-                    "request_id": request.headers.get("x-request-id", "")[:255],
-                },
-            )
+            if credential_kind == "api_key":
+                db.execute(
+                    text(
+                        """
+                        UPDATE api_keys
+                           SET last_used = NOW(), last_used_ip = :ip,
+                               last_used_user_agent = :user_agent,
+                               last_used_request_id = :request_id,
+                               updated_at = NOW()
+                         WHERE id = :credential_id
+                        """
+                    ),
+                    {
+                        "credential_id": str(result.credential_id),
+                        "ip": request.client.host if request.client else "",
+                        "user_agent": request.headers.get("user-agent", "")[:512],
+                        "request_id": request.headers.get("x-request-id", "")[:255],
+                    },
+                )
             db.commit()
 
             # Inject tenant info, scopes, and role into request state.
             request.state.tenant_id = result.tenant_id
             request.state.scopes = result.scopes
-            request.state.user_id = result.created_by
-            request.state.api_key_id = result.id
-            request.state.user_role = _normalize_role(principal.role)
+            request.state.user_id = result.user_id
+            request.state.credential_id = result.credential_id
+            request.state.credential_kind = credential_kind
+            request.state.credential_hash = credential_hash
+            request.state.api_key_id = (
+                result.credential_id if credential_kind == "api_key" else None
+            )
+            request.state.user_role = _normalize_role(result.role)
             request.state.tenant_role = request.state.user_role
-            request.state.platform_role = str(principal.platform_role).upper()
-            request.state.user_is_active = bool(principal.is_active)
+            request.state.platform_role = str(result.platform_role).upper()
+            request.state.user_is_active = bool(result.user_is_active)
         except Exception as e:
             db.rollback()
             logger.exception("Authentication middleware failed")
@@ -203,27 +202,32 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Authentication failed"}
             )
         finally:
-            try:
-                db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
-            except Exception:
-                pass
             db.close()
 
-        return await call_next(request)
+        with database_auth_context(credential_kind, credential_hash):
+            return await call_next(request)
 
 
 def get_tenant_db(request: Request, db: Session = Depends(get_db)) -> Generator[Session, None, None]:
-    """
-    Dependency that sets the tenant context on the DB session to enforce RLS
-    and clears it when the session is closed/returned to the pool.
-    """
-    tenant_id = getattr(request.state, "tenant_id", None)
-    if tenant_id:
-        db.info["tenant_id"] = str(tenant_id)
-    try:
-        yield db
-    finally:
-        db.info.pop("tenant_id", None)
+    """Re-bind the vetted credential inside the handler transaction."""
+    kind = getattr(request.state, "credential_kind", None)
+    credential_hash = getattr(request.state, "credential_hash", None)
+    expected_tenant = getattr(request.state, "tenant_id", None)
+    if kind not in {"api_key", "session"} or not credential_hash:
+        raise HTTPException(status_code=401, detail="Authentication context missing")
+    resolver = (
+        "authn.bind_session_context"
+        if kind == "session"
+        else "authn.bind_api_key_context"
+    )
+    bound = db.execute(
+        text(f"SELECT tenant_id FROM {resolver}(:credential_hash)"),
+        {"credential_hash": credential_hash},
+    ).first()
+    if not bound or str(bound.tenant_id) != str(expected_tenant):
+        db.rollback()
+        raise HTTPException(status_code=401, detail="Authentication context expired")
+    yield db
 
 
 def require_scopes(required_scopes: List[str]):
