@@ -16,7 +16,7 @@ from sqlalchemy import text
 
 from database import engine
 from services.secret_manager import SecretManager
-from services.tenant_context import auth_lookup_context, tenant_context
+from services.tenant_context import tenant_context
 
 
 SUPPORTED_PROVIDER_TYPES = {
@@ -394,15 +394,12 @@ def create_authorization_request(tenant_id: int, provider_id: int) -> Dict[str, 
 
 def _load_state(state: str) -> Dict[str, Any]:
     state_hash = _hash_token(state)
-    with auth_lookup_context(), engine.connect() as conn:
+    with engine.connect() as conn:
         row = conn.execute(
             text(
                 """
                 SELECT state_hash, tenant_id, provider_id, code_verifier, nonce, redirect_uri
-                FROM oidc_login_states
-                WHERE state_hash = :state_hash
-                  AND used_at IS NULL
-                  AND expires_at > NOW()
+                FROM load_oidc_login_state(:state_hash)
                 """
             ),
             {"state_hash": state_hash},
@@ -448,34 +445,18 @@ def exchange_authorization_code(provider: OIDCProviderConfig, code: str, code_ve
 
 def _load_cached_jwks(provider_id: int, allow_stale: bool = False) -> Optional[Dict[str, Any]]:
     cutoff_seconds = JWKS_STALE_TTL_SECONDS if allow_stale else 0
-    with auth_lookup_context(), engine.connect() as conn:
-        if allow_stale:
-            row = conn.execute(
-                text(
-                    """
-                    SELECT jwks_json
-                    FROM oidc_jwks_cache
-                    WHERE provider_id = :provider_id
-                      AND refreshed_at > NOW() - (:cutoff_seconds * INTERVAL '1 second')
-                    """
-                ),
-                {"provider_id": provider_id, "cutoff_seconds": cutoff_seconds},
-            ).fetchone()
-        else:
-            row = conn.execute(
-                text(
-                    """
-                    SELECT jwks_json
-                    FROM oidc_jwks_cache
-                    WHERE provider_id = :provider_id
-                      AND expires_at > NOW()
-                    """
-                ),
-                {"provider_id": provider_id},
-            ).fetchone()
-    if not row:
+    with engine.connect() as conn:
+        jwks = conn.execute(
+            text("SELECT load_oidc_jwks(:provider_id, :allow_stale, :cutoff)"),
+            {
+                "provider_id": provider_id,
+                "allow_stale": allow_stale,
+                "cutoff": cutoff_seconds,
+            },
+        ).scalar()
+    if not jwks:
         return None
-    return _json_loads(row[0], None)
+    return _json_loads(jwks, None)
 
 
 def refresh_jwks(provider: OIDCProviderConfig) -> Dict[str, Any]:

@@ -7,7 +7,6 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, require_roles, require_scopes
@@ -80,11 +79,6 @@ def _public_share_or_404(db: Session, token: str) -> TrustCenterShare:
     if state != "active":
         raise HTTPException(status_code=403, detail=f"Trust Center share is {state}")
     return share
-
-
-def _clear_public_rls_context(db: Session) -> None:
-    db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
-    db.execute(text("SELECT set_config('app.trust_center_token_hash', '', false)"))
 
 
 def _require_auditor_access(request: Request, share: TrustCenterShare, raw_token: str) -> None:
@@ -192,7 +186,7 @@ def get_public_trust_center(
         )
         return package
     finally:
-        _clear_public_rls_context(db)
+        pass
 
 
 @router.get("/public/{token}/signed-export")
@@ -220,7 +214,7 @@ def get_public_trust_center_export(
         )
         return artifact
     finally:
-        _clear_public_rls_context(db)
+        pass
 
 
 @router.post("/public/{token}/request-access")
@@ -238,7 +232,7 @@ def request_public_trust_center_access(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        _clear_public_rls_context(db)
+        pass
 
 
 @router.post("/public/{token}/verify-access")
@@ -254,7 +248,7 @@ def verify_public_trust_center_access(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        _clear_public_rls_context(db)
+        pass
 
 
 @router.post("/public/verify")

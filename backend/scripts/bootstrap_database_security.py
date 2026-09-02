@@ -21,7 +21,36 @@ BACKEND_RUNTIME_FUNCTIONS = {
     "resolve_api_key",
     "resolve_trust_center_share",
 }
+AUTH_DEFINER_ROLE = os.getenv("AUTH_DEFINER_ROLE", "authclaw_auth_definer")
+AGENT_AUTH_DEFINER_ROLE = os.getenv(
+    "AGENT_AUTH_DEFINER_ROLE", "authclaw_agent_auth_definer"
+)
+AUTHN_RUNTIME_FUNCTIONS = {
+    "bind_api_key_context",
+    "bind_session_context",
+    "consume_onboarding_invite_for_otp",
+    "confirm_password_reset",
+    "create_password_reset",
+    "create_session",
+    "create_tenant",
+    "current_tenant_id",
+    "lookup_password_identities",
+    "lookup_oidc_config",
+    "issue_oidc_session",
+    "prepare_onboarding_invite_resend",
+    "revoke_session",
+    "revoke_user_sessions",
+    "set_password_reset_delivery",
+}
 
+
+def acquire_initialization_lock(conn) -> None:
+    """Bound catalog waits and serialize every database-security phase."""
+    conn.execute(text("SET LOCAL lock_timeout = '15s'"))
+    conn.execute(text("SET LOCAL statement_timeout = '120s'"))
+    conn.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended('authclaw.database.security', 0))")
+    )
 
 @dataclass(frozen=True)
 class Role:
@@ -123,6 +152,42 @@ def ensure_login_role(conn, role: Role) -> None:
     )
 
 
+def ensure_auth_definer_role(conn) -> None:
+    require_identifier(AUTH_DEFINER_ROLE, "AUTH_DEFINER_ROLE")
+    quote = conn.dialect.identifier_preparer.quote
+    role = quote(AUTH_DEFINER_ROLE)
+    exists = conn.execute(
+        text("SELECT 1 FROM pg_roles WHERE rolname = :role"),
+        {"role": AUTH_DEFINER_ROLE},
+    ).fetchone()
+    if not exists:
+        conn.execute(text(f"CREATE ROLE {role} NOLOGIN"))
+    conn.execute(
+        text(
+            f"ALTER ROLE {role} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE BYPASSRLS"
+        )
+    )
+
+
+def ensure_agent_auth_definer_role(conn) -> None:
+    require_identifier(AGENT_AUTH_DEFINER_ROLE, "AGENT_AUTH_DEFINER_ROLE")
+    quote = conn.dialect.identifier_preparer.quote
+    role = quote(AGENT_AUTH_DEFINER_ROLE)
+    exists = conn.execute(
+        text("SELECT 1 FROM pg_roles WHERE rolname = :role"),
+        {"role": AGENT_AUTH_DEFINER_ROLE},
+    ).fetchone()
+    if not exists:
+        conn.execute(text(f"CREATE ROLE {role} NOLOGIN"))
+    conn.execute(
+        text(
+            f"ALTER ROLE {role} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE BYPASSRLS"
+        )
+    )
+
+
 def configure_default_privileges(conn, migrator: Role, runtime: Role) -> None:
     quote = conn.dialect.identifier_preparer.quote
     owner = quote(migrator.name)
@@ -149,10 +214,33 @@ def configure_default_privileges(conn, migrator: Role, runtime: Role) -> None:
     )
 
 
+def prepare_agent_security_objects_for_migration(conn, agent_migrator: Role) -> None:
+    quote = conn.dialect.identifier_preparer.quote
+    migrator = quote(agent_migrator.name)
+    table_name = conn.execute(
+        text("SELECT to_regclass('agent.auth_context_secret')::text")
+    ).scalar_one_or_none()
+    if table_name:
+        conn.execute(text(f"ALTER TABLE {table_name} OWNER TO {migrator}"))
+    signatures = conn.execute(
+        text(
+            "SELECT p.oid::regprocedure::text FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "JOIN pg_roles r ON r.oid=p.proowner "
+            "WHERE n.nspname='agent' AND r.rolname=:definer"
+        ),
+        {"definer": AGENT_AUTH_DEFINER_ROLE},
+    ).scalars()
+    for signature in signatures:
+        conn.execute(text(f"ALTER FUNCTION {signature} OWNER TO {migrator}"))
+
 def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> None:
     quote = conn.dialect.identifier_preparer.quote
     database = quote(database_name)
     backend_migrator, backend_runtime, agent_migrator, agent_runtime = roles
+
+    ensure_auth_definer_role(conn)
+    ensure_agent_auth_definer_role(conn)
 
     for role in roles:
         ensure_login_role(conn, role)
@@ -185,6 +273,17 @@ def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> N
         text(f"GRANT USAGE, CREATE ON SCHEMA public TO {quote(backend_migrator.name)}")
     )
     conn.execute(text(f"GRANT USAGE ON SCHEMA public TO {quote(backend_runtime.name)}"))
+    conn.execute(
+        text(
+            f"CREATE SCHEMA IF NOT EXISTS authn "
+            f"AUTHORIZATION {quote(backend_migrator.name)}"
+        )
+    )
+    conn.execute(text(f"ALTER SCHEMA authn OWNER TO {quote(backend_migrator.name)}"))
+    conn.execute(text("REVOKE ALL ON SCHEMA authn FROM PUBLIC"))
+    conn.execute(
+        text(f"GRANT USAGE, CREATE ON SCHEMA authn TO {quote(backend_migrator.name)}")
+    )
 
     conn.execute(
         text(
@@ -197,6 +296,7 @@ def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> N
         text(f"GRANT USAGE, CREATE ON SCHEMA agent TO {quote(agent_migrator.name)}")
     )
     conn.execute(text(f"GRANT USAGE ON SCHEMA agent TO {quote(agent_runtime.name)}"))
+    prepare_agent_security_objects_for_migration(conn, agent_migrator)
 
     configure_default_privileges(conn, backend_migrator, backend_runtime)
     configure_default_privileges(conn, agent_migrator, agent_runtime)
@@ -254,6 +354,141 @@ def grant_backend_functions(conn, backend_runtime: Role) -> None:
         conn.execute(text(f"GRANT EXECUTE ON FUNCTION {signature} TO {quoted_role}"))
 
 
+def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
+    quote = conn.dialect.identifier_preparer.quote
+    definer = quote(AUTH_DEFINER_ROLE)
+    runtime = quote(backend_runtime.name)
+    migrator = quote(configured_roles()[0].name)
+
+    for role in (runtime, migrator):
+        conn.execute(text(f"REVOKE {definer} FROM {role}"))
+    conn.execute(text(f"GRANT USAGE ON SCHEMA public, authn TO {definer}"))
+    conn.execute(
+        text(
+            f"GRANT EXECUTE ON FUNCTION public.gen_random_uuid(), "
+            f"public.hmac(bytea, bytea, text), "
+            f"public.digest(bytea, text) TO {definer}"
+        )
+    )
+    conn.execute(
+        text(
+            f"GRANT SELECT ON public.tenants, public.users, public.api_keys, "
+            f"public.tenant_oidc_configs, public.onboarding_email_otps, "+
+            f"public.trust_center_shares "
+            f"TO {definer}"
+        )
+    )
+    conn.execute(
+        text(
+            f"GRANT INSERT, UPDATE ON public.onboarding_email_otps TO {definer}; "
+            f"GRANT UPDATE ON public.users "
+            f"TO {definer}"
+        )
+    )
+    conn.execute(text(f"GRANT USAGE ON SCHEMA authn TO {runtime}"))
+
+    tables = conn.execute(
+        text(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'authn' "
+            "AND tablename IN ('context_secret', 'sessions')"
+        )
+    ).scalars()
+    for table_name in tables:
+        conn.execute(
+            text(f"ALTER TABLE authn.{quote(table_name)} OWNER TO {definer}")
+        )
+
+    signatures = conn.execute(
+        text(
+            "SELECT p.oid::regprocedure::text, p.proname "
+            "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'authn'"
+        )
+    ).all()
+    for signature, function_name in signatures:
+        conn.execute(text(f"ALTER FUNCTION {signature} OWNER TO {definer}"))
+        conn.execute(text(f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC"))
+        if function_name in AUTHN_RUNTIME_FUNCTIONS:
+            conn.execute(text(f"GRANT EXECUTE ON FUNCTION {signature} TO {runtime}"))
+
+    for resolver_name in ("resolve_api_key", "resolve_trust_center_share"):
+        resolver = conn.execute(
+            text(f"SELECT to_regprocedure('public.{resolver_name}(text)')::text")
+        ).scalar_one_or_none()
+        if resolver:
+            conn.execute(text(f"ALTER FUNCTION {resolver} OWNER TO {definer}"))
+            conn.execute(text(f"REVOKE ALL ON FUNCTION {resolver} FROM PUBLIC"))
+            conn.execute(text(f"GRANT EXECUTE ON FUNCTION {resolver} TO {runtime}"))
+
+    conn.execute(text("REVOKE ALL ON ALL TABLES IN SCHEMA authn FROM PUBLIC"))
+    conn.execute(text(f"REVOKE ALL ON ALL TABLES IN SCHEMA authn FROM {runtime}"))
+
+
+def secure_agent_authentication_boundary(
+    conn, agent_migrator: Role, agent_runtime: Role
+) -> None:
+    quote = conn.dialect.identifier_preparer.quote
+    definer = quote(AGENT_AUTH_DEFINER_ROLE)
+    runtime = quote(agent_runtime.name)
+    migrator = quote(agent_migrator.name)
+    for role in (runtime, migrator):
+        conn.execute(text(f"REVOKE {definer} FROM {role}"))
+    conn.execute(text(f"GRANT USAGE ON SCHEMA agent, public TO {definer}"))
+    conn.execute(
+        text(f"GRANT EXECUTE ON FUNCTION public.hmac(bytea, bytea, text) TO {definer}")
+    )
+    conn.execute(
+        text(
+            "GRANT SELECT ON agent.tenant_api_keys, agent.tenants, "
+            "agent.oidc_login_states, agent.oidc_jwks_cache "
+            f"TO {definer}"
+        )
+    )
+    conn.execute(
+        text(
+            "GRANT INSERT, UPDATE ON agent.tenants TO " + definer
+        )
+    )
+    conn.execute(
+        text("GRANT UPDATE ON agent.tenant_api_keys TO " + definer)
+    )
+    conn.execute(
+        text("GRANT USAGE, SELECT ON SEQUENCE agent.tenants_id_seq TO " + definer)
+    )
+    context_secret = conn.execute(
+        text("SELECT to_regclass('agent.auth_context_secret')::text")
+    ).scalar_one_or_none()
+    if context_secret:
+        conn.execute(text(f"ALTER TABLE {context_secret} OWNER TO {definer}"))
+        conn.execute(text(f"REVOKE ALL ON {context_secret} FROM {runtime}"))
+    function_names = {
+        "set_agent_context",
+        "bind_agent_context",
+        "agent_current_tenant_id",
+        "resolve_tenant_api_key",
+        "resolve_tenant_domain",
+        "upsert_control_plane_tenant",
+        "load_oidc_login_state",
+        "load_oidc_jwks",
+    }
+    signatures = conn.execute(
+        text(
+            "SELECT p.oid::regprocedure::text, p.proname FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "WHERE n.nspname='agent' AND p.proname=ANY(:names)"
+        ),
+        {"names": sorted(function_names)},
+    ).all()
+    for signature, function_name in signatures:
+        conn.execute(text(f"ALTER FUNCTION {signature} OWNER TO {definer}"))
+        conn.execute(text(f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC"))
+        if function_name != "set_agent_context":
+            conn.execute(text(f"GRANT EXECUTE ON FUNCTION {signature} TO {runtime}"))
+    conn.execute(
+        text(f"REVOKE ALL ON agent.onboarding_registrations FROM {runtime}")
+    )
+
+
 def finalize(conn, roles: tuple[Role, Role, Role, Role]) -> None:
     quote = conn.dialect.identifier_preparer.quote
     backend_migrator, backend_runtime, agent_migrator, agent_runtime = roles
@@ -264,6 +499,8 @@ def finalize(conn, roles: tuple[Role, Role, Role, Role]) -> None:
     )
     secure_owned_functions(conn, agent_migrator.name, "agent", ())
     grant_backend_functions(conn, backend_runtime)
+    secure_authentication_boundary(conn, backend_runtime)
+    secure_agent_authentication_boundary(conn, agent_migrator, agent_runtime)
 
     for role in (backend_runtime, agent_runtime):
         other_schema = "agent" if role.schema == "public" else "public"
@@ -304,6 +541,7 @@ def main() -> None:
     roles = configured_roles()
     engine = create_engine(database_url, pool_pre_ping=True)
     with engine.begin() as conn:
+        acquire_initialization_lock(conn)
         if args.phase == "prepare":
             prepare(conn, database_name, roles)
         else:

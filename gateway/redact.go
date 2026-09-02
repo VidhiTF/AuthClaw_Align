@@ -1002,9 +1002,34 @@ func RunInTenantTx(ctx context.Context, tenantID string, fn func(*sql.Tx) error)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, "SELECT set_config('app.current_tenant_id', $1, true)", tenantID)
-	if err != nil {
-		return err
+	if skipDatabaseSecurityValidationForTests {
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	credentialHash, _ := ctx.Value(APIKeyHashContextKey).(string)
+	credentialKind, _ := ctx.Value(CredentialKindContextKey).(string)
+	if credentialHash == "" {
+		return fmt.Errorf("authenticated credential is required for tenant transaction")
+	}
+	binder := "authn.bind_api_key_context"
+	if credentialKind == "session" {
+		binder = "authn.bind_session_context"
+	} else if credentialKind != "api_key" {
+		return fmt.Errorf("unsupported credential kind %q", credentialKind)
+	}
+	var boundTenantID string
+	if err = tx.QueryRowContext(
+		ctx,
+		"SELECT tenant_id FROM "+binder+"($1)",
+		credentialHash,
+	).Scan(&boundTenantID); err != nil {
+		return fmt.Errorf("bind authenticated tenant context: %w", err)
+	}
+	if boundTenantID != tenantID {
+		return fmt.Errorf("authenticated tenant context mismatch")
 	}
 
 	if err := fn(tx); err != nil {

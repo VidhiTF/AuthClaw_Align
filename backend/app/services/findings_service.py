@@ -74,10 +74,6 @@ def create_finding(
     Create or update a finding, deduplicating by finding_key.
     finding_key = framework|finding_type|source_reference
     """
-    db.execute(
-        text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"),
-        {"tenant_id": str(tenant_id)},
-    )
     finding_key = f"{framework}|{finding_type}|{source_reference}"
     
     existing = (
@@ -110,10 +106,6 @@ def create_finding(
             existing.status = status
             
         db.commit()
-        db.execute(
-            text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"),
-            {"tenant_id": str(tenant_id)},
-        )
         db.refresh(existing)
         
         try:
@@ -146,10 +138,6 @@ def create_finding(
 
     try:
         db.commit()
-        db.execute(
-            text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"),
-            {"tenant_id": str(tenant_id)},
-        )
         db.refresh(record)
     except Exception as exc:
         db.rollback()

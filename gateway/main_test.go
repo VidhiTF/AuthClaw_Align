@@ -20,6 +20,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "DATABASE_URL must explicitly target a database ending in _test")
 		os.Exit(1)
 	}
+	skipDatabaseSecurityValidationForTests = true
 	os.Exit(m.Run())
 }
 

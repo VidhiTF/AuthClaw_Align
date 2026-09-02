@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { queryWithTenantContext } from "@/lib/db";
-import { backendFetch, getSessionContext, handleApiError } from "@/lib/api-client";
+import { backendFetch, handleApiError } from "@/lib/api-client";
 
 export const dynamic = "force-dynamic";
 
@@ -18,24 +17,12 @@ interface AuditMetricResponse {
 
 export async function GET() {
   try {
-    const context = await getSessionContext();
-    if ("response" in context) return context.response;
-
-    const tenantId = context.payload.tenantId;
-
-    const approvalsRes = await queryWithTenantContext(
-      tenantId,
-      "SELECT COUNT(*)::integer as count FROM pending_approvals WHERE tenant_id = $1 AND status = 'PENDING'",
-      [tenantId]
-    );
-    const openApprovals = approvalsRes.rows[0]?.count || 0;
-
-    const redactionsRes = await queryWithTenantContext(
-      tenantId,
-      "SELECT COUNT(*)::integer as count FROM redaction_tokens WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '24 HOURS'",
-      [tenantId]
-    );
-    const redactions24h = redactionsRes.rows[0]?.count || 0;
+    const [approvals, redactionMetrics] = await Promise.all([
+      backendFetch("/v1/workflows/approvals") as Promise<Array<{ status: string }>>,
+      backendFetch("/v1/redaction/metrics") as Promise<{ redactions_24h: number }>,
+    ]);
+    const openApprovals = approvals.filter((item) => item.status === "PENDING").length;
+    const redactions24h = redactionMetrics.redactions_24h;
 
     let requestsPerSec: number | null = null;
     let p99LatencyMs: number | null = null;

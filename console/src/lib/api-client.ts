@@ -2,7 +2,6 @@ import { createHmac } from "crypto";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { apiErrorMessage, getErrorMessage, getErrorStatus } from "./errors";
-import { sessionStore } from "./session-store";
 
 const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
 const AGENT_URL = process.env.AGENT_INTERNAL_URL || "http://localhost:8001";
@@ -38,16 +37,27 @@ export type RouteContext<T extends Record<string, string> = { id: string }> = {
 
 async function readSessionContext(invalidSessionMessage?: string) {
   const cookieStore = await cookies();
-  const sessionToken = cookieStore.get("authclaw_session")?.value;
-  if (!sessionToken) return null;
-  let payload;
-  try {
-    payload = JSON.parse(sessionToken);
-  } catch (error) {
+  const token = cookieStore.get("authclaw_session")?.value;
+  if (!token || !token.startsWith("acl_session_")) return null;
+  const validation = await fetchBackend(`${BACKEND_URL}/v1/auth/me`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
+  if (!validation.ok) {
     if (invalidSessionMessage) throw new Error(invalidSessionMessage);
-    throw error;
+    return { payload: null, session: null };
   }
-  return { payload, session: sessionStore.getSession(payload.sessionId) };
+  const principal = await validation.json();
+  const session = {
+    sessionId: token,
+    apiKey: token,
+    userId: principal.id as string,
+    tenantId: principal.tenant_id as string,
+    scopes: Array.isArray(principal.scopes) ? principal.scopes as string[] : [],
+    role: principal.role as string,
+    expiresAt: 0,
+  };
+  return { payload: principal, session };
 }
 
 async function fetchBackend(url: string, options: RequestInit) {
@@ -117,17 +127,6 @@ export async function agentFetch(path: string, options: AgentRequestOptions = {}
   const context = await readSessionContext();
   if (!context) throw new BackendRequestError("Unauthorized: No session cookie found", 401);
   if (!context.session) throw new BackendRequestError("Unauthorized: Session expired or invalid", 401);
-
-  const validation = await fetchBackend(`${BACKEND_URL}/v1/auth/me`, {
-    headers: { Authorization: `Bearer ${context.session.apiKey}` },
-  });
-  if (!validation.ok) {
-    if (validation.status === 401 || validation.status === 403) {
-      sessionStore.deleteSession(context.session.sessionId);
-      throw new BackendRequestError("Unauthorized: Session expired or invalid", 401);
-    }
-    throw new BackendRequestError("Backend request failed", validation.status);
-  }
 
   const secret = process.env.AUTHCLAW_INTERNAL_SERVICE_SECRET;
   if (!secret) throw new BackendRequestError("Agent service authentication is not configured", 503);

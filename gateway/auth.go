@@ -20,11 +20,12 @@ import (
 type contextKey string
 
 const (
-	TenantIDContextKey   contextKey = "tenant_id"
-	ScopesContextKey     contextKey = "scopes"
-	RequestIDContextKey  contextKey = "request_id"
-	UserIDContextKey     contextKey = "user_id"
-	APIKeyHashContextKey contextKey = "api_key_hash"
+	TenantIDContextKey       contextKey = "tenant_id"
+	ScopesContextKey         contextKey = "scopes"
+	RequestIDContextKey      contextKey = "request_id"
+	UserIDContextKey         contextKey = "user_id"
+	APIKeyHashContextKey     contextKey = "api_key_hash"
+	CredentialKindContextKey contextKey = "credential_kind"
 )
 
 type cachedAPIKeyResolution struct {
@@ -112,6 +113,10 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		apiKey := parts[1]
 		keyHash := HashKey(apiKey)
+		credentialKind := "api_key"
+		if strings.HasPrefix(apiKey, "acl_session_") {
+			credentialKind = "session"
+		}
 
 		// 2. Query DB to validate key and retrieve tenant_id
 		var apiKeyID string
@@ -119,27 +124,37 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		var userID string
 		var scopes []string
 
-		if cached, ok := getCachedAPIKeyResolution(keyHash); ok {
-			apiKeyID = cached.apiKeyID
-			tenantID = cached.tenantID
-			userID = cached.userID
-			scopes = cached.scopes
+		if credentialKind == "api_key" {
+			if cached, ok := getCachedAPIKeyResolution(keyHash); ok {
+				apiKeyID = cached.apiKeyID
+				tenantID = cached.tenantID
+				userID = cached.userID
+				scopes = cached.scopes
+			} else {
+				err := DB.QueryRow(
+					"SELECT credential_id, tenant_id, scopes, user_id FROM authn.bind_api_key_context($1)",
+					keyHash,
+				).Scan(&apiKeyID, &tenantID, pq.Array(&scopes), &userID)
+				if err != nil {
+					http.Error(w, "Unauthorized: Invalid or expired API Key", http.StatusUnauthorized)
+					return
+				}
+				setCachedAPIKeyResolution(keyHash, cachedAPIKeyResolution{
+					apiKeyID: apiKeyID,
+					tenantID: tenantID,
+					userID:   userID,
+					scopes:   scopes,
+				})
+			}
 		} else {
 			err := DB.QueryRow(
-				"SELECT id, tenant_id, scopes, created_by FROM resolve_api_key($1)",
+				"SELECT credential_id, tenant_id, scopes, user_id FROM authn.bind_session_context($1)",
 				keyHash,
 			).Scan(&apiKeyID, &tenantID, pq.Array(&scopes), &userID)
-
 			if err != nil {
-				http.Error(w, "Unauthorized: Invalid or expired API Key", http.StatusUnauthorized)
+				http.Error(w, "Unauthorized: Invalid or expired session", http.StatusUnauthorized)
 				return
 			}
-			setCachedAPIKeyResolution(keyHash, cachedAPIKeyResolution{
-				apiKeyID: apiKeyID,
-				tenantID: tenantID,
-				userID:   userID,
-				scopes:   scopes,
-			})
 		}
 
 		// 3. Inject tenant info and request_id into context
@@ -157,9 +172,11 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
 			remoteIP = strings.TrimSpace(strings.Split(forwarded, ",")[0])
 		}
-		if envBool("GATEWAY_AUTH_LAST_USED_ENABLED", true) {
+		if credentialKind == "api_key" && envBool("GATEWAY_AUTH_LAST_USED_ENABLED", true) {
 			go func() {
 				ctx := context.Background()
+				ctx = context.WithValue(ctx, APIKeyHashContextKey, keyHash)
+				ctx = context.WithValue(ctx, CredentialKindContextKey, credentialKind)
 				if err := RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
 					_, err := tx.ExecContext(
 						ctx,
@@ -187,6 +204,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, RequestIDContextKey, requestID)
 		ctx = context.WithValue(ctx, UserIDContextKey, userID)
 		ctx = context.WithValue(ctx, APIKeyHashContextKey, keyHash)
+		ctx = context.WithValue(ctx, CredentialKindContextKey, credentialKind)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

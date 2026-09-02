@@ -31,16 +31,17 @@ test("Agent readiness uses the canonical ACL-11 health endpoint", () => {
   assert.doesNotMatch(liteHealth, /agentFetch\("\/chat/);
 });
 
-test("invitation sessions use backend-authoritative scopes", () => {
-  assert.match(onboardingVerify, /scopes: data\.scopes/g);
-  assert.doesNotMatch(onboardingVerify, /scopes: \["admin", "read", "write"\]/);
+test("invitation sessions store only the backend opaque token", () => {
+  assert.match(onboardingVerify, /data\.session_token/);
+  assert.doesNotMatch(onboardingVerify, /sessionStore|data\.api_key/);
 });
 
-test("agent requests reject revoked canonical sessions before dispatch", () => {
+test("agent requests validate the canonical backend session before dispatch", () => {
   const validation = apiClient.indexOf('fetchBackend(`${BACKEND_URL}/v1/auth/me`');
   const dispatch = apiClient.indexOf("fetch(`${AGENT_URL}${path}`");
 
   assert.ok(validation >= 0 && validation < dispatch);
-  assert.match(apiClient, /validation\.status === 401 \|\| validation\.status === 403/);
-  assert.match(apiClient, /sessionStore\.deleteSession\(context\.session\.sessionId\)/);
+  assert.match(apiClient, /if \(!validation\.ok\)/);
+  assert.match(apiClient, /return \{ payload: null, session: null \}/);
+  assert.doesNotMatch(apiClient, /sessionStore|sessions\.json/);
 });

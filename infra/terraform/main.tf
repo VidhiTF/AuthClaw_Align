@@ -20,6 +20,7 @@ module "primary" {
   region                               = var.primary_region
   vpc_cidr                             = var.primary_vpc_cidr
   availability_zones                   = var.primary_availability_zones
+  nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
   container_images                     = var.container_images
   desired_count                        = var.desired_count_primary
@@ -76,6 +77,7 @@ module "secondary" {
   region                               = var.secondary_region
   vpc_cidr                             = var.secondary_vpc_cidr
   availability_zones                   = var.secondary_availability_zones
+  nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
   container_images                     = var.container_images
   desired_count                        = var.desired_count_secondary

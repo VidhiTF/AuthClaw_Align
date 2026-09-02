@@ -397,6 +397,7 @@ class OnboardingVerifyResponse(BaseModel):
     role: str
     scopes: List[str]
     api_key: str
+    session_token: str
     gateway_url: str
     provider: str
     model: str

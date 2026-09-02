@@ -313,6 +313,7 @@ jobs:
           fi
           terraform -chdir=infra/terraform plan -input=false -lock=false -out=sqs-prod.tfplan -var=audit_stream_transport=sqs_fifo -var=audit_sqs_require_alarm_actions=true -var='audit_sqs_alarm_action_arns=["arn:aws:sns:us-east-1:123456789012:authclaw-audit-alerts"]'
           python scripts/sqs_audit_deployment_readiness.py --output-json infra/security/sqs-audit-ci-pending.json --output-md infra/security/sqs-audit-ci-pending.md
+          terraform -chdir=infra/terraform test
 
   codeql:
     name: CodeQL Analysis

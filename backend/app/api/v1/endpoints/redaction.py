@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from uuid import UUID
 from typing import List
+from datetime import datetime, timedelta, timezone
 
 from app.db.models import RedactionToken
 from app.schemas.models import RedactionTokenMapResponse
@@ -11,6 +12,24 @@ from app.core.crypto import decrypt_secret
 from app.services.privacy_lifecycle import purge_expired_redaction_mappings
 
 router = APIRouter()
+
+
+@router.get("/metrics", dependencies=[require_scopes(["read"])])
+def redaction_metrics(
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+):
+    """Return tenant-scoped dashboard redaction counts."""
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    count = (
+        db.query(func.count(RedactionToken.id))
+        .filter(
+            RedactionToken.tenant_id == request.state.tenant_id,
+            RedactionToken.created_at >= since,
+        )
+        .scalar()
+    )
+    return {"redactions_24h": int(count or 0)}
 
 
 @router.get("/{id}/tokenization-map", response_model=List[RedactionTokenMapResponse], dependencies=[require_scopes(["read"])])

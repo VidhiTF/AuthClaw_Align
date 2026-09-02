@@ -2,7 +2,7 @@
 import os
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from alembic import context
 from app.core.config import settings
 from app.db.base import Base
@@ -54,13 +54,19 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata
-        )
+        with connection.begin():
+            connection.execute(text("SET LOCAL lock_timeout = '15s'"))
+            connection.execute(text("SET LOCAL statement_timeout = '120s'"))
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended('authclaw.database.security', 0))")
+            )
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+            )
 
-        with context.begin_transaction():
-            context.run_migrations()
+            with context.begin_transaction():
+                context.run_migrations()
 
 
 if context.is_offline_mode():

@@ -21,15 +21,16 @@ test("OIDC callback consumes state before backend exchange and deletes its cooki
   const consume = source.indexOf("consumeOidcState(stateCookie)");
   const exchange = source.indexOf("await fetch(`${BACKEND_URL}/v1/auth/oidc/callback`");
   const failure = source.indexOf("if (!backendResponse.ok)");
-  const session = source.indexOf("sessionStore.createSession");
+  const session = source.indexOf('response.cookies.set("authclaw_session"');
 
   assert.ok(consume >= 0 && consume < exchange);
   assert.ok(failure > exchange && failure < session);
   assert.match(source, /const fail = \(message: string\) => \{[\s\S]*response\.cookies\.delete\("authclaw_oidc_state"\)/);
 });
 
-test("OIDC callback success still creates the session, cookie, and overview redirect", () => {
-  assert.match(source, /sessionStore\.createSession\(\{/);
+test("OIDC callback stores the backend opaque session and redirects", () => {
+  assert.match(source, /data\.session_token/);
+  assert.doesNotMatch(source, /sessionStore|data\.api_key/);
   assert.match(source, /response\.cookies\.set\("authclaw_session"/);
   assert.match(source, /NextResponse\.redirect\(`\$\{url\.origin\}\/overview`\)/);
 });

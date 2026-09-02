@@ -16,8 +16,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.core.startup_checks import validate_production_environment
+from app.core.startup_checks import validate_database_security, validate_production_environment
 from app.core.crypto import secret_management_status
+from app.db.session import engine
 
 validate_production_environment()
 logger = logging.getLogger("authclaw.backend")
@@ -178,7 +179,9 @@ def metrics():
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize app on startup"""
+    """Initialize app only after database security invariants pass."""
+    with engine.connect() as connection:
+        validate_database_security(connection)
     print("AuthClaw Backend Starting Up...")
 
 

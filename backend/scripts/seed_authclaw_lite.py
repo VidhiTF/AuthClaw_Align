@@ -79,22 +79,17 @@ def normalize_database_url(url: str) -> str:
     return url
 
 
-def set_tenant_context(conn, tenant_id: uuid.UUID) -> None:
-    conn.execute(
-        text("SELECT set_config('app.current_tenant_id', :tenant_id, true)"),
-        {"tenant_id": str(tenant_id)},
-    )
-
-
 def main() -> None:
-    database_url = normalize_database_url(
-        os.getenv("DATABASE_URL", "postgresql+psycopg://authclaw:authclaw@localhost:5432/authclaw")
-    )
+    if os.getenv("AUTHCLAW_ENV", "local").strip().lower() in {"production", "prod"}:
+        raise RuntimeError("Demo seeding is forbidden in production")
+    raw_database_url = os.getenv("DEMO_SEED_DATABASE_URL") or os.getenv("BOOTSTRAP_DATABASE_URL")
+    if not raw_database_url:
+        raise RuntimeError("DEMO_SEED_DATABASE_URL is required; runtime DATABASE_URL is never accepted")
+    database_url = normalize_database_url(raw_database_url)
     engine = create_engine(database_url, pool_pre_ping=True)
     key_hash = hash_key(RAW_API_KEY)
 
     with engine.begin() as conn:
-        set_tenant_context(conn, TENANT_ID)
 
         conn.execute(
             text("""
@@ -108,8 +103,6 @@ def main() -> None:
             """),
             {"id": TENANT_ID},
         )
-
-        set_tenant_context(conn, SECONDARY_TENANT_ID)
         conn.execute(
             text("""
             INSERT INTO tenants (id, name, tier, status)
@@ -118,17 +111,15 @@ def main() -> None:
             """),
             {"id": SECONDARY_TENANT_ID},
         )
-
-        set_tenant_context(conn, TENANT_ID)
         conn.execute(
             text("""
             INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, mfa_secret, is_active)
             VALUES (:id, :tenant_id, 'admin@authclaw-lite.demo', :password_hash, 'owner', 'NONE', :mfa_enabled, :mfa_secret, true)
             ON CONFLICT (tenant_id, email) DO UPDATE SET
-                password_hash = EXCLUDED.password_hash,
+                password_hash = users.password_hash,
                 role = EXCLUDED.role,
-                mfa_enabled = EXCLUDED.mfa_enabled,
-                mfa_secret = EXCLUDED.mfa_secret,
+                mfa_enabled = users.mfa_enabled,
+                mfa_secret = users.mfa_secret,
                 is_active = true,
                 updated_at = NOW()
             """),
@@ -146,13 +137,12 @@ def main() -> None:
         )
 
         for user_id, email, role in ROLE_USERS:
-            set_tenant_context(conn, TENANT_ID)
             conn.execute(
                 text("""
                 INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, is_active)
                 VALUES (:id, :tenant_id, :email, :password_hash, :role, 'NONE', false, true)
                 ON CONFLICT (tenant_id, email) DO UPDATE SET
-                    password_hash = EXCLUDED.password_hash,
+                    password_hash = users.password_hash,
                     role = EXCLUDED.role,
                     is_active = true,
                     updated_at = NOW()
@@ -165,13 +155,12 @@ def main() -> None:
                     "role": role,
                 },
             )
-            set_tenant_context(conn, SECONDARY_TENANT_ID)
             conn.execute(
                 text("""
                 INSERT INTO users (id, tenant_id, email, password_hash, role, platform_role, mfa_enabled, is_active)
                 VALUES (:id, :tenant_id, :email, :password_hash, :role, 'NONE', false, true)
                 ON CONFLICT (tenant_id, email) DO UPDATE SET
-                    password_hash = EXCLUDED.password_hash,
+                    password_hash = users.password_hash,
                     role = EXCLUDED.role,
                     is_active = true,
                     updated_at = NOW()
@@ -184,8 +173,6 @@ def main() -> None:
                     "role": role,
                 },
             )
-
-        set_tenant_context(conn, TENANT_ID)
         conn.execute(
             text("""
             INSERT INTO api_keys (id, tenant_id, key_hash, name, description, scopes, is_active, expires_at, created_by)
@@ -194,14 +181,7 @@ def main() -> None:
                 'Seeded key for local/AWS Lite demo',
                 ARRAY['admin','read','write'], true, NOW() + INTERVAL '90 days', :created_by
             )
-            ON CONFLICT (id) DO UPDATE SET
-                key_hash = EXCLUDED.key_hash,
-                is_active = true,
-                expires_at = NOW() + INTERVAL '90 days',
-                revoked_at = NULL,
-                rotated_at = NULL,
-                scopes = ARRAY['admin','read','write'],
-                updated_at = NOW()
+            ON CONFLICT (id) DO NOTHING
             """),
             {"id": API_KEY_ID, "tenant_id": TENANT_ID, "key_hash": key_hash, "created_by": ADMIN_USER_ID},
         )

@@ -9,7 +9,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -36,7 +36,6 @@ from app.services import event_backbone, oidc_sso
 
 router = APIRouter()
 logger = logging.getLogger("api.auth")
-_oidc_kafka_producer = None
 LOGIN_ACCOUNT_ATTEMPTS_PER_15_MINUTES = int(os.getenv("LOGIN_ACCOUNT_ATTEMPTS_PER_15_MINUTES", "10"))
 LOGIN_IP_ATTEMPTS_PER_MINUTE = int(os.getenv("LOGIN_IP_ATTEMPTS_PER_MINUTE", "60"))
 
@@ -51,7 +50,6 @@ def _emit_oidc_audit(
     response_status: int,
     provider: str = "oidc",
 ) -> None:
-    global _oidc_kafka_producer
     event = event_backbone.audit_event(
         event_type="authentication",
         tenant_id=tenant_id,
@@ -67,12 +65,9 @@ def _emit_oidc_audit(
     event["result"] = "success" if response_status < 400 else "failure"
     event["response_status"] = response_status
     event_backbone.increment_metric(f"oidc_{action}_total")
-    if _oidc_kafka_producer is None:
-        try:
-            _oidc_kafka_producer = event_backbone.make_kafka_producer()
-        except Exception:
-            logger.warning("OIDC audit Kafka producer unavailable")
-    if exc := event_backbone.publish_audit_event(_oidc_kafka_producer, tenant_id, event):
+    # Persist through the audit outbox without opening a broker connection on
+    # the authentication request path.  The consumer handles Kafka delivery.
+    if exc := event_backbone.publish_audit_event(None, tenant_id, event):
         logger.warning("Failed to publish OIDC audit event: action=%s", action)
     logger.info("[OIDC_AUDIT] %s", json.dumps(event, sort_keys=True))
 
@@ -102,7 +97,7 @@ class PasswordLoginResponse(BaseModel):
     email: EmailStr
     role: str
     scopes: list[str]
-    api_key: str
+    session_token: str
 
 
 def _enforce_password_login_rate_limit(email: str, request: Request) -> None:
@@ -128,6 +123,7 @@ class CurrentUserResponse(BaseModel):
     email: EmailStr
     role: str
     roles: list[str]
+    scopes: list[str]
     mfa_enabled: bool
     is_active: bool
 
@@ -195,21 +191,21 @@ class OIDCAdminConfigRequest(BaseModel):
     max_auth_age_seconds: int = Field(default=43200, ge=0)
 
 
-def _generate_console_key() -> str:
-    return "acl_console_" + secrets.token_urlsafe(24)
+def _generate_session_token() -> str:
+    return "acl_session_" + secrets.token_urlsafe(32)
 
 
 def _active_users_for_email(db, email: str, tenant_name: str | None = None):
-    rows = (
-        db.query(User, Tenant)
-        .join(Tenant, Tenant.id == User.tenant_id)
-        .filter(User.email == email, User.is_active == True, Tenant.status == "active")
-        .all()
-    )
-    if tenant_name:
-        clean_name = tenant_name.strip().lower()
-        rows = [(user, tenant) for user, tenant in rows if tenant.name.lower() == clean_name]
-    return rows
+    return db.execute(
+        text(
+            """
+            SELECT user_id, tenant_id, tenant_name, email, password_hash,
+                   role, platform_role, mfa_enabled
+              FROM authn.lookup_password_identities(:email, :tenant_name)
+            """
+        ),
+        {"email": email, "tenant_name": tenant_name},
+    ).all()
 
 
 @router.get("/oidc/config")
@@ -301,26 +297,50 @@ def oidc_callback(payload: OIDCCallbackRequest, request: Request):
             )
             raise HTTPException(status_code=400, detail="OIDC token response did not include id_token")
         claims = oidc_sso.validate_id_token(config, id_token, payload.nonce)
-        db.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(tenant.id)})
-        user, role = oidc_sso.map_user(db, tenant, config, claims)
-        raw_key, scopes = oidc_sso.issue_console_key(db, tenant, user, user.email, role, "OIDC")
+        email_claim = config["email_claim"] if isinstance(config, dict) else config.email_claim
+        email = str(claims.get(email_claim) or "").strip().lower()
+        if not email or "@" not in email:
+            raise ValueError("OIDC email claim is invalid")
+        claimed_role = oidc_sso.role_from_claims(config, claims)
+        session_token = _generate_session_token()
+        now = datetime.now(timezone.utc)
+        identity = db.execute(
+            text(
+                """
+                SELECT user_id, email, role FROM authn.issue_oidc_session(
+                    :tenant_id, :email, :role, :token_hash, :expires_at,
+                    CAST(:metadata AS jsonb)
+                )
+                """
+            ),
+            {
+                "tenant_id": str(tenant.id),
+                "email": email,
+                "role": claimed_role,
+                "token_hash": _api_key_hash(session_token),
+                "expires_at": now + timedelta(hours=24),
+                "metadata": json.dumps({"request_id": request_id}),
+            },
+        ).one()
+        role = identity.role
+        scopes = _scopes_for_role(role)
         db.commit()
         _emit_oidc_audit(
             tenant_id=str(tenant.id),
-            actor_id=str(user.id),
+            actor_id=str(identity.user_id),
             action="oidc_login_succeeded",
             reason="success",
             request_id=request_id,
             response_status=200,
         )
         return PasswordLoginResponse(
-            user_id=user.id,
+            user_id=identity.user_id,
             tenant_id=tenant.id,
             tenant_name=tenant.name,
-            email=user.email,
+            email=identity.email,
             role=role,
             scopes=scopes,
-            api_key=raw_key,
+            session_token=session_token,
         )
     except (oidc_sso.OIDCAuthorizationError, PermissionError) as exc:
         db.rollback()
@@ -357,10 +377,6 @@ def oidc_callback(payload: OIDCCallbackRequest, request: Request):
         db.rollback()
         raise
     finally:
-        try:
-            db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
-        except Exception:
-            pass
         db.close()
 
 
@@ -396,12 +412,15 @@ def password_login(payload: PasswordLoginRequest, request: Request):
     try:
         users = _active_users_for_email(db, email, payload.tenant_name)
 
-        matches = [(user, tenant) for user, tenant in users if verify_password(payload.password, user.password_hash)]
+        matches = [
+            identity for identity in users
+            if verify_password(payload.password, identity.password_hash)
+        ]
         if not matches:
-            for user, tenant in users:
+            for identity in users:
                 _emit_oidc_audit(
-                    tenant_id=str(tenant.id),
-                    actor_id=str(user.id),
+                    tenant_id=str(identity.tenant_id),
+                    actor_id=str(identity.user_id),
                     action="password_login_failed",
                     reason="invalid_credentials",
                     request_id=request.headers.get("x-request-id", ""),
@@ -412,28 +431,39 @@ def password_login(payload: PasswordLoginRequest, request: Request):
         if len(matches) > 1:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email belongs to multiple tenants. Enter tenant name.")
 
-        user, tenant = matches[0]
-        db.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(tenant.id)})
-        role = user.role or "viewer"
+        identity = matches[0]
+        role = identity.role or "viewer"
         scopes = _scopes_for_role(role)
-        raw_key = _generate_console_key()
+        session_token = _generate_session_token()
         now = datetime.now(timezone.utc)
-        api_key = APIKey(
-            tenant_id=tenant.id,
-            key_hash=_api_key_hash(raw_key),
-            name=f"Console Session - {email}",
-            description="Short-lived key issued after password login",
-            scopes=scopes,
-            is_active=True,
-            expires_at=now + timedelta(hours=24),
-            created_by=user.id,
+        db.execute(
+            text(
+                """
+                SELECT authn.create_session(
+                    :token_hash, :tenant_id, :user_id, 'password',
+                    :expires_at, CAST(:metadata AS jsonb)
+                )
+                """
+            ),
+            {
+                "token_hash": _api_key_hash(session_token),
+                "tenant_id": str(identity.tenant_id),
+                "user_id": str(identity.user_id),
+                "expires_at": now + timedelta(hours=24),
+                "metadata": json.dumps({
+                    "ip": request.client.host if request.client else "",
+                    "user_agent": request.headers.get("user-agent", "")[:512],
+                }),
+            },
         )
-        user.last_login = now
-        db.add(api_key)
+        db.execute(
+            text("UPDATE users SET last_login = :now WHERE id = :user_id"),
+            {"now": now, "user_id": str(identity.user_id)},
+        )
         db.commit()
         _emit_oidc_audit(
-            tenant_id=str(tenant.id),
-            actor_id=str(user.id),
+            tenant_id=str(identity.tenant_id),
+            actor_id=str(identity.user_id),
             action="password_login_succeeded",
             reason="success",
             response_status=200,
@@ -441,23 +471,31 @@ def password_login(payload: PasswordLoginRequest, request: Request):
         )
 
         return PasswordLoginResponse(
-            user_id=user.id,
-            tenant_id=tenant.id,
-            tenant_name=tenant.name,
-            email=user.email,
+            user_id=identity.user_id,
+            tenant_id=identity.tenant_id,
+            tenant_name=identity.tenant_name,
+            email=identity.email,
             role=role,
             scopes=scopes,
-            api_key=raw_key,
+            session_token=session_token,
         )
     except HTTPException:
         db.rollback()
         raise
     finally:
-        try:
-            db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
-        except Exception:
-            pass
         db.close()
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(request: Request, db: Session = Depends(get_tenant_db)):
+    """Revoke the current opaque console session."""
+    if request.state.credential_kind == "session":
+        db.execute(
+            text("SELECT authn.revoke_session(:credential_hash)"),
+            {"credential_hash": request.state.credential_hash},
+        )
+        db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/me", response_model=CurrentUserResponse)
@@ -480,6 +518,7 @@ def current_user(request: Request, db: Session = Depends(get_tenant_db)):
         email=user.email,
         role=role,
         roles=[role],
+        scopes=list(request.state.scopes),
         mfa_enabled=bool(user.mfa_enabled),
         is_active=bool(user.is_active),
     )
@@ -497,30 +536,37 @@ def request_password_reset(payload: PasswordResetRequest):
         if not users:
             return PasswordResetRequestResponse(email=email)
 
-        _, tenant = users[0]
+        identity = users[0]
         otp = _generate_otp()
-        reset_row = OnboardingEmailOTP(
-            email=email,
-            tenant_name=tenant.name,
-            otp_hash=_otp_hash(email, otp),
-            status="pending",
-            expires_at=now + timedelta(minutes=OTP_TTL_MINUTES),
-            sent_at=now,
-            purpose="password_reset",
-            tenant_id=tenant.id,
+        signup_id = db.execute(
+            text(
+                """
+                SELECT authn.create_password_reset(
+                    :email, :tenant_id, :tenant_name, :otp_hash, :expires_at
+                )
+                """
+            ),
+            {
+                "email": email,
+                "tenant_id": str(identity.tenant_id),
+                "tenant_name": identity.tenant_name,
+                "otp_hash": _otp_hash(email, otp),
+                "expires_at": now + timedelta(minutes=OTP_TTL_MINUTES),
+            },
+        ).scalar_one()
+        delivery, _ = _deliver_otp(
+            email, otp, identity.tenant_name, purpose="password reset"
         )
-        db.add(reset_row)
-        db.flush()
-        delivery, _ = _deliver_otp(email, otp, tenant.name, purpose="password reset")
-        reset_row.last_delivery = delivery
-        reset_row.delivery_error = None
+        db.execute(
+            text("SELECT authn.set_password_reset_delivery(:id, :delivery, NULL)"),
+            {"id": str(signup_id), "delivery": delivery},
+        )
         db.commit()
-        db.refresh(reset_row)
         return PasswordResetRequestResponse(
-            signup_id=reset_row.id,
+            signup_id=signup_id,
             email=email,
             delivery=delivery,
-            next_resend_at=_next_resend_at(reset_row.sent_at),
+            next_resend_at=_next_resend_at(now),
         )
     except EmailDeliveryError as exc:
         db.rollback()
@@ -546,54 +592,34 @@ def confirm_password_reset(payload: PasswordResetConfirmRequest):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        reset_row = db.query(OnboardingEmailOTP).filter(OnboardingEmailOTP.id == payload.signup_id).first()
-        if not reset_row or reset_row.purpose != "password_reset":
-            raise HTTPException(status_code=404, detail="Password reset request not found")
-        if reset_row.status != "pending":
-            raise HTTPException(status_code=400, detail="Password reset request is not pending")
-        expires_at = reset_row.expires_at
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < now:
-            reset_row.status = "expired"
-            db.commit()
-            raise HTTPException(status_code=400, detail="Password reset code expired")
-        if reset_row.attempts >= OTP_MAX_ATTEMPTS:
-            raise HTTPException(status_code=429, detail="Too many verification attempts")
-
-        reset_row.attempts += 1
-        if reset_row.otp_hash != _otp_hash(reset_row.email, payload.otp):
-            db.commit()
-            raise HTTPException(status_code=400, detail="Invalid verification code")
-        if not reset_row.tenant_id:
-            raise HTTPException(status_code=400, detail="Password reset is missing tenant context")
-
-        db.execute(text("SELECT set_config('app.current_tenant_id', :tenant_id, false)"), {"tenant_id": str(reset_row.tenant_id)})
-        user = db.query(User).filter(
-            User.tenant_id == reset_row.tenant_id,
-            User.email == reset_row.email,
-            User.is_active == True,
-        ).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        user.password_hash = hash_password(payload.password)
-        reset_row.status = "verified"
-        reset_row.verified_at = now
-        db.query(APIKey).filter(
-            APIKey.tenant_id == reset_row.tenant_id,
-            APIKey.created_by == user.id,
-            APIKey.name.like("Console Session - %"),
-            APIKey.revoked_at.is_(None),
-        ).update({"is_active": False, "revoked_at": now}, synchronize_session=False)
+        outcome = db.execute(
+            text(
+                """
+                SELECT authn.confirm_password_reset(
+                    :signup_id, :otp, :secrets, :password_hash, :max_attempts
+                )
+                """
+            ),
+            {
+                "signup_id": str(payload.signup_id),
+                "otp": payload.otp,
+                "secrets": list(get_session_key_ring()[1].values()),
+                "password_hash": hash_password(payload.password),
+                "max_attempts": OTP_MAX_ATTEMPTS,
+            },
+        ).scalar_one()
         db.commit()
+        if outcome == "not_found":
+            raise HTTPException(status_code=404, detail="Password reset request not found")
+        if outcome == "locked":
+            raise HTTPException(status_code=429, detail="Too many verification attempts")
+        if outcome == "expired":
+            raise HTTPException(status_code=400, detail="Password reset code expired")
+        if outcome != "verified":
+            raise HTTPException(status_code=400, detail="Invalid verification code")
         return PasswordResetConfirmResponse()
     except HTTPException:
         db.rollback()
         raise
     finally:
-        try:
-            db.execute(text("SELECT set_config('app.current_tenant_id', '', false)"))
-        except Exception:
-            pass
         db.close()
