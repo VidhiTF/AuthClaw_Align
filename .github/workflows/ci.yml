@@ -170,7 +170,7 @@ jobs:
           ../.ci-audit/bin/python local_e2e.py --transport both --evidence ../infra/security/audit-transport-ci-e2e.md
           cd ..
           trap 'docker compose -p authclaw-audit-e2e -f docker-compose.yml -f docker-compose.audit-e2e.yml --profile audit-e2e down --remove-orphans' EXIT
-          docker compose -p authclaw-audit-e2e -f docker-compose.yml -f docker-compose.audit-e2e.yml --profile audit-e2e up -d kafka kafka-init clickhouse localstack
+          docker compose -p authclaw-audit-e2e -f docker-compose.yml -f docker-compose.audit-e2e.yml --profile audit-e2e up -d --wait --wait-timeout 120 kafka kafka-init clickhouse localstack
           .ci-audit/bin/python audit_consumer/local_e2e.py --real-adapters --evidence infra/security/audit-transport-ci-real-e2e.md
 
   agent:

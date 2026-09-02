@@ -182,7 +182,7 @@ def _drain_adapter(name: str, adapter: Any, ch_client: Any, expected: int) -> di
     acked: list[str] = []
     retried: list[str] = []
     dlq: list[str] = []
-    deadline = time.time() + 30
+    deadline = time.time() + 90
     while time.time() < deadline:
         for batch in adapter.poll(timeout_ms=1000):
             failed_groups: set[str] = set()
