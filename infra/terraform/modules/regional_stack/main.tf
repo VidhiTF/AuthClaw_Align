@@ -7,8 +7,6 @@ locals {
   discovered_azs = length(var.availability_zones) > 0 ? var.availability_zones : data.aws_availability_zones.available[0].names
   azs            = slice(local.discovered_azs, 0, var.az_count)
   az_map         = { for idx, az in local.azs : tostring(idx) => az }
-  is_production  = contains(["prod", "production"], lower(var.environment))
-  nat_azs        = local.is_production ? local.az_map : { "0" = local.azs[0] }
   interface_endpoint_services = merge({
     ecr_api        = "ecr.api"
     ecr_dkr        = "ecr.dkr"
@@ -28,6 +26,7 @@ locals {
   db_password           = var.db_password != "" ? var.db_password : random_password.db.result
   db_address            = var.create_db_replica ? aws_db_instance.postgres_replica[0].address : aws_db_instance.postgres_primary[0].address
   db_arn                = var.create_db_replica ? aws_db_instance.postgres_replica[0].arn : aws_db_instance.postgres_primary[0].arn
+  nat_subnets           = var.nat_gateway_mode == "per_az" ? aws_subnet.public : { "0" = aws_subnet.public["0"] }
 
   public_services = {
     console = {
@@ -150,28 +149,40 @@ resource "aws_subnet" "private" {
 }
 
 resource "aws_eip" "nat" {
-  for_each = local.nat_azs
+  for_each = local.nat_subnets
 
   domain = "vpc"
-  tags   = merge(var.tags, { Name = "${var.name}-nat-eip-${each.value}" })
+  tags = merge(var.tags, {
+    Name             = "${var.name}-nat-eip-${each.value.availability_zone}"
+    AvailabilityZone = each.value.availability_zone
+    Region           = var.region
+  })
 }
 
 resource "aws_nat_gateway" "main" {
-  for_each = local.nat_azs
+  for_each = local.nat_subnets
 
   allocation_id = aws_eip.nat[each.key].id
-  subnet_id     = aws_subnet.public[each.key].id
-  tags          = merge(var.tags, { Name = "${var.name}-nat-${each.value}" })
-  depends_on    = [aws_internet_gateway.main]
+  subnet_id     = each.value.id
+  tags = merge(var.tags, {
+    Name             = "${var.name}-nat-${each.value.availability_zone}"
+    AvailabilityZone = each.value.availability_zone
+    Region           = var.region
+  })
+  depends_on = [aws_internet_gateway.main]
 }
 
 resource "aws_route_table" "public" {
+  for_each = aws_subnet.public
+
   vpc_id = aws_vpc.main.id
-  tags   = merge(var.tags, { Name = "${var.name}-public-rt" })
+  tags   = merge(var.tags, { Name = "${var.name}-public-rt-${each.value.availability_zone}" })
 }
 
 resource "aws_route" "public_internet" {
-  route_table_id         = aws_route_table.public.id
+  for_each = aws_route_table.public
+
+  route_table_id         = each.value.id
   destination_cidr_block = "0.0.0.0/0"
   gateway_id             = aws_internet_gateway.main.id
 }
@@ -179,7 +190,7 @@ resource "aws_route" "public_internet" {
 resource "aws_route_table_association" "public" {
   for_each       = aws_subnet.public
   subnet_id      = each.value.id
-  route_table_id = aws_route_table.public.id
+  route_table_id = aws_route_table.public[each.key].id
 }
 
 resource "aws_route_table" "private" {
@@ -194,17 +205,48 @@ resource "aws_route" "private_nat" {
 
   route_table_id         = each.value.id
   destination_cidr_block = "0.0.0.0/0"
-  nat_gateway_id         = aws_nat_gateway.main[local.is_production ? each.key : "0"].id
+  nat_gateway_id         = aws_nat_gateway.main[var.nat_gateway_mode == "per_az" ? each.key : "0"].id
 }
 
 resource "aws_route_table_association" "private" {
   for_each       = aws_subnet.private
   subnet_id      = each.value.id
   route_table_id = aws_route_table.private[each.key].id
+  depends_on     = [aws_route.private_nat]
+}
+
+moved {
+  from = aws_eip.nat
+  to   = aws_eip.nat["0"]
+}
+
+moved {
+  from = aws_nat_gateway.main
+  to   = aws_nat_gateway.main["0"]
+}
+
+moved {
+  from = aws_route_table.public
+  to   = aws_route_table.public["0"]
+}
+
+moved {
+  from = aws_route_table.private
+  to   = aws_route_table.private["0"]
+}
+
+moved {
+  from = aws_route.public_internet
+  to   = aws_route.public_internet["0"]
+}
+
+moved {
+  from = aws_route.private_nat
+  to   = aws_route.private_nat["0"]
 }
 
 resource "aws_vpc_endpoint" "gateway" {
-  for_each = var.enable_private_aws_endpoints ? toset(["s3"]) : toset([])
+  for_each = var.enable_private_aws_endpoints ? toset(["s3", "dynamodb"]) : toset([])
 
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${var.region}.${each.value}"
@@ -1449,4 +1491,166 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
   }
 
   tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "nat_port_allocation" {
+  for_each = aws_nat_gateway.main
+
+  alarm_name          = "${var.name}-nat-${each.key}-port-allocation"
+  alarm_description   = "NAT gateway ${each.key} could not allocate a source port"
+  namespace           = "AWS/NATGateway"
+  metric_name         = "ErrorPortAllocation"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  period              = 300
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    NatGatewayId = each.value.id
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "nat_packet_drop" {
+  for_each = aws_nat_gateway.main
+
+  alarm_name          = "${var.name}-nat-${each.key}-packet-drop"
+  alarm_description   = "NAT gateway ${each.key} dropped more than 0.01 percent of packets"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  datapoints_to_alarm = 2
+  threshold           = 0.01
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "drop_rate"
+    expression  = "IF((source_packets + destination_packets) > 0, 100 * dropped_packets / (source_packets + destination_packets), 0)"
+    label       = "Dropped packets percent"
+    return_data = true
+  }
+
+  metric_query {
+    id          = "dropped_packets"
+    return_data = false
+
+    metric {
+      namespace   = "AWS/NATGateway"
+      metric_name = "PacketsDropCount"
+      period      = 300
+      stat        = "Sum"
+      dimensions = {
+        NatGatewayId = each.value.id
+      }
+    }
+  }
+
+  metric_query {
+    id          = "source_packets"
+    return_data = false
+
+    metric {
+      namespace   = "AWS/NATGateway"
+      metric_name = "PacketsInFromSource"
+      period      = 300
+      stat        = "Sum"
+      dimensions = {
+        NatGatewayId = each.value.id
+      }
+    }
+  }
+
+  metric_query {
+    id          = "destination_packets"
+    return_data = false
+
+    metric {
+      namespace   = "AWS/NATGateway"
+      metric_name = "PacketsInFromDestination"
+      period      = 300
+      stat        = "Sum"
+      dimensions = {
+        NatGatewayId = each.value.id
+      }
+    }
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "nat_idle_timeout" {
+  for_each = aws_nat_gateway.main
+
+  alarm_name          = "${var.name}-nat-${each.key}-idle-timeout"
+  alarm_description   = "NAT gateway ${each.key} idle timeouts exceed the learned baseline"
+  comparison_operator = "GreaterThanUpperThreshold"
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  threshold_metric_id = "idle_band"
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "idle"
+    return_data = true
+
+    metric {
+      namespace   = "AWS/NATGateway"
+      metric_name = "IdleTimeoutCount"
+      period      = 300
+      stat        = "Sum"
+      dimensions = {
+        NatGatewayId = each.value.id
+      }
+    }
+  }
+
+  metric_query {
+    id          = "idle_band"
+    expression  = "ANOMALY_DETECTION_BAND(idle, 2)"
+    label       = "Expected idle timeouts"
+    return_data = true
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_dashboard" "nat" {
+  dashboard_name = "${var.name}-nat"
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "metric"
+        width  = 12
+        height = 6
+        properties = {
+          title   = "NAT connections by Availability Zone"
+          region  = var.region
+          view    = "timeSeries"
+          stacked = false
+          metrics = flatten([for key, nat in aws_nat_gateway.main : [
+            ["AWS/NATGateway", "ActiveConnectionCount", "NatGatewayId", nat.id, { label = "${key} active", stat = "Maximum" }],
+            ["AWS/NATGateway", "ConnectionAttemptCount", "NatGatewayId", nat.id, { label = "${key} attempted", stat = "Sum" }],
+            ["AWS/NATGateway", "ConnectionEstablishedCount", "NatGatewayId", nat.id, { label = "${key} established", stat = "Sum" }],
+          ]])
+        }
+      },
+      {
+        type   = "metric"
+        width  = 12
+        height = 6
+        properties = {
+          title  = "NAT bytes by Availability Zone"
+          region = var.region
+          view   = "timeSeries"
+          metrics = flatten([for key, nat in aws_nat_gateway.main : [
+            ["AWS/NATGateway", "BytesOutToDestination", "NatGatewayId", nat.id, { label = "${key} sent", stat = "Sum" }],
+            ["AWS/NATGateway", "BytesInFromDestination", "NatGatewayId", nat.id, { label = "${key} received", stat = "Sum" }],
+          ]])
+        }
+      },
+    ]
+  })
 }

@@ -31,6 +31,17 @@ variable "enable_private_aws_endpoints" {
   default     = true
 }
 
+variable "nat_gateway_mode" {
+  type        = string
+  description = "NAT topology: single for lower environments, per_az for production."
+  default     = "single"
+
+  validation {
+    condition     = contains(["single", "per_az"], var.nat_gateway_mode)
+    error_message = "nat_gateway_mode must be single or per_az."
+  }
+}
+
 variable "container_images" {
   type = object({
     agent          = string

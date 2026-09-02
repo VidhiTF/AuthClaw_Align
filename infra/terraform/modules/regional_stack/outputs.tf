@@ -31,7 +31,69 @@ output "alarm_names" {
     values(aws_cloudwatch_metric_alarm.unhealthy_hosts)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.ecs_cpu)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.nat_port_allocation)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.nat_packet_drop)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.nat_idle_timeout)[*].alarm_name,
   )
+}
+
+output "nat_gateway_mode" {
+  value = var.nat_gateway_mode
+}
+
+output "nat_gateway_ids" {
+  value = { for key, gateway in aws_nat_gateway.main : key => gateway.id }
+}
+
+output "nat_eip_public_ips" {
+  value = { for key, address in aws_eip.nat : key => address.public_ip }
+}
+
+output "nat_gateway_azs" {
+  value = { for key, subnet in local.nat_subnets : key => subnet.availability_zone }
+}
+
+output "private_route_table_ids" {
+  value = { for key, table in aws_route_table.private : key => table.id }
+}
+
+output "private_route_nat_keys" {
+  value = { for key, route in aws_route.private_nat : key => var.nat_gateway_mode == "per_az" ? key : "0" }
+}
+
+output "gateway_endpoint_route_table_ids" {
+  value = { for service, endpoint in aws_vpc_endpoint.gateway : service => endpoint.route_table_ids }
+}
+
+output "gateway_endpoint_route_table_count" {
+  value = { for service, endpoint in aws_vpc_endpoint.gateway : service => length(aws_route_table.private) }
+}
+
+output "interface_endpoint_private_dns_enabled" {
+  value = { for service, endpoint in aws_vpc_endpoint.interface : service => endpoint.private_dns_enabled }
+}
+
+output "endpoint_client_security_group_id" {
+  value = aws_security_group.app.id
+}
+
+output "endpoint_ingress_source_count" {
+  value = try(length(one(aws_security_group.vpc_endpoints[0].ingress).security_groups), 0)
+}
+
+output "endpoint_ingress_public_cidr_count" {
+  value = try(one(aws_security_group.vpc_endpoints[0].ingress).cidr_blocks == null ? 0 : length(one(aws_security_group.vpc_endpoints[0].ingress).cidr_blocks), 0)
+}
+
+output "vpc_endpoint_ids" {
+  value = merge(
+    { for service, endpoint in aws_vpc_endpoint.gateway : service => endpoint.id },
+    { for service, endpoint in aws_vpc_endpoint.interface : service => endpoint.id },
+  )
+}
+
+output "nat_dashboard_name" {
+  value = aws_cloudwatch_dashboard.nat.dashboard_name
 }
 
 output "rds_endpoint" {

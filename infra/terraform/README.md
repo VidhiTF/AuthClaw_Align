@@ -77,6 +77,36 @@ Kafka and ClickHouse are treated as managed external services:
 
 This keeps the regional AuthClaw stack portable while still making the audit path explicit in IaC.
 
+## NAT and Private AWS Paths
+
+`nat_gateway_mode` controls outbound Internet topology in both regional stacks:
+
+- `single` creates one NAT Gateway and routes every private subnet through it. Use this lower-cost mode for development and staging.
+- `per_az` creates one NAT Gateway per public subnet and routes each private subnet to the NAT in the same availability zone. Production must use this mode after the rollout gates in the runbook are satisfied.
+
+Every private subnet has its own route table. S3 and DynamoDB gateway endpoints are associated with all private route tables. ECR API, ECR Docker, CloudWatch Logs, Secrets Manager, and KMS use private-DNS interface endpoints. Their security group accepts TCP 443 only from the regional ECS application security group.
+
+The first state-backed plan after this change must prove that the existing singleton EIP, NAT Gateway, and route tables move to key `"0"` without replacement. Do not apply a plan that deletes or replaces the existing NAT/EIP identity. See [NAT_EGRESS_RUNBOOK.md](../../docs/runbooks/NAT_EGRESS_RUNBOOK.md) for migration, validation, rollback, monitoring, and production approval gates.
+
+Example environment choices:
+
+```hcl
+# Development and staging
+nat_gateway_mode = "single"
+
+# Production, after approval gates
+nat_gateway_mode = "per_az"
+```
+
+Run the deterministic topology tests locally:
+
+```bash
+terraform fmt -check -recursive
+terraform init -backend=false
+terraform validate
+terraform test
+```
+
 ## Operations Notes
 
 - The backend image should run migrations before serving traffic, either in its entrypoint or via a one-off ECS task using the same `backend_database_url` secret.

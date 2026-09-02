@@ -3,6 +3,10 @@ environment      = "prod"
 primary_region   = "us-east-1"
 secondary_region = "us-west-2"
 
+# Use "single" for development/staging and "per_az" for both production regions.
+# Production activation still requires a reviewed state-backed plan and cost approval.
+nat_gateway_mode = "single"
+
 container_images = {
   agent          = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/agent@sha256:replace-with-64-lowercase-hex-characters"
   backend        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/backend@sha256:replace-with-64-lowercase-hex-characters"
