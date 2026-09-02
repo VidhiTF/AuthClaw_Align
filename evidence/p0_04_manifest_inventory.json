@@ -1,0 +1,553 @@
+{
+  "source_repo": "D:/AUTHCLAW-NEW/AuthClaw",
+  "script": "scripts/p0_04_manifest_inventory.py",
+  "python_wheel_audit_reference": "docs/AWS_DEPLOYMENT_READINESS_TASK_LIST.md",
+  "current_ci_build_platforms": [
+    "linux/amd64"
+  ],
+  "production_runtime_services": [
+    "backend",
+    "agent",
+    "gateway",
+    "console",
+    "audit_consumer",
+    "opa",
+    "presidio"
+  ],
+  "status_counts": {
+    "PASS": 1,
+    "FAIL": 0,
+    "LIVE-EVIDENCE-PENDING": 22
+  },
+  "records": [
+    {
+      "service": "backend",
+      "dockerfile": "backend/Dockerfile.demo",
+      "image": "python:3.14.7-slim",
+      "category": "dockerfile_runtime_base",
+      "source_file": "Dockerfile line from backend/Dockerfile.demo",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "agent",
+      "dockerfile": "services/agent/Dockerfile",
+      "image": "python:3.14.3-slim",
+      "category": "dockerfile_runtime_base",
+      "source_file": "FROM line from services/agent/Dockerfile",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_amd64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "gateway",
+      "dockerfile": "gateway/Dockerfile.demo",
+      "image": "golang:1.26.5-alpine",
+      "category": "dockerfile_builder_base",
+      "source_file": "FROM line from gateway/Dockerfile.demo",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "gateway",
+      "dockerfile": "gateway/Dockerfile.demo",
+      "image": "alpine:3.24",
+      "category": "dockerfile_runtime_base",
+      "source_file": "FROM line from gateway/Dockerfile.demo",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "console",
+      "dockerfile": "console/Dockerfile",
+      "image": "node:22.23.1-alpine3.23@sha256:8516a3f4cf95be5f6bde3fd1f5b8f7f9f4bdf3f5f8b5f1f1d1fcb6bbf9ff4d66",
+      "category": "dockerfile_build_and_runtime_base",
+      "source_file": "FROM line from console/Dockerfile",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": true,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "audit_consumer",
+      "dockerfile": "audit_consumer/Dockerfile",
+      "image": "python:3.14.7-slim",
+      "category": "dockerfile_runtime_base",
+      "source_file": "FROM line from audit_consumer/Dockerfile",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "opa",
+      "dockerfile": "infra/opa/Dockerfile",
+      "image": "golang:1.26.5-alpine",
+      "category": "dockerfile_builder_base",
+      "source_file": "FROM line from infra/opa/Dockerfile",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "opa",
+      "dockerfile": "infra/opa/Dockerfile",
+      "image": "scratch",
+      "category": "dockerfile_runtime_base",
+      "source_file": "FROM line from infra/opa/Dockerfile",
+      "external_image_source": "internal",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "evidence-not-applicable-base"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": false,
+      "status": "PASS"
+    },
+    {
+      "service": "presidio",
+      "dockerfile": "infra/presidio/Dockerfile",
+      "image": "mcr.microsoft.com/presidio-analyzer@sha256:286e3fa7f3a7426e775e8564fe1870f1ba8f999d3ab8bbb8cc46a44355d9d6e9",
+      "category": "dockerfile_runtime_base",
+      "source_file": "FROM line from infra/presidio/Dockerfile",
+      "external_image_source": "mcr.microsoft.com",
+      "reference_digest_pinned": true,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "compose",
+      "dockerfile": "docker-compose.yml",
+      "image": "postgres:17",
+      "category": "compose_runtime_dependency",
+      "source_file": "docker-compose.yml",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "compose",
+      "dockerfile": "docker-compose.yml",
+      "image": "redis:7",
+      "category": "compose_runtime_dependency",
+      "source_file": "docker-compose.yml",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "compose",
+      "dockerfile": "docker-compose.yml",
+      "image": "openpolicyagent/opa@sha256:dc009236137bb225a1ef09293bb32f2ee1861cc428870d297bf71412d50221c3",
+      "category": "compose_runtime_dependency",
+      "source_file": "docker-compose.yml",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": true,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "compose",
+      "dockerfile": "docker-compose.yml",
+      "image": "mcr.microsoft.com/presidio-analyzer@sha256:286e3fa7f3a7426e775e8564fe1870f1ba8f999d3ab8bbb8cc46a44355d9d6e9",
+      "category": "compose_runtime_dependency",
+      "source_file": "docker-compose.yml",
+      "external_image_source": "mcr.microsoft.com",
+      "reference_digest_pinned": true,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "compose",
+      "dockerfile": "docker-compose.yml",
+      "image": "docker.redpanda.com/redpandadata/redpanda:v23.2.19",
+      "category": "compose_runtime_dependency",
+      "source_file": "docker-compose.yml",
+      "external_image_source": "docker.redpanda.com",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "compose",
+      "dockerfile": "docker-compose.yml",
+      "image": "clickhouse/clickhouse-server@sha256:07afc18d8a9706eb9d85c5c5d2752e5270f91bbc2894caeaecb73e4d0f603bf5",
+      "category": "compose_runtime_dependency",
+      "source_file": "docker-compose.yml",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": true,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "compose",
+      "dockerfile": "docker-compose.audit-e2e.yml",
+      "image": "localstack/localstack:3.8",
+      "category": "compose_runtime_dependency",
+      "source_file": "docker-compose.audit-e2e.yml",
+      "external_image_source": "docker.io/library",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "terraform",
+      "dockerfile": "infra/terraform/ci.tfvars.json",
+      "image": "ghcr.io/example/authclaw/agent:ci",
+      "category": "terraform_runtime_image",
+      "source_file": "infra/terraform/ci.tfvars.json",
+      "external_image_source": "ghcr.io",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable",
+        "service-ci-tag-only"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "terraform",
+      "dockerfile": "infra/terraform/ci.tfvars.json",
+      "image": "ghcr.io/example/authclaw/backend:ci",
+      "category": "terraform_runtime_image",
+      "source_file": "infra/terraform/ci.tfvars.json",
+      "external_image_source": "ghcr.io",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable",
+        "service-ci-tag-only"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "terraform",
+      "dockerfile": "infra/terraform/ci.tfvars.json",
+      "image": "ghcr.io/example/authclaw/gateway:ci",
+      "category": "terraform_runtime_image",
+      "source_file": "infra/terraform/ci.tfvars.json",
+      "external_image_source": "ghcr.io",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable",
+        "service-ci-tag-only"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "terraform",
+      "dockerfile": "infra/terraform/ci.tfvars.json",
+      "image": "ghcr.io/example/authclaw/console:ci",
+      "category": "terraform_runtime_image",
+      "source_file": "infra/terraform/ci.tfvars.json",
+      "external_image_source": "ghcr.io",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable",
+        "service-ci-tag-only"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "terraform",
+      "dockerfile": "infra/terraform/ci.tfvars.json",
+      "image": "ghcr.io/example/authclaw/audit-consumer:ci",
+      "category": "terraform_runtime_image",
+      "source_file": "infra/terraform/ci.tfvars.json",
+      "external_image_source": "ghcr.io",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable",
+        "service-ci-tag-only"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "terraform",
+      "dockerfile": "infra/terraform/ci.tfvars.json",
+      "image": "ghcr.io/example/authclaw/opa-bundle:ci",
+      "category": "terraform_runtime_image",
+      "source_file": "infra/terraform/ci.tfvars.json",
+      "external_image_source": "ghcr.io",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable",
+        "service-ci-tag-only"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    },
+    {
+      "service": "terraform",
+      "dockerfile": "infra/terraform/ci.tfvars.json",
+      "image": "ghcr.io/example/authclaw/presidio:ci",
+      "category": "terraform_runtime_image",
+      "source_file": "infra/terraform/ci.tfvars.json",
+      "external_image_source": "ghcr.io",
+      "reference_digest_pinned": false,
+      "manifest_list_digest": null,
+      "linux_amd64_supported": null,
+      "linux_amd64_digest": null,
+      "linux_arm64_supported": null,
+      "linux_arm64_digest": null,
+      "unsupported_or_unverifiable": [
+        "digest-pin-missing",
+        "evidence-unverifiable",
+        "service-ci-tag-only"
+      ],
+      "current_ci_build_platforms": [
+        "linux/amd64"
+      ],
+      "requires_multiarch_rollback": true,
+      "status": "LIVE-EVIDENCE-PENDING"
+    }
+  ]
+}
