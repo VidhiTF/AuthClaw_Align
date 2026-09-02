@@ -44,14 +44,22 @@ CI_WORKFLOWS = [
     ".github/workflows/deploy-controlled-beta.yml",
 ]
 
-FROM_RE = re.compile(r"^\s*FROM\s+(?:--platform=[^\s]+\s+)?(?P<image>[^\\s]+)", re.IGNORECASE)
+REQUIRED_SERVICES = set(SERVICE_DOCKERFILES)
+SERVICE_ALIASES = {"audit-consumer": "audit_consumer", "opa-bundle": "opa"}
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+AWS_PENDING = ["fargate_placement", "image_resolution", "task_startup", "service_stabilization", "health_checks", "logs", "alarms", "deployed_image_digest", "live_rollback"]
+
+FROM_RE = re.compile(r"^\s*FROM\s+(?:--platform=\S+\s+)?(?P<image>\S+)", re.IGNORECASE)
 IMAGE_RE = re.compile(r"(?i)^\s*image:\s*(?P<image>\S+)")
 TF_IMAGE_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*\"(?P<value>[^\"]+)\"")
-PLATFORM_RE = re.compile(r"platforms?:\s*([\"']?[\w/,-\s]+[\"']?)")
+PLATFORM_RE = re.compile(r"platforms?:\s*([\"']?[\w/,\s-]+[\"']?)")
 
 
 def run_cmd(cmd: List[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=False, capture_output=True, text=True)
+    try:
+        return subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=5)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, stderr="registry inspection timed out after 5 seconds")
 
 
 def parse_file(path: Path) -> str:
@@ -216,11 +224,70 @@ def dedupe_records(records: Iterable[Dict[str, object]]) -> List[Dict[str, objec
     return out
 
 
+def rollout_readiness(args: argparse.Namespace) -> tuple[Dict[str, object], bool]:
+    checks: List[Dict[str, str]] = []
+    add = lambda name, status, detail: checks.append({"check": name, "status": status, "detail": detail})
+    add("production_services", "PASS" if set(SERVICE_DOCKERFILES) == REQUIRED_SERVICES else "FAIL", ", ".join(sorted(REQUIRED_SERVICES)))
+
+    try:
+        smoke = json.loads((ROOT / "evidence" / "p0_04_build_smoke.json").read_text(encoding="utf-8-sig"))
+        arm = [r for r in smoke["results"] if r.get("platform") == "linux/arm64"]
+        grouped = {service: [r for r in arm if SERVICE_ALIASES.get(str(r.get("service")), r.get("service")) == service] for service in REQUIRED_SERVICES}
+        smoke_ok = all(len(rows) == 1 and rows[0].get("status") == "PASS" and rows[0].get("image_os") == "linux" and rows[0].get("image_architecture") == "arm64" and rows[0].get("qemu_execution") is True for rows in grouped.values())
+        add("local_arm64_build_smoke", "PASS" if smoke_ok else "FAIL", "exactly one successful ARM64/QEMU record per service")
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        add("local_arm64_build_smoke", "FAIL", str(exc))
+
+    release_dir = Path(args.release_evidence_dir) if args.release_evidence_dir else None
+    if not release_dir:
+        add("release_manifest_evidence", "LIVE-EVIDENCE-PENDING", "supply --release-evidence-dir")
+    else:
+        release_records = []
+        try:
+            for path in release_dir.rglob("*.json"):
+                data = json.loads(path.read_text(encoding="utf-8"))
+                release_records.extend(data if isinstance(data, list) else [data])
+            grouped = {service: [r for r in release_records if SERVICE_ALIASES.get(str(r.get("service")), r.get("service")) == service] for service in REQUIRED_SERVICES}
+            fields = ["manifest_list_digest", "linux_amd64_digest", "linux_arm64_digest"]
+            release_ok = all(len(rows) == 1 and rows[0].get("status") == "PASS" and rows[0].get("source_commit_sha") == args.source_commit and all(DIGEST_RE.fullmatch(str(rows[0].get(field, ""))) for field in fields) for rows in grouped.values())
+            add("release_manifest_evidence", "PASS" if release_ok else "FAIL", "exactly one PASS record and three immutable digests per service at source commit")
+        except (OSError, TypeError, json.JSONDecodeError) as exc:
+            add("release_manifest_evidence", "FAIL", str(exc))
+
+    if not args.terraform_input:
+        add("immutable_terraform_images", "LIVE-EVIDENCE-PENDING", "supply --terraform-input")
+        add("staged_architecture", "LIVE-EVIDENCE-PENDING", "supply --terraform-input")
+    else:
+        try:
+            tfvars = json.loads(Path(args.terraform_input).read_text(encoding="utf-8"))
+            images = tfvars.get("container_images", {})
+            immutable = set(images) == REQUIRED_SERVICES and all(re.search(r"@sha256:[0-9a-f]{64}$", str(image)) for image in images.values())
+            add("immutable_terraform_images", "PASS" if immutable else "FAIL", "all seven intended images must use @sha256")
+            architectures = tfvars.get("service_cpu_architectures", {})
+            staged = args.selected_service in REQUIRED_SERVICES and architectures.get(args.selected_service) == "ARM64" and all(architectures.get(service, "X86_64") == "X86_64" for service in REQUIRED_SERVICES - {args.selected_service})
+            add("staged_architecture", "PASS" if staged else "FAIL", f"{args.selected_service}=ARM64; unselected=X86_64")
+        except (OSError, TypeError, json.JSONDecodeError) as exc:
+            add("immutable_terraform_images", "FAIL", str(exc))
+            add("staged_architecture", "FAIL", str(exc))
+
+    add("rollback_architecture", "PASS" if args.rollback_architecture == "X86_64" else "FAIL", args.rollback_architecture)
+    aws = {name: "LIVE-EVIDENCE-PENDING" for name in AWS_PENDING}
+    failed = any(check["status"] == "FAIL" for check in checks)
+    return {"status": "FAIL" if failed else "LIVE-EVIDENCE-PENDING", "source_commit": args.source_commit, "selected_service": args.selected_service, "checks": checks, "aws_only_checks": aws}, failed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-json", default=str(ROOT / "evidence" / "p0_04_manifest_inventory.json"))
     parser.add_argument("--output-md", default=str(ROOT / "evidence" / "p0_04_manifest_inventory.md"))
+    parser.add_argument("--release-evidence-dir")
+    parser.add_argument("--terraform-input")
+    parser.add_argument("--selected-service", default="console")
+    parser.add_argument("--rollback-architecture", default="X86_64")
+    parser.add_argument("--source-commit", default=os.getenv("GITHUB_SHA"))
     args = parser.parse_args()
+    if not args.source_commit:
+        args.source_commit = run_cmd(["git", "rev-parse", "HEAD"]).stdout.strip()
 
     ci_platforms = []
     for wf in CI_WORKFLOWS:
@@ -274,7 +341,7 @@ def main() -> int:
             continue
         for entry in extract_terraform_images(path):
             img = entry["image"]
-            if not img.startswith(("\"","$")) and ":" in img and "/" in img or img.startswith(("ghcr.io","public.ecr.aws","ecr","docker.io")):
+            if "://" in img or not ("/" in img and (":" in img or "@sha256:" in img)):
                 continue
             for service in SERVICE_DOCKERFILES:
                 records.append(
@@ -330,6 +397,7 @@ def main() -> int:
         "unsupported_or_unverifiable_images": unsupported,
         "arm64_missing_or_unsupported_services": runtime_with_fail + runtime_with_pending,
     }
+    payload["rollout_readiness"], readiness_failed = rollout_readiness(args)
 
     # Ensure output dir exists.
     json_path = Path(args.output_json)
@@ -381,6 +449,13 @@ def main() -> int:
     for blocker in payload["blockers"]:
         md_lines.append(f"- {blocker}")
 
+    md_lines.extend(["", "## ARM64 rollout readiness", "", f"- Overall: `{payload['rollout_readiness']['status']}`", "", "|check|status|detail|", "|---|---|---|"])
+    for check in payload["rollout_readiness"]["checks"]:
+        md_lines.append(f"|{check['check']}|{check['status']}|{check['detail']}|")
+    md_lines.extend(["", "## AWS deployment evidence", ""])
+    for name, status in payload["rollout_readiness"]["aws_only_checks"].items():
+        md_lines.append(f"- {name}: `{status}`")
+
     md_lines.extend(
         [
             "",
@@ -396,7 +471,7 @@ def main() -> int:
     )
 
     md_path.write_text("\n".join(md_lines) + "\n")
-    return 0
+    return 1 if readiness_failed else 0
 
 
 if __name__ == "__main__":
