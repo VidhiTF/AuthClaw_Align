@@ -18,25 +18,26 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
+    "picomatch": "4.0.4",
     "tailwindcss": "^4",
-    "typescript": "^5",
-    "@playwright/test": "^1.49.0",
-    "picomatch": "4.0.4"
+    "typescript": "^5"
   },
   "overrides": {
-    "postcss": "8.5.18",
+    "postcss": "8.5.26",
     "sharp": "0.35.0",
     "minimatch@3.1.5": {
       "brace-expansion": "1.1.18"
     },
     "minimatch@10.2.5": {
       "brace-expansion": "5.0.9"
-    }
+    },
+    "browserslist": "4.28.8"
   }
 }
