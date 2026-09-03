@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
 )
+
+var buildTarget = "unknown"
 
 func HealthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -23,6 +26,11 @@ func HealthHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Printf("authclaw-gateway %s\n", buildTarget)
+		return
+	}
+
 	// Try to load .env.local from parent directory
 	_ = godotenv.Load("../.env.local")
 
