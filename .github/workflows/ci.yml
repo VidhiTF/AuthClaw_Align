@@ -100,7 +100,9 @@ jobs:
           fetch-depth: 2
       - run: |
           git diff --check HEAD^
-          python3 -m unittest scripts.test_acl14_delivery_controls
+          python3 -m unittest \
+            scripts.test_acl14_delivery_controls \
+            scripts.test_p008_private_paths_evidence
 
   security:
     name: Security Scans

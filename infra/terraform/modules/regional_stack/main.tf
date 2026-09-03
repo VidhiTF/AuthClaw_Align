@@ -13,6 +13,7 @@ locals {
     logs           = "logs"
     secretsmanager = "secretsmanager"
     kms            = "kms"
+    sts            = "sts"
   }, var.audit_stream_transport == "sqs_fifo" ? { sqs = "sqs" } : {})
   namespace_name        = "${var.name}.local"
   listener_protocol     = "HTTPS"
@@ -90,6 +91,7 @@ locals {
     { name = "AUTHCLAW_GO_GATEWAY_URL", value = "http://gateway.${local.namespace_name}:8080" },
     { name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" },
     { name = "AUTHCLAW_DISABLE_BACKGROUND_MONITOR", value = "true" },
+    { name = "AWS_STS_REGIONAL_ENDPOINTS", value = "regional" },
     { name = "PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
     { name = "GATEWAY_INTERNAL_URL", value = "http://gateway.${local.namespace_name}:8080" },
     { name = "NEXT_PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
@@ -252,6 +254,7 @@ resource "aws_vpc_endpoint" "gateway" {
   service_name      = "com.amazonaws.${var.region}.${each.value}"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = values(aws_route_table.private)[*].id
+  policy            = local.gateway_endpoint_policies[each.key]
 
   tags = merge(var.tags, { Name = "${var.name}-${each.value}-endpoint" })
 }
@@ -349,6 +352,7 @@ resource "aws_vpc_endpoint" "interface" {
   subnet_ids          = values(aws_subnet.private)[*].id
   security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
+  policy              = local.interface_endpoint_policies[each.key]
 
   tags = merge(var.tags, { Name = "${var.name}-${replace(each.value, ".", "-")}-endpoint" })
 }
@@ -759,6 +763,124 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+data "aws_partition" "current" {}
+
+resource "aws_iam_role" "application_task" {
+  for_each = toset(["backend", "gateway", "agent", "audit_consumer"])
+
+  name = each.key == "audit_consumer" ? "${var.name}-audit-consumer-sqs" : each.key == "agent" ? "${var.name}-agent-runtime" : "${var.name}-${each.key}-audit-sqs"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+    }]
+  })
+  tags = var.tags
+}
+
+moved {
+  from = aws_iam_role.audit_sqs_producer["backend"]
+  to   = aws_iam_role.application_task["backend"]
+}
+
+moved {
+  from = aws_iam_role.audit_sqs_producer["gateway"]
+  to   = aws_iam_role.application_task["gateway"]
+}
+
+moved {
+  from = aws_iam_role.audit_sqs_consumer[0]
+  to   = aws_iam_role.application_task["audit_consumer"]
+}
+
+resource "aws_iam_role_policy" "runtime_s3" {
+  for_each = { for service, arns in var.runtime_s3_bucket_arns : service => arns if length(arns) > 0 }
+
+  name = "${var.name}-${each.key}-runtime-s3"
+  role = aws_iam_role.application_task[each.key].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ListApprovedBuckets"
+        Effect = "Allow"
+        Action = each.key == "backend" ? [
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:PutBucketPublicAccessBlock",
+          ] : [
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:GetBucketPublicAccessBlock",
+          "s3:GetEncryptionConfiguration",
+          "s3:GetBucketVersioning",
+          "s3:GetBucketLogging",
+          "s3:GetBucketPolicyStatus",
+        ]
+        Resource = sort(tolist(each.value))
+      },
+      {
+        Sid      = "ReadWriteApprovedObjects"
+        Effect   = "Allow"
+        Action   = each.key == "backend" ? ["s3:GetObject", "s3:PutObject"] : ["s3:GetObject"]
+        Resource = [for arn in sort(tolist(each.value)) : "${arn}/*"]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "runtime_kms" {
+  for_each = { for service, arns in var.runtime_kms_key_arns : service => arns if length(arns) > 0 }
+
+  name = "${var.name}-${each.key}-runtime-kms"
+  role = aws_iam_role.application_task[each.key].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = each.key == "agent" ? ["kms:Decrypt", "kms:GenerateDataKey"] : ["kms:Decrypt"]
+      Resource = sort(tolist(each.value))
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "runtime_secrets_manager" {
+  for_each = { for service, arns in var.runtime_secrets_manager_secret_arns : service => arns if length(arns) > 0 }
+
+  name = "${var.name}-${each.key}-runtime-secrets-manager"
+  role = aws_iam_role.application_task[each.key].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret"
+      ]
+      Resource = sort(tolist(each.value))
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "runtime_sts" {
+  count = length(var.runtime_sts_assume_role_arns) > 0 ? 1 : 0
+
+  name = "${var.name}-agent-runtime-sts"
+  role = aws_iam_role.application_task["agent"].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "sts:AssumeRole"
+      Resource = sort(tolist(var.runtime_sts_assume_role_arns))
+    }]
+  })
+}
+
 resource "aws_iam_role_policy" "task_secrets" {
   name = "${var.name}-ecs-secrets"
   role = aws_iam_role.task_execution.id
@@ -771,26 +893,212 @@ resource "aws_iam_role_policy" "task_secrets" {
           "secretsmanager:GetSecretValue",
           "kms:Decrypt"
         ]
-        Resource = concat([
-          aws_secretsmanager_secret.jwt.arn,
-          aws_secretsmanager_secret.jwt_v2.arn,
-          aws_secretsmanager_secret.session.arn,
-          aws_secretsmanager_secret.session_v2.arn,
-          aws_secretsmanager_secret.envelope.arn,
-          aws_secretsmanager_secret.envelope_v2.arn,
-          aws_secretsmanager_secret.bootstrap_database_url.arn,
-          aws_secretsmanager_secret.backend_migration_database_url.arn, aws_secretsmanager_secret.backend_database_url.arn,
-          aws_secretsmanager_secret.app_database_url.arn,
-          aws_secretsmanager_secret.agent_migration_database_url.arn,
-          aws_secretsmanager_secret.agent_database_url.arn,
-          aws_secretsmanager_secret.internal_service.arn,
-          aws_secretsmanager_secret.agent_encryption.arn,
-          aws_secretsmanager_secret.agent_redaction.arn,
-          aws_kms_key.main.arn
-        ], var.clickhouse_password != "" ? [aws_secretsmanager_secret.clickhouse_password[0].arn] : [])
+        Resource = concat(local.ecs_secret_arns, [aws_kms_key.main.arn])
       }
     ]
   })
+}
+
+locals {
+  ecs_secret_arns = concat([
+    aws_secretsmanager_secret.jwt.arn,
+    aws_secretsmanager_secret.jwt_v2.arn,
+    aws_secretsmanager_secret.session.arn,
+    aws_secretsmanager_secret.session_v2.arn,
+    aws_secretsmanager_secret.envelope.arn,
+    aws_secretsmanager_secret.envelope_v2.arn,
+    aws_secretsmanager_secret.bootstrap_database_url.arn,
+    aws_secretsmanager_secret.backend_migration_database_url.arn,
+    aws_secretsmanager_secret.backend_database_url.arn,
+    aws_secretsmanager_secret.app_database_url.arn,
+    aws_secretsmanager_secret.agent_migration_database_url.arn,
+    aws_secretsmanager_secret.agent_database_url.arn,
+    aws_secretsmanager_secret.internal_service.arn,
+    aws_secretsmanager_secret.agent_encryption.arn,
+    aws_secretsmanager_secret.agent_redaction.arn,
+  ], var.clickhouse_password != "" ? [aws_secretsmanager_secret.clickhouse_password[0].arn] : [])
+
+  runtime_s3_bucket_arns  = sort(distinct(flatten([for arns in values(var.runtime_s3_bucket_arns) : tolist(arns)])))
+  runtime_kms_key_arns    = sort(distinct(flatten([for arns in values(var.runtime_kms_key_arns) : tolist(arns)])))
+  runtime_secret_arns     = sort(distinct(flatten([for arns in values(var.runtime_secrets_manager_secret_arns) : tolist(arns)])))
+  runtime_principal_arns  = distinct(concat([aws_iam_role.application_task["backend"].arn, aws_iam_role.application_task["agent"].arn], sort(tolist(var.vpc_endpoint_external_principal_arns))))
+  execution_principal_arn = aws_iam_role.task_execution.arn
+
+  deny_insecure_transport_statement = {
+    Sid       = "DenyInsecureTransport"
+    Effect    = "Deny"
+    Principal = "*"
+    Action    = "*"
+    Resource  = "*"
+    Condition = { Bool = { "aws:SecureTransport" = "false" } }
+  }
+
+  gateway_endpoint_policies = {
+    s3 = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowECRImageLayers"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = "s3:GetObject"
+          Resource  = "arn:${data.aws_partition.current.partition}:s3:::prod-${var.region}-starport-layer-bucket/*"
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeBucketActions"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action = [
+              "s3:ListBucket",
+              "s3:GetBucketLocation",
+              "s3:GetBucketPublicAccessBlock",
+              "s3:GetEncryptionConfiguration",
+              "s3:GetBucketVersioning",
+              "s3:GetBucketLogging",
+              "s3:GetBucketPolicyStatus",
+              "s3:PutBucketPublicAccessBlock",
+              "s3:GetObject",
+              "s3:PutObject",
+            ]
+            Resource = concat(local.runtime_s3_bucket_arns, [for arn in local.runtime_s3_bucket_arns : "${arn}/*"])
+          },
+          {
+            Sid       = "AllowApprovedRuntimeBucketDiscovery"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action    = "s3:ListAllMyBuckets"
+            Resource  = "*"
+          }
+      ] : statement if length(local.runtime_s3_bucket_arns) > 0])
+    })
+  }
+
+  interface_endpoint_policies = {
+    ecr_api = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskECRToken"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = "ecr:GetAuthorizationToken"
+          Resource  = "*"
+        },
+        {
+          Sid       = "AllowTaskImagePull"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+          Resource  = sort(tolist(var.ecr_repository_arns))
+        }
+      ]
+    })
+    ecr_dkr = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskRegistryPull"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+          Resource  = sort(tolist(var.ecr_repository_arns))
+        }
+      ]
+    })
+    logs = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskLogDelivery"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = ["logs:CreateLogStream", "logs:PutLogEvents"]
+          Resource  = concat([for group in values(aws_cloudwatch_log_group.service) : "${group.arn}:*"], [for group in values(aws_cloudwatch_log_group.database_job) : "${group.arn}:*"])
+        }
+      ]
+    })
+    secretsmanager = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskSecretInjection"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = "secretsmanager:GetSecretValue"
+          Resource  = local.ecs_secret_arns
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeSecrets"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action    = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:CreateSecret", "secretsmanager:DeleteSecret"]
+            Resource  = local.runtime_secret_arns
+          }
+      ] : statement if length(local.runtime_secret_arns) > 0])
+    })
+    kms = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskSecretDecryption"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = "kms:Decrypt"
+          Resource  = aws_kms_key.main.arn
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeCryptography"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action    = ["kms:Decrypt", "kms:GenerateDataKey"]
+            Resource  = local.runtime_kms_key_arns
+          }
+      ] : statement if length(local.runtime_kms_key_arns) > 0])
+    })
+    sts = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowRuntimeIdentityCheck"
+          Effect    = "Allow"
+          Principal = { AWS = distinct(concat(values(aws_iam_role.application_task)[*].arn, sort(tolist(var.vpc_endpoint_external_principal_arns)))) }
+          Action    = "sts:GetCallerIdentity"
+          Resource  = "*"
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeRoleAssumption"
+            Effect    = "Allow"
+            Principal = { AWS = aws_iam_role.application_task["agent"].arn }
+            Action    = "sts:AssumeRole"
+            Resource  = sort(tolist(var.runtime_sts_assume_role_arns))
+          }
+      ] : statement if length(var.runtime_sts_assume_role_arns) > 0])
+    })
+    sqs = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowAuditTransport"
+          Effect    = "Allow"
+          Principal = { AWS = [aws_iam_role.application_task["backend"].arn, aws_iam_role.application_task["gateway"].arn, aws_iam_role.application_task["audit_consumer"].arn] }
+          Action    = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"]
+          Resource  = try(aws_sqs_queue.audit[0].arn, "*")
+        }
+      ]
+    })
+  }
 }
 
 resource "aws_lb" "main" {
@@ -956,7 +1264,7 @@ resource "aws_ecs_task_definition" "service" {
   cpu                      = var.service_cpu
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = lookup(local.audit_sqs_task_role_arns, each.key, null)
+  task_role_arn            = try(aws_iam_role.application_task[each.key].arn, null)
 
   container_definitions = jsonencode([
     merge({
@@ -1053,6 +1361,7 @@ resource "aws_ecs_task_definition" "gateway_with_sidecars" {
   cpu                      = var.gateway_sidecar_task_cpu
   memory                   = var.gateway_sidecar_task_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.application_task["gateway"].arn
 
   container_definitions = jsonencode([
     {
@@ -1169,6 +1478,7 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
   cpu                      = var.backend_sidecar_task_cpu
   memory                   = var.backend_sidecar_task_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.application_task["backend"].arn
 
   container_definitions = jsonencode([
     {
@@ -1256,6 +1566,7 @@ resource "aws_ecs_task_definition" "agent_with_opa" {
   cpu                      = var.agent_sidecar_task_cpu
   memory                   = var.agent_sidecar_task_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.application_task["agent"].arn
 
   container_definitions = jsonencode([
     {
@@ -1392,7 +1703,7 @@ resource "aws_ecs_task_definition" "audit_consumer" {
   cpu                      = var.service_cpu
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = lookup(local.audit_sqs_task_role_arns, "audit_consumer", null)
+  task_role_arn            = aws_iam_role.application_task["audit_consumer"].arn
 
   container_definitions = jsonencode([
     {

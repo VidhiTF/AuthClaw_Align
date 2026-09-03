@@ -7,6 +7,25 @@ secondary_region = "us-west-2"
 # Production activation still requires a reviewed state-backed plan and cost approval.
 nat_gateway_mode = "single"
 
+# Optional workload AWS access is denied until exact resource/principal ARNs are approved.
+# runtime_s3_bucket_arns = {
+#   backend = ["arn:aws:s3:::authclaw-production-documents"]
+#   agent   = ["arn:aws:s3:::approved-customer-evidence"]
+# }
+# runtime_kms_key_arns = {
+#   backend = ["arn:aws:kms:us-east-1:123456789012:key/00000000-0000-4000-8000-000000000000"]
+#   agent   = ["arn:aws:kms:us-east-1:123456789012:key/00000000-0000-4000-8000-000000000000"]
+# }
+# runtime_secrets_manager_secret_arns = {
+#   agent = ["arn:aws:secretsmanager:us-east-1:123456789012:secret:authclaw/customer/*"]
+# }
+# runtime_sts_assume_role_arns = [
+#   "arn:aws:iam::210987654321:role/AuthClawReadOnlyConnector",
+# ]
+# vpc_endpoint_external_principal_arns = [
+#   "arn:aws:iam::210987654321:role/AuthClawReadOnlyConnector",
+# ]
+
 container_images = {
   agent          = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/agent@sha256:replace-with-64-lowercase-hex-characters"
   backend        = "123456789012.dkr.ecr.us-east-1.amazonaws.com/authclaw-prod/backend@sha256:replace-with-64-lowercase-hex-characters"

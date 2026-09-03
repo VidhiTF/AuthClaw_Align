@@ -84,7 +84,19 @@ This keeps the regional AuthClaw stack portable while still making the audit pat
 - `single` creates one NAT Gateway and routes every private subnet through it. Use this lower-cost mode for development and staging.
 - `per_az` creates one NAT Gateway per public subnet and routes each private subnet to the NAT in the same availability zone. Production must use this mode after the rollout gates in the runbook are satisfied.
 
-Every private subnet has its own route table. The S3 gateway endpoint is associated with all private route tables; DynamoDB is intentionally omitted until a runtime dependency is confirmed. ECR API, ECR Docker, CloudWatch Logs, Secrets Manager, and KMS use private-DNS interface endpoints. Their security group accepts TCP 443 only from the regional ECS application security group.
+Every private subnet has its own route table. The S3 gateway endpoint is associated with all private route tables; DynamoDB is intentionally omitted until a runtime dependency is confirmed. ECR API, ECR Docker, CloudWatch Logs, Secrets Manager, KMS, and regional STS use private-DNS interface endpoints. SQS is added only when `audit_stream_transport = "sqs_fifo"`; Kinesis is intentionally absent. Their security group accepts TCP 443 only from the regional ECS application security group.
+
+Every endpoint has an explicit policy. The default policy permits ECS startup paths only from the task execution role and permits application calls only from the separated backend, gateway, agent, and audit-consumer task roles. Optional S3, KMS, Secrets Manager, cross-account principal, and STS role-assumption access is fail-closed until its exact ARN allowlist is supplied. `AWS_STS_REGIONAL_ENDPOINTS=regional` is set on ECS tasks so confirmed runtime role assumption uses the STS endpoint.
+
+The ARN allowlists are:
+
+- `runtime_s3_bucket_arns`: map of `backend` or `agent` to approved bucket ARNs;
+- `runtime_kms_key_arns`: map of `backend` or `agent` to approved key ARNs;
+- `runtime_secrets_manager_secret_arns`: map of `backend` or `agent` to approved secret ARNs or controlled secret-prefix ARN patterns;
+- `runtime_sts_assume_role_arns`: exact customer roles the agent may assume; and
+- `vpc_endpoint_external_principal_arns`: explicit customer principals allowed through the endpoint policies.
+
+Empty allowlists grant no optional runtime access. Do not use wildcard principal, bucket, key, secret, or role inputs in production.
 
 The first state-backed plan after this change must prove that the existing singleton EIP, NAT Gateway, and route tables move to key `"0"` without replacement. Do not apply a plan that deletes or replaces the existing NAT/EIP identity. See [NAT_EGRESS_RUNBOOK.md](../../docs/runbooks/NAT_EGRESS_RUNBOOK.md) for migration, validation, rollback, monitoring, and production approval gates.
 
@@ -105,6 +117,14 @@ terraform fmt -check -recursive
 terraform init -backend=false
 terraform validate
 terraform test
+```
+
+The deterministic test expects six always-on interface endpoints and seven in SQS mode. A production promotion still requires the NAT-disabled staging exercises and denial tests in [`P0_08_PRIVATE_PATHS_VERIFICATION.md`](../../docs/runbooks/P0_08_PRIVATE_PATHS_VERIFICATION.md). Record the result with the fail-closed validator:
+
+```bash
+python scripts/p008_private_paths_evidence.py path/to/p008-staging-evidence.json \
+  --audit-transport kafka \
+  --output-md path/to/p008-staging-evidence.md
 ```
 
 ## Operations Notes

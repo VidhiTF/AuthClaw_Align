@@ -22,7 +22,13 @@ module "primary" {
   availability_zones                   = var.primary_availability_zones
   nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
+  runtime_s3_bucket_arns               = var.runtime_s3_bucket_arns
+  runtime_kms_key_arns                 = var.runtime_kms_key_arns
+  runtime_secrets_manager_secret_arns  = var.runtime_secrets_manager_secret_arns
+  runtime_sts_assume_role_arns         = var.runtime_sts_assume_role_arns
+  vpc_endpoint_external_principal_arns = var.vpc_endpoint_external_principal_arns
   container_images                     = var.container_images
+  ecr_repository_arns                  = toset(values(aws_ecr_repository.service)[*].arn)
   desired_count                        = var.desired_count_primary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
@@ -79,7 +85,13 @@ module "secondary" {
   availability_zones                   = var.secondary_availability_zones
   nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
+  runtime_s3_bucket_arns               = var.runtime_s3_bucket_arns
+  runtime_kms_key_arns                 = var.runtime_kms_key_arns
+  runtime_secrets_manager_secret_arns  = var.runtime_secrets_manager_secret_arns
+  runtime_sts_assume_role_arns         = var.runtime_sts_assume_role_arns
+  vpc_endpoint_external_principal_arns = var.vpc_endpoint_external_principal_arns
   container_images                     = var.container_images
+  ecr_repository_arns                  = toset(values(aws_ecr_repository.service)[*].arn)
   desired_count                        = var.desired_count_secondary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory

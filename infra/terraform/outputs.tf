@@ -26,11 +26,14 @@ output "primary" {
     gateway_endpoint_route_table_ids   = module.primary.gateway_endpoint_route_table_ids
     gateway_endpoint_route_table_count = module.primary.gateway_endpoint_route_table_count
     interface_endpoint_private_dns     = module.primary.interface_endpoint_private_dns_enabled
+    interface_endpoint_policies        = module.primary.interface_endpoint_policies
+    gateway_endpoint_policies          = module.primary.gateway_endpoint_policies
     endpoint_client_security_group_id  = module.primary.endpoint_client_security_group_id
     endpoint_ingress_source_count      = module.primary.endpoint_ingress_source_count
     endpoint_ingress_public_cidr_count = module.primary.endpoint_ingress_public_cidr_count
     vpc_endpoint_ids                   = module.primary.vpc_endpoint_ids
     nat_dashboard_name                 = module.primary.nat_dashboard_name
+    application_task_role_arns         = module.primary.application_task_role_arns
   }
 }
 
@@ -63,11 +66,14 @@ output "secondary" {
     gateway_endpoint_route_table_ids   = module.secondary[0].gateway_endpoint_route_table_ids
     gateway_endpoint_route_table_count = module.secondary[0].gateway_endpoint_route_table_count
     interface_endpoint_private_dns     = module.secondary[0].interface_endpoint_private_dns_enabled
+    interface_endpoint_policies        = module.secondary[0].interface_endpoint_policies
+    gateway_endpoint_policies          = module.secondary[0].gateway_endpoint_policies
     endpoint_client_security_group_id  = module.secondary[0].endpoint_client_security_group_id
     endpoint_ingress_source_count      = module.secondary[0].endpoint_ingress_source_count
     endpoint_ingress_public_cidr_count = module.secondary[0].endpoint_ingress_public_cidr_count
     vpc_endpoint_ids                   = module.secondary[0].vpc_endpoint_ids
     nat_dashboard_name                 = module.secondary[0].nat_dashboard_name
+    application_task_role_arns         = module.secondary[0].application_task_role_arns
   } : null
 }
 

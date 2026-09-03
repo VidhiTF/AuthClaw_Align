@@ -51,9 +51,54 @@ variable "secondary_availability_zones" {
 }
 
 variable "enable_private_aws_endpoints" {
-  description = "Create private S3, ECR, CloudWatch Logs, Secrets Manager, and KMS VPC endpoints in each regional stack."
+  description = "Create private S3, ECR, CloudWatch Logs, Secrets Manager, KMS, and STS VPC endpoints in each regional stack, plus SQS when selected."
   type        = bool
   default     = true
+}
+
+variable "runtime_s3_bucket_arns" {
+  description = "Approved S3 bucket ARNs by runtime service (backend or agent). Empty entries fail closed."
+  type        = map(set(string))
+  default     = {}
+
+  validation {
+    condition     = alltrue([for service in keys(var.runtime_s3_bucket_arns) : contains(["backend", "agent"], service)])
+    error_message = "runtime_s3_bucket_arns keys must be backend or agent."
+  }
+}
+
+variable "runtime_kms_key_arns" {
+  description = "Approved KMS key ARNs by runtime service (backend or agent). Empty entries fail closed."
+  type        = map(set(string))
+  default     = {}
+
+  validation {
+    condition     = alltrue([for service in keys(var.runtime_kms_key_arns) : contains(["backend", "agent"], service)])
+    error_message = "runtime_kms_key_arns keys must be backend or agent."
+  }
+}
+
+variable "runtime_secrets_manager_secret_arns" {
+  description = "Approved Secrets Manager secret ARNs for the agent runtime. Empty entries fail closed."
+  type        = map(set(string))
+  default     = {}
+
+  validation {
+    condition     = alltrue([for service in keys(var.runtime_secrets_manager_secret_arns) : service == "agent"])
+    error_message = "runtime_secrets_manager_secret_arns only supports the confirmed agent caller."
+  }
+}
+
+variable "runtime_sts_assume_role_arns" {
+  description = "Exact customer role ARNs the agent runtime may assume. Empty disables runtime role assumption."
+  type        = set(string)
+  default     = []
+}
+
+variable "vpc_endpoint_external_principal_arns" {
+  description = "Explicit external IAM principal ARNs allowed to use runtime AWS-service endpoints."
+  type        = set(string)
+  default     = []
 }
 
 variable "nat_gateway_mode" {

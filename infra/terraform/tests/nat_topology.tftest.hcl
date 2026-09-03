@@ -71,13 +71,91 @@ run "single_nat_for_lower_environments" {
   }
 
   assert {
-    condition     = length(output.primary.interface_endpoint_private_dns) == 5 && alltrue(values(output.primary.interface_endpoint_private_dns))
-    error_message = "All five interface endpoints must enable private DNS."
+    condition = toset(keys(output.primary.interface_endpoint_private_dns)) == toset([
+      "ecr_api",
+      "ecr_dkr",
+      "kms",
+      "logs",
+      "secretsmanager",
+      "sts",
+    ]) && alltrue(values(output.primary.interface_endpoint_private_dns))
+    error_message = "The six required interface endpoints must exist and enable private DNS."
+  }
+
+  assert {
+    condition     = toset(keys(output.primary.interface_endpoint_policies)) == toset(keys(output.primary.interface_endpoint_private_dns)) && toset(keys(output.primary.gateway_endpoint_policies)) == toset(["s3"])
+    error_message = "Every configured gateway and interface endpoint must select an explicit endpoint policy."
   }
 
   assert {
     condition     = output.primary.endpoint_ingress_source_count == 1 && output.primary.endpoint_ingress_public_cidr_count == 0
     error_message = "Interface endpoint ingress must have one security-group source and no public CIDRs."
+  }
+}
+
+run "sqs_transport_adds_only_sqs_endpoint" {
+  command = plan
+
+  variables {
+    nat_gateway_mode       = "single"
+    audit_stream_transport = "sqs_fifo"
+  }
+
+  assert {
+    condition = toset(keys(output.primary.interface_endpoint_private_dns)) == toset([
+      "ecr_api",
+      "ecr_dkr",
+      "kms",
+      "logs",
+      "secretsmanager",
+      "sqs",
+      "sts",
+    ])
+    error_message = "SQS mode must add only the SQS endpoint to the six always-on interface endpoints."
+  }
+
+  assert {
+    condition     = !contains(keys(output.primary.vpc_endpoint_ids), "kinesis") && !contains(keys(output.primary.vpc_endpoint_ids), "dynamodb")
+    error_message = "Kinesis and DynamoDB endpoints must remain absent without confirmed runtime dependencies."
+  }
+
+  assert {
+    condition     = toset(keys(output.primary.interface_endpoint_policies)) == toset(keys(output.primary.interface_endpoint_private_dns))
+    error_message = "The conditional SQS endpoint must also select an explicit endpoint policy."
+  }
+
+  assert {
+    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "backend", "gateway"])
+    error_message = "Backend, gateway, agent, and audit consumer must have separated application task roles."
+  }
+}
+
+run "approved_runtime_arn_allowlists_plan" {
+  command = plan
+
+  variables {
+    runtime_s3_bucket_arns = {
+      backend = ["arn:aws:s3:::authclaw-test-documents"]
+      agent   = ["arn:aws:s3:::approved-customer-evidence"]
+    }
+    runtime_kms_key_arns = {
+      backend = ["arn:aws:kms:us-east-1:123456789012:key/00000000-0000-4000-8000-000000000010"]
+      agent   = ["arn:aws:kms:us-east-1:123456789012:key/00000000-0000-4000-8000-000000000011"]
+    }
+    runtime_secrets_manager_secret_arns = {
+      agent = ["arn:aws:secretsmanager:us-east-1:123456789012:secret:authclaw/customer/test"]
+    }
+    runtime_sts_assume_role_arns = [
+      "arn:aws:iam::210987654321:role/AuthClawReadOnlyConnector",
+    ]
+    vpc_endpoint_external_principal_arns = [
+      "arn:aws:iam::210987654321:role/AuthClawReadOnlyConnector",
+    ]
+  }
+
+  assert {
+    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "backend", "gateway"])
+    error_message = "Approved runtime allowlists must plan with the separated application task roles."
   }
 }
 

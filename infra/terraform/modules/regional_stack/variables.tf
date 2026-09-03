@@ -31,6 +31,31 @@ variable "enable_private_aws_endpoints" {
   default     = true
 }
 
+variable "runtime_s3_bucket_arns" {
+  type    = map(set(string))
+  default = {}
+}
+
+variable "runtime_kms_key_arns" {
+  type    = map(set(string))
+  default = {}
+}
+
+variable "runtime_secrets_manager_secret_arns" {
+  type    = map(set(string))
+  default = {}
+}
+
+variable "runtime_sts_assume_role_arns" {
+  type    = set(string)
+  default = []
+}
+
+variable "vpc_endpoint_external_principal_arns" {
+  type    = set(string)
+  default = []
+}
+
 variable "nat_gateway_mode" {
   type        = string
   description = "NAT topology: single for lower environments, per_az for production."
@@ -52,6 +77,11 @@ variable "container_images" {
     opa            = string
     presidio       = string
   })
+}
+
+variable "ecr_repository_arns" {
+  description = "Approved ECR repositories used by ECS task image pulls."
+  type        = set(string)
 }
 
 variable "authclaw_env" {
