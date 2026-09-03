@@ -411,6 +411,7 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
     conn.execute(
         text(
             f"GRANT INSERT, UPDATE ON public.onboarding_email_otps TO {definer}; "
+            f"GRANT INSERT ON public.tenants TO {definer}; "
             f"GRANT UPDATE ON public.users "
             f"TO {definer}"
         )
@@ -441,14 +442,26 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
         if function_name in AUTHN_RUNTIME_FUNCTIONS:
             conn.execute(text(f"GRANT EXECUTE ON FUNCTION {signature} TO {runtime}"))
 
-    for resolver_name in ("resolve_api_key", "resolve_trust_center_share"):
-        resolver = conn.execute(
-            text(f"SELECT to_regprocedure('public.{resolver_name}(text)')::text")
+    definer_functions = (
+        "resolve_api_key(text)",
+        "resolve_trust_center_share(text)",
+        "access_request_onboarding_started(text,timestamptz)",
+    )
+    for function_signature in definer_functions:
+        secured_function = conn.execute(
+            text(
+                "SELECT to_regprocedure("
+                f"'public.{function_signature}')::text"
+            )
         ).scalar_one_or_none()
-        if resolver:
-            conn.execute(text(f"ALTER FUNCTION {resolver} OWNER TO {definer}"))
-            conn.execute(text(f"REVOKE ALL ON FUNCTION {resolver} FROM PUBLIC"))
-            conn.execute(text(f"GRANT EXECUTE ON FUNCTION {resolver} TO {runtime}"))
+        if secured_function:
+            conn.execute(text(f"ALTER FUNCTION {secured_function} OWNER TO {definer}"))
+            conn.execute(
+                text(f"REVOKE ALL ON FUNCTION {secured_function} FROM PUBLIC")
+            )
+            conn.execute(
+                text(f"GRANT EXECUTE ON FUNCTION {secured_function} TO {runtime}")
+            )
 
     conn.execute(text("REVOKE ALL ON ALL TABLES IN SCHEMA authn FROM PUBLIC"))
     conn.execute(text(f"REVOKE ALL ON ALL TABLES IN SCHEMA authn FROM {runtime}"))
@@ -554,9 +567,31 @@ def finalize(conn, roles: tuple[Role, Role, Role, Role]) -> None:
         )
 
 
+def finalize_backend(conn, roles: tuple[Role, Role, Role, Role]) -> None:
+    """Finalize only the backend boundary for isolated backend deployments and CI."""
+    backend_migrator, backend_runtime, _, _ = roles
+    grant_runtime_objects(conn, backend_migrator, backend_runtime)
+    secure_owned_functions(
+        conn, backend_migrator.name, "public", (backend_runtime.name,)
+    )
+    grant_backend_functions(conn, backend_runtime)
+    secure_authentication_boundary(conn, backend_runtime)
+
+    quote = conn.dialect.identifier_preparer.quote
+    conn.execute(text(f"REVOKE ALL ON SCHEMA agent FROM {quote(backend_runtime.name)}"))
+    conn.execute(
+        text(
+            "REVOKE ALL ON ALL TABLES IN SCHEMA agent FROM "
+            f"{quote(backend_runtime.name)}"
+        )
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("prepare", "finalize"))
+    parser.add_argument(
+        "phase", choices=("prepare", "finalize", "finalize-backend")
+    )
     args = parser.parse_args()
     database_url = normalize_database_url(
         os.getenv("BOOTSTRAP_DATABASE_URL")
@@ -574,6 +609,8 @@ def main() -> None:
         acquire_initialization_lock(conn)
         if args.phase == "prepare":
             prepare(conn, database_name, roles)
+        elif args.phase == "finalize-backend":
+            finalize_backend(conn, roles)
         else:
             finalize(conn, roles)
     print(f"Database security {args.phase} complete.")

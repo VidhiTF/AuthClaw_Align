@@ -27,7 +27,12 @@ from tests.db_safety import destructive_test_urls
 owner_db_url, db_url = destructive_test_urls()
 owner_engine = create_engine(owner_db_url, echo=False, poolclass=StaticPool)
 engine = create_engine(db_url, echo=False, poolclass=StaticPool)
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
+OwnerTestingSessionLocal = sessionmaker(
+    autocommit=False, autoflush=False, bind=owner_engine, expire_on_commit=False
+)
+AppTestingSessionLocal = sessionmaker(
+    autocommit=False, autoflush=False, bind=engine, expire_on_commit=False
+)
 
 
 @pytest.fixture(scope="module")
@@ -48,7 +53,9 @@ def db_session() -> Session:
         conn.execute(text("TRUNCATE TABLE data_subject_requests, access_request_history, access_requests, audit_log_metadata, pending_approvals, redaction_tokens, gateway_configs, policies, api_keys, users, tenants CASCADE;"))
         conn.commit()
         
-    db = TestingSessionLocal()
+    # Seed and inspect fixtures through the owner connection. Runtime requests below
+    # still use the restricted application role and its signed RLS context.
+    db = OwnerTestingSessionLocal()
     try:
         yield db
     finally:
@@ -61,7 +68,7 @@ def db_session() -> Session:
 def client(db_session: Session) -> TestClient:
     """FastAPI TestClient with overridden get_db dependency to enforce RLS"""
     def override_get_db():
-        db = TestingSessionLocal()
+        db = AppTestingSessionLocal()
         try:
             yield db
         finally:
@@ -117,7 +124,7 @@ def test_authentication_gates(client: TestClient):
     # 3. Invalid API key value
     response = client.get("/v1/audit-logs", headers={"Authorization": "Bearer badkey"})
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "Invalid or expired API Key" in response.json()["detail"]
+    assert "Invalid or expired credential" in response.json()["detail"]
 
 
 def test_data_subject_request_lifecycle_authorization_and_isolation(
@@ -492,7 +499,10 @@ def test_public_access_request_persists_server_owned_fields(
     assert record.status == "PENDING"
     history = (
         db_session.query(AccessRequestHistory)
-        .filter(AccessRequestHistory.access_request_id == record.id)
+        .filter(
+            AccessRequestHistory.access_request_id == record.id,
+            AccessRequestHistory.event_type == "CREATED",
+        )
         .one()
     )
     assert history.event_type == "CREATED"
@@ -614,10 +624,17 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     db_session.add(tenant_b)
     db_session.commit()
 
-    # Seed Owner User & System API Key with 'admin' scope for Tenant A to call POST /tenants
+    # Seed a platform administrator and platform-scoped key for POST /tenants.
     admin_user_id = uuid4()
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
-    admin_user = User(id=admin_user_id, tenant_id=tenant_a_id, email="admin@tenantA.com", role="owner", is_active=True)
+    admin_user = User(
+        id=admin_user_id,
+        tenant_id=tenant_a_id,
+        email="admin@tenantA.com",
+        role="owner",
+        platform_role="ADMIN",
+        is_active=True,
+    )
     db_session.add(admin_user)
     db_session.commit()
 
@@ -628,7 +645,7 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
         tenant_id=tenant_a_id,
         key_hash=admin_hash,
         name="Admin Key",
-        scopes=["admin", "read", "write"],
+        scopes=["admin", "read", "write", "platform.admin"],
         is_active=True,
         created_by=admin_user_id
     )

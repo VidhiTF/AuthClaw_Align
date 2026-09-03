@@ -36,9 +36,10 @@ credentials. The agent already has a separate per-record KMS envelope implementa
 5. Production startup rejects non-HTTPS backend-to-gateway/OPA/Presidio URLs. The Go
    gateway independently rejects non-HTTPS OPA and Presidio URLs. Staging enables the
    same check with `AUTHCLAW_REQUIRE_SERVICE_TLS=true`.
-6. Non-sensitive health/readiness output may expose provider, key version/key
-   identifier and managed/fail-closed state. It must never expose keys, wrapped key
-   blobs, ciphertext or provider exception details.
+6. Public health/readiness output exposes only stable service and healthy/unhealthy
+   state. Provider, key version, key identifier, alias, ARN, configuration state,
+   keys, wrapped key blobs, ciphertext and provider exception details are restricted
+   to authenticated operator telemetry or internal logs.
 
 No new dependency, service or database migration is introduced.
 
@@ -67,8 +68,9 @@ terraform -chdir=infra/terraform validate
 
 ## Telemetry and operational signals
 
-- Backend `/health` includes `secret_management` with provider, key version,
-  non-sensitive key identifier, managed state and configuration state.
+- Backend public `/health` contains no secret-management provider or key identity.
+  Detailed provider, version, managed state and configuration state are available
+  only through authenticated operator telemetry or internal logs.
 - Agent production readiness includes selected secret backend, envelope provider,
   fail-closed selection and whether a customer-managed key identifier is configured.
 - Secret rotation/store events record a hashed secret reference, backend and version;

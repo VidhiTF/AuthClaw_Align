@@ -295,3 +295,24 @@ tenant-aware deletion design.
 Some retention periods and legal exceptions remain shared-responsibility
 decisions. The implementation must not represent AuthClaw as independently
 establishing GDPR compliance.
+
+## Pentest W-3 decision gate
+
+Pentest finding W-3 remains open. The current F11 implementation intentionally
+retains the user identity and raw email for account and tenant lifecycle integrity,
+but that engineering rationale is not by itself a lawful-retention decision.
+
+Before changing deletion behavior or declaring W-3 closed, privacy/legal must approve:
+
+- account deletion versus removal from one tenant;
+- handling of the last tenant owner and platform administrators;
+- legal acceptance evidence, immutable audit records and legal holds;
+- re-enrollment and email uniqueness after deletion;
+- retention and erasure behavior for PostgreSQL, Redis, Kafka, ClickHouse, logs,
+  exports, object storage, processors and backups.
+
+Engineering must then update the data inventory, use non-reversible keyed
+pseudonymous identifiers where approved continuity is required, provide a dry-run
+inventory, and attach tenant-isolation and failure-recovery evidence. Until those
+decisions and tests exist, W-3 is approved for investigation only, not implementation
+or closure.
