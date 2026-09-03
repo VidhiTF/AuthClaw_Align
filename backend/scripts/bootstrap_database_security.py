@@ -214,6 +214,35 @@ def configure_default_privileges(conn, migrator: Role, runtime: Role) -> None:
     )
 
 
+def prepare_backend_security_objects_for_migration(conn, backend_migrator: Role) -> None:
+    """Return finalized auth objects to the migrator before an Alembic upgrade."""
+    quote = conn.dialect.identifier_preparer.quote
+    migrator = quote(backend_migrator.name)
+    tables = conn.execute(
+        text(
+            "SELECT c.oid::regclass::text FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "JOIN pg_roles r ON r.oid=c.relowner "
+            "WHERE n.nspname='authn' AND c.relkind IN ('r', 'p') "
+            "AND r.rolname=:definer"
+        ),
+        {"definer": AUTH_DEFINER_ROLE},
+    ).scalars()
+    for table_name in tables:
+        conn.execute(text(f"ALTER TABLE {table_name} OWNER TO {migrator}"))
+    signatures = conn.execute(
+        text(
+            "SELECT p.oid::regprocedure::text FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "JOIN pg_roles r ON r.oid=p.proowner "
+            "WHERE n.nspname='authn' AND r.rolname=:definer"
+        ),
+        {"definer": AUTH_DEFINER_ROLE},
+    ).scalars()
+    for signature in signatures:
+        conn.execute(text(f"ALTER FUNCTION {signature} OWNER TO {migrator}"))
+
+
 def prepare_agent_security_objects_for_migration(conn, agent_migrator: Role) -> None:
     quote = conn.dialect.identifier_preparer.quote
     migrator = quote(agent_migrator.name)
@@ -296,6 +325,7 @@ def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> N
         text(f"GRANT USAGE, CREATE ON SCHEMA agent TO {quote(agent_migrator.name)}")
     )
     conn.execute(text(f"GRANT USAGE ON SCHEMA agent TO {quote(agent_runtime.name)}"))
+    prepare_backend_security_objects_for_migration(conn, backend_migrator)
     prepare_agent_security_objects_for_migration(conn, agent_migrator)
 
     configure_default_privileges(conn, backend_migrator, backend_runtime)
