@@ -1,11 +1,18 @@
 ARG GO_VERSION=1.26.5
-FROM golang:${GO_VERSION}-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETPLATFORM
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -o /out/authclaw-gateway .
+RUN test "$TARGETPLATFORM" = "$TARGETOS/$TARGETARCH" \
+    && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
+    -trimpath -ldflags="-s -w -X main.buildTarget=$TARGETOS/$TARGETARCH" \
+    -o /out/authclaw-gateway .
 
 FROM alpine:3.24
 WORKDIR /app

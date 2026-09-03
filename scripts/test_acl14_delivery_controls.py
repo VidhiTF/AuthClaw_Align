@@ -60,6 +60,14 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("tests/test_endpoints.py", CI)
         self.assertIn("backend-integration", CI)
 
+    def test_arm64_images_do_not_run_for_pull_requests(self):
+        self.assertIn(
+            "github.event_name == 'push' &&\n"
+            "      github.ref == 'refs/heads/master' &&\n"
+            "      needs.changes.outputs.runtime_images == 'true'",
+            CI,
+        )
+
     def test_external_actions_are_pinned_to_full_commit_shas(self):
         use_pattern = re.compile(r"\buses:\s*([^@\s]+)@([^#\s]+)")
         for workflow_path in WORKFLOWS:

@@ -23,6 +23,7 @@ module "primary" {
   nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
   container_images                     = var.container_images
+  service_cpu_architectures            = var.service_cpu_architectures
   desired_count                        = var.desired_count_primary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
@@ -80,6 +81,7 @@ module "secondary" {
   nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
   container_images                     = var.container_images
+  service_cpu_architectures            = var.service_cpu_architectures
   desired_count                        = var.desired_count_secondary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
