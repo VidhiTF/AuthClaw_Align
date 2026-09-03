@@ -57,6 +57,16 @@ variable "container_images" {
 variable "service_cpu_architectures" {
   type    = map(string)
   default = {}
+
+  validation {
+    condition     = length(setsubtract(keys(var.service_cpu_architectures), ["agent", "backend", "gateway", "console", "audit_consumer"])) == 0
+    error_message = "service_cpu_architectures supports only agent, backend, gateway, console, and audit_consumer."
+  }
+
+  validation {
+    condition     = alltrue([for architecture in values(var.service_cpu_architectures) : contains(["ARM64", "X86_64"], architecture)])
+    error_message = "service_cpu_architectures values must be ARM64 or X86_64."
+  }
 }
 
 variable "authclaw_env" {

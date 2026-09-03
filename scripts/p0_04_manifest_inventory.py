@@ -131,6 +131,11 @@ def is_pinned(image: str) -> bool:
     return "@sha256:" in image
 
 
+def image_repository(image: str) -> str:
+    name = image.split("@", 1)[0]
+    return name.rsplit(":", 1)[0].lower() if ":" in name.rsplit("/", 1)[-1] else name.lower()
+
+
 def normalize_digest_info(payload: Dict[str, object], include_single: bool = False) -> Dict[str, object]:
     if payload.get("status") != "ok":
         return {
@@ -227,6 +232,7 @@ def dedupe_records(records: Iterable[Dict[str, object]]) -> List[Dict[str, objec
 
 def rollout_readiness(args: argparse.Namespace) -> tuple[Dict[str, object], bool]:
     checks: List[Dict[str, str]] = []
+    release_by_service = None
     add = lambda name, status, detail: checks.append({"check": name, "status": status, "detail": detail})
     add("production_services", "PASS" if set(SERVICE_DOCKERFILES) == REQUIRED_SERVICES else "FAIL", ", ".join(sorted(REQUIRED_SERVICES)))
 
@@ -250,7 +256,8 @@ def rollout_readiness(args: argparse.Namespace) -> tuple[Dict[str, object], bool
                 release_records.extend(data if isinstance(data, list) else [data])
             grouped = {service: [r for r in release_records if SERVICE_ALIASES.get(str(r.get("service")), r.get("service")) == service] for service in REQUIRED_SERVICES}
             fields = ["manifest_list_digest", "linux_amd64_digest", "linux_arm64_digest"]
-            release_ok = all(len(rows) == 1 and rows[0].get("status") == "PASS" and rows[0].get("source_commit_sha") == args.source_commit and all(DIGEST_RE.fullmatch(str(rows[0].get(field, ""))) for field in fields) for rows in grouped.values())
+            release_ok = len(release_records) == len(REQUIRED_SERVICES) and all(len(rows) == 1 and rows[0].get("status") == "PASS" and rows[0].get("source_commit_sha") == args.source_commit and all(DIGEST_RE.fullmatch(str(rows[0].get(field, ""))) for field in fields) for rows in grouped.values())
+            release_by_service = {service: rows[0] for service, rows in grouped.items()} if release_ok else None
             add("release_manifest_evidence", "PASS" if release_ok else "FAIL", "exactly one PASS record and three immutable digests per service at source commit")
         except (OSError, TypeError, json.JSONDecodeError) as exc:
             add("release_manifest_evidence", "FAIL", str(exc))
@@ -262,8 +269,17 @@ def rollout_readiness(args: argparse.Namespace) -> tuple[Dict[str, object], bool
         try:
             tfvars = json.loads(Path(args.terraform_input).read_text(encoding="utf-8"))
             images = tfvars.get("container_images", {})
-            immutable = set(images) == REQUIRED_SERVICES and all(re.search(r"@sha256:[0-9a-f]{64}$", str(image)) for image in images.values())
-            add("immutable_terraform_images", "PASS" if immutable else "FAIL", "all seven intended images must use @sha256")
+            canonical_images = {SERVICE_ALIASES.get(str(service), str(service)): image for service, image in images.items()}
+            unique_images = len(canonical_images) == len(images) and set(canonical_images) == REQUIRED_SERVICES
+            if release_by_service is None:
+                binding_status = "FAIL" if release_dir else "LIVE-EVIDENCE-PENDING"
+            else:
+                binding_status = "PASS" if unique_images and all(
+                    image_repository(str(canonical_images[service])) == image_repository(str(release_by_service[service].get("image_reference", "")))
+                    and str(canonical_images[service]) == image_repository(str(release_by_service[service]["image_reference"])) + "@" + str(release_by_service[service]["manifest_list_digest"])
+                    for service in REQUIRED_SERVICES
+                ) else "FAIL"
+            add("immutable_terraform_images", binding_status, "all seven repositories and index digests must match approved release evidence")
             architectures = tfvars.get("service_cpu_architectures", {})
             staged = args.selected_service in DEPLOYABLE_SERVICES and architectures.get(args.selected_service) == "ARM64" and all(architectures.get(service, "X86_64") == "X86_64" for service in REQUIRED_SERVICES - {args.selected_service})
             add("staged_architecture", "PASS" if staged else "FAIL", f"{args.selected_service}=ARM64; unselected=X86_64")
@@ -472,7 +488,7 @@ def main() -> int:
     )
 
     md_path.write_text("\n".join(md_lines) + "\n")
-    return 1 if readiness_failed else 0
+    return 1 if readiness_failed or any(record["status"] == "FAIL" for record in records) else 0
 
 
 if __name__ == "__main__":

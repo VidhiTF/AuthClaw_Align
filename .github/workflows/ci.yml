@@ -420,7 +420,10 @@ jobs:
         shell: bash
         run: |
           repo="${GITHUB_REPOSITORY,,}"
-          echo "name=ghcr.io/$repo/${{ matrix.service }}:ci-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          repository="ghcr.io/$repo/${{ matrix.service }}"
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "name=$repository:ci-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "quarantine=$repository:quarantine-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - name: Initialize immutable digest evidence
         shell: bash
         run: >-
@@ -435,17 +438,18 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.image.outputs.name }}
+          tags: ${{ steps.image.outputs.quarantine }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=min,scope=${{ matrix.service }}
           build-args: |
             NEXT_PUBLIC_API_URL=http://localhost:18000/api/v1
             NEXT_PUBLIC_GATEWAY_URL=http://localhost:18080
             NEXT_PUBLIC_AUTHCLAW_DEMO_MODE=true
-      - name: Verify manifest and capture immutable digests
+      - name: Verify quarantine manifest and capture immutable digests
+        id: quarantine
         shell: bash
         env:
-          IMAGE: ${{ steps.image.outputs.name }}
+          IMAGE: ${{ steps.image.outputs.quarantine }}
           INDEX_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
@@ -455,14 +459,44 @@ jobs:
           amd64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0] // empty' <<<"$manifest")"
           arm64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest][0] // empty' <<<"$manifest")"
           [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ && "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
-          jq -n --arg service '${{ matrix.service }}' --arg image "$IMAGE" --arg tag "ci-${GITHUB_SHA}" --arg index "$INDEX_DIGEST" --arg amd64 "$amd64" --arg arm64 "$arm64" --arg commit "$GITHUB_SHA" --arg timestamp "$(date -u +%FT%TZ)" '{service:$service,image_reference:$image,release_tag:$tag,manifest_list_digest:$index,linux_amd64_digest:$amd64,linux_arm64_digest:$arm64,source_commit_sha:$commit,timestamp:$timestamp,status:"PASS"}' > release-manifest-evidence.json
-      - uses: aquasecurity/trivy-action@v0.36.0
+          echo "index=$INDEX_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "amd64=$amd64" >> "$GITHUB_OUTPUT"
+          echo "arm64=$arm64" >> "$GITHUB_OUTPUT"
+      - name: Scan quarantined AMD64 child
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ steps.image.outputs.name }}
+          image-ref: ${{ steps.image.outputs.repository }}@${{ steps.quarantine.outputs.amd64 }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
           format: table
+      - name: Scan quarantined ARM64 child
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.repository }}@${{ steps.quarantine.outputs.arm64 }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+      - name: Promote and verify release manifest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          QUARANTINE: ${{ steps.image.outputs.quarantine }}
+          QUARANTINE_INDEX: ${{ steps.quarantine.outputs.index }}
+          AMD64: ${{ steps.quarantine.outputs.amd64 }}
+          ARM64: ${{ steps.quarantine.outputs.arm64 }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "$IMAGE" "$QUARANTINE@$QUARANTINE_INDEX"
+          index="$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | jq -er '.digest')"
+          [[ "$index" =~ ^sha256:[0-9a-f]{64}$ ]]
+          manifest="$(docker buildx imagetools inspect "$IMAGE@$index" --raw)"
+          jq -e '(.mediaType == "application/vnd.oci.image.index.v1+json" or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json") and (.manifests | type == "array")' <<<"$manifest" >/dev/null
+          amd64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0] // empty' <<<"$manifest")"
+          arm64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest][0] // empty' <<<"$manifest")"
+          [[ "$amd64" == "$AMD64" && "$arm64" == "$ARM64" ]]
+          jq -n --arg service '${{ matrix.service }}' --arg image "$IMAGE" --arg tag "ci-${GITHUB_SHA}" --arg index "$index" --arg amd64 "$amd64" --arg arm64 "$arm64" --arg commit "$GITHUB_SHA" --arg timestamp "$(date -u +%FT%TZ)" '{service:$service,image_reference:$image,release_tag:$tag,manifest_list_digest:$index,linux_amd64_digest:$amd64,linux_arm64_digest:$arm64,source_commit_sha:$commit,timestamp:$timestamp,status:"PASS"}' > release-manifest-evidence.json
       - name: Preserve immutable digest evidence
         if: always()
         uses: actions/upload-artifact@v6

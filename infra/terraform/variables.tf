@@ -86,8 +86,8 @@ variable "service_cpu_architectures" {
   default     = {}
 
   validation {
-    condition     = length(setsubtract(keys(var.service_cpu_architectures), ["agent", "backend", "gateway", "console", "audit_consumer", "opa", "presidio"])) == 0
-    error_message = "service_cpu_architectures supports only agent, backend, gateway, console, audit_consumer, opa, and presidio."
+    condition     = length(setsubtract(keys(var.service_cpu_architectures), ["agent", "backend", "gateway", "console", "audit_consumer"])) == 0
+    error_message = "service_cpu_architectures supports only agent, backend, gateway, console, and audit_consumer."
   }
 
   validation {
