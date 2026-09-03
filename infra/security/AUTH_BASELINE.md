@@ -111,6 +111,17 @@ acceptance-evidence step.
 
 ## OIDC/SSO Hooks
 
+### Invitation role authority
+
+- An invited user's tenant role is the role assigned by the authorized invitation.
+- OIDC claims authenticate the identity; they do not silently override a verified
+  invitation's role.
+- Tenant invitation APIs cannot assign the tenant `owner` role or any platform role.
+- Platform roles remain provisioned only through the controlled operational process
+  documented above.
+- A future change that allows IdP-managed role assignment requires a separate
+  authority-model decision, conflict policy, and tenant-isolation regression suite.
+
 OIDC discovery is exposed at:
 
 - `GET /v1/auth/oidc/config`

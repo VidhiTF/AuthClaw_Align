@@ -21,7 +21,12 @@ from tests.db_safety import destructive_test_urls
 owner_db_url, db_url = destructive_test_urls()
 owner_engine = create_engine(owner_db_url, echo=False, poolclass=StaticPool)
 engine = create_engine(db_url, echo=False, poolclass=StaticPool)
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
+OwnerTestingSessionLocal = sessionmaker(
+    autocommit=False, autoflush=False, bind=owner_engine, expire_on_commit=False
+)
+AppTestingSessionLocal = sessionmaker(
+    autocommit=False, autoflush=False, bind=engine, expire_on_commit=False
+)
 
 
 @pytest.fixture(scope="module")
@@ -35,7 +40,9 @@ def db_session() -> Session:
         conn.execute(text("TRUNCATE TABLE approval_audit, audit_log_metadata, pending_approvals, compliance_workflows, api_keys, users, tenants CASCADE;"))
         conn.commit()
         
-    db = TestingSessionLocal()
+    # Fixture setup and inspection use the owner connection. API requests below
+    # continue to exercise the restricted runtime role and signed RLS context.
+    db = OwnerTestingSessionLocal()
     try:
         yield db
     finally:
@@ -48,7 +55,7 @@ def db_session() -> Session:
 def client(db_session: Session) -> TestClient:
     """FastAPI TestClient with overridden get_db dependency to enforce RLS"""
     def override_get_db():
-        db = TestingSessionLocal()
+        db = AppTestingSessionLocal()
         try:
             yield db
         finally:

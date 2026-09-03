@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CI = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 DEPLOY = (ROOT / ".github/workflows/deploy-controlled-beta.yml").read_text(encoding="utf-8")
+WORKFLOWS = tuple((ROOT / ".github/workflows").glob("*.yml")) + tuple(
+    (ROOT / ".github/workflows").glob("*.yaml")
+)
 REGISTRY = (ROOT / "infra/terraform/registry.tf").read_text(encoding="utf-8")
 VARIABLES = (ROOT / "infra/terraform/variables.tf").read_text(encoding="utf-8")
 REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_text(encoding="utf-8")
@@ -29,18 +33,52 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("name: Detect changed components", CI)
         self.assertIn("if: needs.changes.outputs.backend == 'true'", CI)
         self.assertIn("if: needs.changes.outputs.console == 'true'", CI)
-        for job in ("Backend Tests", "Gateway Tests", "Agent Tests", "Console Tests and Build", "Security Scans"):
+        for job in ("Backend Unit Tests", "Backend PostgreSQL Integration", "Gateway Tests", "Agent Tests", "Console Tests and Build", "Security Scans"):
             self.assertIn(f"name: {job}", CI)
         self.assertIn("github.ref == 'refs/heads/master'", CI)
-        self.assertIn("github/codeql-action/analyze@v4", CI)
+        self.assertIn("github/codeql-action/analyze@", CI)
         self.assertIn("security-events: write", CI)
         self.assertIn("vars.CODEQL_NATIVE_UPLOAD == 'true'", CI)
         self.assertIn("upload-database: false", CI)
         self.assertIn("name: Enforce CodeQL findings", CI)
-        self.assertIn("actions/upload-artifact@v6", CI)
+        self.assertIn("actions/upload-artifact@", CI)
         self.assertIn("ghcr.io/gitleaks/gitleaks", CI)
         self.assertIn("aquasecurity/trivy-action", CI)
         self.assertNotIn("Full Stack Integration", CI)
+
+    def test_backend_integration_uses_real_postgres_and_current_migration_head(self):
+        self.assertIn(
+            "image: postgres:16.10-alpine@sha256:"
+            "029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297",
+            CI,
+        )
+        self.assertIn("authclaw_ci_test", CI)
+        self.assertIn("bootstrap_database_security.py prepare", CI)
+        self.assertIn("-m alembic upgrade head", CI)
+        self.assertIn("bootstrap_database_security.py finalize-backend", CI)
+        self.assertIn("tests/test_tenant_isolation.py", CI)
+        self.assertIn("tests/test_endpoints.py", CI)
+        self.assertIn("backend-integration", CI)
+
+    def test_external_actions_are_pinned_to_full_commit_shas(self):
+        use_pattern = re.compile(r"\buses:\s*([^@\s]+)@([^#\s]+)")
+        for workflow_path in WORKFLOWS:
+            workflow = workflow_path.read_text(encoding="utf-8")
+            for line_number, line in enumerate(workflow.splitlines(), start=1):
+                match = use_pattern.search(line)
+                if not match or match.group(1).startswith("./"):
+                    continue
+                reference = match.group(2)
+                self.assertRegex(
+                    reference,
+                    r"^[0-9a-f]{40}$",
+                    f"{workflow_path.name}:{line_number} must pin a full commit SHA",
+                )
+                self.assertRegex(
+                    line,
+                    r"#\s*v?\d",
+                    f"{workflow_path.name}:{line_number} must retain a release comment",
+                )
 
     def test_canonical_local_command_is_documented_and_exercised(self):
         command = "docker compose --env-file .env.full -f docker-compose.full.yml up -d --build --wait"
@@ -48,6 +86,7 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn(command, (ROOT / "startup_guide.md").read_text(encoding="utf-8"))
 
     def test_beta_release_is_gated_immutable_encrypted_and_reversible(self):
+        self.assertIn('workflows: ["AuthClaw Required CI"]', DEPLOY)
         self.assertIn("github.event.workflow_run.conclusion == 'success'", DEPLOY)
         self.assertIn("id-token: write", DEPLOY)
         self.assertIn("require_immutable_images: true", DEPLOY)
