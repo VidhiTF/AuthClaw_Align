@@ -460,8 +460,9 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-authclaw}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-authclaw}
       AUDIT_CONSUMER_METRICS_PORT: "9108"
+      AUDIT_CONSUMER_METRICS_HOST: "0.0.0.0"
     ports:
-      - "${AUDIT_CONSUMER_METRICS_PORT:-9108}:9108"
+      - "127.0.0.1:${AUDIT_CONSUMER_METRICS_PORT:-9108}:9108"
     restart: on-failure
 
   console:

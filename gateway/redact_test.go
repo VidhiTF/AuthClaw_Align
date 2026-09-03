@@ -675,6 +675,17 @@ func TestValidateEnvelopeKeyConfigRejectsMissingRedactionSaltInProduction(t *tes
 	}
 }
 
+func TestValidateEnvelopeKeyConfigRejectsDemoStagingKey(t *testing.T) {
+	t.Setenv("AUTHCLAW_ENV", "staging")
+	t.Setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
+	t.Setenv("ENVELOPE_KEY", "demo-local-envelope-key-change-me")
+	t.Setenv("ENCRYPTION_KEY", "")
+
+	if err := ValidateEnvelopeKeyConfig(); err == nil {
+		t.Fatal("expected staging demo envelope key to be rejected")
+	}
+}
+
 func TestValidateServiceTLSConfigFailsClosedInProduction(t *testing.T) {
 	t.Setenv("AUTHCLAW_ENV", "production")
 	t.Setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "")

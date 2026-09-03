@@ -87,7 +87,10 @@ def test_public_health(client: TestClient):
     health = response.json()
     assert health["status"] == "healthy"
     assert health["service"] == "authclaw-backend"
-    assert "secret_management" in health
+    assert set(health) == {"status", "service"}
+
+    metrics_response = client.get("/metrics")
+    assert metrics_response.status_code == status.HTTP_401_UNAUTHORIZED
 
     # Verify OpenAPI documentation loads successfully
     openapi_resp = client.get("/openapi.json")

@@ -31,7 +31,7 @@ CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
 CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "8123"))
 CLICKHOUSE_DB = os.getenv("CLICKHOUSE_DB", "authclaw")
 CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "authclaw")
-CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "authclaw")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
 
 class SequenceGapError(RuntimeError):
     """The mirror must wait for an earlier tenant sequence."""
@@ -43,6 +43,26 @@ class RetryableMirrorError(RuntimeError):
 
 class InvalidAuditEvent(ValueError):
     """The immutable PostgreSQL proof is malformed or inconsistent."""
+
+
+def validate_runtime_environment() -> None:
+    environment = os.getenv("AUTHCLAW_ENV", "local").strip().lower()
+    valid_environments = {
+        "local", "development", "dev", "test", "ci", "shared-test",
+        "staging", "stage", "production", "prod",
+    }
+    if environment not in valid_environments:
+        raise RuntimeError(
+            f"AUTHCLAW_ENV {environment!r} is unsupported; configure an explicit local, test, staging, or production environment"
+        )
+    if environment not in {"ci", "shared-test", "staging", "stage", "production", "prod"}:
+        return
+    password = os.getenv("CLICKHOUSE_PASSWORD", "").strip()
+    normalized_password = password.lower()
+    if not password or normalized_password == "authclaw" or "change-me" in normalized_password:
+        raise RuntimeError(
+            "CLICKHOUSE_PASSWORD must be set to a non-default secret in shared environments"
+        )
 
 
 class _MetricsHandler(BaseHTTPRequestHandler):
@@ -62,13 +82,18 @@ class _MetricsHandler(BaseHTTPRequestHandler):
         return
 
 
+def _metrics_bind_host() -> str:
+    return os.getenv("AUDIT_CONSUMER_METRICS_HOST", "127.0.0.1").strip()
+
+
 def _start_metrics_server() -> ThreadingHTTPServer | None:
     if METRICS_PORT <= 0:
         return None
-    server = ThreadingHTTPServer(("0.0.0.0", METRICS_PORT), _MetricsHandler)
+    metrics_host = _metrics_bind_host()
+    server = ThreadingHTTPServer((metrics_host, METRICS_PORT), _MetricsHandler)
     thread = threading.Thread(target=server.serve_forever, name="audit-consumer-metrics", daemon=True)
     thread.start()
-    logger.info("Audit consumer metrics listening on :%s/metrics", METRICS_PORT)
+    logger.info("Audit consumer metrics listening on %s:%s/metrics", metrics_host, METRICS_PORT)
     return server
 
 
@@ -149,6 +174,7 @@ def normalise_event(payload: dict) -> dict:
     }
 
 def main():
+    validate_runtime_environment()
     consumer = make_audit_consumer(metrics.set_gauge)
     logger.info(
         "Connecting audit transport topics=%s group=%s",

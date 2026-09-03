@@ -7,6 +7,7 @@ import (
 	"crypto/sha3"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"hash"
 	"net/http"
 	"os"
@@ -40,6 +41,53 @@ var apiKeyResolutionCache sync.Map
 
 func apiKeyCacheTTL() time.Duration {
 	return time.Duration(envInt("GATEWAY_AUTH_CACHE_TTL_MS", 0)) * time.Millisecond
+}
+
+func ValidateAuthCacheConfig() error {
+	environment := strings.ToLower(strings.TrimSpace(os.Getenv("AUTHCLAW_ENV")))
+	switch environment {
+	case "ci", "shared-test", "staging", "stage", "production", "prod":
+		if ttl := apiKeyCacheTTL(); ttl != 0 {
+			return fmt.Errorf("GATEWAY_AUTH_CACHE_TTL_MS must be zero in shared test, staging, and production environments")
+		}
+	}
+	return nil
+}
+
+func ValidateEnvironmentConfig() error {
+	environment := strings.ToLower(strings.TrimSpace(os.Getenv("AUTHCLAW_ENV")))
+	if environment == "" {
+		environment = "local"
+	}
+	switch environment {
+	case "local", "development", "dev", "test", "ci", "shared-test", "staging", "stage", "production", "prod":
+		return nil
+	default:
+		return fmt.Errorf("AUTHCLAW_ENV %q is unsupported; configure an explicit local, test, staging, or production environment", environment)
+	}
+}
+
+func effectiveAPIKeyHashSecret() string {
+	for _, name := range []string{"API_KEY_HASH_SECRET", "SESSION_SECRET_V1", "SESSION_SECRET", "JWT_SECRET"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func isDemoAuthSecret(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	return normalized == "" || normalized == "authclaw-lite-dev-secret" ||
+		normalized == "dev-secret-change-in-production" ||
+		strings.Contains(normalized, "change-me") || strings.HasPrefix(normalized, "authclaw-full-local-")
+}
+
+func ValidateAuthSecretConfig() error {
+	if isSharedEnv() && isDemoAuthSecret(effectiveAPIKeyHashSecret()) {
+		return fmt.Errorf("API_KEY_HASH_SECRET, SESSION_SECRET_V1, SESSION_SECRET, or JWT_SECRET must provide a non-default API-key hash secret in shared environments")
+	}
+	return nil
 }
 
 func getCachedAPIKeyResolution(keyHash string) (cachedAPIKeyResolution, bool) {
@@ -77,16 +125,7 @@ func generateRequestID() string {
 
 // HashKey computes a keyed digest of the API key for deterministic lookup.
 func HashKey(key string) string {
-	secret := os.Getenv("API_KEY_HASH_SECRET")
-	if secret == "" {
-		secret = os.Getenv("SESSION_SECRET_V1")
-	}
-	if secret == "" {
-		secret = os.Getenv("SESSION_SECRET")
-	}
-	if secret == "" {
-		secret = os.Getenv("JWT_SECRET")
-	}
+	secret := effectiveAPIKeyHashSecret()
 	if secret == "" {
 		secret = "authclaw-lite-dev-secret"
 	}

@@ -136,7 +136,7 @@ def _get_clickhouse_client() -> Optional[Any]:
         port=int(os.getenv("CLICKHOUSE_PORT", "8123")),
         database=os.getenv("CLICKHOUSE_DB", "authclaw"),
         username=os.getenv("CLICKHOUSE_USER", "authclaw"),
-        password=os.getenv("CLICKHOUSE_PASSWORD", "authclaw"),
+        password=os.getenv("CLICKHOUSE_PASSWORD", ""),
     )
 
 
