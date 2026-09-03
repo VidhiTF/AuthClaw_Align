@@ -365,6 +365,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v4
         with:
+          image: tonistiigi/binfmt:qemu-v9.2.2@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6
           platforms: arm64
       - uses: docker/setup-buildx-action@v4
       - name: Build and smoke-test ARM64 runtime images
@@ -413,6 +414,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-qemu-action@v4
         with:
+          image: tonistiigi/binfmt:qemu-v9.2.2@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6
           platforms: arm64
       - uses: docker/setup-buildx-action@v4
       - name: Compute lowercase image name
