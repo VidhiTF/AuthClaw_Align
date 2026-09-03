@@ -62,6 +62,8 @@ app.add_middleware(
 # Register Authentication & Tenant Context Middleware
 from app.core.auth import AuthMiddleware
 app.add_middleware(AuthMiddleware)
+from app.core.client_ip import TrustedProxyMiddleware
+app.add_middleware(TrustedProxyMiddleware)
 
 # Import & register endpoints
 from app.api.v1.endpoints.tenants import router as tenants_router

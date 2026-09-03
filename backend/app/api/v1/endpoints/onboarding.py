@@ -127,9 +127,6 @@ def _rate_limit_hash(value: str) -> str:
 
 
 def _client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    if forwarded_for:
-        return forwarded_for.split(",", 1)[0].strip()
     if request.client:
         return request.client.host
     return "unknown"

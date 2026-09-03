@@ -62,6 +62,9 @@ func main() {
 	if err := ValidateAuthSecretConfig(); err != nil {
 		log.Fatalf("Invalid authentication secret configuration: %v", err)
 	}
+	if _, err := newClientIPResolverFromEnv(); err != nil {
+		log.Fatalf("Invalid trusted proxy configuration: %v", err)
+	}
 
 	// Initialize database
 	InitDB()

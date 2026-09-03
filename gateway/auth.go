@@ -207,10 +207,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		if len(userAgent) > 512 {
 			userAgent = userAgent[:512]
 		}
-		remoteIP := r.RemoteAddr
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			remoteIP = strings.TrimSpace(strings.Split(forwarded, ",")[0])
-		}
+		remoteIP := resolvedClientIP(r)
 		if credentialKind == "api_key" && envBool("GATEWAY_AUTH_LAST_USED_ENABLED", true) {
 			go func() {
 				ctx := context.Background()

@@ -78,6 +78,9 @@ locals {
 
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
+    { name = "AUTHCLAW_FORWARDED_HEADER_MODE", value = "enforce" },
+    { name = "AUTHCLAW_FORWARDED_FOR_MAX_HOPS", value = "8" },
+    { name = "AUTHCLAW_TRUSTED_PROXY_CIDRS", value = join(",", values(aws_subnet.public)[*].cidr_block) },
     { name = "AUTHCLAW_REQUIRE_SERVICE_TLS", value = tostring(var.authclaw_env == "production") },
     { name = "AUTHCLAW_SECRET_PROVIDER", value = "env" },
     { name = "AUTHCLAW_SECRET_KEY_VERSION", value = var.secret_key_version },
