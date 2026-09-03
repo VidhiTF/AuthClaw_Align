@@ -102,6 +102,7 @@ jobs:
           git diff --check HEAD^
           python3 -m unittest \
             scripts.test_acl14_delivery_controls \
+            scripts.test_assert_audit_transport_plan \
             scripts.test_p008_private_paths_evidence
 
   security:
