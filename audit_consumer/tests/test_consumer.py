@@ -15,10 +15,37 @@ from consumer import (  # noqa: E402
     _process_message,
     normalise_event,
 )
+import consumer  # noqa: E402
 
 
 TENANT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 RECORD = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def test_metrics_bind_to_loopback_by_default(monkeypatch):
+    monkeypatch.delenv("AUDIT_CONSUMER_METRICS_HOST", raising=False)
+    assert consumer._metrics_bind_host() == "127.0.0.1"
+
+
+@pytest.mark.parametrize("password", ["", "authclaw", "AUTHCLAW", "demo-CHANGE-ME"])
+def test_shared_environment_rejects_default_clickhouse_password(monkeypatch, password):
+    monkeypatch.setenv("AUTHCLAW_ENV", "staging")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", password)
+    with pytest.raises(RuntimeError, match="CLICKHOUSE_PASSWORD"):
+        consumer.validate_runtime_environment()
+
+
+def test_local_environment_allows_explicit_development_default(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_ENV", "development")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "authclaw")
+    consumer.validate_runtime_environment()
+
+
+def test_unknown_environment_is_rejected(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_ENV", "production-us")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "strong-runtime-secret")
+    with pytest.raises(RuntimeError, match="AUTHCLAW_ENV"):
+        consumer.validate_runtime_environment()
 
 
 def event(*, sequence=1, tenant_id=TENANT, record_id=RECORD, prior_hash="GENESIS"):

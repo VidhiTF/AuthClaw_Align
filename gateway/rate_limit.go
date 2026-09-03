@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -81,12 +80,7 @@ func fixedWindowRateLimit(ctx context.Context, key string, limit int, ttl time.D
 }
 
 func writeRateLimitError(w http.ResponseWriter, status int, code string, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error":   code,
-		"message": message,
-	})
+	writeGatewayError(w, status, code, message)
 }
 
 func RateLimitMiddleware(next http.Handler) http.Handler {

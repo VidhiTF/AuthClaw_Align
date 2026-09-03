@@ -1,4 +1,5 @@
 """Startup validation for production Lite deployments."""
+import logging
 import os
 from ipaddress import ip_address
 from urllib.parse import urlparse
@@ -7,6 +8,7 @@ from sqlalchemy import text
 
 
 _DEMO_VALUES = {
+    "authclaw",
     "change-this-demo-jwt-secret",
     "change-this-demo-session-secret",
     "change-this-demo-envelope-key",
@@ -15,17 +17,45 @@ _DEMO_VALUES = {
     "authclaw-default-32-byte-key-12",
     "your-256-bit-hex-encoded-key-here",
     "dev-secret-change-in-production",
+    "authclaw-full-local-jwt-secret-change-me",
+    "authclaw-full-local-session-secret",
+    "authclaw-full-local-session-secret-v2",
+    "YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=",
 }
+
+_VALID_ENVIRONMENTS = {
+    "local", "development", "dev", "test", "ci", "shared-test",
+    "staging", "stage", "production", "prod",
+}
+
+logger = logging.getLogger("authclaw.backend.startup")
 
 
 def is_production() -> bool:
-    return os.getenv("AUTHCLAW_ENV", "").strip().lower() == "production"
+    return os.getenv("AUTHCLAW_ENV", "local").strip().lower() in {"production", "prod"}
+
+
+def is_shared_environment() -> bool:
+    return os.getenv("AUTHCLAW_ENV", "local").strip().lower() in {
+        "ci",
+        "shared-test",
+        "staging",
+        "stage",
+        "production",
+        "prod",
+    }
 
 
 def _is_missing_or_demo(value: str | None) -> bool:
     if not value:
         return True
-    return value.strip() in _DEMO_VALUES or value.strip().startswith("change-this")
+    normalized = value.strip()
+    return (
+        normalized in _DEMO_VALUES
+        or normalized.startswith("change-this")
+        or "change-me" in normalized.lower()
+        or normalized.lower().startswith("authclaw-full-local-")
+    )
 
 
 def _truthy(value: str | None) -> bool:
@@ -50,11 +80,20 @@ def _is_secure_sidecar_url(value: str | None) -> bool:
 
 
 def validate_production_environment() -> None:
+    environment = os.getenv("AUTHCLAW_ENV", "local").strip().lower()
+    if environment not in _VALID_ENVIRONMENTS:
+        raise RuntimeError(
+            f"AUTHCLAW_ENV {environment!r} is unsupported; configure an explicit local, test, staging, or production environment"
+        )
     production = is_production()
+    shared_environment = is_shared_environment()
     require_service_tls = _truthy(
         os.getenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true" if production else "false")
     )
-    if not production and not require_service_tls:
+    if not shared_environment and not require_service_tls:
+        for name in ("JWT_SECRET", "SESSION_SECRET", "ENVELOPE_KEY"):
+            if _is_missing_or_demo(os.getenv(name)):
+                logger.warning("%s is using a local-development default", name)
         return
 
     errors: list[str] = []
@@ -66,9 +105,48 @@ def validate_production_environment() -> None:
                 requirement = "https" if name == "GATEWAY_INTERNAL_URL" else "https or task-local loopback http"
                 errors.append(f"{name} must use {requirement} when service TLS is required")
 
+    if shared_environment and os.getenv("CLICKHOUSE_HOST", "").strip() and _is_missing_or_demo(
+        os.getenv("CLICKHOUSE_PASSWORD")
+    ):
+        errors.append("CLICKHOUSE_PASSWORD must be set to a non-demo secret in shared environments")
+
+    if shared_environment and not production:
+        for name in ("JWT_SECRET", "SESSION_SECRET"):
+            if _is_missing_or_demo(os.getenv(name)):
+                errors.append(f"{name} must be set to a non-demo secret in shared environments")
+
+        provider = os.getenv("AUTHCLAW_SECRET_PROVIDER", "env").strip().lower()
+        key_version = os.getenv("AUTHCLAW_SECRET_KEY_VERSION", "").strip()
+        if provider == "env":
+            envelope_key = (
+                os.getenv(f"ENVELOPE_KEY_{key_version.upper().replace('-', '_')}")
+                if key_version
+                else None
+            ) or os.getenv("ENVELOPE_KEY") or os.getenv("ENCRYPTION_KEY")
+            if _is_missing_or_demo(envelope_key):
+                errors.append(
+                    "ENVELOPE_KEY/ENCRYPTION_KEY must be set to a non-demo secret in shared environments"
+                )
+            elif len(envelope_key.encode("utf-8")) < 32:
+                errors.append("ENVELOPE_KEY/ENCRYPTION_KEY must be at least 32 bytes")
+        elif provider == "vault":
+            for name in ("VAULT_ADDR", "VAULT_TOKEN", "VAULT_SECRET_KEY_PATH"):
+                if not os.getenv(name, "").strip():
+                    errors.append(f"{name} must be configured for vault secret provider")
+        elif provider == "aws_kms":
+            if not (os.getenv("AWS_KMS_ENCRYPTED_DATA_KEY") or os.getenv("KMS_ENCRYPTED_DATA_KEY")):
+                errors.append("AWS_KMS_ENCRYPTED_DATA_KEY must be configured for aws_kms secret provider")
+            if not (os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID")):
+                errors.append("AUTHCLAW_AWS_KMS_KEY_ID must be configured for aws_kms secret provider")
+        else:
+            errors.append("AUTHCLAW_SECRET_PROVIDER must be one of: env, vault, aws_kms")
+
+        if os.getenv("DEMO_OTP_VISIBLE", "false").lower() == "true":
+            errors.append("DEMO_OTP_VISIBLE must be false in shared environments")
+
     if not production:
         if errors:
-            raise RuntimeError(f"Service TLS validation failed: {'; '.join(errors)}")
+            raise RuntimeError(f"Shared environment validation failed: {'; '.join(errors)}")
         return
 
     for name in ("JWT_SECRET", "SESSION_SECRET"):

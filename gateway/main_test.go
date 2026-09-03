@@ -49,10 +49,17 @@ func TestHealthCheck(t *testing.T) {
 	if body["service"] != "authclaw-gateway" {
 		t.Errorf("Expected service authclaw-gateway, got %v", body["service"])
 	}
-	if _, ok := body["audit_fail_closed"].(bool); !ok {
-		t.Errorf("Expected audit_fail_closed boolean, got %T", body["audit_fail_closed"])
+	if len(body) != 2 {
+		t.Fatalf("public health leaked internal fields: %#v", body)
 	}
-	if body["audit_outbox_path"] == "" {
-		t.Errorf("Expected audit_outbox_path to be set")
+}
+
+func TestPublicGatewayRouterDoesNotExposeMetrics(t *testing.T) {
+	t.Setenv("GATEWAY_HTTP_LOGGER_ENABLED", "false")
+	router := NewGatewayRouter(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("public metrics status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }

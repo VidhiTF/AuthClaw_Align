@@ -311,6 +311,16 @@ resource "aws_security_group" "app" {
     }
   }
 
+  dynamic "ingress" {
+    for_each = var.enable_audit_consumer ? [1] : []
+    content {
+      from_port = 9108
+      to_port   = 9108
+      protocol  = "tcp"
+      self      = true
+    }
+  }
+
   egress {
     from_port = 0
     to_port   = 0
@@ -1205,7 +1215,7 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
       environment = concat(local.common_environment, [
         { name = "AGENT_AUDIT_STREAM_TRANSPORT", value = "kafka" }
       ])
-      secrets = [
+      secrets = concat([
         { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
         { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
         { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
@@ -1216,7 +1226,9 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
         { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
         { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
         { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn }
-      ]
+        ], var.clickhouse_password != "" ? [
+        { name = "CLICKHOUSE_PASSWORD", valueFrom = aws_secretsmanager_secret.clickhouse_password[0].arn }
+      ] : [])
       dependsOn = [{ containerName = "presidio", condition = "HEALTHY" }]
       healthCheck = {
         command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
@@ -1419,6 +1431,17 @@ resource "aws_ecs_task_definition" "audit_consumer" {
   execution_role_arn       = aws_iam_role.task_execution.arn
   task_role_arn            = lookup(local.audit_sqs_task_role_arns, "audit_consumer", null)
 
+  lifecycle {
+    precondition {
+      condition = (
+        trimspace(var.clickhouse_password) != "" &&
+        lower(var.clickhouse_password) != "authclaw" &&
+        !strcontains(lower(var.clickhouse_password), "change-me")
+      )
+      error_message = "clickhouse_password must be a non-default secret when enable_audit_consumer is true."
+    }
+  }
+
   runtime_platform {
     operating_system_family = "LINUX"
     cpu_architecture        = lookup(var.service_cpu_architectures, "audit_consumer", "X86_64")
@@ -1433,6 +1456,7 @@ resource "aws_ecs_task_definition" "audit_consumer" {
         { name = "KAFKA_TOPICS", value = "gateway.traffic,audit.events" },
         { name = "KAFKA_DLQ_TOPIC", value = "audit.deadletter" },
         { name = "AUDIT_CONSUMER_METRICS_PORT", value = "9108" },
+        { name = "AUDIT_CONSUMER_METRICS_HOST", value = "0.0.0.0" },
         { name = "CLICKHOUSE_HOST", value = var.clickhouse_host },
         { name = "CLICKHOUSE_PORT", value = tostring(var.clickhouse_port) },
         { name = "CLICKHOUSE_DB", value = var.clickhouse_db },

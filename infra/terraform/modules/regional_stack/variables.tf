@@ -72,6 +72,11 @@ variable "service_cpu_architectures" {
 variable "authclaw_env" {
   type    = string
   default = "staging"
+
+  validation {
+    condition     = contains(["ci", "shared-test", "staging", "stage", "production", "prod"], var.authclaw_env)
+    error_message = "authclaw_env must be an explicit shared-test, staging, or production environment."
+  }
 }
 
 variable "secret_key_version" {

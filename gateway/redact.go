@@ -692,6 +692,16 @@ func isProductionEnv() bool {
 	return env == "production" || env == "prod"
 }
 
+func isSharedEnv() bool {
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("AUTHCLAW_ENV")))
+	switch env {
+	case "ci", "shared-test", "staging", "stage", "production", "prod":
+		return true
+	default:
+		return false
+	}
+}
+
 func configuredEnvelopeKey() string {
 	keyStr := os.Getenv("ENCRYPTION_KEY")
 	if keyStr == "" {
@@ -725,12 +735,12 @@ func envVersionedEnvelopeKey(version string) string {
 }
 
 func ValidateEnvelopeKeyConfig() error {
-	if !isProductionEnv() {
+	if !isSharedEnv() {
 		return nil
 	}
 	provider := secretProvider()
 	version := secretKeyVersion()
-	if os.Getenv("AUTHCLAW_SECRET_KEY_VERSION") == "" {
+	if isProductionEnv() && os.Getenv("AUTHCLAW_SECRET_KEY_VERSION") == "" {
 		return fmt.Errorf("AUTHCLAW_SECRET_KEY_VERSION must be set in production")
 	}
 	if provider != "env" {
@@ -738,14 +748,14 @@ func ValidateEnvelopeKeyConfig() error {
 	}
 	keyStr := envVersionedEnvelopeKey(version)
 	if keyStr == "" || keyStr == "authclaw-default-32-byte-key-12" || strings.HasPrefix(keyStr, "demo-") || strings.Contains(keyStr, "change-me") {
-		return fmt.Errorf("ENVELOPE_KEY or ENCRYPTION_KEY must be set to a non-demo value in production")
+		return fmt.Errorf("ENVELOPE_KEY or ENCRYPTION_KEY must be set to a non-demo value in shared environments")
 	}
 	if len([]byte(keyStr)) < 32 {
-		return fmt.Errorf("ENVELOPE_KEY or ENCRYPTION_KEY must be at least 32 bytes in production")
+		return fmt.Errorf("ENVELOPE_KEY or ENCRYPTION_KEY must be at least 32 bytes in shared environments")
 	}
 	redactionSalt := strings.TrimSpace(os.Getenv("REDACTION_HASH_SALT"))
 	if redactionSalt == "" || redactionSalt == defaultRedactionHashSalt || strings.Contains(redactionSalt, "change-me") {
-		return fmt.Errorf("REDACTION_HASH_SALT must be set to a non-demo secret in production")
+		return fmt.Errorf("REDACTION_HASH_SALT must be set to a non-demo secret in shared environments")
 	}
 	return nil
 }

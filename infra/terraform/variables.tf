@@ -113,6 +113,11 @@ variable "authclaw_env" {
   description = "Runtime AUTHCLAW_ENV value. Use production only after SMTP and HTTPS inputs are configured."
   type        = string
   default     = "staging"
+
+  validation {
+    condition     = contains(["ci", "shared-test", "staging", "stage", "production", "prod"], var.authclaw_env)
+    error_message = "authclaw_env must be an explicit shared-test, staging, or production environment for Terraform deployments."
+  }
 }
 
 variable "secret_key_version" {
@@ -378,7 +383,7 @@ variable "clickhouse_user" {
 }
 
 variable "clickhouse_password" {
-  description = "Optional ClickHouse password. Prefer passing via a secured tfvars source."
+  description = "ClickHouse account password, required when the shared audit consumer is enabled. Pass via a secured tfvars source."
   type        = string
   default     = ""
   sensitive   = true

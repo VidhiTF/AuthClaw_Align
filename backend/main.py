@@ -10,14 +10,13 @@ if os.path.exists(env_path):
 else:
     load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.startup_checks import validate_database_security, validate_production_environment
-from app.core.crypto import secret_management_status
 from app.db.session import engine
 
 validate_production_environment()
@@ -161,20 +160,7 @@ def health_check():
     return {
         "status": "healthy",
         "service": "authclaw-backend",
-        "secret_management": secret_management_status(),
     }
-
-
-@app.get("/metrics", include_in_schema=False)
-def metrics():
-    """Expose the dependency-free ACL-21 backend metrics registry."""
-    from app.services.event_backbone import metrics_snapshot
-
-    body = "\n".join(
-        f"# TYPE {name} gauge\n{name} {value}"
-        for name, value in sorted(metrics_snapshot().items())
-    )
-    return Response(content=body + "\n", media_type="text/plain")
 
 
 @app.on_event("startup")

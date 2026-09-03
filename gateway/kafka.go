@@ -233,4 +233,7 @@ func KafkaMetricsHandler(w http.ResponseWriter, _ *http.Request) {
 	for name, value := range PolicyActionMetricsSnapshot() {
 		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)
 	}
+	for name, value := range ResponseProtectionMetricsSnapshot() {
+		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)
+	}
 }
