@@ -12,6 +12,26 @@ mock_provider "random" {
   override_during = plan
 }
 
+# Distinct IDs make set cardinality and network-boundary comparisons known
+# during plan without replacing the security-group rules under test.
+override_resource {
+  target          = module.primary.aws_security_group.app
+  override_during = plan
+  values          = { id = "sg-app" }
+}
+
+override_resource {
+  target          = module.primary.aws_security_group.alb
+  override_during = plan
+  values          = { id = "sg-alb" }
+}
+
+override_resource {
+  target          = module.primary.aws_security_group.console_ingress
+  override_during = plan
+  values          = { id = "sg-console" }
+}
+
 variables {
   project                    = "authclaw-test"
   environment                = "test"
@@ -76,8 +96,18 @@ run "single_nat_for_lower_environments" {
   }
 
   assert {
-    condition     = output.primary.endpoint_ingress_source_count == 1 && output.primary.endpoint_ingress_public_cidr_count == 0
-    error_message = "Interface endpoint ingress must have one security-group source and no public CIDRs."
+    condition     = output.primary.endpoint_ingress_source_count == 2 && output.primary.endpoint_ingress_public_cidr_count == 0
+    error_message = "Interface endpoint ingress must allow the app and isolated console groups, with no public CIDRs."
+  }
+
+  assert {
+    condition     = output.primary.client_identity.console_alb_only && output.primary.client_identity.console_task_isolated
+    error_message = "Console identity signing requires an ALB-only, isolated task security group."
+  }
+
+  assert {
+    condition     = !output.primary.client_identity.signing_enabled && output.primary.client_identity.proxy_mode == "compare"
+    error_message = "Client identity must default to comparison with signing disabled."
   }
 }
 

@@ -78,9 +78,14 @@ locals {
 
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
-    { name = "AUTHCLAW_FORWARDED_HEADER_MODE", value = "enforce" },
+    { name = "AUTHCLAW_FORWARDED_HEADER_MODE", value = var.forwarded_header_mode },
     { name = "AUTHCLAW_FORWARDED_FOR_MAX_HOPS", value = "8" },
     { name = "AUTHCLAW_TRUSTED_PROXY_CIDRS", value = join(",", values(aws_subnet.public)[*].cidr_block) },
+    { name = "MFA_FAILURE_THRESHOLD", value = "5" },
+    { name = "MFA_ATTEMPT_WINDOW_SECONDS", value = "300" },
+    { name = "MFA_BASE_COOLDOWN_SECONDS", value = "30" },
+    { name = "MFA_MAX_COOLDOWN_SECONDS", value = "300" },
+    { name = "MFA_ESCALATING_COOLDOWN_ENABLED", value = "true" },
     { name = "AUTHCLAW_REQUIRE_SERVICE_TLS", value = tostring(var.authclaw_env == "production") },
     { name = "AUTHCLAW_SECRET_PROVIDER", value = "env" },
     { name = "AUTHCLAW_SECRET_KEY_VERSION", value = var.secret_key_version },
@@ -295,6 +300,17 @@ resource "aws_security_group" "app" {
   vpc_id      = aws_vpc.main.id
 
   dynamic "ingress" {
+    for_each = toset([8000, 8001, 8080])
+    content {
+      description     = "Console outbound API and health-check calls"
+      from_port       = ingress.value
+      to_port         = ingress.value
+      protocol        = "tcp"
+      security_groups = [aws_security_group.console_ingress.id]
+    }
+  }
+
+  dynamic "ingress" {
     for_each = local.public_services
     content {
       from_port       = ingress.value.container_port
@@ -347,7 +363,7 @@ resource "aws_security_group" "vpc_endpoints" {
     from_port       = 443
     to_port         = 443
     protocol        = "tcp"
-    security_groups = [aws_security_group.app.id]
+    security_groups = [aws_security_group.app.id, aws_security_group.console_ingress.id]
   }
 
   tags = merge(var.tags, { Name = "${var.name}-vpc-endpoints" })
@@ -797,6 +813,7 @@ resource "aws_iam_role_policy" "task_secrets" {
           aws_secretsmanager_secret.agent_migration_database_url.arn,
           aws_secretsmanager_secret.agent_database_url.arn,
           aws_secretsmanager_secret.internal_service.arn,
+          aws_secretsmanager_secret.bff_client_ip.arn,
           aws_secretsmanager_secret.agent_encryption.arn,
           aws_secretsmanager_secret.agent_redaction.arn,
           aws_kms_key.main.arn
@@ -814,6 +831,8 @@ resource "aws_lb" "main" {
   security_groups            = [aws_security_group.alb.id]
   subnets                    = values(aws_subnet.public)[*].id
   drop_invalid_header_fields = true
+  xff_header_processing_mode = "append"
+  enable_xff_client_port     = false
   tags                       = var.tags
 }
 
@@ -992,11 +1011,17 @@ resource "aws_ecs_task_definition" "service" {
       }]
       environment = concat(
         local.common_environment,
+        each.key == "console" ? [
+          { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_signing_enabled) },
+          { name = "API_URL", value = local.api_base_url },
+          { name = "AUTHCLAW_CONSOLE_ALB_INGRESS_ONLY", value = "true" }
+        ] : [],
         contains(tolist(local.audit_sqs_producer_services), each.key) ? local.audit_sqs_producer_environment : [],
         each.key == "gateway" ? [
           { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
         ] : [],
         each.key == "backend" ? [
+          { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_enabled) },
           { name = "AUTHCLAW_RUNTIME_DB_ROLE", value = "authclaw_app" }
         ] : [],
         each.key == "agent" ? [
@@ -1005,6 +1030,9 @@ resource "aws_ecs_task_definition" "service" {
         ] : []
       )
       secrets = concat(
+        contains(["console", "backend"], each.key) ? [
+          { name = "BFF_CLIENT_IP_SECRET", valueFrom = aws_secretsmanager_secret.bff_client_ip.arn }
+        ] : [],
         contains(["backend", "gateway", "console"], each.key) ? [
           { name = "DATABASE_URL", valueFrom = each.key == "backend" ? aws_secretsmanager_secret.backend_database_url.arn : aws_secretsmanager_secret.app_database_url.arn },
           { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
@@ -1055,6 +1083,10 @@ resource "aws_ecs_task_definition" "service" {
   ])
 
   lifecycle {
+    precondition {
+      condition     = !var.bff_client_ip_signing_enabled || var.bff_client_ip_enabled
+      error_message = "Enable backend client-identity verification before console signing."
+    }
     precondition {
       condition = var.authclaw_env != "production" || alltrue([
         startswith(local.internal_agent_url, "https://"),
@@ -1216,9 +1248,11 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
         protocol      = "tcp"
       }]
       environment = concat(local.common_environment, [
+        { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_enabled) },
         { name = "AGENT_AUDIT_STREAM_TRANSPORT", value = "kafka" }
       ])
       secrets = concat([
+        { name = "BFF_CLIENT_IP_SECRET", valueFrom = aws_secretsmanager_secret.bff_client_ip.arn },
         { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
         { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
         { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
@@ -1383,7 +1417,7 @@ resource "aws_ecs_service" "public" {
 
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
-    security_groups  = [aws_security_group.app.id]
+    security_groups  = each.key == "console" ? [aws_security_group.console_ingress.id] : [aws_security_group.app.id]
     assign_public_ip = false
   }
 
