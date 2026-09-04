@@ -65,11 +65,15 @@ export function proxy(request: NextRequest) {
   const session = Boolean(sessionCookie?.startsWith("acl_session_"));
 
   // 3. Handle redirects
+  if (!session && path.startsWith("/developer")) {
+    return NextResponse.redirect(new URL("/login?developer=1", request.url));
+  }
+
   if (!session && !isPublicPath) {
     return new NextResponse("Unauthorized", { status: 401 });
   }
 
-  if (session && path === "/login") {
+  if (session && path === "/login" && request.nextUrl.searchParams.get("developer") !== "1") {
     // Redirect authenticated user away from login to the demo onboarding flow
     return NextResponse.redirect(new URL("/connect", request.url));
   }

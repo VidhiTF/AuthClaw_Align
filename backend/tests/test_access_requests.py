@@ -236,12 +236,14 @@ def test_client_cannot_supply_notice_version(client):
 def test_status_and_retention_routes_require_authentication(client):
     test_client, _ = client
 
+    list_response = test_client.get("/api/public/v1/access-requests")
     transition = test_client.patch(
         "/api/public/v1/access-requests/AR-TEST/status",
         params={"new_status": "APPROVED"},
     )
     retention = test_client.post("/api/public/v1/access-requests/retention/purge")
 
+    assert list_response.status_code == 401
     assert transition.status_code == 401
     assert retention.status_code == 401
 

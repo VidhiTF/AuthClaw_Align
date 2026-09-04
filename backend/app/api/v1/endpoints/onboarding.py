@@ -8,6 +8,7 @@ import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import redis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -100,6 +101,14 @@ def _emit_invitation_audit(
         event,
     ):
         logger.warning("Failed to publish invitation audit event: action=%s", action)
+
+
+def _invitation_audit_snapshot(invitation: OnboardingEmailOTP):
+    return SimpleNamespace(
+        id=invitation.id,
+        purpose=invitation.purpose,
+        tenant_id=invitation.tenant_id,
+    )
 
 
 def _invalid_invitation() -> HTTPException:
@@ -488,11 +497,12 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if expires_at < now:
+            invitation_audit = _invitation_audit_snapshot(signup_row)
             signup_row.status = "expired"
             db.commit()
-            _emit_invitation_audit(signup_row, "InviteExpired", "invitation_expired", request_id, 400)
+            _emit_invitation_audit(invitation_audit, "InviteExpired", "invitation_expired", request_id, 400)
             _emit_invitation_audit(
-                signup_row,
+                invitation_audit,
                 "InviteRedemptionFailed",
                 "invitation_expired",
                 request_id,
@@ -514,9 +524,10 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
             hmac.compare_digest(signup_row.otp_hash, _otp_hash(signup_row.email, payload.otp, secret))
             for secret in get_session_key_ring()[1].values()
         ):
+            invitation_audit = _invitation_audit_snapshot(signup_row)
             db.commit()
             _emit_invitation_audit(
-                signup_row,
+                invitation_audit,
                 "InviteRedemptionFailed",
                 "invalid_verification_code",
                 request_id,
@@ -596,6 +607,12 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
             db.add(api_key)
             db.flush()
             session_token = _generate_session_token()
+            invitation_audit = _invitation_audit_snapshot(signup_row)
+            tenant_id = tenant.id
+            tenant_name = tenant.name
+            user_id = user.id
+            user_email = user.email
+            user_role = user.role
             db.execute(
                 text(
                     """
@@ -607,8 +624,8 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
                 ),
                 {
                     "token_hash": _api_key_hash(session_token),
-                    "tenant_id": str(tenant.id),
-                    "user_id": str(user.id),
+                    "tenant_id": str(tenant_id),
+                    "user_id": str(user_id),
                     "expires_at": now + timedelta(hours=24),
                     "metadata": json.dumps({"request_id": request_id}),
                 },
@@ -616,14 +633,12 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
             signup_row.status = "verified"
             signup_row.verified_at = now
             signup_row.api_key_id = api_key.id
-            db.commit()
-            _emit_invitation_audit(signup_row, "InviteRedeemed", "invitation_redeemed", request_id, 200)
-
-            status_row = db.query(OnboardingStatus).filter(OnboardingStatus.tenant_id == tenant.id).first()
+            status_row = db.query(OnboardingStatus).filter(OnboardingStatus.tenant_id == tenant_id).first()
             if not status_row:
                 status_row = OnboardingStatus(
-                    tenant_id=tenant.id,
-                    user_id=user.id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    signup_id=signup_row.id,
                     email_verified=True,
                     tenant_created=True,
                     api_key_issued=True,
@@ -632,23 +647,24 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
                     current_step="connect_provider",
                 )
                 db.add(status_row)
-                db.commit()
-                db.refresh(status_row)
-
+                db.flush()
+            checklist = _checklist(status_row)
             powershell, curl = _snippets(raw_api_key, gateway_url)
+            db.commit()
+            _emit_invitation_audit(invitation_audit, "InviteRedeemed", "invitation_redeemed", request_id, 200)
             return OnboardingVerifyResponse(
-                tenant_id=tenant.id,
-                tenant_name=tenant.name,
-                user_id=user.id,
-                email=user.email,
-                role=user.role,
+                tenant_id=tenant_id,
+                tenant_name=tenant_name,
+                user_id=user_id,
+                email=user_email,
+                role=user_role,
                 scopes=scopes,
                 api_key=raw_api_key,
                 session_token=session_token,
                 gateway_url=gateway_url,
                 provider=DEFAULT_PROVIDER,
                 model=DEFAULT_MODEL,
-                checklist=_checklist(status_row),
+                checklist=checklist,
                 powershell_snippet=powershell,
                 curl_snippet=curl,
             )

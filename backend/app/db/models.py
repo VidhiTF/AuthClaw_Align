@@ -148,6 +148,22 @@ class Tenant(Base):
     )
 
 
+class PlatformAdmin(Base):
+    """Tenantless AuthClaw developer administrator."""
+    __tablename__ = "platform_admins"
+    __table_args__ = {"schema": "authn"}
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), nullable=False, unique=True)
+    password_hash = Column(String(255), nullable=False)
+    display_name = Column(String(255), nullable=False, default="AuthClaw Developer")
+    role = Column(String(50), nullable=False, default="ADMIN")
+    is_active = Column(Boolean, nullable=False, default=True)
+    last_login = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class User(Base):
     """User model with tenant isolation"""
     __tablename__ = "users"

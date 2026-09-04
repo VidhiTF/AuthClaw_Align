@@ -1,5 +1,7 @@
 export function sessionCookieOptions(maxAge?: number) {
-  const secure = process.env.NODE_ENV === "production" || process.env.AUTHCLAW_COOKIE_SECURE === "true";
+  const secure = process.env.AUTHCLAW_COOKIE_SECURE
+    ? process.env.AUTHCLAW_COOKIE_SECURE === "true"
+    : process.env.NODE_ENV === "production";
   return {
     httpOnly: true,
     secure,

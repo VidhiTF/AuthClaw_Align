@@ -14,6 +14,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.db.dependencies import get_db
 from app.api.v1.endpoints.onboarding import (
     OTP_MAX_ATTEMPTS,
     OTP_TTL_MINUTES,
@@ -85,16 +86,16 @@ def _oidc_authentication_reason(exc: Exception) -> str:
 
 
 class PasswordLoginRequest(BaseModel):
-    email: EmailStr
+    email: str
     password: str
     tenant_name: str | None = None
 
 
 class PasswordLoginResponse(BaseModel):
     user_id: UUID
-    tenant_id: UUID
-    tenant_name: str
-    email: EmailStr
+    tenant_id: UUID | None = None
+    tenant_name: str | None = None
+    email: str
     role: str
     scopes: list[str]
     session_token: str
@@ -119,9 +120,10 @@ def _enforce_password_login_rate_limit(email: str, request: Request) -> None:
 
 class CurrentUserResponse(BaseModel):
     id: UUID
-    tenant_id: UUID
-    email: EmailStr
+    tenant_id: UUID | None = None
+    email: str
     role: str
+    platform_role: str
     roles: list[str]
     scopes: list[str]
     mfa_enabled: bool
@@ -206,6 +208,18 @@ def _active_users_for_email(db, email: str, tenant_name: str | None = None):
         ),
         {"email": email, "tenant_name": tenant_name},
     ).all()
+
+
+def _active_platform_admin_for_email(db, email: str):
+    return db.execute(
+        text(
+            """
+            SELECT platform_admin_id, email, password_hash, role, is_active
+              FROM authn.lookup_platform_password_identity(:email)
+            """
+        ),
+        {"email": email},
+    ).first()
 
 
 @router.get("/oidc/config")
@@ -410,6 +424,41 @@ def password_login(payload: PasswordLoginRequest, request: Request):
     _enforce_password_login_rate_limit(email, request)
     db = OwnerSessionLocal()
     try:
+        if payload.tenant_name is None:
+            platform_identity = _active_platform_admin_for_email(db, email)
+            if platform_identity and verify_password(payload.password, platform_identity.password_hash):
+                session_token = _generate_session_token()
+                now = datetime.now(timezone.utc)
+                db.execute(
+                    text(
+                        """
+                        SELECT authn.create_platform_session(
+                            :token_hash, :platform_admin_id, 'password',
+                            :expires_at, CAST(:metadata AS jsonb)
+                        )
+                        """
+                    ),
+                    {
+                        "token_hash": _api_key_hash(session_token),
+                        "platform_admin_id": str(platform_identity.platform_admin_id),
+                        "expires_at": now + timedelta(hours=24),
+                        "metadata": json.dumps({
+                            "ip": request.client.host if request.client else "",
+                            "user_agent": request.headers.get("user-agent", "")[:512],
+                        }),
+                    },
+                )
+                db.commit()
+                return PasswordLoginResponse(
+                    user_id=platform_identity.platform_admin_id,
+                    tenant_id=None,
+                    tenant_name=None,
+                    email=platform_identity.email,
+                    role="platform_admin",
+                    scopes=["platform.admin"],
+                    session_token=session_token,
+                )
+
         users = _active_users_for_email(db, email, payload.tenant_name)
 
         matches = [
@@ -487,7 +536,7 @@ def password_login(payload: PasswordLoginRequest, request: Request):
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(request: Request, db: Session = Depends(get_tenant_db)):
+def logout(request: Request, db: Session = Depends(get_db)):
     """Revoke the current opaque console session."""
     if request.state.credential_kind == "session":
         db.execute(
@@ -495,12 +544,44 @@ def logout(request: Request, db: Session = Depends(get_tenant_db)):
             {"credential_hash": request.state.credential_hash},
         )
         db.commit()
+    if request.state.credential_kind == "platform_session":
+        db.execute(
+            text("SELECT authn.revoke_platform_session(:credential_hash)"),
+            {"credential_hash": request.state.credential_hash},
+        )
+        db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/me", response_model=CurrentUserResponse)
-def current_user(request: Request, db: Session = Depends(get_tenant_db)):
+def current_user(request: Request, db: Session = Depends(get_db)):
     """Return the API-key principal in the shape required by the operator console."""
+    if request.state.credential_kind == "platform_session":
+        platform_admin = db.execute(
+            text(
+                """
+                SELECT id, email, role, platform_role, scopes, is_active
+                  FROM authn.platform_admin_profile(:credential_hash)
+                """
+            ),
+            {"credential_hash": request.state.credential_hash},
+        ).first()
+        if not platform_admin:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        return CurrentUserResponse(
+            id=platform_admin.id,
+            tenant_id=None,
+            email=platform_admin.email,
+            role="platform_admin",
+            platform_role=platform_admin.platform_role,
+            roles=["platform_admin"],
+            scopes=list(platform_admin.scopes or ["platform.admin"]),
+            mfa_enabled=False,
+            is_active=bool(platform_admin.is_active),
+        )
+
+    if request.state.tenant_id is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant-scoped credential required")
     user = (
         db.query(User)
         .filter(
@@ -517,6 +598,7 @@ def current_user(request: Request, db: Session = Depends(get_tenant_db)):
         tenant_id=user.tenant_id,
         email=user.email,
         role=role,
+        platform_role=str(user.platform_role),
         roles=[role],
         scopes=list(request.state.scopes),
         mfa_enabled=bool(user.mfa_enabled),

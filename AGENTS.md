@@ -1,3 +1,10 @@
+## Repository Remote
+
+Use the `align` remote (`https://github.com/VidhiTF/AuthClaw_Align.git`) for
+AuthClaw Git fetch, pull, and authorized push operations. A request to pull
+`master` means `align master`. Do not use another repository unless the user
+explicitly requests it. This selects the repository, not a different login identity.
+
 ## Refactoring Protocol (Semantic Duplicates)
 
 When a task involves "semantic duplicate" removal:

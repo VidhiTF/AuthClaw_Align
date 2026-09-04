@@ -34,6 +34,34 @@ class AccessRequestResponse(BaseModel):
     created_at: datetime
 
 
+class AccessRequestHistoryResponse(BaseModel):
+    """Developer-console audit trail for access request decisions."""
+    id: UUID
+    event_type: str
+    old_status: Optional[str] = None
+    new_status: Optional[str] = None
+    created_at: datetime
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AccessRequestReviewResponse(BaseModel):
+    """Developer-console view of a public intake request."""
+    model_config = ConfigDict(from_attributes=True)
+
+    reference: str
+    name: str
+    business_email: EmailStr
+    company: str
+    role: str
+    use_case: str
+    requested_access: Literal["DEMO", "EARLY_ACCESS"]
+    source_page: str
+    status: Literal["PENDING", "APPROVED", "REJECTED", "INVITED"]
+    created_at: datetime
+    updated_at: datetime
+    history: List[AccessRequestHistoryResponse] = Field(default_factory=list)
+
+
 class DataSubjectRequestCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

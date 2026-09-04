@@ -23,7 +23,8 @@ export async function GET() {
       tenantId: principal.tenant_id,
       email: principal.email,
       role: principal.role,
-      scopes: ["read", "write", "admin"],
+      platformRole: principal.platform_role || "NONE",
+      scopes: Array.isArray(principal.scopes) ? principal.scopes : [],
     });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

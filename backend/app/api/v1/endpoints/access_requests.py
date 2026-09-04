@@ -15,15 +15,70 @@ from app.api.v1.endpoints.onboarding import (
 )
 from app.db.dependencies import get_db
 from app.core.auth import require_platform_admin
-from app.schemas.models import AccessRequestCreate, AccessRequestResponse
+from app.schemas.models import (
+    AccessRequestCreate,
+    AccessRequestHistoryResponse,
+    AccessRequestResponse,
+    AccessRequestReviewResponse,
+)
 from app.services.access_requests import (
     create_access_request,
     deliver_access_request_emails,
+    list_access_request_histories,
+    list_access_requests,
     transition_access_request,
 )
 from app.services.privacy_lifecycle import purge_expired_access_requests
 
 router = APIRouter()
+
+
+@router.get(
+    "",
+    response_model=list[AccessRequestReviewResponse],
+    dependencies=[require_platform_admin()],
+)
+def review_access_requests(
+    status_filter: Literal["PENDING", "APPROVED", "REJECTED", "INVITED", "ALL"] = "PENDING",
+    requested_access: Literal["DEMO", "EARLY_ACCESS", "ALL"] = "ALL",
+    limit: int = 100,
+    db: Session = Depends(get_db),
+) -> list[AccessRequestReviewResponse]:
+    bounded_limit = max(1, min(limit, 250))
+    requests = list_access_requests(
+        db,
+        status=None if status_filter == "ALL" else status_filter,
+        requested_access=None if requested_access == "ALL" else requested_access,
+        limit=bounded_limit,
+    )
+    histories = list_access_request_histories(db, [request.id for request in requests])
+    return [
+        AccessRequestReviewResponse(
+            reference=request.reference,
+            name=request.name,
+            business_email=request.business_email,
+            company=request.company,
+            role=request.role,
+            use_case=request.use_case,
+            requested_access=request.requested_access,
+            source_page=request.source_page,
+            status=request.status,
+            created_at=request.created_at,
+            updated_at=request.updated_at,
+            history=[
+                AccessRequestHistoryResponse(
+                    id=history.id,
+                    event_type=history.event_type,
+                    old_status=history.old_status,
+                    new_status=history.new_status,
+                    created_at=history.created_at,
+                    metadata=history.event_metadata or {},
+                )
+                for history in histories.get(request.id, [])
+            ],
+        )
+        for request in requests
+    ]
 
 
 @router.post(
@@ -91,6 +146,7 @@ def update_access_request_status(
             reference=reference,
             new_status=new_status,
             actor_id=http_request.state.user_id,
+            create_invitation=True,
         )
     except LookupError:
         raise HTTPException(

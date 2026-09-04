@@ -27,17 +27,25 @@ AGENT_AUTH_DEFINER_ROLE = os.getenv(
 )
 AUTHN_RUNTIME_FUNCTIONS = {
     "bind_api_key_context",
+    "bind_platform_session_context",
     "bind_session_context",
     "consume_onboarding_invite_for_otp",
     "confirm_password_reset",
+    "create_platform_session",
+    "create_platform_tenant_owner_invite",
     "create_password_reset",
     "create_session",
     "create_tenant",
+    "create_tenant_as_platform_admin",
+    "current_platform_admin_id",
     "current_tenant_id",
+    "lookup_platform_password_identity",
     "lookup_password_identities",
     "lookup_oidc_config",
     "issue_oidc_session",
+    "platform_admin_profile",
     "prepare_onboarding_invite_resend",
+    "revoke_platform_session",
     "revoke_session",
     "revoke_user_sessions",
     "set_password_reset_delivery",
@@ -263,6 +271,58 @@ def prepare_agent_security_objects_for_migration(conn, agent_migrator: Role) -> 
     for signature in signatures:
         conn.execute(text(f"ALTER FUNCTION {signature} OWNER TO {migrator}"))
 
+
+def prepare_existing_schema_objects_for_migration(conn, migrator: Role) -> None:
+    owner = conn.dialect.identifier_preparer.quote(migrator.name)
+    relations = conn.execute(
+        text(
+            """
+            SELECT format('%I.%I', schemaname, tablename)
+              FROM pg_tables
+             WHERE schemaname = :schema
+            UNION ALL
+            SELECT format('%I.%I', schemaname, viewname)
+              FROM pg_views
+             WHERE schemaname = :schema
+            UNION ALL
+            SELECT format('%I.%I', schemaname, matviewname)
+              FROM pg_matviews
+             WHERE schemaname = :schema
+            """
+        ),
+        {"schema": migrator.schema},
+    ).scalars()
+    for relation in relations:
+        conn.execute(text(f"ALTER TABLE {relation} OWNER TO {owner}"))
+
+    sequences = conn.execute(
+        text(
+            """
+            SELECT format('%I.%I', schemaname, sequencename)
+              FROM pg_sequences
+             WHERE schemaname = :schema
+            """
+        ),
+        {"schema": migrator.schema},
+    ).scalars()
+    for sequence in sequences:
+        conn.execute(text(f"ALTER SEQUENCE {sequence} OWNER TO {owner}"))
+
+    signatures = conn.execute(
+        text(
+            """
+            SELECT p.oid::regprocedure::text
+              FROM pg_proc p
+              JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname IN (:schema, 'authn')
+            """
+        ),
+        {"schema": migrator.schema},
+    ).scalars()
+    for signature in signatures:
+        conn.execute(text(f"ALTER FUNCTION {signature} OWNER TO {owner}"))
+
+
 def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> None:
     quote = conn.dialect.identifier_preparer.quote
     database = quote(database_name)
@@ -302,6 +362,7 @@ def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> N
         text(f"GRANT USAGE, CREATE ON SCHEMA public TO {quote(backend_migrator.name)}")
     )
     conn.execute(text(f"GRANT USAGE ON SCHEMA public TO {quote(backend_runtime.name)}"))
+    prepare_existing_schema_objects_for_migration(conn, backend_migrator)
     conn.execute(
         text(
             f"CREATE SCHEMA IF NOT EXISTS authn "
@@ -408,6 +469,15 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
             f"TO {definer}"
         )
     )
+    conn.execute(text(f"GRANT INSERT ON public.tenants TO {definer}"))
+    conn.execute(
+        text(
+            f"GRANT SELECT ON authn.platform_admins, authn.platform_sessions, "
+            f"authn.context_secret TO {definer}; "
+            f"GRANT INSERT, UPDATE ON authn.platform_sessions TO {definer}; "
+            f"GRANT UPDATE ON authn.platform_admins TO {definer}"
+        )
+    )
     conn.execute(
         text(
             f"GRANT INSERT, UPDATE ON public.onboarding_email_otps TO {definer}; "
@@ -421,7 +491,7 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
     tables = conn.execute(
         text(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'authn' "
-            "AND tablename IN ('context_secret', 'sessions')"
+            "AND tablename IN ('context_secret', 'sessions', 'platform_admins', 'platform_sessions')"
         )
     ).scalars()
     for table_name in tables:
@@ -439,6 +509,7 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
     for signature, function_name in signatures:
         conn.execute(text(f"ALTER FUNCTION {signature} OWNER TO {definer}"))
         conn.execute(text(f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC"))
+        conn.execute(text(f"REVOKE ALL ON FUNCTION {signature} FROM {runtime}"))
         if function_name in AUTHN_RUNTIME_FUNCTIONS:
             conn.execute(text(f"GRANT EXECUTE ON FUNCTION {signature} TO {runtime}"))
 

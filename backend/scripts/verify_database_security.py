@@ -259,6 +259,11 @@ def verify_cross_tenant(bootstrap_url: str, backend_url: str, agent_url: str) ->
                 text("DELETE FROM public.users WHERE id=:id"), {"id": backend_user_b}
             ).rowcount == 0
             expect_denied(conn, "SELECT authn.set_context(:tenant, :user, :user)", {"tenant": backend_tenant_b, "user": backend_user_b})
+            expect_denied(
+                conn,
+                "SELECT authn.set_platform_context(:admin, :credential)",
+                {"admin": uuid.uuid4(), "credential": uuid.uuid4()},
+            )
 
         with backend_engine.begin() as conn:
             assert conn.execute(

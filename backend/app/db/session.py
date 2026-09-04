@@ -24,7 +24,7 @@ _database_auth_context: ContextVar[tuple[str, str] | None] = ContextVar(
 
 @contextmanager
 def database_auth_context(kind: str, credential_hash: str):
-    if kind not in {"api_key", "session"} or not credential_hash:
+    if kind not in {"api_key", "session", "platform_session"} or not credential_hash:
         raise ValueError("A validated database credential is required")
     token = _database_auth_context.set((kind, credential_hash))
     try:
@@ -39,11 +39,14 @@ def bind_authenticated_database_context(_session, _transaction, connection) -> N
     if auth_context is None or connection.dialect.name != "postgresql":
         return
     kind, credential_hash = auth_context
-    resolver = (
-        "authn.bind_session_context"
-        if kind == "session"
-        else "authn.bind_api_key_context"
-    )
+    if kind == "platform_session":
+        resolver = "authn.bind_platform_session_context"
+    else:
+        resolver = (
+            "authn.bind_session_context"
+            if kind == "session"
+            else "authn.bind_api_key_context"
+        )
     bound = connection.execute(
         text(f"SELECT tenant_id FROM {resolver}(:credential_hash)"),
         {"credential_hash": credential_hash},
