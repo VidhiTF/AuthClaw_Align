@@ -23,8 +23,8 @@ from app.core.auth import (
     get_tenant_db,
     require_scopes,
     set_mfa_credentials,
-    verify_mfa_code,
 )
+from app.api.v1.endpoints.onboarding import _get_redis
 from app.core.startup_checks import is_production
 from app.db.models import PendingApproval, ComplianceWorkflow, User, ApprovalAudit, Tenant
 from app.orchestrator.runner import ComplianceWorkflowRunner
@@ -35,6 +35,7 @@ from app.services.remediation_approval import (
     mark_altered_approval_and_workflow,
 )
 from app.services.worker_throttle import check_worker_throttle
+from app.services.abuse_controls import verify_mfa_challenge
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("api.workflows")
@@ -242,6 +243,7 @@ def _verify_mfa_if_enabled(
     request: Request,
     body: Optional["ApprovalRequest"],
     required: bool = False,
+    operation: str = "workflow_approval",
 ) -> tuple[bool, Optional[datetime]]:
     """Shared MFA verification for all HITL approval endpoints.
 
@@ -278,7 +280,14 @@ def _verify_mfa_if_enabled(
             detail="MFA token required: your account has MFA enabled",
         )
 
-    if verify_mfa_code(user, totp_code):
+    if verify_mfa_challenge(
+        _get_redis(),
+        user,
+        totp_code,
+        tenant_id=str(user.tenant_id),
+        operation=operation,
+        request_id=request.headers.get("x-request-id", ""),
+    ):
         return True, datetime.now(timezone.utc)
 
     raise HTTPException(
@@ -313,14 +322,15 @@ def mfa_setup(
     user = db.query(User).filter(User.id == user_id).with_for_update().first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.mfa_enabled and (
-        not body
-        or not body.totp_code
-        or not verify_mfa_code(user, body.totp_code)
-    ):
-        raise HTTPException(
-            status_code=400, detail="Current MFA token or backup code required"
-        )
+    if user.mfa_enabled:
+        if not body or not body.totp_code:
+            raise HTTPException(status_code=400, detail="Current MFA token or backup code required")
+        if not verify_mfa_challenge(
+            _get_redis(), user, body.totp_code,
+            tenant_id=str(user.tenant_id), operation="mfa_replace",
+            request_id=request.headers.get("x-request-id", ""),
+        ):
+            raise HTTPException(status_code=400, detail="Current MFA token or backup code required")
         
     secret = pyotp.random_base32()
     backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(5)]
@@ -408,7 +418,9 @@ def approve_gateway_approval(
     ).with_for_update().first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
-    mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(user, request, body)
+    mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
+        user, request, body, operation="gateway_approval"
+    )
 
     approval.status = "APPROVED"
     approval.approver_id = user_id
@@ -583,7 +595,13 @@ def approve_workflow(
         raise HTTPException(status_code=404, detail="Approver user record not found")
 
     requires_fresh_mfa = _approval_requires_fresh_mfa(approval)
-    mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(user, request, body, required=requires_fresh_mfa)
+    mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
+        user,
+        request,
+        body,
+        required=requires_fresh_mfa,
+        operation="destructive_remediation" if requires_fresh_mfa else "workflow_approval",
+    )
     if requires_fresh_mfa and not mfa_verified:
         raise HTTPException(status_code=403, detail="Fresh MFA is required for destructive remediation")
 

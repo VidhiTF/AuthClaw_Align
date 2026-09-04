@@ -100,10 +100,10 @@ def run_cloud_connector_action(
         user = db.query(User).filter(
             User.id == request.state.user_id,
             User.tenant_id == request.state.tenant_id,
-        ).first()
+        ).with_for_update().first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        _verify_mfa_if_enabled(user, request, body, required=True)
+        _verify_mfa_if_enabled(user, request, body, required=True, operation="cloud_mutation")
     try:
         return cloud_connectors.run_action(
             db,

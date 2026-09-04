@@ -241,9 +241,8 @@ rate_limits:
 		InvalidatePolicyCache(tenantB)
 
 		// Clear rate limits in Redis
-		now := time.Now().Format("200601021504")
-		RedisClient.Del(ctx, "rate_limit:"+tenantA+":/v1/chat/completions:"+now)
-		RedisClient.Del(ctx, "rate_limit:"+tenantB+":/v1/chat/completions:"+now)
+		RedisClient.Del(ctx, policyRateLimitKey(tenantA, "/v1/chat/completions", time.Now()))
+		RedisClient.Del(ctx, policyRateLimitKey(tenantB, "/v1/chat/completions", time.Now()))
 
 		// 1st request for Tenant A (Allowed)
 		allow, _, _, _ := EvaluatePolicy(ctx, tenantA, "gemini-2.5-flash-lite", "/v1/chat/completions", []string{"Hi"}, nil)

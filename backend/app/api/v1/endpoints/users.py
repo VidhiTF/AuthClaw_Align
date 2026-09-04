@@ -16,16 +16,17 @@ from app.core.auth import (
     require_roles,
     require_scopes,
     set_mfa_credentials,
-    verify_mfa_code,
 )
 from app.api.v1.endpoints.onboarding import (
     OTP_TTL_MINUTES,
     _deliver_otp,
     _emit_invitation_audit,
     _generate_otp,
+    _get_redis,
     _next_resend_at,
     _otp_hash,
 )
+from app.services.abuse_controls import verify_mfa_challenge
 from app.services.email_service import EmailDeliveryError
 
 router = APIRouter()
@@ -102,11 +103,16 @@ def setup_my_mfa(
     ).with_for_update().first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    if user.mfa_enabled and (not body or not body.code or not verify_mfa_code(user, body.code)):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current MFA token or backup code required",
-        )
+    if user.mfa_enabled:
+        if not body or not body.code or not verify_mfa_challenge(
+            _get_redis(), user, body.code,
+            tenant_id=str(user.tenant_id), operation="mfa_replace",
+            request_id=request.headers.get("x-request-id", ""),
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current MFA token or backup code required",
+            )
 
     secret = pyotp.random_base32()
     backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(5)]
@@ -150,7 +156,11 @@ def disable_my_mfa(body: MFADisableRequest, request: Request, db: Session = Depe
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
 
     code = body.code.strip()
-    if not verify_mfa_code(user, code):
+    if not verify_mfa_challenge(
+        _get_redis(), user, code,
+        tenant_id=str(user.tenant_id), operation="mfa_disable",
+        request_id=request.headers.get("x-request-id", ""),
+    ):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid MFA token or backup code")
 
     user.mfa_enabled = False

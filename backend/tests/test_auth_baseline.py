@@ -10,7 +10,7 @@ import pyotp
 import pytest
 from fastapi import HTTPException, Request
 
-from app.core.auth import hash_key
+from app.core.auth import hash_key, verify_mfa_code
 from app.core import oidc
 from app.core.crypto import decrypt_secret
 from app.core.passwords import hash_password, verify_password
@@ -49,7 +49,12 @@ def test_internal_exception_detail_is_sanitized():
     assert b"secret" not in response.body
 
 
-def test_mfa_disable_requires_current_code():
+def test_mfa_disable_requires_current_code(monkeypatch):
+    monkeypatch.setattr(
+        user_endpoints,
+        "verify_mfa_challenge",
+        lambda _client, user, code, **_kwargs: verify_mfa_code(user, code),
+    )
     secret = pyotp.random_base32()
     user = MagicMock(
         id="00000000-0000-4000-8000-000000000001",
@@ -84,7 +89,12 @@ def test_mfa_disable_requires_current_code():
     db.commit.assert_called_once()
 
 
-def test_mfa_replacement_requires_current_factor_and_protects_credentials():
+def test_mfa_replacement_requires_current_factor_and_protects_credentials(monkeypatch):
+    monkeypatch.setattr(
+        user_endpoints,
+        "verify_mfa_challenge",
+        lambda _client, user, code, **_kwargs: verify_mfa_code(user, code),
+    )
     secret = pyotp.random_base32()
     user = MagicMock(
         id="00000000-0000-4000-8000-000000000001",
