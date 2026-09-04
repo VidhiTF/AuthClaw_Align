@@ -9,7 +9,9 @@ locals {
 }
 
 module "primary" {
-  source = "./modules/regional_stack"
+  source                   = "./modules/regional_stack"
+  oidc_bff_exchange_secret = random_password.oidc_bff_exchange.result
+  oidc_login_paused        = var.oidc_login_paused
 
   providers = {
     aws = aws.primary
@@ -70,8 +72,10 @@ module "primary" {
 }
 
 module "secondary" {
-  count  = var.enable_secondary ? 1 : 0
-  source = "./modules/regional_stack"
+  count                    = var.enable_secondary ? 1 : 0
+  source                   = "./modules/regional_stack"
+  oidc_bff_exchange_secret = random_password.oidc_bff_exchange.result
+  oidc_login_paused        = var.oidc_login_paused
 
   providers = {
     aws = aws.secondary

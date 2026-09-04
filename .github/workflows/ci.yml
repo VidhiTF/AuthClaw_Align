@@ -164,6 +164,7 @@ jobs:
           ../.ci-backend/bin/python -m pytest -p no:cacheprovider -q \
             tests/test_auth_baseline.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
             tests/test_client_ip.py tests/test_bff_client_ip.py tests/test_release4_abuse_controls.py \
+            tests/test_oidc_transactions.py \
             tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
             tests/test_compliance_scoring.py tests/test_migration_038.py tests/test_audit_transport_contract.py
 

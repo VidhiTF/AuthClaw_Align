@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,7 @@ from app.api.v1.endpoints.onboarding import (
     _deliver_otp,
     _enforce_onboarding_rate_limit,
     _generate_otp,
+    _get_redis,
     _next_resend_at,
     _otp_hash,
     _rate_limit_hash,
@@ -33,7 +34,7 @@ from app.db.models import APIKey, OnboardingEmailOTP, Tenant, TenantOIDCConfig, 
 from app.services.email_service import EmailDeliveryError
 
 from app.core.oidc import oidc_config
-from app.services import event_backbone, oidc_sso
+from app.services import event_backbone, oidc_sso, oidc_transactions
 
 router = APIRouter()
 logger = logging.getLogger("api.auth")
@@ -168,6 +169,18 @@ class OIDCCallbackRequest(BaseModel):
     redirect_uri: str
 
 
+class OIDCTransactionStart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    transaction_id: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+    tenant_name: str | None = Field(default=None, max_length=255)
+
+
+class OIDCTransactionExchange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    transaction_id: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
+    code: str = Field(min_length=1, max_length=8192)
+
+
 class OIDCAdminConfigRequest(BaseModel):
     enabled: bool = False
     issuer: str
@@ -228,20 +241,25 @@ def get_oidc_config(tenant_name: str | None = None):
     }
 
 
-@router.get("/oidc/start", response_model=OIDCStartResponse)
+@router.post("/oidc/start", response_model=OIDCStartResponse, dependencies=[Depends(oidc_transactions.authenticate_bff)])
 def start_oidc_login(
-    state: str = Query(..., min_length=24),
-    nonce: str = Query(..., min_length=24),
-    tenant_name: str | None = None,
+    payload: OIDCTransactionStart,
 ):
     db = OwnerSessionLocal()
     try:
-        _, config = oidc_sso.public_config(db, tenant_name)
+        tenant, config = oidc_sso.public_config(db, payload.tenant_name)
         if not config:
             return OIDCStartResponse(enabled=False)
+        if not tenant:
+            raise HTTPException(400, "Tenant name is required for SSO")
+        nonce = secrets.token_urlsafe(32)
+        record = {**oidc_transactions.binding(tenant, config),
+                  "tenant_name": tenant.name, "nonce": nonce,
+                  "created_at": datetime.now(timezone.utc).timestamp()}
+        oidc_transactions.register(_get_redis(), payload.transaction_id, record)
         return OIDCStartResponse(
             enabled=True,
-            authorization_url=oidc_sso.authorization_url(config, state, nonce),
+            authorization_url=oidc_sso.authorization_url(config, payload.transaction_id, nonce),
             issuer=config["issuer"],
             client_id=config["client_id"],
             redirect_uri=config["redirect_uri"],
@@ -257,25 +275,32 @@ def _oidc_callback_config(db, tenant_name: str | None):
     if public.get("source") == "tenant":
         if not tenant:
             raise HTTPException(status_code=400, detail="Tenant name is required for SSO")
-        config = db.query(TenantOIDCConfig).filter(
-            TenantOIDCConfig.tenant_id == tenant.id,
-            TenantOIDCConfig.status == "active",
-        ).first()
-        if not config:
-            raise HTTPException(status_code=404, detail="OIDC SSO is not active for this tenant")
-        return tenant, config
+        # The authentication lookup already restricts this to active tenant
+        # configurations. Before identity establishment, tenant RLS tables
+        # cannot be queried directly by the unauthenticated runtime session.
+        return tenant, public
     if not tenant:
         raise HTTPException(status_code=400, detail="Tenant name is required for environment OIDC mapping")
     return tenant, public
 
 
-@router.post("/oidc/callback", response_model=PasswordLoginResponse)
-def oidc_callback(payload: OIDCCallbackRequest, request: Request):
+@router.post("/oidc/callback", response_model=PasswordLoginResponse, dependencies=[Depends(oidc_transactions.authenticate_bff)])
+def exchange_oidc_transaction(payload: OIDCTransactionExchange, request: Request):
+    record = oidc_transactions.consume(_get_redis(), payload.transaction_id)
+    return oidc_callback(OIDCCallbackRequest(
+        code=payload.code, state=payload.transaction_id, nonce=record["nonce"],
+        tenant_name=record["tenant_name"], redirect_uri=record["redirect_uri"],
+    ), request, transaction=record)
+
+
+def oidc_callback(payload: OIDCCallbackRequest, request: Request, transaction: dict | None = None):
     db = OwnerSessionLocal()
     tenant = None
     request_id = request.headers.get("x-request-id", "")
     try:
         tenant, config = _oidc_callback_config(db, payload.tenant_name)
+        if transaction is not None:
+            oidc_transactions.validate_binding(transaction, oidc_transactions.binding(tenant, config))
         configured_redirect_uri = config["redirect_uri"] if isinstance(config, dict) else config.redirect_uri
         if payload.redirect_uri != configured_redirect_uri:
             _emit_oidc_audit(
