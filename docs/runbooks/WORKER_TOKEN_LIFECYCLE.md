@@ -72,10 +72,20 @@ gate passes; do not remove the preflight to make first deployment succeed.
 
 ## Independent heartbeat monitoring: mandatory operational gate
 
+Deployment decision (2026-09-04): current verification is local only. The target
+is AuthClaw containers on EC2 with private RDS PostgreSQL. Configure AWS-native
+independent monitoring and alert delivery during that deployment; do not assume
+an existing Prometheus installation or alert receiver. The monitoring probe must
+remain independent of the EC2/backend failure domain, detect missing probe data
+as well as stale cleanup heartbeat, and use a function-only database credential.
+Record the owner, receiver, network path and delivered failure/recovery evidence
+before production approval. This does not authorize an AWS apply now or replace
+the existing-container cleanup loop with EventBridge/ECS scheduled cleanup.
+
 The heartbeat is durable in RDS; logging from inside a backend container alone
 cannot detect loss of the entire fleet. Run
-`python scripts/check_worker_cleanup.py` every 60 seconds from an **existing
-monitoring host outside the backend fleet**, with a dedicated monitor credential
+`python scripts/check_worker_cleanup.py` (from `backend/`) every 60 seconds from an
+**independent monitoring runtime outside the backend fleet**, with a dedicated monitor credential
 granted schema USAGE and EXECUTE only on
 `worker_maintenance.cleanup_health()`. Grant no table access, maintenance-role
 membership, cleanup execution or administrator privileges to that credential.
