@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sessionCookieOptions } from "@/lib/cookie-options";
+import { bffClientIPHeaders } from "@/lib/bff-client-ip";
 
 const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
 
@@ -16,10 +17,11 @@ export async function POST(request: Request) {
       );
     }
 
+    const body = JSON.stringify({ email, password, tenant_name: cleanTenantName });
     const backendResponse = await fetch(`${BACKEND_URL}/v1/auth/login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, tenant_name: cleanTenantName }),
+      headers: { "Content-Type": "application/json", ...bffClientIPHeaders(request, body) },
+      body,
     });
     const data = await backendResponse.json();
     if (!backendResponse.ok) {

@@ -17,6 +17,8 @@ type clientIPResolver struct {
 }
 
 var trustedProxyResolutionChangedTotal atomic.Uint64
+var trustedProxyComparisonTotal atomic.Uint64
+var trustedProxyLegacyMismatchTotal atomic.Uint64
 
 func newClientIPResolverFromEnv() (*clientIPResolver, error) {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("AUTHCLAW_FORWARDED_HEADER_MODE")))
@@ -75,6 +77,19 @@ func (resolver *clientIPResolver) trustedIP(ip net.IP) bool {
 
 func (resolver *clientIPResolver) resolve(remoteAddr, forwardedFor string) string {
 	peer := canonicalSocketIP(remoteAddr)
+	proposed := peer
+	if resolver.mode == "compare" {
+		defer func() {
+			legacy := peer
+			if forwardedFor != "" {
+				legacy = strings.TrimSpace(strings.SplitN(forwardedFor, ",", 2)[0])
+			}
+			trustedProxyComparisonTotal.Add(1)
+			if proposed != legacy {
+				trustedProxyLegacyMismatchTotal.Add(1)
+			}
+		}()
+	}
 	peerIP := net.ParseIP(peer)
 	if resolver.mode == "off" || peerIP == nil || forwardedFor == "" || !resolver.trustedIP(peerIP) {
 		return peer
@@ -93,7 +108,7 @@ func (resolver *clientIPResolver) resolve(remoteAddr, forwardedFor string) strin
 			return peer
 		}
 	}
-	proposed := addresses[0].String()
+	proposed = addresses[0].String()
 	for index := len(addresses) - 1; index >= 0; index-- {
 		if !resolver.trustedIP(addresses[index]) {
 			proposed = addresses[index].String()
@@ -114,5 +129,9 @@ func resolvedClientIP(r *http.Request) string {
 	if err != nil {
 		return canonicalSocketIP(r.RemoteAddr)
 	}
-	return resolver.resolve(r.RemoteAddr, r.Header.Get("X-Forwarded-For"))
+	values := r.Header.Values("X-Forwarded-For")
+	if len(values) != 1 {
+		return canonicalSocketIP(r.RemoteAddr)
+	}
+	return resolver.resolve(r.RemoteAddr, values[0])
 }
