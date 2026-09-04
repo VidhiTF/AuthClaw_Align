@@ -63,7 +63,8 @@ def _aws_session():
 
     session_name = os.getenv("AUTHCLAW_AWS_ROLE_SESSION_NAME", "authclaw-document-connector")
     sts = boto3.client("sts")
-    assumed = sts.assume_role(RoleArn=role_arn, RoleSessionName=session_name)
+    external_id = os.getenv("AUTHCLAW_AWS_EXTERNAL_ID", "").strip()
+    assumed = sts.assume_role(RoleArn=role_arn, RoleSessionName=session_name, **({"ExternalId": external_id} if external_id else {}))
     credentials = assumed["Credentials"]
     return boto3.session.Session(
         aws_access_key_id=credentials["AccessKeyId"],

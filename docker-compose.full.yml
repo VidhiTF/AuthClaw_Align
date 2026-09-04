@@ -168,6 +168,8 @@ services:
       agent-migrations:
         condition: service_completed_successfully
     environment:
+      PLATFORM_AUTH_USER: ${PLATFORM_AUTH_USER:-authclaw_platform_auth}
+      PLATFORM_AUTH_PASSWORD: ${PLATFORM_AUTH_PASSWORD:-authclaw-local-platform-issuer}
       BOOTSTRAP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-authclaw}:${POSTGRES_PASSWORD:-authclaw}@postgres:5432/${POSTGRES_DB:-authclaw}
       POSTGRES_DB: ${POSTGRES_DB:-authclaw}
       BACKEND_MIGRATOR_USER: ${BACKEND_MIGRATOR_USER:-authclaw_migrator}
@@ -241,6 +243,7 @@ services:
         condition: service_completed_successfully
     environment:
       OWNER_DATABASE_URL: null
+      PLATFORM_AUTH_DATABASE_URL: postgresql+psycopg://${PLATFORM_AUTH_USER:-authclaw_platform_auth}:${PLATFORM_AUTH_PASSWORD:-authclaw-local-platform-issuer}@postgres:5432/${POSTGRES_DB:-authclaw}
       BOOTSTRAP_DATABASE_URL: null
       MIGRATION_DATABASE_URL: null
       BACKEND_MIGRATION_DATABASE_URL: null

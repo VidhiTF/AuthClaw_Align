@@ -213,8 +213,13 @@ jobs:
 
       - name: Gate runtime rollout on complete ciphertext and key inventory
         shell: bash
+        env:
+          IAM_SECRETS_MIGRATION_APPROVED: ${{ vars.IAM_SECRETS_MIGRATION_APPROVED }}
+          BOOTSTRAP_DATABASE_APPROVED: ${{ vars.BOOTSTRAP_DATABASE_APPROVED }}
         run: |
           set -euo pipefail
+          [[ "$IAM_SECRETS_MIGRATION_APPROVED" == true ]] ||
+            { echo '::error::Approve the secret/RDS/IAM migration and rollback runbook before deployment'; exit 1; }
           # Provision database jobs and their dependencies, never runtime services.
           # Only an empty installation may bootstrap automatically. Existing
           # databases must already satisfy the retirement preconditions.
@@ -224,8 +229,13 @@ jobs:
             [[ ! -s previous-task-definitions.tsv ]] || { echo '::error::Runtime exists without managed database state'; exit 1; }
             fresh=true
           fi
+          if [[ ! -s previous-task-definitions.tsv && "$BOOTSTRAP_DATABASE_APPROVED" == true ]]; then
+            fresh=true
+          fi
           terraform -chdir=infra/terraform apply -input=false -auto-approve \
             -target=module.primary.aws_ecs_cluster.main \
+            -target=module.primary.aws_db_instance.postgres_primary \
+            -target=module.primary.aws_kms_key_policy.main \
             -target=module.primary.aws_ecs_task_definition.database_job \
             -target=module.primary.aws_subnet.private \
             -target=module.primary.aws_security_group.app \
@@ -233,17 +243,14 @@ jobs:
             -target=module.primary.aws_route.private_nat \
             -target=module.primary.aws_route_table_association.public \
             -target=module.primary.aws_route_table_association.private \
-            -target=module.primary.aws_secretsmanager_secret_version.bootstrap_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.backend_migration_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.backend_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.agent_migration_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.agent_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.envelope \
-            -target=module.primary.aws_secretsmanager_secret_version.envelope_v2 \
-            -target=module.primary.aws_secretsmanager_secret_version.session \
-            -target=module.primary.aws_secretsmanager_secret_version.worker_token_hmac \
-            -target=module.primary.aws_iam_role_policy.task_secrets \
-            -target=module.primary.aws_iam_role_policy_attachment.task_execution
+            -target=module.primary.aws_iam_role_policy.task_execution
+          mapfile -t secrets < <(terraform -chdir=infra/terraform output -json required_secret_arns | jq -er '.[]')
+          [[ ${#secrets[@]} -gt 0 ]] || { echo '::error::Secret inventory is unavailable'; exit 1; }
+          for secret in "${secrets[@]}"; do
+            aws secretsmanager describe-secret --secret-id "$secret" --output json |
+              jq -e '[.VersionIdsToStages[]? | select(index("AWSCURRENT"))] | length == 1' >/dev/null ||
+              { echo '::error::External secret provisioning is incomplete; runtime rollout stopped'; exit 1; }
+          done
           gate="$(terraform -chdir=infra/terraform output -json crypto_preflight)"
           cluster="$(jq -er '.cluster' <<<"$gate")"
           network="$(jq -c '.network_configuration' <<<"$gate")"
@@ -271,7 +278,14 @@ jobs:
       - name: Apply controlled-beta infrastructure and immutable release
         id: runtime_release
         shell: bash
-        run: terraform -chdir=infra/terraform apply -input=false -auto-approve
+        run: |
+          set -euo pipefail
+          trap 'rm -f infra/terraform/runtime.tfplan' EXIT
+          terraform -chdir=infra/terraform plan -input=false -out=runtime.tfplan >/dev/null
+          terraform -chdir=infra/terraform show -json runtime.tfplan |
+            python scripts/iam_release_evidence.py --access-analyzer > iam-review.json
+          echo 'apply_started=true' >> "$GITHUB_OUTPUT"
+          terraform -chdir=infra/terraform apply -input=false runtime.tfplan
 
       - name: Wait for services and verify public health
         shell: bash
@@ -317,6 +331,7 @@ jobs:
         # retained rollback image as strict AES-GCM-only before enabling this.
         if: >-
           failure() &&
+          steps.runtime_release.outputs.apply_started == 'true' &&
           (steps.runtime_release.outcome == 'success' || steps.runtime_release.outcome == 'failure') &&
           vars.CRYPTO_STRICT_ROLLBACK_APPROVED == 'true'
         shell: bash
@@ -337,6 +352,7 @@ jobs:
           name: acl-14-controlled-beta-${{ github.event.workflow_run.head_sha }}
           path: |
             deployment-evidence.json
+            iam-review.json
             previous-task-definitions.tsv
             database-*-task.json
           if-no-files-found: warn

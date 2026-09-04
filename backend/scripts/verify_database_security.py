@@ -259,6 +259,10 @@ def verify_cross_tenant(bootstrap_url: str, backend_url: str, agent_url: str) ->
                 text("DELETE FROM public.users WHERE id=:id"), {"id": backend_user_b}
             ).rowcount == 0
             expect_denied(conn, "SELECT authn.set_context(:tenant, :user, :user)", {"tenant": backend_tenant_b, "user": backend_user_b})
+            assert not conn.execute(text(
+                "SELECT has_function_privilege(current_user, "
+                "'authn.create_platform_session(text,uuid,text,timestamptz,jsonb)', 'EXECUTE')"
+            )).scalar_one(), "Runtime must not issue platform sessions"
             expect_denied(
                 conn,
                 "SELECT authn.set_platform_context(:admin, :credential)",

@@ -1,6 +1,8 @@
-resource "random_password" "worker_token_hmac" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.worker_token_hmac
+  lifecycle {
+    destroy = false
+  }
 }
 
 variable "worker_token_issuance_paused" {

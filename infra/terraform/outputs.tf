@@ -93,3 +93,13 @@ output "ecr_repository_urls" {
 output "ecr_kms_key_arn" {
   value = aws_kms_key.registry.arn
 }
+output "execution_iam_review" {
+  sensitive = true
+  value     = module.primary.execution_iam_review
+}
+output "runtime_iam_review" {
+  value = module.primary.runtime_iam_review
+}
+output "required_secret_arns" {
+  value = module.primary.required_secret_arns
+}

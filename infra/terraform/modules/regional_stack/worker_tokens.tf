@@ -2,6 +2,10 @@ variable "worker_token_hmac_secret" {
   type      = string
   sensitive = true
   default   = null
+  validation {
+    condition     = var.worker_token_hmac_secret == null || var.worker_token_hmac_secret == ""
+    error_message = "Provision worker HMAC values externally, not through Terraform state."
+  }
 }
 
 variable "worker_token_issuance_paused" {
@@ -9,9 +13,11 @@ variable "worker_token_issuance_paused" {
   default = true
 }
 
-resource "random_password" "worker_token_hmac" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.worker_token_hmac
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "worker_token_hmac" {
@@ -20,7 +26,9 @@ resource "aws_secretsmanager_secret" "worker_token_hmac" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "worker_token_hmac" {
-  secret_id     = aws_secretsmanager_secret.worker_token_hmac.id
-  secret_string = coalesce(var.worker_token_hmac_secret, random_password.worker_token_hmac.result)
+removed {
+  from = aws_secretsmanager_secret_version.worker_token_hmac
+  lifecycle {
+    destroy = false
+  }
 }

@@ -1,7 +1,12 @@
 variable "oidc_bff_exchange_secret" {
-  type      = string
-  sensitive = true
-  default   = null
+  description = "Deprecated: provision the secret externally; values must not enter Terraform."
+  type        = string
+  default     = null
+  sensitive   = true
+  validation {
+    condition     = var.oidc_bff_exchange_secret == null || var.oidc_bff_exchange_secret == ""
+    error_message = "Secret values must be supplied by the external provisioner, not Terraform variables."
+  }
 }
 
 variable "oidc_login_paused" {
@@ -10,9 +15,11 @@ variable "oidc_login_paused" {
   description = "Keep new SSO logins paused until the approved drain/cutover is complete."
 }
 
-resource "random_password" "oidc_bff_exchange" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.oidc_bff_exchange
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "oidc_bff_exchange" {
@@ -21,7 +28,9 @@ resource "aws_secretsmanager_secret" "oidc_bff_exchange" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "oidc_bff_exchange" {
-  secret_id     = aws_secretsmanager_secret.oidc_bff_exchange.id
-  secret_string = coalesce(var.oidc_bff_exchange_secret, random_password.oidc_bff_exchange.result)
+removed {
+  from = aws_secretsmanager_secret_version.oidc_bff_exchange
+  lifecycle {
+    destroy = false
+  }
 }

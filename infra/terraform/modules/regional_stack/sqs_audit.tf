@@ -12,10 +12,7 @@ locals {
     { name = "SQS_MAX_MESSAGES", value = tostring(var.audit_sqs_max_messages) },
     { name = "SQS_VISIBILITY_TIMEOUT_SECONDS", value = tostring(var.audit_sqs_visibility_timeout_seconds) }
   ] : []
-  audit_sqs_task_role_arns = local.audit_sqs_enabled ? merge(
-    { for service, role in aws_iam_role.audit_sqs_producer : service => role.arn },
-    { audit_consumer = aws_iam_role.audit_sqs_consumer[0].arn }
-  ) : {}
+
 }
 
 resource "aws_sqs_queue" "audit_dlq" {
@@ -95,26 +92,11 @@ resource "aws_sqs_queue_policy" "audit_dlq_tls" {
   })
 }
 
-resource "aws_iam_role" "audit_sqs_producer" {
+resource "aws_iam_role_policy" "audit_sqs_producer" {
   for_each = local.audit_sqs_enabled ? local.audit_sqs_producer_services : toset([])
 
-  name = "${var.name}-${each.key}-audit-sqs"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "ecs-tasks.amazonaws.com" }
-    }]
-  })
-  tags = var.tags
-}
-
-resource "aws_iam_role_policy" "audit_sqs_producer" {
-  for_each = aws_iam_role.audit_sqs_producer
-
   name = "${var.name}-${each.key}-audit-sqs-producer"
-  role = each.value.id
+  role = aws_iam_role.runtime[each.key].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -135,26 +117,11 @@ resource "aws_iam_role_policy" "audit_sqs_producer" {
   })
 }
 
-resource "aws_iam_role" "audit_sqs_consumer" {
-  count = local.audit_sqs_enabled ? 1 : 0
-
-  name = "${var.name}-audit-consumer-sqs"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "ecs-tasks.amazonaws.com" }
-    }]
-  })
-  tags = var.tags
-}
-
 resource "aws_iam_role_policy" "audit_sqs_consumer" {
-  count = local.audit_sqs_enabled ? 1 : 0
+  count = local.audit_sqs_enabled && var.enable_audit_consumer ? 1 : 0
 
   name = "${var.name}-audit-consumer-sqs"
-  role = aws_iam_role.audit_sqs_consumer[0].id
+  role = aws_iam_role.runtime["audit_consumer"].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [

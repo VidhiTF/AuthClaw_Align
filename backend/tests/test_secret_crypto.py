@@ -96,6 +96,14 @@ def test_provider_secret_versioned_key_rotation(monkeypatch):
 
     assert encrypted.startswith("authclaw-secret-v2:env:v2:")
     assert decrypt_secret(encrypted) == "rotated-provider-secret"
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
+    assert decrypt_secret(encrypted) == "rotated-provider-secret"
+    old = encrypt_secret("previous-version-secret")
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v2")
+    assert decrypt_secret(old) == "previous-version-secret"
+    monkeypatch.delenv("ENVELOPE_KEY_V1")
+    with pytest.raises(ValueError):
+        decrypt_secret(old)
 
 
 def test_vault_rejects_plaintext_address(monkeypatch):
@@ -104,6 +112,31 @@ def test_vault_rejects_plaintext_address(monkeypatch):
 
     with pytest.raises(RuntimeError, match="VAULT_ADDR must use https"):
         _vault_key_material("v1")
+
+
+def test_kms_envelope_rotation_and_rollback(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "aws_kms")
+    for version in ("v1", "v2"):
+        monkeypatch.setenv(f"AWS_KMS_ENCRYPTED_DATA_KEY_{version.upper()}", base64.b64encode(version.encode()).decode())
+        monkeypatch.setenv(f"AUTHCLAW_AWS_KMS_KEY_ID_{version.upper()}", f"alias/test-{version}")
+
+    class KMS:
+        def decrypt(self, **request):
+            version = request["CiphertextBlob"].decode()
+            assert request["KeyId"] == f"alias/test-{version}"
+            return {"Plaintext": version.encode() * 16}
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda _: KMS()))
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
+    old = encrypt_secret("old")
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v2")
+    new = encrypt_secret("new")
+    assert decrypt_secret(old) == "old"
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
+    assert decrypt_secret(new) == "new"
+    monkeypatch.delenv("AWS_KMS_ENCRYPTED_DATA_KEY_V2")
+    with pytest.raises(ValueError):
+        decrypt_secret(new)
 
 
 def test_production_env_provider_requires_key_version_and_real_key(monkeypatch):

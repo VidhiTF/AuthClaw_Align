@@ -134,9 +134,11 @@ def validate_production_environment() -> None:
                 if not os.getenv(name, "").strip():
                     errors.append(f"{name} must be configured for vault secret provider")
         elif provider == "aws_kms":
-            if not (os.getenv("AWS_KMS_ENCRYPTED_DATA_KEY") or os.getenv("KMS_ENCRYPTED_DATA_KEY")):
+            from app.core.crypto import aws_kms_configuration
+            encrypted_key, key_id = aws_kms_configuration(key_version or "v1")
+            if not encrypted_key:
                 errors.append("AWS_KMS_ENCRYPTED_DATA_KEY must be configured for aws_kms secret provider")
-            if not (os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID")):
+            if not key_id:
                 errors.append("AUTHCLAW_AWS_KMS_KEY_ID must be configured for aws_kms secret provider")
         else:
             errors.append("AUTHCLAW_SECRET_PROVIDER must be one of: env, vault, aws_kms")
@@ -173,9 +175,11 @@ def validate_production_environment() -> None:
             if not os.getenv(name, "").strip():
                 errors.append(f"{name} must be configured for vault secret provider")
     elif provider == "aws_kms":
-        if not (os.getenv("AWS_KMS_ENCRYPTED_DATA_KEY") or os.getenv("KMS_ENCRYPTED_DATA_KEY")):
+        from app.core.crypto import aws_kms_configuration
+        encrypted_key, key_id = aws_kms_configuration(key_version or "v1")
+        if not encrypted_key:
             errors.append("AWS_KMS_ENCRYPTED_DATA_KEY must be configured for aws_kms secret provider")
-        if not (os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID")):
+        if not key_id:
             errors.append("AUTHCLAW_AWS_KMS_KEY_ID must be configured for aws_kms secret provider")
     else:
         errors.append("AUTHCLAW_SECRET_PROVIDER must be one of: env, vault, aws_kms")

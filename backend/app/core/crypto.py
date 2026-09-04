@@ -95,15 +95,22 @@ def _vault_key_material(version: str) -> str:
     return str(key_material)
 
 
-def _aws_kms_key_material() -> bytes:
-    encrypted_data_key = os.getenv("AWS_KMS_ENCRYPTED_DATA_KEY") or os.getenv("KMS_ENCRYPTED_DATA_KEY")
+def aws_kms_configuration(version: str) -> tuple[str | None, str | None]:
+    encrypted_data_key = os.getenv(f"AWS_KMS_ENCRYPTED_DATA_KEY_{version.upper()}")
+    if not encrypted_data_key and version == get_secret_key_version():
+        encrypted_data_key = os.getenv("AWS_KMS_ENCRYPTED_DATA_KEY") or os.getenv("KMS_ENCRYPTED_DATA_KEY")
+    key_id = os.getenv(f"AUTHCLAW_AWS_KMS_KEY_ID_{version.upper()}") or os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID")
+    return encrypted_data_key, key_id
+
+
+def _aws_kms_key_material(version: str) -> bytes:
+    encrypted_data_key, key_id = aws_kms_configuration(version)
     if not encrypted_data_key:
         raise RuntimeError("AWS_KMS_ENCRYPTED_DATA_KEY is required for AUTHCLAW_SECRET_PROVIDER=aws_kms")
     try:
         import boto3
         ciphertext = base64.b64decode(encrypted_data_key)
         request = {"CiphertextBlob": ciphertext}
-        key_id = os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID")
         if key_id:
             request["KeyId"] = key_id
         response = boto3.client("kms").decrypt(**request)
@@ -125,7 +132,7 @@ def get_secret_envelope_key(provider: str | None = None, version: str | None = N
     if provider == "vault":
         return _normalize_key_material(_vault_key_material(version))
     if provider == "aws_kms":
-        return _normalize_key_material(_aws_kms_key_material())
+        return _normalize_key_material(_aws_kms_key_material(version))
     raise RuntimeError(f"Unsupported secret provider: {provider}")
 
 
@@ -145,14 +152,13 @@ def secret_management_status() -> dict:
         )
         detail = "vault key path configured" if configured else "vault configuration incomplete"
     elif provider == "aws_kms":
-        encrypted_key = os.getenv("AWS_KMS_ENCRYPTED_DATA_KEY") or os.getenv("KMS_ENCRYPTED_DATA_KEY")
-        key_id = os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID")
+        encrypted_key, key_id = aws_kms_configuration(version)
         configured = bool(encrypted_key and key_id)
         detail = "kms key id and encrypted data key configured" if configured else "kms key id or encrypted data key missing"
     return {
         "provider": provider,
         "key_version": version,
-        "key_id": os.getenv("AUTHCLAW_AWS_KMS_KEY_ID") or os.getenv("AWS_KMS_KEY_ID") or version,
+        "key_id": aws_kms_configuration(version)[1] or version,
         "managed": provider in {"vault", "aws_kms"},
         "configured": configured,
         "detail": detail,
