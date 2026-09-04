@@ -10,6 +10,11 @@ variable "region" {
   type = string
 }
 
+variable "aws_account_id" {
+  type    = string
+  default = ""
+}
+
 variable "vpc_cidr" {
   type = string
 }
@@ -69,7 +74,6 @@ variable "service_cpu_architectures" {
   }
 }
 
-
 variable "ecs_ec2_graviton" {
   description = "Optional ECS on EC2 Graviton capacity provider for P0-05."
   type = object({
@@ -95,6 +99,7 @@ variable "ecs_ec2_graviton" {
     error_message = "ecs_ec2_graviton.instance_type must be an ARM64 Graviton instance family such as m7g.large."
   }
 }
+
 variable "authclaw_env" {
   type    = string
   default = "staging"
@@ -216,6 +221,47 @@ variable "certificate_arn" {
 variable "domain_name" {
   type    = string
   default = ""
+}
+
+variable "enable_public_edge" {
+  description = "Allow CloudFront ingress to the always-private application ALBs."
+  type        = bool
+  default     = false
+}
+
+variable "public_domain_names" {
+  description = "Approved public hostnames used to construct browser-facing runtime URLs."
+  type = object({
+    console = string
+    api     = string
+    gateway = string
+  })
+  default = {
+    console = ""
+    api     = ""
+    gateway = ""
+  }
+}
+
+variable "public_url_environment" {
+  type    = string
+  default = "staging"
+}
+
+variable "alb_access_log_retention_days" {
+  description = "Retention for regional ALB access logs."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.alb_access_log_retention_days >= 30
+    error_message = "alb_access_log_retention_days must be at least 30 days."
+  }
+}
+
+variable "edge_alarm_action_arns" {
+  type    = list(string)
+  default = []
 }
 
 variable "smtp_host" {

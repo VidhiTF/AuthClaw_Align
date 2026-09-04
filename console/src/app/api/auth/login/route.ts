@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { sessionCookieOptions } from "@/lib/cookie-options";
+import { sessionCookieName, sessionCookieOptions } from "@/lib/cookie-options";
 import { bffClientIPHeaders } from "@/lib/bff-client-ip";
 
 const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
@@ -41,7 +41,7 @@ export async function POST(request: Request) {
     };
     const response = NextResponse.json({ success: true, user });
 
-    response.cookies.set("authclaw_session", data.session_token, {
+    response.cookies.set(sessionCookieName(), data.session_token, {
       ...sessionCookieOptions(60 * 60 * 24),
     });
 

@@ -85,7 +85,24 @@ output "secondary" {
 }
 
 output "console_failover_domain" {
-  value = var.domain_name != "" ? var.domain_name : null
+  description = "Deprecated compatibility output; public DNS is now CloudFront-only."
+  value       = var.enable_public_edge ? local.approved_public_domains.console : null
+}
+
+output "public_edge" {
+  value = var.enable_public_edge ? {
+    domains = local.approved_public_domains
+    distribution_ids = merge(
+      { console = aws_cloudfront_distribution.console[0].id },
+      { for key, distribution in aws_cloudfront_distribution.service : key => distribution.id },
+      var.public_url_environment == "production" ? { marketing = aws_cloudfront_distribution.marketing[0].id } : {},
+    )
+    waf_web_acl_arn           = aws_wafv2_web_acl.edge[0].arn
+    waf_log_group             = aws_cloudwatch_log_group.waf[0].name
+    primary_origin_boundary   = module.primary.origin_ingress_boundary
+    runtime_url_boundary      = module.primary.runtime_url_boundary
+    secondary_origin_boundary = var.enable_secondary ? module.secondary[0].origin_ingress_boundary : null
+  } : null
 }
 
 output "ecr_repository_urls" {

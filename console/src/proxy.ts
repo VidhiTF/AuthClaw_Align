@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { sessionCookieName } from "@/lib/cookie-options";
 import type { NextRequest } from "next/server";
 
 export function proxy(request: NextRequest) {
@@ -61,7 +62,7 @@ export function proxy(request: NextRequest) {
   }
 
   // 2. Extract session cookie
-  const sessionCookie = request.cookies.get("authclaw_session")?.value;
+  const sessionCookie = request.cookies.get(sessionCookieName())?.value;
   const session = Boolean(sessionCookie?.startsWith("acl_session_"));
 
   // 3. Handle redirects

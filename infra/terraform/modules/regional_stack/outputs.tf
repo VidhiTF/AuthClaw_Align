@@ -1,9 +1,41 @@
 output "alb_dns_name" {
-  value = aws_lb.main.dns_name
+  value = aws_lb.service["console"].dns_name
 }
 
 output "alb_zone_id" {
-  value = aws_lb.main.zone_id
+  value = aws_lb.service["console"].zone_id
+}
+
+output "origin_load_balancers" {
+  value = {
+    for service, load_balancer in aws_lb.service : service => {
+      arn      = load_balancer.arn
+      dns_name = load_balancer.dns_name
+      zone_id  = load_balancer.zone_id
+      internal = load_balancer.internal
+    }
+  }
+}
+
+output "origin_ingress_boundary" {
+  value = {
+    public_cidr_rule_count = length(flatten([for rule in aws_security_group.alb.ingress : coalesce(rule.cidr_blocks, [])]))
+    prefix_list_rule_count = length(flatten([for rule in aws_security_group.alb.ingress : coalesce(rule.prefix_list_ids, [])]))
+    listener_ports         = distinct(values(aws_lb_listener.service)[*].port)
+    access_log_bucket      = aws_s3_bucket.alb_logs.id
+  }
+}
+
+output "runtime_url_boundary" {
+  value = {
+    console_url       = local.console_base_url
+    api_url           = local.api_base_url
+    gateway_url       = local.gateway_base_url
+    cors_origins      = [local.console_base_url]
+    oidc_redirect_uri = "${local.console_base_url}/api/auth/oidc/callback"
+    cookie_secure     = true
+    cookie_domain     = null
+  }
 }
 
 output "ecs_cluster_name" {
@@ -20,7 +52,7 @@ output "ecs_service_names" {
 
 output "public_endpoints" {
   value = {
-    console = "${local.public_scheme}://${local.public_host}"
+    console = local.console_base_url
     backend = "${local.api_base_url}/health"
     gateway = "${local.gateway_base_url}/health"
   }
@@ -54,6 +86,7 @@ output "ecs_launch_model" {
     x86_provider_enabled   = var.ecs_ec2_graviton.x86_provider_enabled
   }
 }
+
 output "nat_gateway_mode" {
   value = var.nat_gateway_mode
 }

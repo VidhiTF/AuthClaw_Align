@@ -42,9 +42,12 @@ locals {
   namespace_name        = "${var.name}.local"
   listener_protocol     = "HTTPS"
   public_scheme         = "https"
-  public_host           = var.domain_name != "" ? var.domain_name : aws_lb.main.dns_name
-  api_base_url          = "${local.public_scheme}://${local.public_host}:8000"
-  gateway_base_url      = "${local.public_scheme}://${local.public_host}:8080"
+  console_host          = var.enable_public_edge ? var.public_domain_names.console : (var.domain_name != "" ? var.domain_name : aws_lb.service["console"].dns_name)
+  api_host              = var.enable_public_edge ? var.public_domain_names.api : (var.domain_name != "" ? var.domain_name : aws_lb.service["backend"].dns_name)
+  gateway_host          = var.enable_public_edge ? var.public_domain_names.gateway : (var.domain_name != "" ? var.domain_name : aws_lb.service["gateway"].dns_name)
+  console_base_url      = "${local.public_scheme}://${local.console_host}"
+  api_base_url          = "${local.public_scheme}://${local.api_host}${var.enable_public_edge ? "/api/v1" : ":8000"}"
+  gateway_base_url      = "${local.public_scheme}://${local.gateway_host}${var.enable_public_edge ? "" : ":8080"}"
   internal_agent_url    = "http://agent.${local.namespace_name}:8001"
   internal_opa_url      = "http://127.0.0.1:8181"
   internal_presidio_url = "http://127.0.0.1:3000"
@@ -57,21 +60,18 @@ locals {
     console = {
       image          = var.container_images.console
       container_port = 3001
-      listener_port  = 443
       health_path    = "/"
       command        = null
     }
     backend = {
       image          = var.container_images.backend
       container_port = 8000
-      listener_port  = 8000
       health_path    = "/health"
       command        = null
     }
     gateway = {
       image          = var.container_images.gateway
       container_port = 8080
-      listener_port  = 8080
       health_path    = "/health"
       command        = null
     }
@@ -128,6 +128,16 @@ locals {
     { name = "GATEWAY_INTERNAL_URL", value = "http://gateway.${local.namespace_name}:8080" },
     { name = "NEXT_PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
     { name = "NEXT_PUBLIC_API_URL", value = local.api_base_url },
+    { name = "PUBLIC_API_URL", value = local.api_base_url },
+    { name = "NEXT_PUBLIC_CONSOLE_URL", value = local.console_base_url },
+    { name = "PUBLIC_CONSOLE_URL", value = local.console_base_url },
+    { name = "API_URL", value = "http://backend.${local.namespace_name}:8000" },
+    { name = "GATEWAY_URL", value = "http://gateway.${local.namespace_name}:8080" },
+    { name = "ALLOWED_ORIGINS", value = jsonencode([local.console_base_url]) },
+    { name = "OIDC_REDIRECT_URI", value = "${local.console_base_url}/api/auth/oidc/callback" },
+    { name = "AUTHCLAW_COOKIE_SECURE", value = "true" },
+    { name = "AUTHCLAW_SESSION_COOKIE_NAME", value = var.enable_public_edge ? (var.public_url_environment == "production" ? "authclaw_session_prod" : "authclaw_session_stg") : "authclaw_session" },
+    { name = "AUTHCLAW_OIDC_STATE_COOKIE_NAME", value = var.enable_public_edge ? (var.public_url_environment == "production" ? "authclaw_oidc_state_prod" : "authclaw_oidc_state_stg") : "authclaw_oidc_state" },
     { name = "DEMO_OTP_VISIBLE", value = "false" },
     { name = "SMTP_HOST", value = var.smtp_host },
     { name = "SMTP_FROM", value = var.smtp_from },
@@ -290,23 +300,27 @@ resource "aws_vpc_endpoint" "gateway" {
   tags = merge(var.tags, { Name = "${var.name}-${each.value}-endpoint" })
 }
 
+data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
+  count = var.enable_public_edge ? 1 : 0
+  name  = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+data "aws_partition" "current" {}
+
 resource "aws_security_group" "alb" {
   name        = "${var.name}-alb"
-  description = "Public ALB ingress"
+  description = "CloudFront-only private origin ingress"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    from_port   = 8000
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  dynamic "ingress" {
+    for_each = var.enable_public_edge ? [1] : []
+    content {
+      description     = "HTTPS from CloudFront origin-facing network only"
+      from_port       = 443
+      to_port         = 443
+      protocol        = "tcp"
+      prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront_origin[0].id]
+    }
   }
 
   egress {
@@ -1024,23 +1038,122 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
     base              = 0
   }
 }
-resource "aws_lb" "main" {
-  name = substr(replace("${var.name}-alb", "_", "-"), 0, 32)
-  #trivy:ignore:AVD-AWS-0053 This ALB is the intentional public ingress for console/API/gateway traffic; private services are not attached.
-  internal                   = false
+
+resource "random_id" "alb_log_bucket" {
+  byte_length = 4
+}
+
+resource "aws_s3_bucket" "alb_logs" {
+  bucket        = substr(lower("${var.name}-${var.region}-alb-logs-${random_id.alb_log_bucket.hex}"), 0, 63)
+  force_destroy = false
+  tags          = merge(var.tags, { DataClass = "security-telemetry" })
+}
+
+resource "aws_s3_bucket_public_access_block" "alb_logs" {
+  bucket                  = aws_s3_bucket.alb_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  #trivy:ignore:AVD-AWS-0132 ALB access-log delivery supports SSE-S3, not customer-managed SSE-KMS keys.
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  rule {
+    id     = "retention"
+    status = "Enabled"
+    filter {}
+    expiration { days = var.alb_access_log_retention_days }
+  }
+}
+
+data "aws_iam_policy_document" "alb_logs" {
+  statement {
+    sid       = "AllowALBLogDelivery"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.alb_logs.arn}/AWSLogs/${var.aws_account_id != "" ? var.aws_account_id : "*"}/*"]
+    principals {
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+    }
+    dynamic "condition" {
+      for_each = var.aws_account_id != "" ? [1] : []
+      content {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [var.aws_account_id]
+      }
+    }
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:${data.aws_partition.current.partition}:elasticloadbalancing:${var.region}:${var.aws_account_id != "" ? var.aws_account_id : "*"}:loadbalancer/*"]
+    }
+  }
+
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.alb_logs.arn, "${aws_s3_bucket.alb_logs.arn}/*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  policy = data.aws_iam_policy_document.alb_logs.json
+}
+
+moved {
+  from = aws_lb.main
+  to   = aws_lb.service["console"]
+}
+
+resource "aws_lb" "service" {
+  for_each = local.public_services
+
+  name                       = trim(substr(replace("${substr(var.name, 0, 20)}-${each.key}-alb", "_", "-"), 0, 32), "-")
+  internal                   = true
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
-  subnets                    = values(aws_subnet.public)[*].id
+  subnets                    = values(aws_subnet.private)[*].id
   drop_invalid_header_fields = true
   xff_header_processing_mode = "append"
   enable_xff_client_port     = false
   tags                       = var.tags
+
+  access_logs {
+    bucket  = aws_s3_bucket.alb_logs.id
+    prefix  = each.key
+    enabled = true
+  }
+
+  depends_on = [aws_s3_bucket_policy.alb_logs]
 }
 
 resource "aws_lb_target_group" "service" {
   for_each = local.public_services
 
-  name        = substr(replace("${var.name}-${each.key}", "_", "-"), 0, 32)
+  name        = trim(substr(replace("${substr(var.name, 0, 20)}-${each.key}", "_", "-"), 0, 32), "-")
   port        = each.value.container_port
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -1061,8 +1174,8 @@ resource "aws_lb_target_group" "service" {
 resource "aws_lb_listener" "service" {
   for_each = local.public_services
 
-  load_balancer_arn = aws_lb.main.arn
-  port              = each.value.listener_port
+  load_balancer_arn = aws_lb.service[each.key].arn
+  port              = 443
   protocol          = local.listener_protocol
   certificate_arn   = var.certificate_arn
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
@@ -1661,6 +1774,7 @@ resource "aws_ecs_service" "public" {
       base              = 0
     }
   }
+
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
     security_groups  = each.key == "console" ? [aws_security_group.console_ingress.id] : [aws_security_group.app.id]
@@ -1698,6 +1812,7 @@ resource "aws_ecs_service" "private" {
       base              = 0
     }
   }
+
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
     security_groups  = [aws_security_group.app.id]
@@ -1794,6 +1909,7 @@ resource "aws_ecs_service" "audit_consumer" {
       base              = 0
     }
   }
+
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
     security_groups  = [aws_security_group.app.id]
@@ -1817,9 +1933,10 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
   statistic           = "Maximum"
   threshold           = 0
   treat_missing_data  = "breaching"
+  alarm_actions       = var.edge_alarm_action_arns
 
   dimensions = {
-    LoadBalancer = aws_lb.main.arn_suffix
+    LoadBalancer = aws_lb.service[each.key].arn_suffix
     TargetGroup  = aws_lb_target_group.service[each.key].arn_suffix
   }
 
@@ -1842,7 +1959,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
 
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
-    ServiceName = "${var.name}-${each.key}"
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
   }
 
   tags = var.tags
@@ -1888,7 +2005,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_pending_tasks" {
 
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
-    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
+    ServiceName = "${var.name}-${each.key}"
   }
 
   tags = var.tags
@@ -1995,6 +2112,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_placement_failure" {
 
   tags = var.tags
 }
+
 resource "aws_cloudwatch_metric_alarm" "nat_port_allocation" {
   for_each = aws_nat_gateway.main
 

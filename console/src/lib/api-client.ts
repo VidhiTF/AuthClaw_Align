@@ -1,5 +1,6 @@
 import { createHmac } from "crypto";
 import { cookies } from "next/headers";
+import { sessionCookieName } from "@/lib/cookie-options";
 import { NextResponse } from "next/server";
 import { apiErrorMessage, getErrorMessage, getErrorStatus } from "./errors";
 
@@ -37,7 +38,7 @@ export type RouteContext<T extends Record<string, string> = { id: string }> = {
 
 async function readSessionContext(invalidSessionMessage?: string) {
   const cookieStore = await cookies();
-  const token = cookieStore.get("authclaw_session")?.value;
+  const token = cookieStore.get(sessionCookieName())?.value;
   if (!token || !token.startsWith("acl_session_")) return null;
   const validation = await fetchBackend(`${BACKEND_URL}/v1/auth/me`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -79,7 +80,7 @@ export async function getSessionContext() {
   if (!context) return { response: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
   if (!context.session) {
     const response = NextResponse.json({ error: "Unauthorized: Session expired or invalid" }, { status: 401 });
-    response.cookies.delete("authclaw_session");
+    response.cookies.delete(sessionCookieName());
     return { response };
   }
   return context;
@@ -288,7 +289,7 @@ export function handleApiError(error: unknown) {
   const status = getErrorStatus(error, isUnauthorized ? 401 : 500);
   const response = NextResponse.json({ error: status >= 500 ? "Request failed" : message }, { status });
   if (isUnauthorized) {
-    response.cookies.delete("authclaw_session");
+    response.cookies.delete(sessionCookieName());
   }
   return response;
 }

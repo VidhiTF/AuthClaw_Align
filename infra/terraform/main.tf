@@ -1,5 +1,18 @@
 locals {
   name = "${var.project}-${var.environment}"
+  approved_public_domains = var.public_url_environment == "production" ? {
+    marketing = "authclaw.ai"
+    www       = "www.authclaw.ai"
+    console   = "app.authclaw.ai"
+    api       = "api.authclaw.ai"
+    gateway   = "gateway.authclaw.ai"
+    } : {
+    marketing = "dev.authclaw.ai"
+    www       = ""
+    console   = "dev.authclaw.ai"
+    api       = "api.dev.authclaw.ai"
+    gateway   = "gateway.dev.authclaw.ai"
+  }
   tags = merge(var.tags, {
     Project     = var.project
     Environment = var.environment
@@ -19,35 +32,45 @@ module "primary" {
     aws = aws.primary
   }
 
-  name                                 = "${local.name}-primary"
-  environment                          = var.environment
-  region                               = var.primary_region
-  vpc_cidr                             = var.primary_vpc_cidr
-  availability_zones                   = var.primary_availability_zones
-  nat_gateway_mode                     = var.nat_gateway_mode
-  enable_private_aws_endpoints         = var.enable_private_aws_endpoints
-  container_images                     = var.container_images
-  service_cpu_architectures            = var.service_cpu_architectures
-  ecs_ec2_graviton                   = var.ecs_ec2_graviton
-  desired_count                        = var.desired_count_primary
-  gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
-  gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
-  backend_sidecar_task_cpu             = var.backend_sidecar_task_cpu
-  backend_sidecar_task_memory          = var.backend_sidecar_task_memory
-  agent_sidecar_task_cpu               = var.agent_sidecar_task_cpu
-  agent_sidecar_task_memory            = var.agent_sidecar_task_memory
-  is_primary                           = true
-  create_db_replica                    = false
-  authclaw_env                         = var.authclaw_env
-  forwarded_header_mode                = var.forwarded_header_mode
-  bff_client_ip_enabled                = var.bff_client_ip_enabled
-  bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled
-  bff_client_ip_secret                 = random_password.bff_client_ip.result
-  secret_key_version                   = var.secret_key_version
-  jwt_key_version                      = var.jwt_key_version
-  session_key_version                  = var.session_key_version
-  certificate_arn                      = var.primary_certificate_arn != "" ? var.primary_certificate_arn : var.certificate_arn
-  domain_name                          = var.domain_name
+  name                          = "${local.name}-primary"
+  environment                   = var.environment
+  region                        = var.primary_region
+  aws_account_id                = var.aws_account_id
+  vpc_cidr                      = var.primary_vpc_cidr
+  availability_zones            = var.primary_availability_zones
+  nat_gateway_mode              = var.nat_gateway_mode
+  enable_private_aws_endpoints  = var.enable_private_aws_endpoints
+  container_images              = var.container_images
+  service_cpu_architectures     = var.service_cpu_architectures
+  ecs_ec2_graviton              = var.ecs_ec2_graviton
+  desired_count                 = var.desired_count_primary
+  gateway_sidecar_task_cpu      = var.gateway_sidecar_task_cpu
+  gateway_sidecar_task_memory   = var.gateway_sidecar_task_memory
+  backend_sidecar_task_cpu      = var.backend_sidecar_task_cpu
+  backend_sidecar_task_memory   = var.backend_sidecar_task_memory
+  agent_sidecar_task_cpu        = var.agent_sidecar_task_cpu
+  agent_sidecar_task_memory     = var.agent_sidecar_task_memory
+  is_primary                    = true
+  create_db_replica             = false
+  authclaw_env                  = var.authclaw_env
+  forwarded_header_mode         = var.forwarded_header_mode
+  bff_client_ip_enabled         = var.bff_client_ip_enabled
+  bff_client_ip_signing_enabled = var.bff_client_ip_signing_enabled
+  bff_client_ip_secret          = random_password.bff_client_ip.result
+  secret_key_version            = var.secret_key_version
+  jwt_key_version               = var.jwt_key_version
+  session_key_version           = var.session_key_version
+  certificate_arn               = var.primary_certificate_arn != "" ? var.primary_certificate_arn : var.certificate_arn
+  domain_name                   = var.domain_name
+  enable_public_edge            = var.enable_public_edge
+  public_domain_names = {
+    console = local.approved_public_domains.console
+    api     = local.approved_public_domains.api
+    gateway = local.approved_public_domains.gateway
+  }
+  public_url_environment               = var.public_url_environment
+  alb_access_log_retention_days        = var.edge_log_retention_days
+  edge_alarm_action_arns               = var.edge_alarm_action_arns
   smtp_host                            = var.smtp_host
   smtp_from                            = var.smtp_from
   kafka_brokers                        = var.kafka_brokers
@@ -86,35 +109,45 @@ module "secondary" {
     aws = aws.secondary
   }
 
-  name                                 = "${local.name}-secondary"
-  environment                          = var.environment
-  region                               = var.secondary_region
-  vpc_cidr                             = var.secondary_vpc_cidr
-  availability_zones                   = var.secondary_availability_zones
-  nat_gateway_mode                     = var.nat_gateway_mode
-  enable_private_aws_endpoints         = var.enable_private_aws_endpoints
-  container_images                     = var.container_images
-  service_cpu_architectures            = var.service_cpu_architectures
-  ecs_ec2_graviton                   = var.ecs_ec2_graviton
-  desired_count                        = var.desired_count_secondary
-  gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
-  gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
-  backend_sidecar_task_cpu             = var.backend_sidecar_task_cpu
-  backend_sidecar_task_memory          = var.backend_sidecar_task_memory
-  agent_sidecar_task_cpu               = var.agent_sidecar_task_cpu
-  agent_sidecar_task_memory            = var.agent_sidecar_task_memory
-  is_primary                           = false
-  create_db_replica                    = var.enable_cross_region_db_replica
-  authclaw_env                         = var.authclaw_env
-  forwarded_header_mode                = var.forwarded_header_mode
-  bff_client_ip_enabled                = var.bff_client_ip_enabled
-  bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled
-  bff_client_ip_secret                 = random_password.bff_client_ip.result
-  secret_key_version                   = var.secret_key_version
-  jwt_key_version                      = var.jwt_key_version
-  session_key_version                  = var.session_key_version
-  certificate_arn                      = var.secondary_certificate_arn != "" ? var.secondary_certificate_arn : var.certificate_arn
-  domain_name                          = var.domain_name
+  name                          = "${local.name}-secondary"
+  environment                   = var.environment
+  region                        = var.secondary_region
+  aws_account_id                = var.aws_account_id
+  vpc_cidr                      = var.secondary_vpc_cidr
+  availability_zones            = var.secondary_availability_zones
+  nat_gateway_mode              = var.nat_gateway_mode
+  enable_private_aws_endpoints  = var.enable_private_aws_endpoints
+  container_images              = var.container_images
+  service_cpu_architectures     = var.service_cpu_architectures
+  ecs_ec2_graviton              = var.ecs_ec2_graviton
+  desired_count                 = var.desired_count_secondary
+  gateway_sidecar_task_cpu      = var.gateway_sidecar_task_cpu
+  gateway_sidecar_task_memory   = var.gateway_sidecar_task_memory
+  backend_sidecar_task_cpu      = var.backend_sidecar_task_cpu
+  backend_sidecar_task_memory   = var.backend_sidecar_task_memory
+  agent_sidecar_task_cpu        = var.agent_sidecar_task_cpu
+  agent_sidecar_task_memory     = var.agent_sidecar_task_memory
+  is_primary                    = false
+  create_db_replica             = var.enable_cross_region_db_replica
+  authclaw_env                  = var.authclaw_env
+  forwarded_header_mode         = var.forwarded_header_mode
+  bff_client_ip_enabled         = var.bff_client_ip_enabled
+  bff_client_ip_signing_enabled = var.bff_client_ip_signing_enabled
+  bff_client_ip_secret          = random_password.bff_client_ip.result
+  secret_key_version            = var.secret_key_version
+  jwt_key_version               = var.jwt_key_version
+  session_key_version           = var.session_key_version
+  certificate_arn               = var.secondary_certificate_arn != "" ? var.secondary_certificate_arn : var.certificate_arn
+  domain_name                   = var.domain_name
+  enable_public_edge            = var.enable_public_edge
+  public_domain_names = {
+    console = local.approved_public_domains.console
+    api     = local.approved_public_domains.api
+    gateway = local.approved_public_domains.gateway
+  }
+  public_url_environment               = var.public_url_environment
+  alb_access_log_retention_days        = var.edge_log_retention_days
+  edge_alarm_action_arns               = var.edge_alarm_action_arns
   smtp_host                            = var.smtp_host
   smtp_from                            = var.smtp_from
   kafka_brokers                        = var.kafka_brokers
@@ -140,44 +173,4 @@ module "secondary" {
   replica_source_db_arn                = var.enable_cross_region_db_replica ? module.primary.rds_instance_arn : ""
   db_password                          = var.enable_cross_region_db_replica ? module.primary.db_password : ""
   tags                                 = local.tags
-}
-
-resource "aws_route53_record" "console_primary" {
-  provider = aws.primary
-  count    = var.hosted_zone_id != "" && var.domain_name != "" ? 1 : 0
-
-  zone_id = var.hosted_zone_id
-  name    = var.domain_name
-  type    = "A"
-
-  set_identifier = "primary"
-  failover_routing_policy {
-    type = "PRIMARY"
-  }
-
-  alias {
-    name                   = module.primary.alb_dns_name
-    zone_id                = module.primary.alb_zone_id
-    evaluate_target_health = true
-  }
-}
-
-resource "aws_route53_record" "console_secondary" {
-  provider = aws.primary
-  count    = var.enable_secondary && var.hosted_zone_id != "" && var.domain_name != "" ? 1 : 0
-
-  zone_id = var.hosted_zone_id
-  name    = var.domain_name
-  type    = "A"
-
-  set_identifier = "secondary"
-  failover_routing_policy {
-    type = "SECONDARY"
-  }
-
-  alias {
-    name                   = module.secondary[0].alb_dns_name
-    zone_id                = module.secondary[0].alb_zone_id
-    evaluate_target_health = true
-  }
 }

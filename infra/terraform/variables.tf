@@ -16,6 +16,17 @@ variable "primary_region" {
   default     = "us-east-1"
 }
 
+variable "aws_account_id" {
+  description = "AWS account ID used to scope service log-delivery policies; required for production."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.aws_account_id == "" || can(regex("^[0-9]{12}$", var.aws_account_id))
+    error_message = "aws_account_id must be empty or exactly 12 digits."
+  }
+}
+
 variable "secondary_region" {
   description = "Secondary AWS region for standby/failover."
   type        = string
@@ -96,7 +107,6 @@ variable "service_cpu_architectures" {
   }
 }
 
-
 variable "ecs_ec2_graviton" {
   description = "Optional ECS on EC2 Graviton capacity provider for P0-05. Keep disabled until ownership and failure rehearsal gates are approved."
   type = object({
@@ -122,6 +132,7 @@ variable "ecs_ec2_graviton" {
     error_message = "ecs_ec2_graviton.instance_type must be an ARM64 Graviton instance family such as m7g.large."
   }
 }
+
 variable "require_immutable_images" {
   description = "Require every runtime image to use an immutable sha256 digest. Enable for controlled-beta deployments."
   type        = bool
@@ -247,6 +258,57 @@ variable "certificate_arn" {
   description = "Optional fallback ACM certificate ARN used by regional ALB listeners."
   type        = string
   default     = ""
+}
+
+variable "enable_public_edge" {
+  description = "Create the approved Route53, CloudFront, WAF, and private-ALB public entry model."
+  type        = bool
+  default     = false
+}
+
+variable "public_url_environment" {
+  description = "Approved ADR-0002 public URL boundary to provision independently of runtime hardening gates."
+  type        = string
+  default     = "staging"
+
+  validation {
+    condition     = contains(["staging", "production"], var.public_url_environment)
+    error_message = "public_url_environment must be staging or production."
+  }
+}
+
+variable "edge_certificate_arn" {
+  description = "ACM certificate ARN in us-east-1 covering the approved environment domains."
+  type        = string
+  default     = ""
+}
+
+variable "edge_log_retention_days" {
+  description = "CloudFront, WAF, and ALB access-log retention."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.edge_log_retention_days >= 30
+    error_message = "edge_log_retention_days must be at least 30 days."
+  }
+}
+
+variable "waf_rate_limit" {
+  description = "Maximum requests per five-minute WAF evaluation window for one source IP."
+  type        = number
+  default     = 2000
+
+  validation {
+    condition     = var.waf_rate_limit >= 100
+    error_message = "waf_rate_limit must be at least 100."
+  }
+}
+
+variable "edge_alarm_action_arns" {
+  description = "Approved SNS or incident-action ARNs for CloudFront, WAF, and origin health alarms."
+  type        = list(string)
+  default     = []
 }
 
 variable "primary_certificate_arn" {
