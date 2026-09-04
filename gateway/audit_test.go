@@ -32,7 +32,7 @@ func randomTestUUID(t *testing.T) string {
 }
 
 func TestEmitAuditEvent(t *testing.T) {
-	EmitAuditEvent(&AuditEvent{
+	EmitAuditEvent(context.Background(), &AuditEvent{
 		ID:             "test-id",
 		Timestamp:      time.Now(),
 		TenantID:       "tenant-123",
@@ -62,7 +62,7 @@ func TestEmitAuditEvent_WritesOutboxWhenFailClosedAndDatabaseUnavailable(t *test
 		Action:         "allow",
 		DecisionReason: "outbox test",
 	}
-	if err := EmitAuditEvent(event); err == nil {
+	if err := EmitAuditEvent(context.Background(), event); err == nil {
 		t.Fatal("fail-closed mode must reject a request without a canonical PostgreSQL append")
 	}
 	data, err := os.ReadFile(outboxPath)
@@ -86,7 +86,7 @@ func TestEmitAuditEvent_FailClosedWhenOutboxUnavailable(t *testing.T) {
 	t.Setenv("AUDIT_FAIL_CLOSED", "true")
 	t.Setenv("AUDIT_OUTBOX_PATH", t.TempDir())
 
-	err := EmitAuditEvent(&AuditEvent{
+	err := EmitAuditEvent(context.Background(), &AuditEvent{
 		ID:        "22222222-2222-4222-8222-222222222222",
 		TenantID:  "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 		Timestamp: time.Now(),
@@ -142,7 +142,7 @@ func TestAuditEventMetadataConcurrentCanonicalAppend(t *testing.T) {
 				RequestSize:    i,
 				ResponseStatus: 200,
 			}
-			if err := persistAuditMetadata(event); err != nil {
+			if err := persistAuditMetadata(context.Background(), event); err != nil {
 				failures <- err
 			}
 		}(i)
@@ -165,11 +165,11 @@ func TestAuditEventMetadataConcurrentCanonicalAppend(t *testing.T) {
 		Provider:       "test",
 		ResponseStatus: 200,
 	}
-	if err := persistAuditMetadata(replayed); err != nil {
+	if err := persistAuditMetadata(context.Background(), replayed); err != nil {
 		t.Fatalf("first replay append: %v", err)
 	}
 	firstSequence, firstHash := replayed.TenantSequence, replayed.IntegrityHash
-	if err := persistAuditMetadata(replayed); err != nil {
+	if err := persistAuditMetadata(context.Background(), replayed); err != nil {
 		t.Fatalf("exact replay must return the existing row: %v", err)
 	}
 	if replayed.TenantSequence != firstSequence || replayed.IntegrityHash != firstHash {
@@ -178,7 +178,7 @@ func TestAuditEventMetadataConcurrentCanonicalAppend(t *testing.T) {
 	collision := *replayed
 	collision.ID = randomTestUUID(t)
 	collision.Action = "block"
-	if err := persistAuditMetadata(&collision); err == nil {
+	if err := persistAuditMetadata(context.Background(), &collision); err == nil {
 		t.Fatal("changed content with the same idempotency key must fail")
 	}
 
@@ -290,7 +290,7 @@ func TestAuditEventMetadataConcurrentMultiTenant(t *testing.T) {
 			go func(tenantID string, index int) {
 				defer wg.Done()
 				<-start
-				failures <- persistAuditMetadata(&AuditEvent{
+				failures <- persistAuditMetadata(context.Background(), &AuditEvent{
 					ID:             randomTestUUID(t),
 					IdempotencyKey: fmt.Sprintf("multi-%s-%d", tenantID, index),
 					Timestamp:      time.Unix(1700010000, int64(index)*1_000_000),

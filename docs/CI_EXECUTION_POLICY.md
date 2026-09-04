@@ -4,6 +4,13 @@
 selected job actually succeeded. Unexpected failures/cancellations cannot pass
 as intentional skips.
 
+CodeQL was removed from this workflow at the user's request on 2026-09-04,
+including scheduled/manual runs and the aggregate's dependencies. Its source
+analysis coverage is no longer provided by CI. Gitleaks, Trivy, component tests
+and fail-closed required-job validation remain enabled. Historical CodeQL evidence
+is not evidence of a current scan. Repository-level default scanning and branch
+protection settings are not changed by this workflow edit.
+
 | Trigger | Work |
 | --- | --- |
 | Pull request | Full affected component suites; shared/security contracts conservatively include consumers |

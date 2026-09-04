@@ -25,7 +25,6 @@ HEAVY_JOBS = (
     "console",
     "compose",
     "terraform",
-    "codeql",
 )
 
 
@@ -51,6 +50,9 @@ def plan(
         ):
             continue
         matched = False
+        # This gateway regression runs inside the restricted-role PostgreSQL job.
+        if path == "gateway/audit_context_test.go":
+            affected["backend"] = True
         for name, prefix in COMPONENTS.items():
             if path.startswith(prefix):
                 affected[name] = True
@@ -82,15 +84,10 @@ def plan(
     selected = {name: value and expensive for name, value in affected.items()}
     selected["audit_transport"] = selected["audit"] or selected["terraform"]
     selected["shared"] = shared and expensive
-    languages = []
-    if any(selected[name] for name in ("backend", "audit", "agent", "sdk")):
-        languages.append("python")
-    if selected["console"]:
-        languages.append("javascript-typescript")
-    if selected["gateway"]:
-        languages.append("go")
-    selected["code"] = bool(languages)
-    selected["security"] = bool(languages) or selected["terraform"]
+    selected["security"] = any(
+        selected[name]
+        for name in ("backend", "audit", "agent", "sdk", "console", "gateway", "terraform")
+    )
     selected["full_regression"] = full
     selected["runtime_images"] = any(affected.values())
     selected["smoke"] = (
@@ -114,7 +111,6 @@ def plan(
             "backend-integration": "backend",
             "audit": "audit_transport",
             "compose": "shared",
-            "codeql": "code",
         }.get(job, job)
         if selected[key]:
             expected.append(job)
@@ -123,7 +119,6 @@ def plan(
     if selected["arm64"]:
         expected.append("arm64-images")
     result = {key: str(value).lower() for key, value in selected.items()}
-    result["codeql_languages"] = ",".join(languages) or "python"
     result["expected_jobs"] = json.dumps(expected)
     return result
 

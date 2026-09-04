@@ -61,11 +61,7 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         for job in ("Backend Unit Tests", "Backend PostgreSQL Integration", "Gateway Tests", "Agent Tests", "Console Tests and Build", "Security Scans"):
             self.assertIn(f"name: {job}", CI)
         self.assertIn("github.ref == 'refs/heads/master'", CI)
-        self.assertIn("github/codeql-action/analyze@", CI)
-        self.assertIn("security-events: write", CI)
-        self.assertIn("vars.CODEQL_NATIVE_UPLOAD == 'true'", CI)
-        self.assertIn("upload-database: false", CI)
-        self.assertIn("name: Enforce CodeQL findings", CI)
+        self.assertNotIn("codeql", CI.lower())
         self.assertIn("actions/upload-artifact@", CI)
         self.assertIn("ghcr.io/gitleaks/gitleaks", CI)
         self.assertIn("aquasecurity/trivy-action", CI)

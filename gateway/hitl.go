@@ -95,6 +95,7 @@ func CreateGatewayApproval(ctx context.Context, tenantID, requesterID, requestID
 		return "", 0, err
 	}
 	queueNotification(
+		ctx,
 		tenantID,
 		"",
 		"approval_requested",

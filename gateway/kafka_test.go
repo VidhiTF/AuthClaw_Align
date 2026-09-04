@@ -162,7 +162,7 @@ func TestEmitAuditEvent_StdoutFallback(t *testing.T) {
 	defer func() { kafkaWriter = original }()
 
 	// Must not panic.
-	EmitAuditEvent(testAuditEvent("emit-test", "req-emit", "tenant-emit", "allow"))
+	EmitAuditEvent(context.Background(), testAuditEvent("emit-test", "req-emit", "tenant-emit", "allow"))
 }
 
 func TestAuditEvent_FrameworksAndTrace(t *testing.T) {
