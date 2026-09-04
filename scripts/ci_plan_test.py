@@ -62,7 +62,7 @@ class CIPlanTests(unittest.TestCase):
     def test_console_pr_selects_console_and_security_not_unrelated_suites(self):
         self.assertEqual(
             self.expected("pull_request", ["console/src/app/page.tsx"]),
-            {"changes", "policy", "console", "security", "codeql"},
+            {"changes", "policy", "console", "security"},
         )
 
     def test_backend_local_test_change_does_not_fan_out(self):
@@ -74,7 +74,6 @@ class CIPlanTests(unittest.TestCase):
                 "backend",
                 "backend-integration",
                 "security",
-                "codeql",
             },
         )
 
@@ -83,6 +82,12 @@ class CIPlanTests(unittest.TestCase):
         self.assertIn("backend-integration", expected)
         self.assertIn("gateway", expected)
         self.assertNotIn("console", expected)
+
+    def test_codeql_is_not_selected_for_any_trigger(self):
+        for event in ("pull_request", "push", "schedule", "workflow_dispatch"):
+            selected = plan(event, ["gateway/main.go"], full_regression=True)
+            self.assertNotIn("codeql", json.loads(selected["expected_jobs"]))
+            self.assertNotIn("codeql_languages", selected)
 
     def test_cross_service_contracts_select_consumers_conservatively(self):
         for path in (
