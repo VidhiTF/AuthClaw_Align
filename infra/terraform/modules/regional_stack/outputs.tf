@@ -30,13 +30,30 @@ output "alarm_names" {
   value = concat(
     values(aws_cloudwatch_metric_alarm.unhealthy_hosts)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.ecs_cpu)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_pending_tasks)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.nat_port_allocation)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.nat_packet_drop)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.nat_idle_timeout)[*].alarm_name,
+    aws_cloudwatch_metric_alarm.ecs_capacity_provider_reservation[*].alarm_name,
+    aws_cloudwatch_metric_alarm.ecs_instance_health[*].alarm_name,
+    aws_cloudwatch_metric_alarm.ecs_placement_failure[*].alarm_name,
   )
 }
 
+output "ecs_launch_model" {
+  value = {
+    mode                   = var.ecs_ec2_graviton.enabled ? "EC2_GRAVITON" : "FARGATE"
+    task_compatibilities   = local.ecs_launch_compatibilities
+    runtime_architectures  = local.runtime_architectures
+    capacity_provider_name = try(aws_ecs_capacity_provider.graviton[0].name, null)
+    asg_name               = try(aws_autoscaling_group.ecs_graviton[0].name, null)
+    asg_min_size           = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.min_size : null
+    asg_desired_size       = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.desired_size : null
+    asg_max_size           = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.max_size : null
+    x86_provider_enabled   = var.ecs_ec2_graviton.x86_provider_enabled
+  }
+}
 output "nat_gateway_mode" {
   value = var.nat_gateway_mode
 }

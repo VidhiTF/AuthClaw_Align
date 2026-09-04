@@ -3,10 +3,35 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+data "aws_ssm_parameter" "ecs_arm64_ami" {
+  count = var.ecs_ec2_graviton.enabled && var.ecs_ec2_graviton.image_id == "" ? 1 : 0
+  name  = "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id"
+}
+
 locals {
   discovered_azs = length(var.availability_zones) > 0 ? var.availability_zones : data.aws_availability_zones.available[0].names
   azs            = slice(local.discovered_azs, 0, var.az_count)
   az_map         = { for idx, az in local.azs : tostring(idx) => az }
+  runtime_architectures = var.ecs_ec2_graviton.enabled ? {
+    agent          = "ARM64"
+    backend        = "ARM64"
+    gateway        = "ARM64"
+    console        = "ARM64"
+    audit_consumer = "ARM64"
+    opa            = "ARM64"
+    presidio       = "ARM64"
+    } : merge({
+      agent          = "X86_64"
+      backend        = "X86_64"
+      gateway        = "X86_64"
+      console        = "X86_64"
+      audit_consumer = "X86_64"
+      opa            = "X86_64"
+      presidio       = "X86_64"
+  }, var.service_cpu_architectures)
+  ecs_launch_compatibilities = var.ecs_ec2_graviton.enabled ? ["EC2"] : ["FARGATE"]
+  ec2_capacity_provider_name = "${var.name}-graviton"
+  ec2_ami_id                 = var.ecs_ec2_graviton.enabled ? (var.ecs_ec2_graviton.image_id != "" ? var.ecs_ec2_graviton.image_id : data.aws_ssm_parameter.ecs_arm64_ami[0].value) : ""
   interface_endpoint_services = merge({
     ecr_api        = "ecr.api"
     ecr_dkr        = "ecr.dkr"
@@ -75,6 +100,7 @@ locals {
 
   service_configs         = merge(local.public_services, local.private_services)
   task_definition_configs = merge(local.service_configs, local.legacy_sidecar_services)
+  ecs_alarm_services      = toset(concat(keys(local.service_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
 
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
@@ -825,6 +851,179 @@ resource "aws_iam_role_policy" "task_secrets" {
   })
 }
 
+resource "aws_iam_role" "ecs_instance" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name = "${var.name}-ecs-instance"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+  })
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_instance" {
+  for_each = var.ecs_ec2_graviton.enabled ? toset([
+    "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role",
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+  ]) : toset([])
+
+  role       = aws_iam_role.ecs_instance[0].name
+  policy_arn = each.value
+}
+
+resource "aws_iam_instance_profile" "ecs_instance" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name = "${var.name}-ecs-instance"
+  role = aws_iam_role.ecs_instance[0].name
+  tags = var.tags
+}
+
+resource "aws_launch_template" "ecs_graviton" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name_prefix   = "${var.name}-ecs-graviton-"
+  image_id      = local.ec2_ami_id
+  instance_type = var.ecs_ec2_graviton.instance_type
+  user_data = base64encode(join("\n", [
+    "#!/bin/bash",
+    "set -euo pipefail",
+    "cat >/etc/ecs/ecs.config <<'EOF'",
+    "ECS_CLUSTER=${aws_ecs_cluster.main.name}",
+    "ECS_ENABLE_SPOT_INSTANCE_DRAINING=true",
+    "ECS_CONTAINER_INSTANCE_PROPAGATE_TAGS_FROM=ec2_instance",
+    "EOF",
+  ]))
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      encrypted             = true
+      kms_key_id            = aws_kms_key.main.arn
+      volume_size           = var.ecs_ec2_graviton.root_volume_size
+      volume_type           = "gp3"
+      delete_on_termination = true
+    }
+  }
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ecs_instance[0].name
+  }
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  monitoring {
+    enabled = true
+  }
+
+  network_interfaces {
+    associate_public_ip_address = false
+    delete_on_termination       = true
+    security_groups             = [aws_security_group.app.id]
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = merge(var.tags, { Name = "${var.name}-ecs-graviton" })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = merge(var.tags, { Name = "${var.name}-ecs-graviton-root" })
+  }
+
+  update_default_version = true
+  tags                   = var.tags
+}
+
+resource "aws_autoscaling_group" "ecs_graviton" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name                      = "${var.name}-ecs-graviton"
+  min_size                  = var.ecs_ec2_graviton.min_size
+  desired_capacity          = var.ecs_ec2_graviton.desired_size
+  max_size                  = var.ecs_ec2_graviton.max_size
+  vpc_zone_identifier       = values(aws_subnet.private)[*].id
+  health_check_type         = "EC2"
+  health_check_grace_period = 300
+  protect_from_scale_in     = true
+  termination_policies      = ["OldestLaunchTemplate", "OldestInstance"]
+  enabled_metrics           = ["GroupDesiredCapacity", "GroupInServiceInstances", "GroupPendingInstances", "GroupStandbyInstances", "GroupTerminatingInstances", "GroupTotalInstances"]
+
+  launch_template {
+    id      = aws_launch_template.ecs_graviton[0].id
+    version = "$Latest"
+  }
+
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 100
+      instance_warmup        = 300
+    }
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${var.name}-ecs-graviton"
+    propagate_at_launch = true
+  }
+
+  dynamic "tag" {
+    for_each = var.tags
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+}
+
+resource "aws_ecs_capacity_provider" "graviton" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name = local.ec2_capacity_provider_name
+
+  auto_scaling_group_provider {
+    auto_scaling_group_arn         = aws_autoscaling_group.ecs_graviton[0].arn
+    managed_draining               = "ENABLED"
+    managed_termination_protection = "ENABLED"
+
+    managed_scaling {
+      status                    = "ENABLED"
+      target_capacity           = 80
+      minimum_scaling_step_size = 1
+      maximum_scaling_step_size = max(1, var.ecs_ec2_graviton.max_size - var.ecs_ec2_graviton.min_size)
+      instance_warmup_period    = 300
+    }
+  }
+
+  tags = var.tags
+}
+
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = [aws_ecs_capacity_provider.graviton[0].name]
+
+  default_capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+    weight            = 1
+    base              = 0
+  }
+}
 resource "aws_lb" "main" {
   name = substr(replace("${var.name}-alb", "_", "-"), 0, 32)
   #trivy:ignore:AVD-AWS-0053 This ALB is the intentional public ingress for console/API/gateway traffic; private services are not attached.
@@ -980,7 +1179,7 @@ resource "aws_cloudwatch_log_group" "database_job" {
 resource "aws_ecs_task_definition" "database_job" {
   for_each                 = local.database_jobs
   family                   = "${var.name}-database-${replace(each.key, "_", "-")}"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.service_cpu
   memory                   = var.service_memory
@@ -988,7 +1187,7 @@ resource "aws_ecs_task_definition" "database_job" {
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, each.key == "agent_migrations" ? "agent" : "backend", "X86_64")
+    cpu_architecture        = local.runtime_architectures[each.key == "agent_migrations" ? "agent" : "backend"]
   }
 
   container_definitions = jsonencode([{
@@ -1014,7 +1213,7 @@ resource "aws_ecs_task_definition" "service" {
   for_each = local.task_definition_configs
 
   family                   = "${var.name}-${each.key}"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.service_cpu
   memory                   = var.service_memory
@@ -1023,7 +1222,7 @@ resource "aws_ecs_task_definition" "service" {
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, each.key, "X86_64")
+    cpu_architecture        = local.runtime_architectures[each.key]
   }
 
   container_definitions = jsonencode([
@@ -1137,7 +1336,7 @@ resource "aws_ecs_task_definition" "service" {
 
 resource "aws_ecs_task_definition" "gateway_with_sidecars" {
   family                   = "${var.name}-gateway-sidecars"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.gateway_sidecar_task_cpu
   memory                   = var.gateway_sidecar_task_memory
@@ -1145,7 +1344,7 @@ resource "aws_ecs_task_definition" "gateway_with_sidecars" {
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "gateway", "X86_64")
+    cpu_architecture        = local.runtime_architectures.gateway
   }
 
   container_definitions = jsonencode([
@@ -1258,7 +1457,7 @@ resource "aws_ecs_task_definition" "gateway_with_sidecars" {
 
 resource "aws_ecs_task_definition" "backend_with_presidio" {
   family                   = "${var.name}-backend-presidio"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.backend_sidecar_task_cpu
   memory                   = var.backend_sidecar_task_memory
@@ -1266,7 +1465,7 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "backend", "X86_64")
+    cpu_architecture        = local.runtime_architectures.backend
   }
 
   container_definitions = jsonencode([
@@ -1359,7 +1558,7 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
 
 resource "aws_ecs_task_definition" "agent_with_opa" {
   family                   = "${var.name}-agent-opa"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.agent_sidecar_task_cpu
   memory                   = var.agent_sidecar_task_memory
@@ -1367,7 +1566,7 @@ resource "aws_ecs_task_definition" "agent_with_opa" {
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "agent", "X86_64")
+    cpu_architecture        = local.runtime_architectures.agent
   }
 
   container_definitions = jsonencode([
@@ -1452,8 +1651,16 @@ resource "aws_ecs_service" "public" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = each.key == "gateway" ? aws_ecs_task_definition.gateway_with_sidecars.arn : each.key == "backend" ? aws_ecs_task_definition.backend_with_presidio.arn : aws_ecs_task_definition.service[each.key].arn
   desired_count   = var.desired_count
-  launch_type     = "FARGATE"
+  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
 
+  dynamic "capacity_provider_strategy" {
+    for_each = var.ecs_ec2_graviton.enabled ? [1] : []
+    content {
+      capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+      weight            = 1
+      base              = 0
+    }
+  }
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
     security_groups  = each.key == "console" ? [aws_security_group.console_ingress.id] : [aws_security_group.app.id]
@@ -1470,7 +1677,7 @@ resource "aws_ecs_service" "public" {
     registry_arn = aws_service_discovery_service.service[each.key].arn
   }
 
-  depends_on = [aws_lb_listener.service]
+  depends_on = [aws_lb_listener.service, aws_ecs_cluster_capacity_providers.main]
   tags       = var.tags
 }
 
@@ -1481,8 +1688,16 @@ resource "aws_ecs_service" "private" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = each.key == "agent" ? aws_ecs_task_definition.agent_with_opa.arn : aws_ecs_task_definition.service[each.key].arn
   desired_count   = var.desired_count
-  launch_type     = "FARGATE"
+  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
 
+  dynamic "capacity_provider_strategy" {
+    for_each = var.ecs_ec2_graviton.enabled ? [1] : []
+    content {
+      capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+      weight            = 1
+      base              = 0
+    }
+  }
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
     security_groups  = [aws_security_group.app.id]
@@ -1493,14 +1708,15 @@ resource "aws_ecs_service" "private" {
     registry_arn = aws_service_discovery_service.service[each.key].arn
   }
 
-  tags = var.tags
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
+  tags       = var.tags
 }
 
 resource "aws_ecs_task_definition" "audit_consumer" {
   count = var.enable_audit_consumer ? 1 : 0
 
   family                   = "${var.name}-audit-consumer"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.service_cpu
   memory                   = var.service_memory
@@ -1520,7 +1736,7 @@ resource "aws_ecs_task_definition" "audit_consumer" {
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "audit_consumer", "X86_64")
+    cpu_architecture        = local.runtime_architectures.audit_consumer
   }
 
   container_definitions = jsonencode([
@@ -1568,15 +1784,24 @@ resource "aws_ecs_service" "audit_consumer" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.audit_consumer[0].arn
   desired_count   = 1
-  launch_type     = "FARGATE"
+  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
 
+  dynamic "capacity_provider_strategy" {
+    for_each = var.ecs_ec2_graviton.enabled ? [1] : []
+    content {
+      capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+      weight            = 1
+      base              = 0
+    }
+  }
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
     security_groups  = [aws_security_group.app.id]
     assign_public_ip = false
   }
 
-  tags = var.tags
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
+  tags       = var.tags
 }
 
 resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
@@ -1623,6 +1848,153 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
   tags = var.tags
 }
 
+resource "aws_cloudwatch_metric_alarm" "ecs_capacity_provider_reservation" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  alarm_name          = "${var.name}-ecs-graviton-capacity-reservation"
+  alarm_description   = "ECS Graviton capacity provider reservation is above 90 percent"
+  namespace           = "AWS/ECS/ManagedScaling"
+  metric_name         = "CapacityProviderReservation"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  period              = 60
+  statistic           = "Average"
+  threshold           = 90
+  treat_missing_data  = "breaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  dimensions = {
+    CapacityProviderName = aws_ecs_capacity_provider.graviton[0].name
+    ClusterName          = aws_ecs_cluster.main.name
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_pending_tasks" {
+  for_each = var.ecs_ec2_graviton.enabled ? local.ecs_alarm_services : toset([])
+
+  alarm_name          = "${var.name}-${each.key}-pending-tasks"
+  alarm_description   = "AuthClaw ${each.key} has pending ECS tasks"
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "PendingTaskCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_instance_health" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  alarm_name          = "${var.name}-ecs-graviton-instance-health"
+  alarm_description   = "At least one ECS Graviton container instance has failed EC2 status checks"
+  namespace           = "AWS/EC2"
+  metric_name         = "StatusCheckFailed"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.ecs_graviton[0].name
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_event_rule" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name        = "${var.name}-ecs-placement-failure"
+  description = "Captures ECS placement failures for AuthClaw services"
+  event_pattern = jsonencode({
+    source        = ["aws.ecs"]
+    "detail-type" = ["ECS Service Action"]
+    detail = {
+      clusterArn = [aws_ecs_cluster.main.arn]
+      eventName  = ["SERVICE_TASK_PLACEMENT_FAILURE"]
+    }
+  })
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_log_group" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name              = "/authclaw/${var.name}/ecs-placement-failure"
+  retention_in_days = 30
+  tags              = var.tags
+}
+
+resource "aws_cloudwatch_log_resource_policy" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  policy_name = "${var.name}-ecs-placement-failure"
+  policy_document = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "events.amazonaws.com"
+      }
+      Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+      Resource = "${aws_cloudwatch_log_group.ecs_placement_failure[0].arn}:*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_event_target" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  rule = aws_cloudwatch_event_rule.ecs_placement_failure[0].name
+  arn  = aws_cloudwatch_log_group.ecs_placement_failure[0].arn
+}
+
+resource "aws_cloudwatch_log_metric_filter" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name           = "${var.name}-ecs-placement-failure"
+  log_group_name = aws_cloudwatch_log_group.ecs_placement_failure[0].name
+  pattern        = "{ $.detail.eventName = \"SERVICE_TASK_PLACEMENT_FAILURE\" }"
+
+  metric_transformation {
+    name      = "PlacementFailureCount"
+    namespace = "AuthClaw/ECS"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  alarm_name          = "${var.name}-ecs-placement-failure"
+  alarm_description   = "ECS reported at least one AuthClaw task placement failure"
+  namespace           = "AuthClaw/ECS"
+  metric_name         = "PlacementFailureCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  tags = var.tags
+}
 resource "aws_cloudwatch_metric_alarm" "nat_port_allocation" {
   for_each = aws_nat_gateway.main
 

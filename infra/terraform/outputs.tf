@@ -14,6 +14,7 @@ output "primary" {
     alb_dns_name                       = module.primary.alb_dns_name
     ecs_cluster_name                   = module.primary.ecs_cluster_name
     ecs_service_names                  = module.primary.ecs_service_names
+    ecs_launch_model                   = module.primary.ecs_launch_model
     public_endpoints                   = module.primary.public_endpoints
     alarm_names                        = module.primary.alarm_names
     rds_endpoint                       = module.primary.rds_endpoint
@@ -51,6 +52,7 @@ output "secondary" {
     alb_dns_name                       = module.secondary[0].alb_dns_name
     ecs_cluster_name                   = module.secondary[0].ecs_cluster_name
     ecs_service_names                  = module.secondary[0].ecs_service_names
+    ecs_launch_model                   = module.secondary[0].ecs_launch_model
     public_endpoints                   = module.secondary[0].public_endpoints
     alarm_names                        = module.secondary[0].alarm_names
     rds_endpoint                       = module.secondary[0].rds_endpoint

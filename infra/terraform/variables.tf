@@ -96,6 +96,32 @@ variable "service_cpu_architectures" {
   }
 }
 
+
+variable "ecs_ec2_graviton" {
+  description = "Optional ECS on EC2 Graviton capacity provider for P0-05. Keep disabled until ownership and failure rehearsal gates are approved."
+  type = object({
+    enabled              = optional(bool, false)
+    instance_type        = optional(string, "m7g.large")
+    min_size             = optional(number, 2)
+    desired_size         = optional(number, 2)
+    max_size             = optional(number, 4)
+    image_id             = optional(string, "")
+    root_volume_size     = optional(number, 50)
+    alarm_action_arns    = optional(list(string), [])
+    x86_provider_enabled = optional(bool, false)
+  })
+  default = {}
+
+  validation {
+    condition     = var.ecs_ec2_graviton.min_size >= 0 && var.ecs_ec2_graviton.desired_size >= var.ecs_ec2_graviton.min_size && var.ecs_ec2_graviton.max_size >= var.ecs_ec2_graviton.desired_size
+    error_message = "ecs_ec2_graviton capacity must satisfy min_size <= desired_size <= max_size."
+  }
+
+  validation {
+    condition     = can(regex("^[a-z][0-9]+g\\.", var.ecs_ec2_graviton.instance_type))
+    error_message = "ecs_ec2_graviton.instance_type must be an ARM64 Graviton instance family such as m7g.large."
+  }
+}
 variable "require_immutable_images" {
   description = "Require every runtime image to use an immutable sha256 digest. Enable for controlled-beta deployments."
   type        = bool
