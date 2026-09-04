@@ -1,0 +1,19 @@
+groups:
+  - name: authclaw-worker-token-lifecycle
+    rules:
+      - alert: WorkerTokenCleanupUnhealthy
+        expr: authclaw_worker_cleanup_healthy == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker-token cleanup heartbeat is stale, missing or unreachable
+          runbook: docs/runbooks/WORKER_TOKEN_LIFECYCLE.md
+      - alert: WorkerTokenCleanupMonitorMissing
+        expr: absent(authclaw_worker_cleanup_monitor_timestamp_seconds) or (time() - authclaw_worker_cleanup_monitor_timestamp_seconds > 180)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Independent worker-token cleanup monitoring is not reporting
+          runbook: docs/runbooks/WORKER_TOKEN_LIFECYCLE.md

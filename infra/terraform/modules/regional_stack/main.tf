@@ -815,6 +815,7 @@ resource "aws_iam_role_policy" "task_secrets" {
           aws_secretsmanager_secret.internal_service.arn,
           aws_secretsmanager_secret.bff_client_ip.arn,
           aws_secretsmanager_secret.oidc_bff_exchange.arn,
+          aws_secretsmanager_secret.worker_token_hmac.arn,
           aws_secretsmanager_secret.agent_encryption.arn,
           aws_secretsmanager_secret.agent_redaction.arn,
           aws_kms_key.main.arn
@@ -875,6 +876,15 @@ resource "aws_lb_listener" "service" {
 
 locals {
   database_jobs = {
+    worker_preflight = {
+      image       = var.container_images.backend
+      command     = ["python", "scripts/verify_worker_lifecycle.py"]
+      environment = [{ name = "WORKER_TOKEN_HMAC_ACTIVE_VERSION", value = "v1" }]
+      secrets = [
+        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.bootstrap_database_url.arn },
+        { name = "WORKER_TOKEN_HMAC_KEY_V1", valueFrom = aws_secretsmanager_secret.worker_token_hmac.arn }
+      ]
+    }
     crypto_preflight = {
       image   = var.container_images.backend
       command = ["python", "scripts/verify_secret_retirement.py"]
@@ -1038,6 +1048,9 @@ resource "aws_ecs_task_definition" "service" {
           { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
         ] : [],
         each.key == "backend" ? [
+          { name = "WORKER_TOKEN_HMAC_ACTIVE_VERSION", value = "v1" },
+          { name = "WORKER_TOKEN_ISSUANCE_PAUSED", value = tostring(var.worker_token_issuance_paused) },
+          { name = "WORKER_CLEANUP_ENABLED", value = "true" },
           { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_enabled) },
           { name = "AUTHCLAW_RUNTIME_DB_ROLE", value = "authclaw_app" }
         ] : [],
@@ -1047,6 +1060,9 @@ resource "aws_ecs_task_definition" "service" {
         ] : []
       )
       secrets = concat(
+        each.key == "backend" ? [
+          { name = "WORKER_TOKEN_HMAC_KEY_V1", valueFrom = aws_secretsmanager_secret.worker_token_hmac.arn }
+        ] : [],
         contains(["console", "backend"], each.key) ? [
           { name = "BFF_CLIENT_IP_SECRET", valueFrom = aws_secretsmanager_secret.bff_client_ip.arn },
           { name = "OIDC_BFF_EXCHANGE_SECRET", valueFrom = aws_secretsmanager_secret.oidc_bff_exchange.arn }
@@ -1267,10 +1283,14 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
       }]
       environment = concat(local.common_environment, [
         { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_enabled) },
+        { name = "WORKER_TOKEN_HMAC_ACTIVE_VERSION", value = "v1" },
+        { name = "WORKER_TOKEN_ISSUANCE_PAUSED", value = tostring(var.worker_token_issuance_paused) },
+        { name = "WORKER_CLEANUP_ENABLED", value = "true" },
         { name = "AGENT_AUDIT_STREAM_TRANSPORT", value = "kafka" }
       ])
       secrets = concat([
         { name = "BFF_CLIENT_IP_SECRET", valueFrom = aws_secretsmanager_secret.bff_client_ip.arn },
+        { name = "WORKER_TOKEN_HMAC_KEY_V1", valueFrom = aws_secretsmanager_secret.worker_token_hmac.arn },
         { name = "OIDC_BFF_EXCHANGE_SECRET", valueFrom = aws_secretsmanager_secret.oidc_bff_exchange.arn },
         { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
         { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },

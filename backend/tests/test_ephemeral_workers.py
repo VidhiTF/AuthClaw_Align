@@ -5,8 +5,9 @@ from app.db.models import EphemeralWorkerToken
 from app.services import ephemeral_workers
 
 
-def test_worker_token_hash_does_not_store_raw_secret():
-    raw = "ewt_demo_secret"
+def test_worker_token_hash_does_not_store_raw_secret(monkeypatch):
+    monkeypatch.setenv("WORKER_TOKEN_HMAC_KEY_V1", "test-only-worker-hmac-key-material-32")
+    raw = "ewt.v1.abcdefgh." + "a" * 43
 
     digest = ephemeral_workers.hash_worker_token(raw)
 

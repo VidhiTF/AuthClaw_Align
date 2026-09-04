@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import secrets
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
+from sqlalchemy import text
+from fastapi import HTTPException
+from app.core import worker_tokens
 
 from app.db.models import AuditLogMetadata, EphemeralWorkerRun, EphemeralWorkerToken
 from app.services import event_backbone
@@ -18,7 +20,6 @@ from app.services.audit_store import append_audit_event
 
 DEFAULT_TTL_SECONDS = 900
 MAX_TTL_SECONDS = 1800
-TOKEN_PREFIX = "ewt"
 
 CONNECTOR_REGISTRY: dict[str, dict[str, Any]] = {
     "aws": {
@@ -105,13 +106,11 @@ def ensure_aware(value: datetime) -> datetime:
 
 
 def hash_worker_token(raw_token: str) -> str:
-    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    return worker_tokens.hash_token(raw_token)
 
 
 def generate_worker_secret() -> tuple[str, str]:
-    prefix = secrets.token_urlsafe(6).replace("-", "").replace("_", "")[:8]
-    secret = secrets.token_urlsafe(32)
-    return prefix, f"{TOKEN_PREFIX}_{prefix}_{secret}"
+    return worker_tokens.generate()
 
 
 def connector_catalog() -> list[dict[str, Any]]:
@@ -224,6 +223,13 @@ def emit_worker_audit_event(
     response_status: int = 0,
 ) -> AuditLogMetadata:
     tenant_id_str = str(tenant_id)
+    if db.get_bind().dialect.name == "postgresql":
+        bound_tenant = db.execute(text("SELECT authn.current_tenant_id()")).scalar_one()
+        if str(bound_tenant) != tenant_id_str:
+            raise HTTPException(status_code=403, detail="Worker audit tenant context mismatch")
+        # Canonical audit append still checks this compatibility GUC. Derive it
+        # from the signed DB context, never grant tenant access via a caller GUC.
+        db.execute(text("SELECT set_config('app.current_tenant_id', :tenant, true)"), {"tenant": str(bound_tenant)})
     trace_items = [
         f"worker_action={action}",
         f"connector={connector or ''}",
@@ -306,6 +312,12 @@ def issue_worker_token(
     request_id: str = "",
     commit: bool = True,
 ) -> IssuedWorkerToken:
+    if os.getenv("WORKER_TOKEN_ISSUANCE_PAUSED", "true").lower() != "false":
+        raise HTTPException(status_code=503, detail="Worker token issuance is paused")
+    if db.get_bind().dialect.name == "postgresql":
+        ready = db.execute(text("SELECT worker_maintenance.issuance_ready()")).scalar_one()
+        if not ready:
+            raise HTTPException(status_code=503, detail="Worker token issuance is paused")
     connector = normalize_connector(connector)
     ttl = max(60, min(int(ttl_seconds), MAX_TTL_SECONDS))
     scopes = validate_scopes(connector, scopes)
@@ -325,6 +337,8 @@ def issue_worker_token(
         scopes=scopes,
         permission_boundary=boundary,
         token_hash=hash_worker_token(raw_token),
+        hash_algorithm="hmac-sha256-v1",
+        hash_key_version=worker_tokens.token_version(raw_token),
         token_prefix=prefix,
         status="active",
         issued_by=issued_by,
@@ -396,11 +410,18 @@ def authorize_worker_action(
     action_rule = validate_action(connector, action)
     required_scope = required_scope or action_rule["scope"]
     destructive = action_rule["destructive"] if destructive is None else destructive
+    try:
+        digest = hash_worker_token(raw_token)
+        key_version = worker_tokens.token_version(raw_token)
+    except (ValueError, RuntimeError):
+        digest, key_version = "", ""
     token = (
         db.query(EphemeralWorkerToken)
         .filter(
             EphemeralWorkerToken.tenant_id == tenant_id,
-            EphemeralWorkerToken.token_hash == hash_worker_token(raw_token),
+            EphemeralWorkerToken.token_hash == digest,
+            EphemeralWorkerToken.hash_algorithm == "hmac-sha256-v1",
+            EphemeralWorkerToken.hash_key_version == key_version,
             EphemeralWorkerToken.connector == connector,
         )
         .first()
@@ -596,7 +617,7 @@ def expire_stale_worker_tokens(db: Session, *, tenant_id: Any | None = None, lim
     )
     if tenant_id:
         query = query.filter(EphemeralWorkerToken.tenant_id == tenant_id)
-    tokens = query.limit(limit).all()
+    tokens = query.order_by(EphemeralWorkerToken.id).with_for_update(skip_locked=True).limit(max(1, min(int(limit), 500))).all()
     for token in tokens:
         token.status = "expired"
         emit_worker_audit_event(
