@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import redis
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +39,7 @@ from app.schemas.models import (
 )
 from app.services.email_service import EmailDeliveryError, demo_otp_visible, send_otp_email
 from app.services import event_backbone
+from app.services.abuse_controls import atomic_increment
 from app.services.legal_acceptance import validate_legal_acceptance
 
 router = APIRouter()
@@ -127,9 +130,6 @@ def _rate_limit_hash(value: str) -> str:
 
 
 def _client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    if forwarded_for:
-        return forwarded_for.split(",", 1)[0].strip()
     if request.client:
         return request.client.host
     return "unknown"
@@ -141,7 +141,14 @@ def _get_redis() -> redis.Redis:
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
         if redis_url and not redis_url.startswith(("redis://", "rediss://")):
             redis_url = f"redis://{redis_url}"
-        _redis_client = redis.from_url(redis_url, decode_responses=True)
+        _redis_client = redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1.0,
+            socket_timeout=1.0,
+            retry_on_timeout=False,
+            retry=Retry(NoBackoff(), 0),
+        )
     return _redis_client
 
 
@@ -150,15 +157,20 @@ def _enforce_onboarding_rate_limit(key: str, limit: int, window_seconds: int, me
         return
     try:
         client = _get_redis()
-        count = client.incr(key)
-        if count == 1:
-            client.expire(key, window_seconds)
+        count, _ttl_ms = atomic_increment(client, key, window_seconds)
     except redis.RedisError as exc:
-        logger.warning("Rate limiter unavailable")
-        if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
-            raise HTTPException(status_code=503, detail="Rate limiter unavailable. Request blocked for safety.") from exc
-        return
+        ambiguous = isinstance(exc, redis.TimeoutError)
+        event_backbone.increment_metric(
+            "rate_limiter_ambiguous_total" if ambiguous else "rate_limiter_unavailable_total"
+        )
+        logger.warning("[RATE_LIMIT_AUDIT] outcome=unavailable ambiguous=%s", ambiguous)
+        raise HTTPException(
+            status_code=503,
+            detail="Rate limiter unavailable. Request blocked for safety.",
+        ) from exc
     if count > limit:
+        event_backbone.increment_metric("rate_limiter_throttled_total")
+        logger.info("[RATE_LIMIT_AUDIT] outcome=throttled")
         raise HTTPException(status_code=429, detail=message)
 
 

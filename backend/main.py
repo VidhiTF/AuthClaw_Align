@@ -16,10 +16,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
+from app.core.bff_client_ip import validate_bff_client_ip_config
 from app.core.startup_checks import validate_database_security, validate_production_environment
+from app.services.abuse_controls import validate_abuse_control_config
 from app.db.session import engine
 
 validate_production_environment()
+validate_abuse_control_config()
+validate_bff_client_ip_config()
 logger = logging.getLogger("authclaw.backend")
 
 # Initialize FastAPI app
@@ -35,7 +39,9 @@ async def sanitized_http_exception(request: Request, exc: HTTPException):
     if exc.status_code < 500:
         return await http_exception_handler(request, exc)
     logger.error("Request failed status=%s path=%s error_type=%s", exc.status_code, request.url.path, type(exc).__name__)
-    return JSONResponse(status_code=exc.status_code, content={"detail": "Internal server error"})
+    retry_after = (exc.headers or {}).get("Retry-After")
+    headers = {"Retry-After": retry_after} if retry_after and retry_after.isdigit() else None
+    return JSONResponse(status_code=exc.status_code, content={"detail": "Internal server error"}, headers=headers)
 
 
 @app.exception_handler(Exception)
@@ -62,6 +68,8 @@ app.add_middleware(
 # Register Authentication & Tenant Context Middleware
 from app.core.auth import AuthMiddleware
 app.add_middleware(AuthMiddleware)
+from app.core.client_ip import ClientIPConfig, TrustedProxyMiddleware
+app.add_middleware(TrustedProxyMiddleware, config=ClientIPConfig.from_environment())
 
 # Import & register endpoints
 from app.api.v1.endpoints.tenants import router as tenants_router

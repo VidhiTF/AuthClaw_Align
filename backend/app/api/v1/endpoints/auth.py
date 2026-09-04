@@ -27,6 +27,7 @@ from app.api.v1.endpoints.onboarding import (
     _scopes_for_role,
 )
 from app.core.passwords import hash_password, validate_password, verify_password
+from app.core.bff_client_ip import authenticate_bff_client_ip
 from app.core.auth import get_tenant_db, hash_key as _api_key_hash, require_roles, require_scopes
 from app.db.models import APIKey, OnboardingEmailOTP, Tenant, TenantOIDCConfig, User
 from app.services.email_service import EmailDeliveryError
@@ -404,7 +405,7 @@ def test_oidc_admin_config(request: Request, db: Session = Depends(get_tenant_db
     return oidc_sso.test_config(db, config)
 
 
-@router.post("/login", response_model=PasswordLoginResponse)
+@router.post("/login", response_model=PasswordLoginResponse, dependencies=[Depends(authenticate_bff_client_ip)])
 def password_login(payload: PasswordLoginRequest, request: Request):
     email = payload.email.strip().lower()
     _enforce_password_login_rate_limit(email, request)

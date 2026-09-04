@@ -221,6 +221,12 @@ func KafkaMetricsSnapshot() map[string]uint64 {
 
 func KafkaMetricsHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	for name, value := range AbuseControlMetricsSnapshot() {
+		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)
+	}
+	fmt.Fprintf(w, "authclaw_trusted_proxy_resolution_changed_total %d\n", trustedProxyResolutionChangedTotal.Load())
+	fmt.Fprintf(w, "authclaw_trusted_proxy_comparison_total %d\n", trustedProxyComparisonTotal.Load())
+	fmt.Fprintf(w, "authclaw_trusted_proxy_legacy_mismatch_total %d\n", trustedProxyLegacyMismatchTotal.Load())
 	for name, value := range KafkaMetricsSnapshot() {
 		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)
 	}

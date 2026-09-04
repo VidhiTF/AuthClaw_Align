@@ -33,12 +33,13 @@ func InitRedis() {
 	if strings.HasPrefix(redisURL, "redis://") || strings.HasPrefix(redisURL, "rediss://") {
 		opts, err := redis.ParseURL(redisURL)
 		if err == nil {
+			opts.MaxRetries = -1
 			RedisClient = redis.NewClient(opts)
 			return
 		}
 		log.Printf("Invalid REDIS_URL %q, falling back to raw address: %v", redisURL, err)
 	}
-	RedisClient = redis.NewClient(&redis.Options{Addr: redisURL})
+	RedisClient = redis.NewClient(&redis.Options{Addr: redisURL, MaxRetries: -1})
 }
 
 // Policy definitions
@@ -391,23 +392,19 @@ func CheckRateLimit(ctx context.Context, tenantID, route string, limit int) (boo
 		return false, nil
 	}
 
-	now := time.Now().Format("200601021504")
-	key := fmt.Sprintf("rate_limit:%s:%s:%s", tenantID, route, now)
+	key := policyRateLimitKey(tenantID, route, time.Now())
+	exceeded, _, err := fixedWindowRateLimit(ctx, key, limit, 60*time.Second)
+	return exceeded, err
+}
 
-	pipe := RedisClient.Pipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, 60*time.Second)
-
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		return false, err
-	}
-
-	count := incr.Val()
-	if count > int64(limit) {
-		return true, nil
-	}
-	return false, nil
+func policyRateLimitKey(tenantID, route string, now time.Time) string {
+	routeDigest := sha256.Sum256([]byte(route))
+	return fmt.Sprintf(
+		"authclaw:policy-limit:v2:{%s}:%s:%s",
+		tenantID,
+		hex.EncodeToString(routeDigest[:8]),
+		now.Format("200601021504"),
+	)
 }
 
 // OPA JSON Request / Response payloads

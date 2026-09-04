@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -62,23 +61,6 @@ func loadGatewayRateLimitConfig() gatewayRateLimitConfig {
 	}
 }
 
-func fixedWindowRateLimit(ctx context.Context, key string, limit int, ttl time.Duration) (bool, int64, error) {
-	if limit <= 0 {
-		return false, 0, nil
-	}
-	if RedisClient == nil {
-		InitRedis()
-	}
-	pipe := RedisClient.Pipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, ttl)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return false, 0, err
-	}
-	count := incr.Val()
-	return count > int64(limit), count, nil
-}
-
 func writeRateLimitError(w http.ResponseWriter, status int, code string, message string) {
 	writeGatewayError(w, status, code, message)
 }
@@ -108,7 +90,7 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 		}
 
 		now := time.Now().UTC()
-		keyPrefix := fmt.Sprintf("gateway_limit:%s:%s", tenantID, apiKeyHash[:16])
+		keyPrefix := fmt.Sprintf("authclaw:gateway-limit:v2:{%s:%s}", tenantID, apiKeyHash[:16])
 		checks := []struct {
 			name    string
 			key     string

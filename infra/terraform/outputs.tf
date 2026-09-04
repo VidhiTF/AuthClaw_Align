@@ -1,6 +1,7 @@
 output "primary" {
   value = {
     region                             = var.primary_region
+    client_identity                    = module.primary.client_identity
     alb_dns_name                       = module.primary.alb_dns_name
     ecs_cluster_name                   = module.primary.ecs_cluster_name
     ecs_service_names                  = module.primary.ecs_service_names
@@ -37,6 +38,7 @@ output "primary" {
 output "secondary" {
   value = var.enable_secondary ? {
     region                             = var.secondary_region
+    client_identity                    = module.secondary[0].client_identity
     alb_dns_name                       = module.secondary[0].alb_dns_name
     ecs_cluster_name                   = module.secondary[0].ecs_cluster_name
     ecs_service_names                  = module.secondary[0].ecs_service_names

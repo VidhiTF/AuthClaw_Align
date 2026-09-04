@@ -1,4 +1,7 @@
+import { validateBffClientIPConfig } from "./lib/bff-client-ip-config.ts";
+
 export function register() {
+  validateBffClientIPConfig();
   if (
     process.env.AUTHCLAW_ENV === "production" &&
     process.env.AUTHCLAW_COOKIE_SECURE !== "true"

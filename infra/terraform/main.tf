@@ -34,6 +34,10 @@ module "primary" {
   is_primary                           = true
   create_db_replica                    = false
   authclaw_env                         = var.authclaw_env
+  forwarded_header_mode                = var.forwarded_header_mode
+  bff_client_ip_enabled                = var.bff_client_ip_enabled
+  bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled
+  bff_client_ip_secret                 = random_password.bff_client_ip.result
   secret_key_version                   = var.secret_key_version
   jwt_key_version                      = var.jwt_key_version
   session_key_version                  = var.session_key_version
@@ -92,6 +96,10 @@ module "secondary" {
   is_primary                           = false
   create_db_replica                    = var.enable_cross_region_db_replica
   authclaw_env                         = var.authclaw_env
+  forwarded_header_mode                = var.forwarded_header_mode
+  bff_client_ip_enabled                = var.bff_client_ip_enabled
+  bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled
+  bff_client_ip_secret                 = random_password.bff_client_ip.result
   secret_key_version                   = var.secret_key_version
   jwt_key_version                      = var.jwt_key_version
   session_key_version                  = var.session_key_version
