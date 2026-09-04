@@ -78,6 +78,12 @@ class CIPlanTests(unittest.TestCase):
             },
         )
 
+    def test_gateway_database_regression_selects_postgres_job(self):
+        expected = self.expected("pull_request", ["gateway/audit_context_test.go"])
+        self.assertIn("backend-integration", expected)
+        self.assertIn("gateway", expected)
+        self.assertNotIn("console", expected)
+
     def test_cross_service_contracts_select_consumers_conservatively(self):
         for path in (
             "backend/app/api/v1/users.py",

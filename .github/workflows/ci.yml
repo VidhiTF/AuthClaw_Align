@@ -254,6 +254,17 @@ jobs:
           tests/test_secret_retirement_postgres.py
           tests/test_worker_lifecycle_postgres.py
 
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: Verify gateway audit and notifications with authenticated PostgreSQL role
+        working-directory: gateway
+        run: |
+          export DATABASE_URL="${BACKEND_DATABASE_URL/postgresql+psycopg:/postgresql:}"
+          export AUDIT_TEST_OWNER_DATABASE_URL="${OWNER_DATABASE_URL/postgresql+psycopg:/postgresql:}"
+          go test ./... -count=1 -run '^TestAuditAuthenticatedContextPostgres$'
+
   audit:
     name: Audit Consumer Tests
     needs: changes

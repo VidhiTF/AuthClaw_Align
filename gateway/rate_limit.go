@@ -125,7 +125,7 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 			exceeded, _, err := fixedWindowRateLimit(r.Context(), check.key, check.limit, check.ttl)
 			if err != nil {
 				writeRateLimitError(w, http.StatusServiceUnavailable, "RateLimitUnavailable", "Rate limiter unavailable. Request blocked for safety.")
-				EmitAuditEvent(&AuditEvent{
+				EmitAuditEvent(r.Context(), &AuditEvent{
 					ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 					TenantID: tenantID, Action: "block", DecisionReason: "Rate limiter unavailable",
 					ResponseStatus: http.StatusServiceUnavailable, DurationMs: 0,
@@ -134,7 +134,7 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 			}
 			if exceeded {
 				writeRateLimitError(w, http.StatusTooManyRequests, "RateLimitExceeded", check.message)
-				EmitAuditEvent(&AuditEvent{
+				EmitAuditEvent(r.Context(), &AuditEvent{
 					ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 					TenantID: tenantID, Action: "block", DecisionReason: "Rate limit exceeded: " + check.name,
 					ResponseStatus: http.StatusTooManyRequests, DurationMs: 0,

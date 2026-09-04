@@ -108,8 +108,8 @@ func writeAuditOutbox(event *AuditEvent, reason error) error {
 }
 
 // EmitAuditEvent appends in Postgres, then publishes committed outbox rows.
-func EmitAuditEvent(event *AuditEvent) error {
-	if err := persistAuditMetadata(event); err != nil {
+func EmitAuditEvent(ctx context.Context, event *AuditEvent) error {
+	if err := persistAuditMetadata(ctx, event); err != nil {
 		auditPostgresFailures.Add(1)
 		if strings.Contains(err.Error(), "idempotency-key collision") {
 			auditIdempotencyCollisions.Add(1)
@@ -133,7 +133,7 @@ func EmitAuditEvent(event *AuditEvent) error {
 	}
 
 	// Attempt transport publish first.
-	if err := publishPendingAuditOutbox(event.TenantID, 100); err != nil {
+	if err := publishPendingAuditOutbox(ctx, event.TenantID, 100); err != nil {
 		log.Printf("[AUDIT] transport publish error: %v — falling back to stdout", err)
 		logToStdout(event)
 		return nil
@@ -148,9 +148,10 @@ func EmitAuditEvent(event *AuditEvent) error {
 
 var auditAsyncSlots = make(chan struct{}, 4)
 
-func EmitAuditEventAsync(event *AuditEvent) {
+func EmitAuditEventAsync(ctx context.Context, event *AuditEvent) {
+	ctx = context.WithoutCancel(ctx)
 	if auditFailClosedEnabled() {
-		if err := EmitAuditEvent(event); err != nil {
+		if err := EmitAuditEvent(ctx, event); err != nil {
 			log.Printf("[AUDIT] fail-closed emit failed: %v", err)
 		}
 		return
@@ -159,7 +160,7 @@ func EmitAuditEventAsync(event *AuditEvent) {
 		// ponytail: bound background DB/Kafka work; a burst must not exhaust the request pool.
 		auditAsyncSlots <- struct{}{}
 		defer func() { <-auditAsyncSlots }()
-		if err := EmitAuditEvent(event); err != nil {
+		if err := EmitAuditEvent(ctx, event); err != nil {
 			log.Printf("[AUDIT] async emit failed: %v", err)
 		}
 	}()
@@ -175,7 +176,7 @@ func logToStdout(event *AuditEvent) {
 	log.Printf("[AUDIT] %s", string(eventBytes))
 }
 
-func persistAuditMetadata(event *AuditEvent) error {
+func persistAuditMetadata(parent context.Context, event *AuditEvent) error {
 	if event == nil {
 		return fmt.Errorf("audit event is nil")
 	}
@@ -192,10 +193,15 @@ func persistAuditMetadata(event *AuditEvent) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
 	defer cancel()
 
 	err := RunInTenantTx(ctx, event.TenantID, func(tx *sql.Tx) error {
+		// RunInTenantTx has authenticated and matched the tenant. The canonical
+		// append function still checks this legacy GUC in addition to signed RLS.
+		if _, err := tx.ExecContext(ctx, "SELECT set_config('app.current_tenant_id', $1, true)", event.TenantID); err != nil {
+			return err
+		}
 		if event.Timestamp.IsZero() {
 			event.Timestamp = time.Now().UTC()
 		}
@@ -250,11 +256,11 @@ func persistAuditMetadata(event *AuditEvent) error {
 	return nil
 }
 
-func publishPendingAuditOutbox(tenantID string, limit int) error {
+func publishPendingAuditOutbox(parent context.Context, tenantID string, limit int) error {
 	if !AuditTransportEnabled() || DB == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
 	defer cancel()
 	return RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
 		var backlog int64

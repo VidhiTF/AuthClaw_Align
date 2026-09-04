@@ -51,6 +51,9 @@ def plan(
         ):
             continue
         matched = False
+        # This gateway regression runs inside the restricted-role PostgreSQL job.
+        if path == "gateway/audit_context_test.go":
+            affected["backend"] = True
         for name, prefix in COMPONENTS.items():
             if path.startswith(prefix):
                 affected[name] = True

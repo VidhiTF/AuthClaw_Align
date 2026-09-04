@@ -7,12 +7,15 @@ import (
 	"time"
 )
 
-func queueNotification(tenantID, userID, notificationType, severity, title, body, link string) {
+func queueNotification(parent context.Context, tenantID, userID, notificationType, severity, title, body, link string) {
 	if tenantID == "" {
 		return
 	}
+	// Preserve the credential for signed tenant binding, but allow the bounded
+	// notification write to finish after the HTTP request has returned.
+	parent = context.WithoutCancel(parent)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 		defer cancel()
 		if err := insertNotification(ctx, tenantID, userID, notificationType, severity, title, body, link); err != nil {
 			log.Printf("notification insert failed: %v", err)
