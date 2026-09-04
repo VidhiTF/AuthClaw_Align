@@ -123,6 +123,14 @@ output "interface_endpoint_private_dns_enabled" {
   value = { for service, endpoint in aws_vpc_endpoint.interface : service => endpoint.private_dns_enabled }
 }
 
+output "gateway_endpoint_policies" {
+  value = { for service in keys(aws_vpc_endpoint.gateway) : service => true }
+}
+
+output "interface_endpoint_policies" {
+  value = { for service in keys(aws_vpc_endpoint.interface) : service => true }
+}
+
 output "endpoint_client_security_group_id" {
   value = aws_security_group.app.id
 }
@@ -140,6 +148,10 @@ output "vpc_endpoint_ids" {
     { for service, endpoint in aws_vpc_endpoint.gateway : service => endpoint.id },
     { for service, endpoint in aws_vpc_endpoint.interface : service => endpoint.id },
   )
+}
+
+output "application_task_role_arns" {
+  value = local.application_task_role_arns
 }
 
 output "nat_dashboard_name" {
@@ -213,8 +225,8 @@ output "audit_sqs" {
     queue_arn          = try(aws_sqs_queue.audit[0].arn, null)
     dlq_url            = try(aws_sqs_queue.audit_dlq[0].url, null)
     dlq_arn            = try(aws_sqs_queue.audit_dlq[0].arn, null)
-    producer_role_arns = { for service, role in aws_iam_role.audit_sqs_producer : service => role.arn }
-    consumer_role_arn  = try(aws_iam_role.audit_sqs_consumer[0].arn, null)
+    producer_role_arns = { for service in local.audit_sqs_producer_services : service => aws_iam_role.application_task[service].arn }
+    consumer_role_arn  = aws_iam_role.application_task["audit_consumer"].arn
     alarm_names        = values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name
   }
 }

@@ -14,9 +14,9 @@ This runbook covers the Terraform NAT topology, private AWS service endpoints, v
 
 The root setting applies to both primary and secondary stacks. Public and private subnet lists must remain one-to-one and in the same AZ order.
 
-The S3 gateway endpoint attaches to every private route table. No DynamoDB endpoint is provisioned because the core runtime has no confirmed dependency. Interface endpoints for ECR API, ECR Docker, CloudWatch Logs, Secrets Manager, and KMS use private DNS and accept TCP 443 only from the ECS application security group.
+The S3 gateway endpoint attaches to every private route table. No DynamoDB endpoint is provisioned because the core runtime has no confirmed dependency. Interface endpoints for ECR API, ECR Docker, CloudWatch Logs, Secrets Manager, KMS, and STS use private DNS and accept TCP 443 only from the ECS application security group. SQS is added only when `audit_stream_transport = "sqs_fifo"`.
 
-Endpoint policies initially use the AWS default full-access policy. IAM task roles remain the authorization boundary. The security owner must approve any later endpoint-policy restriction after the destination inventory is complete, because over-restricting ECR can break access to S3-backed image layers.
+Endpoint policies explicitly deny insecure transport and scope approved principals, actions, and resources for the inventoried P0-08 paths. IAM task roles remain the application authorization boundary.
 
 ## Required Evidence Before Production
 

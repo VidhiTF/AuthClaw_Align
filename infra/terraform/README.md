@@ -84,7 +84,7 @@ This keeps the regional AuthClaw stack portable while still making the audit pat
 - `single` creates one NAT Gateway and routes every private subnet through it. Use this lower-cost mode for development and staging.
 - `per_az` creates one NAT Gateway per public subnet and routes each private subnet to the NAT in the same availability zone. Production must use this mode after the rollout gates in the runbook are satisfied.
 
-Every private subnet has its own route table. The S3 gateway endpoint is associated with all private route tables; DynamoDB is intentionally omitted until a runtime dependency is confirmed. ECR API, ECR Docker, CloudWatch Logs, Secrets Manager, and KMS use private-DNS interface endpoints. Their security group accepts TCP 443 only from the regional ECS application security group.
+Every private subnet has its own route table. The S3 gateway endpoint is associated with all private route tables; DynamoDB is intentionally omitted until a runtime dependency is confirmed. ECR API, ECR Docker, CloudWatch Logs, Secrets Manager, KMS, and STS use private-DNS interface endpoints; SQS is added only when `audit_stream_transport = "sqs_fifo"`. Their security group accepts TCP 443 only from the regional ECS application security group, and endpoint policies fail closed to approved principals, actions, and resources.
 
 The first state-backed plan after this change must prove that the existing singleton EIP, NAT Gateway, and route tables move to key `"0"` without replacement. Do not apply a plan that deletes or replaces the existing NAT/EIP identity. See [NAT_EGRESS_RUNBOOK.md](../../docs/runbooks/NAT_EGRESS_RUNBOOK.md) for migration, validation, rollback, monitoring, and production approval gates.
 

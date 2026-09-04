@@ -77,7 +77,7 @@ jobs:
           fetch-depth: 2
       - run: |
           git diff --check HEAD^
-          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test scripts.test_verify_p007_edge_evidence
+          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test scripts.test_verify_p007_edge_evidence scripts.test_p008_private_paths_evidence
 
   smoke:
     name: Master Smoke and Contract Integration
