@@ -601,12 +601,8 @@ func TestSecretEnvelopeEncryptionIsRandomizedAndBackwardCompatible(t *testing.T)
 	if err != nil {
 		t.Fatalf("EncryptDeterministic failed: %v", err)
 	}
-	plaintext, err := DecryptSecret(legacy)
-	if err != nil {
-		t.Fatalf("DecryptSecret legacy fallback failed: %v", err)
-	}
-	if plaintext != "legacy-provider-secret" {
-		t.Fatalf("unexpected legacy plaintext %q", plaintext)
+	if _, err := DecryptSecret(legacy); err == nil {
+		t.Fatal("runtime must reject legacy ciphertext")
 	}
 }
 

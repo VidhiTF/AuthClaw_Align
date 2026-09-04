@@ -16,6 +16,21 @@ REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
+    def test_crypto_gate_precedes_runtime_and_bootstraps_only_empty_installation(self):
+        gate = DEPLOY.split("- name: Gate runtime rollout", 1)[1].split(
+            "- name: Apply controlled-beta", 1
+        )[0]
+        self.assertIn("fresh=false", gate)
+        self.assertIn("[[ ! -s previous-task-definitions.tsv ]]", gate)
+        self.assertIn('if [[ "$fresh" == true ]]', gate)
+        self.assertIn("bootstrap_prepare backend_migrations agent_migrations bootstrap_finalize database_security_check", gate)
+        self.assertIn("run_job crypto_preflight", gate)
+        self.assertNotIn("-target=module.primary.aws_ecs_service", gate)
+        self.assertIn("-target=module.primary.aws_secretsmanager_secret_version.envelope_v2", gate)
+        self.assertIn("all(.tasks[0].containers[]; .exitCode == 0)", gate)
+        self.assertIn("vars.CRYPTO_STRICT_ROLLBACK_APPROVED == 'true'", DEPLOY)
+        self.assertIn("steps.runtime_release.outcome", DEPLOY)
+
     def test_ci_executes_for_master_and_master_pull_requests(self):
         self.assertNotIn("  create:\n", CI)
         self.assertIn("  push:\n    branches: [master]", CI)

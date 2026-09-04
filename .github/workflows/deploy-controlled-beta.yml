@@ -180,7 +180,63 @@ jobs:
               done
           fi
 
+      - name: Gate runtime rollout on complete ciphertext and key inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Provision database jobs and their dependencies, never runtime services.
+          # Only an empty installation may bootstrap automatically. Existing
+          # databases must already satisfy the retirement preconditions.
+          terraform -chdir=infra/terraform state list > preflight-state.txt
+          fresh=false
+          if ! grep -q '^module.primary.aws_db_instance.postgres_primary' preflight-state.txt; then
+            [[ ! -s previous-task-definitions.tsv ]] || { echo '::error::Runtime exists without managed database state'; exit 1; }
+            fresh=true
+          fi
+          terraform -chdir=infra/terraform apply -input=false -auto-approve \
+            -target=module.primary.aws_ecs_cluster.main \
+            -target=module.primary.aws_ecs_task_definition.database_job \
+            -target=module.primary.aws_subnet.private \
+            -target=module.primary.aws_security_group.app \
+            -target=module.primary.aws_route.public_internet \
+            -target=module.primary.aws_route.private_nat \
+            -target=module.primary.aws_route_table_association.public \
+            -target=module.primary.aws_route_table_association.private \
+            -target=module.primary.aws_secretsmanager_secret_version.bootstrap_database_url \
+            -target=module.primary.aws_secretsmanager_secret_version.backend_migration_database_url \
+            -target=module.primary.aws_secretsmanager_secret_version.backend_database_url \
+            -target=module.primary.aws_secretsmanager_secret_version.agent_migration_database_url \
+            -target=module.primary.aws_secretsmanager_secret_version.agent_database_url \
+            -target=module.primary.aws_secretsmanager_secret_version.envelope \
+            -target=module.primary.aws_secretsmanager_secret_version.envelope_v2 \
+            -target=module.primary.aws_secretsmanager_secret_version.session \
+            -target=module.primary.aws_iam_role_policy.task_secrets \
+            -target=module.primary.aws_iam_role_policy_attachment.task_execution
+          gate="$(terraform -chdir=infra/terraform output -json crypto_preflight)"
+          cluster="$(jq -er '.cluster' <<<"$gate")"
+          network="$(jq -c '.network_configuration' <<<"$gate")"
+          run_job() {
+            local job="$1" definition started task
+            definition="$(jq -er --arg job "$job" '.task_definitions[$job]' <<<"$gate")"
+            started="$(aws ecs run-task --cluster "$cluster" --task-definition "$definition" \
+              --launch-type FARGATE --network-configuration "$network")"
+            jq -e '(.failures | length) == 0 and (.tasks | length) == 1' <<<"$started" >/dev/null
+            task="$(jq -er '.tasks[0].taskArn' <<<"$started")"
+            aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task"
+            aws ecs describe-tasks --cluster "$cluster" --tasks "$task" > "database-${job}-task.json"
+            jq -e --arg job "$job" '(.failures | length) == 0 and (.tasks | length) == 1 and
+              ([.tasks[0].containers[] | select(.name == $job)] | length) == 1 and
+              all(.tasks[0].containers[]; .exitCode == 0)' "database-${job}-task.json" >/dev/null
+          }
+          if [[ "$fresh" == true ]]; then
+            for job in bootstrap_prepare backend_migrations agent_migrations bootstrap_finalize database_security_check; do
+              run_job "$job"
+            done
+          fi
+          run_job crypto_preflight
+
       - name: Apply controlled-beta infrastructure and immutable release
+        id: runtime_release
         shell: bash
         run: terraform -chdir=infra/terraform apply -input=false -auto-approve
 
@@ -223,7 +279,13 @@ jobs:
           fi
 
       - name: Roll back to previous task definitions
-        if: failure()
+        # Do not restart services after a failed preflight, or restore a
+        # CBC-capable image after retirement. The operator must approve the
+        # retained rollback image as strict AES-GCM-only before enabling this.
+        if: >-
+          failure() &&
+          (steps.runtime_release.outcome == 'success' || steps.runtime_release.outcome == 'failure') &&
+          vars.CRYPTO_STRICT_ROLLBACK_APPROVED == 'true'
         shell: bash
         run: |
           [[ -s previous-task-definitions.tsv ]] || exit 0
@@ -243,5 +305,6 @@ jobs:
           path: |
             deployment-evidence.json
             previous-task-definitions.tsv
+            database-*-task.json
           if-no-files-found: warn
           retention-days: 30

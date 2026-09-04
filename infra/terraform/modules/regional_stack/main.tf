@@ -875,6 +875,21 @@ resource "aws_lb_listener" "service" {
 
 locals {
   database_jobs = {
+    crypto_preflight = {
+      image   = var.container_images.backend
+      command = ["python", "scripts/verify_secret_retirement.py"]
+      environment = [
+        { name = "AUTHCLAW_ENV", value = var.authclaw_env },
+        { name = "AUTHCLAW_SECRET_PROVIDER", value = "env" },
+        { name = "AUTHCLAW_SECRET_KEY_VERSION", value = var.secret_key_version }
+      ]
+      secrets = [
+        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.bootstrap_database_url.arn },
+        { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
+        { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
+        { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn }
+      ]
+    }
     bootstrap_prepare = {
       image   = var.container_images.backend
       command = ["python", "scripts/bootstrap_database_security.py", "prepare"]

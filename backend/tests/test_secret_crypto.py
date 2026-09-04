@@ -7,11 +7,42 @@ import pytest
 from app.core.crypto import (
     _vault_key_material,
     decrypt_secret,
-    encrypt_deterministic,
     encrypt_secret,
     secret_management_status,
 )
 from app.core.startup_checks import validate_production_environment
+from tests.legacy_crypto_fixture import encrypt_deterministic
+
+
+def test_python_gateway_shared_aes_gcm_vector(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "env")
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v7")
+    monkeypatch.setenv("ENVELOPE_KEY_V7", "test-envelope-key-material-32-bytes!!")
+    monkeypatch.setenv("ENVELOPE_KEY", "test-envelope-key-material-32-bytes!!")
+    monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
+    monkeypatch.setattr("app.core.crypto.os.urandom", lambda n: bytes(range(n)))
+    vector = "authclaw-secret-v2:env:v7:AAECAwQFBgcICQoLfg77cQzhaxHPBVah3UEx1MbA1dIqCVyxukG74cXQlchpvK/oTDA="
+    assert encrypt_secret("shared-provider-secret") == vector
+    assert decrypt_secret(vector) == "shared-provider-secret"
+    assert decrypt_secret(vector.replace("authclaw-secret-v2:env:v7:", "authclaw-secret-v1:")) == "shared-provider-secret"
+
+
+@pytest.mark.parametrize("value", ["", "unknown:payload", "authclaw-secret-v2::v1:AAAA", "authclaw-secret-v2:env::AAAA", "authclaw-secret-v2:env:v1:!invalid!", "authclaw-secret-v1:AAAA"])
+def test_runtime_rejects_unknown_or_corrupt_envelopes(value):
+    with pytest.raises(ValueError):
+        decrypt_secret(value)
+
+
+def test_missing_referenced_key_fails_closed(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "env")
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v8")
+    monkeypatch.setenv("ENVELOPE_KEY_V8", "distinct-test-version-eight-secret")
+    ciphertext = encrypt_secret("retained-secret")
+    monkeypatch.delenv("ENVELOPE_KEY_V8")
+    monkeypatch.delenv("ENVELOPE_KEY", raising=False)
+    monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
+    with pytest.raises(ValueError):
+        decrypt_secret(ciphertext)
 
 
 def test_provider_secret_encryption_is_randomized_and_round_trips(monkeypatch):
@@ -30,14 +61,15 @@ def test_provider_secret_encryption_is_randomized_and_round_trips(monkeypatch):
     assert decrypt_secret(second) == "sk-provider-secret"
 
 
-def test_provider_secret_decrypt_supports_legacy_deterministic_rows(monkeypatch):
+def test_provider_secret_decrypt_rejects_legacy_deterministic_rows(monkeypatch):
     monkeypatch.setenv("ENVELOPE_KEY", "test-envelope-key-material-32-bytes!!")
     monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
 
     legacy = encrypt_deterministic("legacy-provider-secret")
 
     assert not legacy.startswith("authclaw-secret-v1:")
-    assert decrypt_secret(legacy) == "legacy-provider-secret"
+    with pytest.raises(ValueError):
+        decrypt_secret(legacy)
 
 
 def test_provider_secret_decrypt_supports_v1_rows(monkeypatch):
