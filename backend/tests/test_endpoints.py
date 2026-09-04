@@ -627,7 +627,7 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     db_session.add(tenant_b)
     db_session.commit()
 
-    # Seed a platform administrator and platform-scoped key for POST /tenants.
+    # A legacy tenant admin must not gain platform access through API-key scopes.
     admin_user_id = uuid4()
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_a_id}'"))
     admin_user = User(
@@ -689,8 +689,45 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     response = client.post("/v1/tenants", json={"name": "Tenant C", "tier": "starter"}, headers=headers_b)
     assert response.status_code == status.HTTP_403_FORBIDDEN
 
-    # Request as Tenant A owner (admin scope) -> 201 Created
+    # Even a tenant owner with legacy ADMIN/platform.admin claims is denied.
     response = client.post("/v1/tenants", json={"name": "Tenant C", "tier": "pro"}, headers=headers_admin)
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    platform_admin_id = uuid4()
+    platform_token = f"acl_session_{uuid4().hex}"
+    with owner_engine.begin() as connection:
+        connection.execute(
+            text("""
+                INSERT INTO authn.platform_admins (id, email, password_hash)
+                VALUES (:id, :email, 'unusable-test-password')
+            """),
+            {"id": platform_admin_id, "email": f"{platform_admin_id}@platform.test"},
+        )
+        connection.execute(
+            text("""
+                INSERT INTO authn.platform_sessions (
+                    id, token_hash, platform_admin_id, authentication_method, expires_at
+                ) VALUES (:id, :token_hash, :admin_id, 'password', :expires_at)
+            """),
+            {
+                "id": uuid4(),
+                "token_hash": hash_key(platform_token),
+                "admin_id": platform_admin_id,
+                "expires_at": datetime.now(timezone.utc) + timedelta(minutes=15),
+            },
+        )
+    try:
+        response = client.post(
+            "/v1/tenants",
+            json={"name": "Tenant C", "tier": "pro"},
+            headers={"Authorization": f"Bearer {platform_token}"},
+        )
+    finally:
+        with owner_engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM authn.platform_admins WHERE id = :id"),
+                {"id": platform_admin_id},
+            )
     assert response.status_code == status.HTTP_201_CREATED
     assert response.json()["name"] == "Tenant C"
     assert response.json()["tier"] == "pro"
