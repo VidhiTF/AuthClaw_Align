@@ -1364,9 +1364,9 @@ resource "aws_s3_bucket_public_access_block" "alb_logs" {
   restrict_public_buckets = true
 }
 
+#trivy:ignore:AVD-AWS-0132 ALB access-log delivery supports SSE-S3, not customer-managed SSE-KMS keys.
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
-  #trivy:ignore:AVD-AWS-0132 ALB access-log delivery supports SSE-S3, not customer-managed SSE-KMS keys.
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
