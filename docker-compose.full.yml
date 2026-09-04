@@ -212,6 +212,8 @@ services:
       ENVELOPE_KEY: ${ENVELOPE_KEY:-YXV0aGNsYXctbG9jYWwtZmVybmV0LWtleS1jaGFuZ2U=}
       API_KEY_HASH_SECRET: ${API_KEY_HASH_SECRET:-authclaw-full-local-api-key-hash-secret}
       AUTHCLAW_LITE_DEMO_PASSWORD: ${AUTHCLAW_LITE_DEMO_PASSWORD:-AuthClawDemo!234}
+      AUTHCLAW_PLATFORM_ADMIN_EMAIL: ${AUTHCLAW_PLATFORM_ADMIN_EMAIL:-developer@authclaw.local}
+      AUTHCLAW_PLATFORM_ADMIN_PASSWORD: ${AUTHCLAW_PLATFORM_ADMIN_PASSWORD:-AuthClawDeveloper!234}
     command: ["python", "scripts/seed_authclaw_lite.py"]
     restart: "no"
 

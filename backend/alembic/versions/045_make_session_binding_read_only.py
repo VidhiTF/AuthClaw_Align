@@ -1,14 +1,14 @@
 """Make authentication session binding safe for concurrent reads.
 
-Revision ID: 042
-Revises: 041
+Revision ID: 045
+Revises: 044
 """
 
 from alembic import op
 
 
-revision = "042"
-down_revision = "041"
+revision = "045"
+down_revision = "044"
 branch_labels = None
 depends_on = None
 
@@ -57,6 +57,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute(
         _FUNCTION_PREFIX
-        + "    UPDATE authn.sessions SET last_seen_at = now() WHERE id = v.id;\n"
+        + "    UPDATE authn.sessions SET last_seen_at = now() WHERE id = v.id\n"
+        + "       AND last_seen_at < now() - interval '5 minutes';\n"
         + _FUNCTION_SUFFIX
     )

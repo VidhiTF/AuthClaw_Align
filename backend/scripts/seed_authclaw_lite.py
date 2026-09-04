@@ -24,6 +24,7 @@ load_dotenv(".env.local")
 TENANT_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
 SECONDARY_TENANT_ID = uuid.UUID("11111111-1111-4111-8111-111111111112")
 ADMIN_USER_ID = uuid.UUID("22222222-2222-4222-8222-222222222222")
+PLATFORM_ADMIN_ID = uuid.UUID("77777777-7777-4777-8777-777777777777")
 ROLE_USERS = (
     (uuid.UUID("22222222-2222-4222-8222-222222222223"), "admin-role@authclaw-lite.demo", "admin"),
     (uuid.UUID("22222222-2222-4222-8222-222222222224"), "operator@authclaw-lite.demo", "operator"),
@@ -35,6 +36,8 @@ POLICY_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
 PROVIDER_CREDENTIAL_ID = uuid.UUID("66666666-6666-4666-8666-666666666666")
 RAW_API_KEY = os.getenv("AUTHCLAW_LITE_DEMO_KEY", "acl_lite_demo_key")
 RAW_ADMIN_PASSWORD = os.getenv("AUTHCLAW_LITE_DEMO_PASSWORD", "AuthClawDemo!234")
+RAW_PLATFORM_ADMIN_EMAIL = os.getenv("AUTHCLAW_PLATFORM_ADMIN_EMAIL", "developer@authclaw.local").strip().lower()
+RAW_PLATFORM_ADMIN_PASSWORD = os.getenv("AUTHCLAW_PLATFORM_ADMIN_PASSWORD", "AuthClawDeveloper!234")
 RAW_ADMIN_TOTP_SECRET = os.getenv("AUTHCLAW_LITE_DEMO_TOTP_SECRET", "").strip() or None
 RAW_PROVIDER_KEY = os.getenv("AUTHCLAW_LITE_PROVIDER_KEY", "ci-mock-provider-key")
 PROVIDER_ENDPOINT = os.getenv("AUTHCLAW_LITE_PROVIDER_ENDPOINT", "")
@@ -90,6 +93,21 @@ def main() -> None:
     key_hash = hash_key(RAW_API_KEY)
 
     with engine.begin() as conn:
+        conn.execute(
+            text("""
+            INSERT INTO authn.platform_admins (id, email, password_hash, display_name, role, is_active)
+            VALUES (:id, :email, :password_hash, 'AuthClaw Developer', 'ADMIN', true)
+            ON CONFLICT (email) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                role = 'ADMIN',
+                updated_at = NOW()
+            """),
+            {
+                "id": PLATFORM_ADMIN_ID,
+                "email": RAW_PLATFORM_ADMIN_EMAIL,
+                "password_hash": hash_password(RAW_PLATFORM_ADMIN_PASSWORD),
+            },
+        )
 
         conn.execute(
             text("""
@@ -260,7 +278,9 @@ def main() -> None:
 
     print("AuthClaw Lite demo seed complete.")
     print("Login email: admin@authclaw-lite.demo")
+    print(f"Platform admin email: {RAW_PLATFORM_ADMIN_EMAIL}")
     print("Login password is configured via AUTHCLAW_LITE_DEMO_PASSWORD (not displayed).")
+    print("Platform admin password is configured via AUTHCLAW_PLATFORM_ADMIN_PASSWORD (not displayed).")
     print(f"Gateway API key fingerprint (hmac-sha3-256): {key_hash[:12]}...")
 
 

@@ -44,7 +44,7 @@ export default function LoginPage() {
         throw new Error(data.message || data.detail || "Authentication failed");
       }
 
-      router.push("/connect");
+      router.push(data.user?.role === "platform_admin" ? "/developer" : "/connect");
       router.refresh();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "An unexpected error occurred");
