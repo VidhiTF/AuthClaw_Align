@@ -13,6 +13,10 @@ from dataclasses import dataclass
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+try:
+    from scripts import worker_maintenance_security
+except ModuleNotFoundError:
+    import worker_maintenance_security
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 BACKEND_RUNTIME_FUNCTIONS = {
@@ -342,6 +346,9 @@ def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> N
             )
         )
 
+    # Schema ownership requires its login role even on a brand-new cluster.
+    worker_maintenance_security.prepare(conn, backend_migrator.name)
+
     conn.execute(
         text(
             f"REVOKE {quote(backend_migrator.name)} FROM {quote(backend_runtime.name)}"
@@ -446,6 +453,7 @@ def grant_backend_functions(conn, backend_runtime: Role) -> None:
 
 
 def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
+    worker_maintenance_security.finalize(conn, configured_roles()[0].name, backend_runtime.name)
     quote = conn.dialect.identifier_preparer.quote
     definer = quote(AUTH_DEFINER_ROLE)
     runtime = quote(backend_runtime.name)

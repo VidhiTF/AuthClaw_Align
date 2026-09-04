@@ -808,6 +808,8 @@ class EphemeralWorkerToken(Base):
     permission_boundary = Column(JSON, nullable=False, default=dict)
     token_hash = Column(String(64), nullable=False, unique=True)
     token_prefix = Column(String(32), nullable=False)
+    hash_algorithm = Column(String(32), nullable=False, server_default="sha256")
+    hash_key_version = Column(String(16), nullable=True)
     status = Column(String(50), nullable=False, default="active")
     issued_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     issued_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)

@@ -17,11 +17,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Immutable Controlled-Beta Deployment
+  eligibility:
+    name: Verify source release completion
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'master' &&
       vars.CONTROLLED_BETA_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.release.outputs.ready }}
+    steps:
+      - name: Require all scanned release images from the triggering run
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPOSITORY/actions/runs/$RUN_ID/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[]' | jq -s '.' > source-jobs.json
+          count="$(jq '[.[] | select(.name | startswith("Controlled-Beta Release Images")) | select(.conclusion != "skipped")] | length' source-jobs.json)"
+          if [[ "$count" == 0 ]]; then
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          jq -e '([.[] | select(.name | startswith("Controlled-Beta Release Images"))] | length) == 7 and
+            all(.[] | select(.name | startswith("Controlled-Beta Release Images")); .conclusion == "success") and
+            any(.[]; .name == "Release Completion Gate" and .conclusion == "success") and
+            any(.[]; .name == "ACL-14 Required Checks" and .conclusion == "success")' source-jobs.json >/dev/null
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Immutable Controlled-Beta Deployment
+    needs: eligibility
+    if: needs.eligibility.outputs.ready == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: controlled-beta
@@ -210,6 +241,7 @@ jobs:
             -target=module.primary.aws_secretsmanager_secret_version.envelope \
             -target=module.primary.aws_secretsmanager_secret_version.envelope_v2 \
             -target=module.primary.aws_secretsmanager_secret_version.session \
+            -target=module.primary.aws_secretsmanager_secret_version.worker_token_hmac \
             -target=module.primary.aws_iam_role_policy.task_secrets \
             -target=module.primary.aws_iam_role_policy_attachment.task_execution
           gate="$(terraform -chdir=infra/terraform output -json crypto_preflight)"
@@ -234,6 +266,7 @@ jobs:
             done
           fi
           run_job crypto_preflight
+          run_job worker_preflight
 
       - name: Apply controlled-beta infrastructure and immutable release
         id: runtime_release

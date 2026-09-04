@@ -181,6 +181,7 @@ output "database_job_execution_order" {
     "bootstrap_finalize",
     "database_security_check",
     "crypto_preflight",
+    "worker_preflight",
   ]
 }
 

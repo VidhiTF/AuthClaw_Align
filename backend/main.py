@@ -176,10 +176,17 @@ async def startup_event():
     """Initialize app only after database security invariants pass."""
     with engine.connect() as connection:
         validate_database_security(connection)
+    from app.core.worker_tokens import active_version, key_for
+    from app.services import worker_cleanup
+    if os.getenv("WORKER_TOKEN_ISSUANCE_PAUSED", "true").lower() == "false":
+        key_for(active_version())
+    await worker_cleanup.start(app, engine)
     print("AuthClaw Backend Starting Up...")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
+    from app.services import worker_cleanup
+    await worker_cleanup.shutdown(app)
     print("AuthClaw Backend Shutting Down...")
