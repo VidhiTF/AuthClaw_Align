@@ -1,3 +1,12 @@
+output "crypto_preflight" {
+  value = {
+    cluster               = module.primary.ecs_cluster_name
+    task_definition       = module.primary.database_job_task_definition_arns["crypto_preflight"]
+    task_definitions      = module.primary.database_job_task_definition_arns
+    network_configuration = module.primary.database_job_network_configuration
+  }
+}
+
 output "primary" {
   value = {
     region                             = var.primary_region

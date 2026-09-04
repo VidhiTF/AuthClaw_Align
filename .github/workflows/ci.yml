@@ -164,8 +164,10 @@ jobs:
           ../.ci-backend/bin/python -m pytest -p no:cacheprovider -q \
             tests/test_auth_baseline.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
             tests/test_client_ip.py tests/test_bff_client_ip.py tests/test_release4_abuse_controls.py \
+            tests/test_oidc_transactions.py \
             tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
-            tests/test_compliance_scoring.py tests/test_migration_038.py tests/test_audit_transport_contract.py
+            tests/test_compliance_scoring.py tests/test_migration_038.py tests/test_migration_040.py \
+            tests/test_secret_crypto.py tests/test_secret_retirement.py tests/test_audit_transport_contract.py
 
   backend-integration:
     name: Backend PostgreSQL Integration
@@ -246,6 +248,7 @@ jobs:
           tests/test_user_invitation_lifecycle.py
           tests/test_phase10.py
           tests/test_access_requests.py
+          tests/test_secret_retirement_postgres.py
 
   audit:
     name: Audit Consumer Tests
@@ -330,7 +333,7 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
         run: >-
           go test ./... -count=1
-          -run '^(TestACL17|TestClientIP|TestAtomicRateLimit|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream)'
+          -run '^(TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream)'
 
   console:
     name: Console Tests and Build

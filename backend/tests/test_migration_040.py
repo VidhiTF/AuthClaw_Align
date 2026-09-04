@@ -1,7 +1,8 @@
 import importlib.util
 from pathlib import Path
 
-from app.core.crypto import decrypt_secret, encrypt_deterministic
+from app.core.crypto import decrypt_secret
+from tests.legacy_crypto_fixture import encrypt_deterministic
 
 
 def migration():
@@ -17,6 +18,7 @@ def test_migration_converts_legacy_ciphertext_and_preserves_plaintext(monkeypatc
     monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "env")
     monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
     module = migration()
+    assert module.decrypt_secret.__module__ == "migration_support.secret_crypto_v040"
     legacy = encrypt_deterministic("legacy-secret")
 
     assert module._ENCRYPTED_COLUMNS == (

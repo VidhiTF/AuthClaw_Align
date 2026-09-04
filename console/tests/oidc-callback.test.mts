@@ -14,16 +14,19 @@ test("OIDC callback exposes only the generic authentication failure", () => {
   assert.match(source, /const GENERIC_AUTH_FAILURE = "Authentication failed"/);
   assert.doesNotMatch(source, /data\.(detail|message)/);
   assert.doesNotMatch(source, /error_description/);
-  assert.equal((source.match(/return fail\(GENERIC_AUTH_FAILURE\)/g) || []).length, 2);
+  assert.equal((source.match(/return fail\(GENERIC_AUTH_FAILURE\)/g) || []).length, 3);
 });
 
-test("OIDC callback consumes state before backend exchange and deletes its cookie on failure", () => {
-  const consume = source.indexOf("consumeOidcState(stateCookie)");
+test("OIDC callback sends only opaque state to authenticated exchange and clears failures", () => {
+  const binding = source.indexOf("state !== expected");
   const exchange = source.indexOf("await fetch(`${BACKEND_URL}/v1/auth/oidc/callback`");
   const failure = source.indexOf("if (!backendResponse.ok)");
   const session = source.indexOf('response.cookies.set("authclaw_session"');
 
-  assert.ok(consume >= 0 && consume < exchange);
+  assert.ok(binding >= 0 && binding < exchange);
+  assert.match(source, /oidcServiceHeaders\("\/v1\/auth\/oidc\/callback", body\)/);
+  assert.match(source, /JSON.stringify\(\{ code, transaction_id: expected \}\)/);
+  assert.doesNotMatch(source, /nonce:|tenant_name:|redirect_uri:/);
   assert.ok(failure > exchange && failure < session);
   assert.match(source, /const fail = \(message: string\) => \{[\s\S]*response\.cookies\.delete\("authclaw_oidc_state"\)/);
 });

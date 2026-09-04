@@ -11,7 +11,7 @@ import os
 from alembic import op
 import sqlalchemy as sa
 
-from app.core.crypto import (
+from migration_support.secret_crypto_v040 import (
     SECRET_ENVELOPE_PREFIX,
     SECRET_ENVELOPE_V2_PREFIX,
     decrypt_secret,

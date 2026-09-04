@@ -180,5 +180,16 @@ output "database_job_execution_order" {
     "agent_migrations",
     "bootstrap_finalize",
     "database_security_check",
+    "crypto_preflight",
   ]
+}
+
+output "database_job_network_configuration" {
+  value = {
+    awsvpcConfiguration = {
+      subnets        = values(aws_subnet.private)[*].id
+      securityGroups = [aws_security_group.app.id]
+      assignPublicIp = "DISABLED"
+    }
+  }
 }

@@ -761,31 +761,12 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     # -------------------------------------------------------------------------
     # 6. Test GET /redaction/{id}/tokenization-map with dynamic decryption
     # -------------------------------------------------------------------------
-    # Seed a token value for Tenant A: plaintext is "John Doe", encrypted is "iv + encrypted"
-    # To mock matching deterministic decryption in Go gateway, we'll use a valid encrypted token
-    # Let's import the Go decryption key default "authclaw-default-32-byte-key-12"
-    # Decrypting will be tested against the backend crypto decrypt logic.
-    # We encrypt using Python's equivalent logic for test verification:
-    from app.core.crypto import get_encryption_key
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    from cryptography.hazmat.backends import default_backend
+    # Current runtime token maps contain authenticated AES-GCM envelopes.
+    # Historical CBC upgrade/rejection is exercised by the retirement suites.
+    from app.core.crypto import encrypt_secret
     import hashlib
 
-    # Deterministic Encryption Mock
-    plaintext = "John Doe"
-    key = get_encryption_key()
-    pad_len = 16 - (len(plaintext) % 16)
-    padded = plaintext.encode("utf-8") + bytes([pad_len] * pad_len)
-    
-    h = hashlib.sha256()
-    h.update(plaintext.encode("utf-8"))
-    h.update(key)
-    iv = h.digest()[:16]
-    
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-    encryptor = cipher.encryptor()
-    ciphertext = encryptor.update(padded) + encryptor.finalize()
-    encrypted_base64 = base64.b64encode(iv + ciphertext).decode("utf-8")
+    encrypted_base64 = encrypt_secret("John Doe")
 
     token_hash = hashlib.sha256("[REDACTED_PERSON_abc]".encode("utf-8")).hexdigest()
     

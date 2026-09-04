@@ -814,6 +814,7 @@ resource "aws_iam_role_policy" "task_secrets" {
           aws_secretsmanager_secret.agent_database_url.arn,
           aws_secretsmanager_secret.internal_service.arn,
           aws_secretsmanager_secret.bff_client_ip.arn,
+          aws_secretsmanager_secret.oidc_bff_exchange.arn,
           aws_secretsmanager_secret.agent_encryption.arn,
           aws_secretsmanager_secret.agent_redaction.arn,
           aws_kms_key.main.arn
@@ -874,6 +875,21 @@ resource "aws_lb_listener" "service" {
 
 locals {
   database_jobs = {
+    crypto_preflight = {
+      image   = var.container_images.backend
+      command = ["python", "scripts/verify_secret_retirement.py"]
+      environment = [
+        { name = "AUTHCLAW_ENV", value = var.authclaw_env },
+        { name = "AUTHCLAW_SECRET_PROVIDER", value = "env" },
+        { name = "AUTHCLAW_SECRET_KEY_VERSION", value = var.secret_key_version }
+      ]
+      secrets = [
+        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.bootstrap_database_url.arn },
+        { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
+        { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
+        { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn }
+      ]
+    }
     bootstrap_prepare = {
       image   = var.container_images.backend
       command = ["python", "scripts/bootstrap_database_security.py", "prepare"]
@@ -1013,6 +1029,7 @@ resource "aws_ecs_task_definition" "service" {
         local.common_environment,
         each.key == "console" ? [
           { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_signing_enabled) },
+          { name = "AUTHCLAW_OIDC_LOGIN_PAUSED", value = tostring(var.oidc_login_paused) },
           { name = "API_URL", value = local.api_base_url },
           { name = "AUTHCLAW_CONSOLE_ALB_INGRESS_ONLY", value = "true" }
         ] : [],
@@ -1031,7 +1048,8 @@ resource "aws_ecs_task_definition" "service" {
       )
       secrets = concat(
         contains(["console", "backend"], each.key) ? [
-          { name = "BFF_CLIENT_IP_SECRET", valueFrom = aws_secretsmanager_secret.bff_client_ip.arn }
+          { name = "BFF_CLIENT_IP_SECRET", valueFrom = aws_secretsmanager_secret.bff_client_ip.arn },
+          { name = "OIDC_BFF_EXCHANGE_SECRET", valueFrom = aws_secretsmanager_secret.oidc_bff_exchange.arn }
         ] : [],
         contains(["backend", "gateway", "console"], each.key) ? [
           { name = "DATABASE_URL", valueFrom = each.key == "backend" ? aws_secretsmanager_secret.backend_database_url.arn : aws_secretsmanager_secret.app_database_url.arn },
@@ -1253,6 +1271,7 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
       ])
       secrets = concat([
         { name = "BFF_CLIENT_IP_SECRET", valueFrom = aws_secretsmanager_secret.bff_client_ip.arn },
+        { name = "OIDC_BFF_EXCHANGE_SECRET", valueFrom = aws_secretsmanager_secret.oidc_bff_exchange.arn },
         { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
         { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
         { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { sessionCookieOptions } from "@/lib/cookie-options";
-import { consumeOidcState, openOidcState, type OidcState } from "@/lib/oidc-state";
+import { openOidcState } from "@/lib/oidc-state";
+import { oidcServiceHeaders } from "@/lib/oidc-service";
 
 const BACKEND_URL = process.env.API_URL || "http://localhost:8000";
 const GENERIC_AUTH_FAILURE = "Authentication failed";
@@ -33,7 +34,7 @@ export async function GET(request: Request) {
     return fail("SSO state expired. Try again.");
   }
 
-  let expected: OidcState;
+  let expected: string;
   try {
     expected = openOidcState(stateCookie);
   } catch {
@@ -42,27 +43,17 @@ export async function GET(request: Request) {
   }
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
-  if (!code || state !== expected.state) {
+  if (!code || state !== expected || url.searchParams.getAll("state").length !== 1 || url.searchParams.getAll("code").length !== 1) {
     auditStateFailure();
     return fail("Invalid SSO callback state");
   }
   try {
-    consumeOidcState(stateCookie);
-  } catch {
-    auditStateFailure();
-    return fail("Invalid SSO state");
-  }
-
+  // Backend atomically consumes the server-owned record before token exchange.
+  const body = JSON.stringify({ code, transaction_id: expected });
   const backendResponse = await fetch(`${BACKEND_URL}/v1/auth/oidc/callback`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      code,
-      state,
-      nonce: expected.nonce,
-      tenant_name: expected.tenantName || null,
-      redirect_uri: expected.redirectUri,
-    }),
+    headers: oidcServiceHeaders("/v1/auth/oidc/callback", body),
+    body,
   });
   const data = await backendResponse.json().catch(() => ({}));
   if (!backendResponse.ok) {
@@ -75,4 +66,7 @@ export async function GET(request: Request) {
   });
   response.cookies.delete("authclaw_oidc_state");
   return response;
+  } catch {
+    return fail(GENERIC_AUTH_FAILURE);
+  }
 }
