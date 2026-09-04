@@ -5,13 +5,25 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  schedule:
+    - cron: '23 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      full_regression:
+        description: Run all established CI component regression suites
+        type: boolean
+        default: true
+      arm64:
+        description: Also build and smoke-test ARM64 runtime images
+        type: boolean
+        default: false
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: authclaw-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: authclaw-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -38,61 +50,24 @@ jobs:
       codeql_languages: ${{ steps.changes.outputs.codeql_languages }}
       shared: ${{ steps.changes.outputs.shared }}
       runtime_images: ${{ steps.changes.outputs.runtime_images }}
+      security: ${{ steps.changes.outputs.security }}
+      smoke: ${{ steps.changes.outputs.smoke }}
+      arm64: ${{ steps.changes.outputs.arm64 }}
+      release: ${{ steps.changes.outputs.release }}
+      full_regression: ${{ steps.changes.outputs.full_regression }}
+      expected_jobs: ${{ steps.changes.outputs.expected_jobs }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 2
       - name: Detect changed components
         id: changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            before='${{ github.event.pull_request.base.sha }}'
-          else
-            before='${{ github.event.before }}'
-          fi
-          if [[ -z "$before" || "$before" =~ ^0+$ ]] || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
-            changed="$(git ls-files)"
-          else
-            changed="$(git diff --name-only "$before" "$GITHUB_SHA")"
-          fi
-          printf '%s\n' "$changed"
-          matches() { grep -Eq "$1" <<<"$changed"; }
-          shared=false
-          matches '^(\.github/workflows/ci\.yml|docker-compose\.full\.yml|\.env\.full\.example|scripts/)' && shared=true
-          runtime_images=false
-          matches '^(\.github/workflows/ci\.yml|docker-compose[^/]*\.yml|scripts/p0_04_build_smoke\.ps1|backend/|audit_consumer/|services/agent/|gateway/|console/|infra/(opa|presidio)/)' && runtime_images=true
-          echo "runtime_images=$runtime_images" >> "$GITHUB_OUTPUT"
-          component() {
-            local name="$1" pattern="$2" value=false
-            if [[ "$shared" == true ]] || matches "$pattern"; then value=true; fi
-            echo "$name=$value" >> "$GITHUB_OUTPUT"
-          }
-          component backend '^backend/'
-          component audit '^audit_consumer/'
-          component agent '^services/agent/'
-          component sdk '^sdk/python/'
-          component gateway '^gateway/'
-          component console '^console/'
-          component terraform '^(infra/terraform/|\.github/workflows/deploy-controlled-beta\.yml)'
-          if [[ "$shared" == true ]] || matches '^(audit_consumer/|gateway/(audit_transport|kafka|sqs_fifo|audit).*|backend/app/services/audit_transport.py|services/agent/services/audit_transport.py|infra/terraform/(modules/regional_stack/(sqs_audit|main|variables|outputs)\.tf|main\.tf|variables\.tf|outputs\.tf)|scripts/(assert_audit_transport_plan|sqs_audit_deployment_readiness)\.py|docker-compose\.audit-e2e\.yml)'; then
-            echo "audit_transport=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "audit_transport=false" >> "$GITHUB_OUTPUT"
-          fi
-          languages=()
-          if [[ "$shared" == true ]] || matches '^(backend/|audit_consumer/|services/agent/|sdk/python/)'; then languages+=(python); fi
-          if [[ "$shared" == true ]] || matches '^console/'; then languages+=(javascript-typescript); fi
-          if [[ "$shared" == true ]] || matches '^gateway/'; then languages+=(go); fi
-          if (( ${#languages[@]} )); then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            (IFS=,; echo "codeql_languages=${languages[*]}" >> "$GITHUB_OUTPUT")
-          else
-            echo "code=false" >> "$GITHUB_OUTPUT"
-            echo "codeql_languages=python" >> "$GITHUB_OUTPUT"
-          fi
-          echo "shared=$shared" >> "$GITHUB_OUTPUT"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FULL_REGRESSION: ${{ inputs.full_regression }}
+          ARM64_ENABLED: ${{ (inputs.arm64 || vars.CI_ARM64_ENABLED == 'true') && 'true' || 'false' }}
+          RELEASE_ENABLED: ${{ vars.CONTROLLED_BETA_ENABLED }}
+        run: python3 scripts/ci_plan.py
 
   policy:
     name: Repository Policy
@@ -104,12 +79,38 @@ jobs:
           fetch-depth: 2
       - run: |
           git diff --check HEAD^
-          python3 -m unittest scripts.test_acl14_delivery_controls
+          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test
+
+  smoke:
+    name: Master Smoke and Contract Integration
+    needs: changes
+    if: needs.changes.outputs.smoke == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Validate compose integration and SDK behavior
+        run: |
+          docker compose --env-file .env.full.example -f docker-compose.full.yml config --quiet
+          python -m unittest discover -s sdk/python -p "test_*.py"
+      - name: Exercise crypto and audit publisher contracts
+        env:
+          DATABASE_URL: postgresql+psycopg://test:test@127.0.0.1:1/authclaw_ci_test
+          OWNER_DATABASE_URL: postgresql+psycopg://test:test@127.0.0.1:1/authclaw_ci_test
+        run: |
+          python -m venv .ci-smoke
+          .ci-smoke/bin/python -m pip install --require-hashes -r backend/requirements-test.txt
+          cd backend
+          ../.ci-smoke/bin/python -m pytest -p no:cacheprovider -q tests/test_secret_crypto.py tests/test_audit_transport_contract.py
 
   security:
     name: Security Scans
     needs: changes
-    if: needs.changes.outputs.code == 'true' || needs.changes.outputs.terraform == 'true'
+    if: needs.changes.outputs.security == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -165,6 +166,7 @@ jobs:
             tests/test_auth_baseline.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
             tests/test_client_ip.py tests/test_bff_client_ip.py tests/test_release4_abuse_controls.py \
             tests/test_oidc_transactions.py \
+            tests/test_worker_hmac.py tests/test_worker_cleanup.py tests/test_ephemeral_workers.py \
             tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
             tests/test_compliance_scoring.py tests/test_migration_038.py tests/test_migration_040.py \
             tests/test_secret_crypto.py tests/test_secret_retirement.py tests/test_audit_transport_contract.py
@@ -249,6 +251,7 @@ jobs:
           tests/test_phase10.py
           tests/test_access_requests.py
           tests/test_secret_retirement_postgres.py
+          tests/test_worker_lifecycle_postgres.py
 
   audit:
     name: Audit Consumer Tests
@@ -464,10 +467,7 @@ jobs:
   arm64-images:
     name: ARM64 Runtime Images
     needs: changes
-    if: >-
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/master' &&
-      needs.changes.outputs.runtime_images == 'true'
+    if: needs.changes.outputs.arm64 == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     steps:
@@ -480,20 +480,20 @@ jobs:
   checks:
     name: ACL-14 Required Checks
     if: always()
-    needs: [changes, policy, security, backend, backend-integration, audit, agent, sdk, gateway, console, compose, terraform, codeql, arm64-images]
+    needs: [changes, policy, smoke, security, backend, backend-integration, audit, agent, sdk, gateway, console, compose, terraform, codeql, arm64-images]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Verify all required jobs
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          echo "Job results: $RESULTS"
-          if [[ "$RESULTS" == *failure* || "$RESULTS" == *cancelled* ]]; then exit 1; fi
+          EXPECTED_JOBS: ${{ needs.changes.outputs.expected_jobs }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_plan.py verify
 
   release-images:
     name: Controlled-Beta Release Images
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CONTROLLED_BETA_ENABLED == 'true'
-    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CONTROLLED_BETA_ENABLED == 'true' && needs.changes.outputs.release == 'true'
+    needs: [changes, checks]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -612,3 +612,23 @@ jobs:
           path: release-manifest-evidence.json
           if-no-files-found: error
           retention-days: 14
+  release-status:
+    name: Release Completion Gate
+    if: always()
+    needs: [changes, checks, release-images]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject incomplete enabled releases
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          RELEASE_EXPECTED: ${{ needs.changes.outputs.release }}
+          RELEASE_RESULT: ${{ needs.release-images.result }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          test "$CHECKS_RESULT" = success
+          if [ "$RELEASE_EXPECTED" = true ]; then
+            test "$RELEASE_RESULT" = success
+          else
+            test "$RELEASE_RESULT" = skipped
+          fi

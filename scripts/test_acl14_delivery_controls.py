@@ -16,6 +16,16 @@ REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
+    def test_deployment_requires_push_and_complete_release_jobs(self):
+        self.assertIn("github.event.workflow_run.event == 'push'", DEPLOY)
+        self.assertIn("if: needs.eligibility.outputs.ready == 'true'", DEPLOY)
+        self.assertIn('if [[ "$count" == 0 ]]', DEPLOY)
+        self.assertIn('length) == 7', DEPLOY)
+        self.assertIn('.name == "Release Completion Gate" and .conclusion == "success"', DEPLOY)
+        release = CI.split("  release-images:", 1)[1].split("    runs-on:", 1)[0]
+        self.assertIn("needs.changes.outputs.release == 'true'", release)
+        self.assertIn("needs: [changes, checks]", release)
+
     def test_crypto_gate_precedes_runtime_and_bootstraps_only_empty_installation(self):
         gate = DEPLOY.split("- name: Gate runtime rollout", 1)[1].split(
             "- name: Apply controlled-beta", 1
@@ -35,13 +45,13 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertNotIn("  create:\n", CI)
         self.assertIn("  push:\n    branches: [master]", CI)
         self.assertIn("  pull_request:\n    branches: [master]", CI)
-        self.assertIn('if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]', CI)
-        self.assertIn("before='${{ github.event.pull_request.base.sha }}'", CI)
+        self.assertIn("BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}", CI)
         self.assertIn("    branches: [master]", DEPLOY)
         self.assertNotIn("pull_request:", DEPLOY)
-        for workflow in (CI, DEPLOY):
-            self.assertNotIn("schedule:", workflow)
-            self.assertNotIn("workflow_dispatch:", workflow)
+        self.assertIn("  schedule:", CI)
+        self.assertIn("  workflow_dispatch:", CI)
+        self.assertNotIn("schedule:", DEPLOY)
+        self.assertNotIn("workflow_dispatch:", DEPLOY)
 
     def test_default_master_ci_is_minimal_and_path_aware(self):
         self.assertIn("name: ACL-14 Required Checks", CI)
@@ -76,12 +86,24 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("backend-integration", CI)
 
     def test_arm64_images_do_not_run_for_pull_requests(self):
-        self.assertIn(
-            "github.event_name == 'push' &&\n"
-            "      github.ref == 'refs/heads/master' &&\n"
-            "      needs.changes.outputs.runtime_images == 'true'",
-            CI,
-        )
+        self.assertIn("if: needs.changes.outputs.arm64 == 'true'", CI)
+        self.assertIn("vars.CI_ARM64_ENABLED == 'true'", CI)
+        self.assertIn("description: Also build and smoke-test ARM64 runtime images", CI)
+
+    def test_required_gate_rejects_unexpected_skips_and_release_gate_is_always_run(self):
+        self.assertIn("EXPECTED_JOBS: ${{ needs.changes.outputs.expected_jobs }}", CI)
+        self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", CI)
+        self.assertIn("run: python3 scripts/ci_plan.py verify", CI)
+        self.assertIn("    name: Release Completion Gate\n    if: always()", CI)
+        self.assertIn('test "$RELEASE_RESULT" = success', CI)
+        self.assertIn("needs: [changes, checks, release-images]", CI)
+
+    def test_light_master_and_full_regression_execute_real_suites(self):
+        self.assertIn("name: Master Smoke and Contract Integration", CI)
+        self.assertIn("tests/test_secret_crypto.py tests/test_audit_transport_contract.py", CI)
+        self.assertIn("description: Run all established CI component regression suites", CI)
+        self.assertIn("name: Run destructive PostgreSQL suites serially", CI)
+        self.assertIn("name: Run gateway tests", CI)
 
     def test_external_actions_are_pinned_to_full_commit_shas(self):
         use_pattern = re.compile(r"\buses:\s*([^@\s]+)@([^#\s]+)")
