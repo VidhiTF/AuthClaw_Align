@@ -28,6 +28,7 @@ def database():
     app = create_engine(make_url(app_url).set(database=name))
     environment = {
         **os.environ,
+        "POSTGRES_DB": name,
         "DATABASE_URL": make_url(owner_url)
         .set(database=name)
         .render_as_string(hide_password=False),
