@@ -47,6 +47,8 @@ def _check_dependencies(
     scopes: list[str],
     platform_role: str = "NONE",
     is_active: bool = True,
+    credential_kind: str = "session",
+    tenant_id: str | None = "tenant-test",
 ) -> None:
     request = SimpleNamespace(
         state=SimpleNamespace(
@@ -55,6 +57,8 @@ def _check_dependencies(
             scopes=scopes,
             platform_role=platform_role,
             user_is_active=is_active,
+            credential_kind=credential_kind,
+            tenant_id=tenant_id,
         )
     )
     for dependency in route.dependencies:
@@ -99,6 +103,8 @@ def test_only_platform_admin_can_create_tenant():
         role="viewer",
         scopes=["platform.admin"],
         platform_role="ADMIN",
+        credential_kind="platform_session",
+        tenant_id=None,
     )
 
 @pytest.mark.parametrize("role", ["developer", "operator"])
@@ -155,6 +161,7 @@ def test_tenant_administrators_cannot_administer_access_requests(role):
 
 def test_platform_admin_requires_role_scope_and_active_identity():
     routes = [
+        _route(access_requests_router, "", "GET"),
         _route(access_requests_router, "/{reference}/status", "PATCH"),
         _route(access_requests_router, "/retention/purge", "POST"),
     ]
@@ -164,6 +171,8 @@ def test_platform_admin_requires_role_scope_and_active_identity():
             role="viewer",
             scopes=["platform.admin"],
             platform_role="ADMIN",
+            credential_kind="platform_session",
+            tenant_id=None,
         )
 
     for platform_role, scopes, is_active in [
@@ -179,6 +188,8 @@ def test_platform_admin_requires_role_scope_and_active_identity():
                     scopes=scopes,
                     platform_role=platform_role,
                     is_active=is_active,
+                    credential_kind="platform_session",
+                    tenant_id=None,
                 )
             assert exc.value.status_code == 403
 
@@ -201,6 +212,17 @@ def test_platform_scope_is_separate_and_tenant_roles_are_unchanged():
             password="CorrectHorse!234",
             role="platform_admin",
         )
+
+
+@pytest.mark.parametrize("kind,tenant_id", [("session", uuid4()), ("api_key", uuid4()), ("session", None), ("platform_session", uuid4())])
+def test_platform_guard_rejects_non_tenantless_platform_sessions(kind, tenant_id):
+    request = SimpleNamespace(state=SimpleNamespace(
+        credential_kind=kind, tenant_id=tenant_id,
+        platform_role="ADMIN", scopes=["platform.admin"], user_is_active=True,
+    ))
+    with pytest.raises(HTTPException) as exc:
+        auth.require_platform_admin().dependency(request)
+    assert exc.value.status_code == 403
 
 
 def test_tenant_admin_cannot_create_platform_key():
@@ -387,6 +409,48 @@ def test_authentication_middleware_exposes_platform_role(monkeypatch):
         assert authenticated_request.state.tenant_role == "viewer"
         assert authenticated_request.state.platform_role == "ADMIN"
         assert authenticated_request.state.user_is_active is True
+        return Response(status_code=204)
+
+    response = asyncio.run(
+        auth.AuthMiddleware(MagicMock()).dispatch(request, call_next)
+    )
+
+    assert response.status_code == 204
+
+
+def test_legacy_tenant_admin_session_does_not_receive_platform_scope(monkeypatch):
+    resolved = SimpleNamespace(
+        credential_id=uuid4(),
+        tenant_id=uuid4(),
+        scopes=["read", "write", "admin"],
+        user_id=uuid4(),
+        role="owner",
+        platform_role="ADMIN",
+        user_is_active=True,
+        tenant_status="active",
+    )
+    resolved_result = MagicMock()
+    resolved_result.first.return_value = resolved
+    db = MagicMock()
+    db.execute.return_value = resolved_result
+    monkeypatch.setattr(auth, "SessionLocal", lambda: db)
+    monkeypatch.setenv("API_KEY_HASH_SECRET", "test-secret")
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/public/v1/access-requests",
+            "headers": [(b"authorization", b"Bearer acl_session_platform")],
+            "query_string": b"",
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+
+    async def call_next(authenticated_request):
+        assert "platform.admin" not in authenticated_request.state.scopes
+        assert authenticated_request.state.platform_role == "ADMIN"
         return Response(status_code=204)
 
     response = asyncio.run(

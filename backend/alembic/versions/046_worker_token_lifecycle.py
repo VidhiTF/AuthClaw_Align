@@ -1,13 +1,13 @@
 """HMAC cutover barrier and restricted worker maintenance.
 
-Revision ID: 043
-Revises: 042
+Revision ID: 046
+Revises: 045
 """
 
 from alembic import op
 
-revision = "043"
-down_revision = "042"
+revision = "046"
+down_revision = "045"
 branch_labels = None
 depends_on = None
 

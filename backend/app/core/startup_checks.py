@@ -215,7 +215,7 @@ def validate_database_security(connection) -> None:
     if connection.dialect.name != "postgresql":
         return
 
-    expected_revision = os.getenv("AUTHCLAW_EXPECTED_DB_REVISION", "043")
+    expected_revision = os.getenv("AUTHCLAW_EXPECTED_DB_REVISION", "046")
     failures: list[str] = []
     if not connection.execute(
         text("SELECT EXISTS (SELECT 1 FROM public.alembic_version WHERE version_num = :revision)"),

@@ -28,6 +28,7 @@ interface ConsoleShellProps {
   tenantId: string;
   tenantName: string;
   userRole: string;
+  platformRole?: string;
 }
 
 const readRoles = ["owner", "admin", "developer", "operator", "viewer"];
@@ -48,12 +49,13 @@ const navigation = [
   { name: "Settings", href: "/settings", icon: Settings, roles: ["owner", "admin"] },
 ];
 
-export default function ConsoleShell({ children, userEmail, tenantId, tenantName, userRole }: ConsoleShellProps) {
+export default function ConsoleShell({ children, userEmail, tenantId, tenantName, userRole, platformRole = "NONE" }: ConsoleShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const normalizedRole = userRole?.toLowerCase() || "viewer";
+  const hasPlatformAccess = platformRole.toUpperCase() === "ADMIN";
   const allowedNavigation = navigation.filter((item) => item.roles.includes(normalizedRole));
 
   const handleLogout = async () => {
@@ -218,7 +220,9 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
                     <div className="px-4 py-2 border-b border-[#E6E9F0]">
                       <p className="text-[10px] font-semibold uppercase text-[#6B7488] tracking-wider">Signed In As</p>
                       <p className="text-xs text-[#475069] truncate font-medium mt-0.5">{userEmail}</p>
-                      <p className="text-[10px] text-[#6B7488] capitalize mt-0.5">{normalizedRole}</p>
+                      <p className="text-[10px] text-[#6B7488] capitalize mt-0.5">
+                        {hasPlatformAccess ? "platform admin" : normalizedRole}
+                      </p>
                     </div>
                     <button
                       onClick={handleLogout}

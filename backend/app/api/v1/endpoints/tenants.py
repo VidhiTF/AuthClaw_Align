@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 import uuid
 
+from app.db.dependencies import get_db
 from app.db.models import Tenant, User
 from app.schemas.models import TenantCreate, TenantResponse, TenantStatusUpdate
 from app.core.auth import get_tenant_db, require_platform_admin, require_roles, require_scopes
@@ -18,7 +19,7 @@ router = APIRouter()
 )
 def create_tenant(
     tenant_data: TenantCreate,
-    db: Session = Depends(get_tenant_db),
+    db: Session = Depends(get_db),
 ):
     tenant_id = uuid.uuid4()
     try:
@@ -26,7 +27,7 @@ def create_tenant(
             text(
                 """
                 SELECT id, name, tier, status, created_at, updated_at
-                  FROM authn.create_tenant(:id, :name, :tier)
+                  FROM authn.create_tenant_as_platform_admin(:id, :name, :tier)
                 """
             ),
             {"id": str(tenant_id), "name": tenant_data.name, "tier": tenant_data.tier},

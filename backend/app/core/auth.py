@@ -102,7 +102,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/v1/auth/password-reset/confirm",
             "/api/public/v1/access-requests",
         }
-        if request.method == "OPTIONS" or canonical_path in public_paths or path.startswith("/static") or canonical_path.startswith("/v1/trust-center/public"):
+        public_access_request = (
+            request.method == "POST"
+            and canonical_path == "/api/public/v1/access-requests"
+        )
+        public_route = canonical_path in public_paths and not (
+            canonical_path == "/api/public/v1/access-requests"
+        )
+        if request.method == "OPTIONS" or public_route or public_access_request or path.startswith("/static") or canonical_path.startswith("/v1/trust-center/public"):
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization")
@@ -140,6 +147,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 ),
                 {"credential_hash": credential_hash},
             ).first()
+            if not result and credential_kind == "session":
+                result = db.execute(
+                    text(
+                        "SELECT credential_id, tenant_id, scopes, user_id, role, "
+                        "platform_role, user_is_active, tenant_status "
+                        "FROM authn.bind_platform_session_context(:credential_hash)"
+                    ),
+                    {"credential_hash": credential_hash},
+                ).first()
+                if result:
+                    credential_kind = "platform_session"
 
             if not result:
                 return JSONResponse(
@@ -181,7 +199,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             # Inject tenant info, scopes, and role into request state.
             request.state.tenant_id = result.tenant_id
-            request.state.scopes = result.scopes
+            scopes = list(result.scopes or [])
+            platform_role = str(result.platform_role).upper()
+            request.state.scopes = scopes
             request.state.user_id = result.user_id
             request.state.credential_id = result.credential_id
             request.state.credential_kind = credential_kind
@@ -191,7 +211,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
             request.state.user_role = _normalize_role(result.role)
             request.state.tenant_role = request.state.user_role
-            request.state.platform_role = str(result.platform_role).upper()
+            request.state.platform_role = platform_role
             request.state.user_is_active = bool(result.user_is_active)
         except Exception as e:
             db.rollback()
@@ -212,6 +232,8 @@ def get_tenant_db(request: Request, db: Session = Depends(get_db)) -> Generator[
     kind = getattr(request.state, "credential_kind", None)
     credential_hash = getattr(request.state, "credential_hash", None)
     expected_tenant = getattr(request.state, "tenant_id", None)
+    if kind == "platform_session" or expected_tenant is None:
+        raise HTTPException(status_code=403, detail="Tenant-scoped credential required")
     if kind not in {"api_key", "session"} or not credential_hash:
         raise HTTPException(status_code=401, detail="Authentication context missing")
     resolver = (
@@ -259,7 +281,7 @@ def require_roles(required_roles: List[str]):
 
 
 def require_platform_admin():
-    """Require the global ADMIN role and its dedicated platform scope."""
+    """Require an active tenantless platform session and its dedicated scope."""
 
     def dependency(request: Request):
         platform_role = str(getattr(request.state, "platform_role", "NONE")).upper()
@@ -267,6 +289,8 @@ def require_platform_admin():
         is_active = getattr(request.state, "user_is_active", False)
         if (
             not is_active
+            or getattr(request.state, "credential_kind", None) != "platform_session"
+            or getattr(request.state, "tenant_id", None) is not None
             or platform_role != "ADMIN"
             or "platform.admin" not in scopes
         ):

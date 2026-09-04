@@ -43,8 +43,8 @@ Run commands from `backend/` in the candidate image. Obtain operator-only
 logs. Keep the previous fleet accepting existing tokens until the drain finishes.
 
 1. Pause issuance across all producer configurations. Run the established
-   bootstrap `prepare`, migration to revision `043` using the migration role,
-   and bootstrap `finalize-backend` using the operator role. Revision 043 also
+   bootstrap `prepare`, migration to revision `046` using the migration role,
+   and bootstrap `finalize-backend` using the operator role. Revision 046 also
    installs a database write barrier, blocking old binaries from issuing SHA
    tokens. Do not switch authentication to the candidate yet.
 2. Run `python scripts/worker_token_cutover.py pause`. It waits for in-flight
@@ -104,6 +104,6 @@ monitoring infrastructure; no separate scheduled AWS cleanup resource is needed.
 - Pause issuance if a key/configuration problem is found. Retain all key versions
   referenced by valid tokens and distribute identical values to every consumer.
 - Roll back only to an HMAC-capable image preserving the database barrier and
-  configured keys. Never restore SHA acceptance or downgrade revision 043.
+  configured keys. Never restore SHA acceptance or downgrade revision 046.
 - Cleanup scheduling is continuous; the 32-minute drain is a separate one-time
   credential transition, not a cleanup interval or alert threshold.

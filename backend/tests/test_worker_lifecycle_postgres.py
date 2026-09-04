@@ -51,7 +51,7 @@ def database():
         conn.execute(text(f'CREATE DATABASE "{name}"'))
     try:
         run("scripts/bootstrap_database_security.py", "prepare")
-        run("-m", "alembic", "upgrade", "042")
+        run("-m", "alembic", "upgrade", "045")
         tenant = uuid.uuid4()
         with owner.begin() as conn:
             conn.execute(
