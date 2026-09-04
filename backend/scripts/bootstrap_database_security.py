@@ -334,7 +334,6 @@ def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> N
 
     ensure_auth_definer_role(conn)
     ensure_agent_auth_definer_role(conn)
-    worker_maintenance_security.prepare(conn, backend_migrator.name)
 
     for role in roles:
         ensure_login_role(conn, role)
@@ -346,6 +345,9 @@ def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> N
                 f"ALTER ROLE {quote(role.name)} SET search_path = {quote(role.schema)}, pg_catalog"
             )
         )
+
+    # Schema ownership requires its login role even on a brand-new cluster.
+    worker_maintenance_security.prepare(conn, backend_migrator.name)
 
     conn.execute(
         text(
