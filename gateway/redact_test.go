@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,52 @@ import (
 
 	"github.com/lib/pq"
 )
+
+type failingRandomReader struct{}
+
+func (failingRandomReader) Read([]byte) (int, error) {
+	return 0, errors.New("random source unavailable")
+}
+
+func TestCryptographicRandomHelpersFailClosed(t *testing.T) {
+	if _, err := cryptoRandIntFrom(failingRandomReader{}, 10); err == nil {
+		t.Fatal("expected integer generation to fail when the random source fails")
+	}
+	if _, err := generateShortUUIDFrom(failingRandomReader{}); err == nil {
+		t.Fatal("expected identifier generation to fail when the random source fails")
+	}
+	if _, err := cryptoRandIntFrom(strings.NewReader("randomness"), 0); err == nil {
+		t.Fatal("expected a non-positive bound to fail")
+	}
+
+	previousReader := cryptographicRandomReader
+	cryptographicRandomReader = failingRandomReader{}
+	t.Cleanup(func() { cryptographicRandomReader = previousReader })
+	if _, err := GenerateTokenValue(context.Background(), nil, "tenant", "value", "PERSON", "mask"); err == nil {
+		t.Fatal("expected mask token generation to fail closed")
+	}
+	if _, err := GenerateTokenValue(context.Background(), nil, "tenant", "value", "PERSON", "synthetic"); err == nil {
+		t.Fatal("expected synthetic token generation to fail closed")
+	}
+}
+
+func TestCryptographicRandomHelpersReturnBoundedValues(t *testing.T) {
+	value, err := cryptoRandInt(7)
+	if err != nil {
+		t.Fatalf("generate random integer: %v", err)
+	}
+	if value < 0 || value >= 7 {
+		t.Fatalf("random integer %d is outside [0, 7)", value)
+	}
+
+	identifier, err := generateShortUUID()
+	if err != nil {
+		t.Fatalf("generate random identifier: %v", err)
+	}
+	if len(identifier) != 8 {
+		t.Fatalf("expected eight hexadecimal characters, got %q", identifier)
+	}
+}
 
 func TestNormalizeDetectedEntityTreatsPhoneLikeUkNhsAsPhoneNumber(t *testing.T) {
 	entity := normalizeDetectedEntity("UK_NHS", "9876543210", []RegexRule{
