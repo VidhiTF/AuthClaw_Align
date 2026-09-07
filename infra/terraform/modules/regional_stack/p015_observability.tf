@@ -1,6 +1,7 @@
 locals {
-  rds_identifier = try(aws_db_instance.postgres_primary[0].identifier, aws_db_instance.postgres_replica[0].identifier)
-  alarm_context  = "owner=${var.alarm_owner}; acknowledge_within=${var.alarm_acknowledgement_minutes}m; escalation=${var.alarm_escalation_path}"
+  rds_identifier   = try(aws_db_instance.postgres_primary[0].identifier, aws_db_instance.postgres_replica[0].identifier)
+  redis_node_count = var.is_primary ? 2 : 1
+  alarm_context    = "owner=${var.alarm_owner}; acknowledge_within=${var.alarm_acknowledgement_minutes}m; escalation=${var.alarm_escalation_path}"
   alarm_tags = {
     Owner                  = var.alarm_owner
     AcknowledgementMinutes = tostring(var.alarm_acknowledgement_minutes)
@@ -135,7 +136,7 @@ resource "aws_cloudwatch_metric_alarm" "redis" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "redis_replication_lag" {
-  count = 2
+  count = local.redis_node_count
 
   alarm_name          = "${var.name}-redis-node-${count.index + 1}-replication-lag"
   alarm_description   = "Redis node replication lag exceeded five seconds; runbook docs/runbooks/P0_14_P0_15_OPERATIONS.md"
@@ -158,7 +159,7 @@ resource "aws_cloudwatch_metric_alarm" "redis_replication_lag" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "redis_evictions" {
-  count = 2
+  count = local.redis_node_count
 
   alarm_name          = "${var.name}-redis-node-${count.index + 1}-evictions"
   alarm_description   = "Redis node evicted data; inspect memory pressure and scaling"
@@ -397,7 +398,7 @@ resource "aws_cloudwatch_dashboard" "data" {
             [".", "EngineCPUUtilization", ".", ".", "Role", "Primary", { label = "primary engine CPU", stat = "Average" }],
             [".", ".", ".", ".", ".", "Replica", { label = "replica engine CPU", stat = "Average" }],
           ],
-          flatten([for node in range(2) : [
+          flatten([for node in range(local.redis_node_count) : [
             ["AWS/ElastiCache", "Evictions", "CacheClusterId", element(tolist(aws_elasticache_replication_group.redis.member_clusters), node), "CacheNodeId", "0001", { label = "node ${node + 1} evictions", stat = "Sum" }],
             [".", "CurrConnections", ".", ".", ".", ".", { label = "node ${node + 1} connections", stat = "Maximum" }],
             [".", "ReplicationLag", ".", ".", ".", ".", { label = "node ${node + 1} replication lag", stat = "Maximum" }],

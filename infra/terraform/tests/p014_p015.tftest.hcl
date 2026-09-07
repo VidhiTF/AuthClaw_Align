@@ -105,3 +105,22 @@ run "availability_scaling_and_observability_contract" {
     error_message = "Alarm ownership and destination metadata must be deployment-ready without inventing a destination."
   }
 }
+
+run "secondary_redis_observability_matches_node_count" {
+  command = plan
+
+  variables {
+    enable_secondary             = true
+    secondary_availability_zones = ["us-west-2a", "us-west-2b"]
+  }
+
+  assert {
+    condition = alltrue([
+      for suffix in ["replication-lag", "evictions"] : length([
+        for name in output.secondary.alarm_names : name
+        if can(regex("-redis-node-[0-9]+-${suffix}$", name))
+      ]) == 1
+    ])
+    error_message = "The one-node secondary Redis group must expose exactly one replication-lag and one eviction alarm."
+  }
+}
