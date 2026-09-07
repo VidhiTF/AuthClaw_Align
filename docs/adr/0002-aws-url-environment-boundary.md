@@ -1,6 +1,6 @@
 # ADR-0002: AWS URL and environment boundary
 
-- Status: Proposed — pending Binod approval
+- Status: Accepted — implementation authorized; release evidence remains mandatory
 - Decision date: 2026-07-13
 - Owners: Kunal (AWS infrastructure, application routing, deployment and rollback), Binod
   (decision and production promotion), Ravi (marketing and console), Vidhi (agent services)
@@ -42,14 +42,14 @@ Production access is not granted to staging workloads or CI roles.
 | URL | Route | Destination | Authentication | Cache policy |
 | --- | --- | --- | --- | --- |
 | `dev.authclaw.ai` | `/`, marketing pages, `/demo`, `/early-access` and static assets | Staging marketing S3 origin through CloudFront Origin Access Control (OAC) | Public | Versioned static assets may cache; HTML uses short TTL |
-| `dev.authclaw.ai` | `/login`, `/invite/accept`, `/auth/callback`, `/logout`, `/trust/shared/*` and authenticated console routes | Staging Next.js console on ECS through a CloudFront VPC origin and internal ALB | Public entry; invitation and authenticated routes enforce application authorization | No shared cache for personalized responses |
+| `dev.authclaw.ai` | `/login`, `/invite/accept`, `/api/auth/oidc/callback`, `/logout`, `/trust/shared/*` and authenticated console routes | Staging Next.js console on ECS through a CloudFront VPC origin and internal ALB | Public entry; invitation and authenticated routes enforce application authorization | No shared cache for personalized responses |
 | `dev.authclaw.ai` | `POST /api/public/v1/access-requests` | Staging FastAPI intake endpoint through CloudFront/WAF, a VPC origin and internal ALB | Public, credential-free request with consent, server-side validation, rate limiting and bot protection | Disabled |
 | `api.dev.authclaw.ai` | `/api/v1/*`, `/health` | Staging FastAPI control plane on ECS through CloudFront/WAF and an internal ALB | Bearer token except a minimal non-sensitive health response | Disabled for authenticated responses |
 | `gateway.dev.authclaw.ai` | Provider-compatible gateway routes and `/health` | Staging Go gateway on ECS through CloudFront/WAF and an internal ALB | Tenant-scoped gateway key | Disabled |
 | `authclaw.ai` | Marketing pages, `/demo`, `/early-access` and static assets | Production marketing S3 origin through CloudFront OAC | Public only after go/no-go | Versioned assets may cache; HTML uses short TTL |
 | `www.authclaw.ai` | All paths | Permanent redirect to the equivalent `https://authclaw.ai` path | Public only after go/no-go | Redirect only |
 | `authclaw.ai` | `POST /api/public/v1/access-requests` | Production FastAPI intake endpoint through CloudFront/WAF, a VPC origin and internal ALB | Public, credential-free request with consent, server-side validation, rate limiting and bot protection | Disabled |
-| `app.authclaw.ai` | `/login`, `/invite/accept`, `/auth/callback`, `/logout`, `/trust/shared/*` and authenticated console routes | Production Next.js console on ECS through a CloudFront VPC origin and internal ALB | Public entry; invitation and authenticated routes enforce application authorization | No shared cache for personalized responses |
+| `app.authclaw.ai` | `/login`, `/invite/accept`, `/api/auth/oidc/callback`, `/logout`, `/trust/shared/*` and authenticated console routes | Production Next.js console on ECS through a CloudFront VPC origin and internal ALB | Public entry; invitation and authenticated routes enforce application authorization | No shared cache for personalized responses |
 | `api.authclaw.ai` | `/api/v1/*`, `/health` | Production FastAPI control plane on ECS through CloudFront/WAF and an internal ALB | Bearer token except a minimal non-sensitive health response | Disabled for authenticated responses |
 | `gateway.authclaw.ai` | Provider-compatible gateway routes and `/health` | Production Go gateway on ECS through CloudFront/WAF and an internal ALB | Tenant-scoped gateway key | Disabled |
 
@@ -165,8 +165,8 @@ ACL-30 and ACL-37 implement and test the controls before release:
 ### Authentication, invitation and public intake boundary
 
 - OIDC redirect URIs are exact and environment-specific:
-  `https://dev.authclaw.ai/auth/callback` for staging and
-  `https://app.authclaw.ai/auth/callback` for production. Wildcard redirect URIs are
+  `https://dev.authclaw.ai/api/auth/oidc/callback` for staging and
+  `https://app.authclaw.ai/api/auth/oidc/callback` for production. Wildcard redirect URIs are
   prohibited.
 - Login does not create an account. Early users enter through one-time, expiring,
   revocable invitations bound to the intended email address and tenant.

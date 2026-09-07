@@ -10,3 +10,11 @@ export function sessionCookieOptions(maxAge?: number) {
     path: "/",
   };
 }
+
+export function sessionCookieName() {
+  return process.env.AUTHCLAW_SESSION_COOKIE_NAME || "authclaw_session";
+}
+
+export function oidcStateCookieName() {
+  return process.env.AUTHCLAW_OIDC_STATE_COOKIE_NAME || "authclaw_oidc_state";
+}

@@ -13,6 +13,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import MfaChallengeModal from "@/components/mfa-challenge-modal";
+import { useRuntimeConfig } from "@/lib/runtime-config";
 import { fetchJson } from "@/lib/client-fetch";
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
@@ -87,6 +88,7 @@ interface OnboardingConnectResult {
 }
 
 export default function ConnectPage() {
+  const runtimeConfig = useRuntimeConfig();
   const [provider, setProvider] = useState<Provider>("gemini");
   const [copied, setCopied] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<GatewayApproval[]>([]);
@@ -113,7 +115,7 @@ export default function ConnectPage() {
   const [testResult, setTestResult] = useState<GatewayTestResult | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [onboardingResult, setOnboardingResult] = useState<OnboardingConnectResult | null>(null);
-  const gatewayUrl = onboardingResult?.gateway_url || process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:18080";
+  const gatewayUrl = onboardingResult?.gateway_url || runtimeConfig?.gateway_url || "";
   const selected = providerCatalog[provider];
 
   const selectProvider = (nextProvider: Provider) => {
@@ -473,7 +475,7 @@ print(response)`;
           </div>
           <p className="text-xs text-[#6B7488] mb-3">Replace the model provider base URL in the customer app.</p>
           <div className="flex items-center gap-2 rounded-[10px] border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2">
-            <code className="text-xs text-[#0E1726] flex-1 truncate">{gatewayUrl}</code>
+            <code className="text-xs text-[#0E1726] flex-1 truncate">{gatewayUrl || "Loading runtime configuration…"}</code>
             <button
               onClick={() => copy("gateway", gatewayUrl)}
               className="p-1.5 rounded bg-white hover:bg-[#F1ECFE] text-[#475069] border border-[#E6E9F0]"

@@ -12,7 +12,7 @@ sqs = {addr for addr in addresses if "aws_sqs_queue.audit" in addr or "audit_sqs
 required = [
     "aws_sqs_queue.audit",
     "aws_sqs_queue.audit_dlq",
-    "aws_iam_role.audit_sqs_consumer",
+    'aws_iam_role.application_task["audit_consumer"]',
     "aws_cloudwatch_metric_alarm.audit_sqs",
     'aws_vpc_endpoint.interface["sqs"]',
 ]

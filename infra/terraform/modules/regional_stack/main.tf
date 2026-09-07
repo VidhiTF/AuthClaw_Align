@@ -3,23 +3,52 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+data "aws_ssm_parameter" "ecs_arm64_ami" {
+  count = var.ecs_ec2_graviton.enabled && var.ecs_ec2_graviton.image_id == "" ? 1 : 0
+  name  = "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id"
+}
+
 locals {
   discovered_azs = length(var.availability_zones) > 0 ? var.availability_zones : data.aws_availability_zones.available[0].names
   azs            = slice(local.discovered_azs, 0, var.az_count)
   az_map         = { for idx, az in local.azs : tostring(idx) => az }
+  runtime_architectures = var.ecs_ec2_graviton.enabled ? {
+    agent          = "ARM64"
+    backend        = "ARM64"
+    gateway        = "ARM64"
+    console        = "ARM64"
+    audit_consumer = "ARM64"
+    opa            = "ARM64"
+    presidio       = "ARM64"
+    } : merge({
+      agent          = "X86_64"
+      backend        = "X86_64"
+      gateway        = "X86_64"
+      console        = "X86_64"
+      audit_consumer = "X86_64"
+      opa            = "X86_64"
+      presidio       = "X86_64"
+  }, var.service_cpu_architectures)
+  ecs_launch_compatibilities = var.ecs_ec2_graviton.enabled ? ["EC2"] : ["FARGATE"]
+  ec2_capacity_provider_name = "${var.name}-graviton"
+  ec2_ami_id                 = var.ecs_ec2_graviton.enabled ? (var.ecs_ec2_graviton.image_id != "" ? var.ecs_ec2_graviton.image_id : data.aws_ssm_parameter.ecs_arm64_ami[0].value) : ""
   interface_endpoint_services = merge({
     ecr_api        = "ecr.api"
     ecr_dkr        = "ecr.dkr"
     logs           = "logs"
     secretsmanager = "secretsmanager"
     kms            = "kms"
+    sts            = "sts"
   }, var.audit_stream_transport == "sqs_fifo" ? { sqs = "sqs" } : {})
   namespace_name        = "${var.name}.local"
   listener_protocol     = "HTTPS"
   public_scheme         = "https"
-  public_host           = var.domain_name != "" ? var.domain_name : aws_lb.main.dns_name
-  api_base_url          = "${local.public_scheme}://${local.public_host}:8000"
-  gateway_base_url      = "${local.public_scheme}://${local.public_host}:8080"
+  console_host          = var.enable_public_edge ? var.public_domain_names.console : (var.domain_name != "" ? var.domain_name : aws_lb.service["console"].dns_name)
+  api_host              = var.enable_public_edge ? var.public_domain_names.api : (var.domain_name != "" ? var.domain_name : aws_lb.service["backend"].dns_name)
+  gateway_host          = var.enable_public_edge ? var.public_domain_names.gateway : (var.domain_name != "" ? var.domain_name : aws_lb.service["gateway"].dns_name)
+  console_base_url      = "${local.public_scheme}://${local.console_host}"
+  api_base_url          = "${local.public_scheme}://${local.api_host}${var.enable_public_edge ? "/api/v1" : ":8000"}"
+  gateway_base_url      = "${local.public_scheme}://${local.gateway_host}${var.enable_public_edge ? "" : ":8080"}"
   internal_agent_url    = "http://agent.${local.namespace_name}:8001"
   internal_opa_url      = "http://127.0.0.1:8181"
   internal_presidio_url = "http://127.0.0.1:3000"
@@ -32,21 +61,18 @@ locals {
     console = {
       image          = var.container_images.console
       container_port = 3001
-      listener_port  = 443
       health_path    = "/"
       command        = null
     }
     backend = {
       image          = var.container_images.backend
       container_port = 8000
-      listener_port  = 8000
       health_path    = "/health"
       command        = null
     }
     gateway = {
       image          = var.container_images.gateway
       container_port = 8080
-      listener_port  = 8080
       health_path    = "/health"
       command        = null
     }
@@ -75,6 +101,7 @@ locals {
 
   service_configs         = merge(local.public_services, local.private_services)
   task_definition_configs = merge(local.service_configs, local.legacy_sidecar_services)
+  ecs_alarm_services      = toset(concat(keys(local.service_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
 
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
@@ -98,10 +125,21 @@ locals {
     { name = "AUTHCLAW_GO_GATEWAY_URL", value = "http://gateway.${local.namespace_name}:8080" },
     { name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" },
     { name = "AUTHCLAW_DISABLE_BACKGROUND_MONITOR", value = "true" },
+    { name = "AWS_STS_REGIONAL_ENDPOINTS", value = "regional" },
     { name = "PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
     { name = "GATEWAY_INTERNAL_URL", value = "http://gateway.${local.namespace_name}:8080" },
     { name = "NEXT_PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
     { name = "NEXT_PUBLIC_API_URL", value = local.api_base_url },
+    { name = "PUBLIC_API_URL", value = local.api_base_url },
+    { name = "NEXT_PUBLIC_CONSOLE_URL", value = local.console_base_url },
+    { name = "PUBLIC_CONSOLE_URL", value = local.console_base_url },
+    { name = "API_URL", value = "http://backend.${local.namespace_name}:8000" },
+    { name = "GATEWAY_URL", value = "http://gateway.${local.namespace_name}:8080" },
+    { name = "ALLOWED_ORIGINS", value = jsonencode([local.console_base_url]) },
+    { name = "OIDC_REDIRECT_URI", value = "${local.console_base_url}/api/auth/oidc/callback" },
+    { name = "AUTHCLAW_COOKIE_SECURE", value = "true" },
+    { name = "AUTHCLAW_SESSION_COOKIE_NAME", value = var.enable_public_edge ? (var.public_url_environment == "production" ? "authclaw_session_prod" : "authclaw_session_stg") : "authclaw_session" },
+    { name = "AUTHCLAW_OIDC_STATE_COOKIE_NAME", value = var.enable_public_edge ? (var.public_url_environment == "production" ? "authclaw_oidc_state_prod" : "authclaw_oidc_state_stg") : "authclaw_oidc_state" },
     { name = "DEMO_OTP_VISIBLE", value = "false" },
     { name = "SMTP_HOST", value = var.smtp_host },
     { name = "SMTP_FROM", value = var.smtp_from },
@@ -260,27 +298,32 @@ resource "aws_vpc_endpoint" "gateway" {
   service_name      = "com.amazonaws.${var.region}.${each.value}"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = values(aws_route_table.private)[*].id
+  policy            = local.gateway_endpoint_policies[each.key]
 
   tags = merge(var.tags, { Name = "${var.name}-${each.value}-endpoint" })
 }
 
+data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
+  count = var.enable_public_edge ? 1 : 0
+  name  = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+data "aws_partition" "current" {}
+
 resource "aws_security_group" "alb" {
   name        = "${var.name}-alb"
-  description = "Public ALB ingress"
+  description = "CloudFront-only private origin ingress"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    from_port   = 8000
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  dynamic "ingress" {
+    for_each = var.enable_public_edge ? [1] : []
+    content {
+      description     = "HTTPS from CloudFront origin-facing network only"
+      from_port       = 443
+      to_port         = 443
+      protocol        = "tcp"
+      prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront_origin[0].id]
+    }
   }
 
   egress {
@@ -378,6 +421,7 @@ resource "aws_vpc_endpoint" "interface" {
   subnet_ids          = values(aws_subnet.private)[*].id
   security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
+  policy              = local.interface_endpoint_policies[each.key]
 
   tags = merge(var.tags, { Name = "${var.name}-${replace(each.value, ".", "-")}-endpoint" })
 }
@@ -788,6 +832,328 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+resource "aws_iam_role" "application_task" {
+  for_each = toset(["backend", "gateway", "agent", "audit_consumer"])
+
+  name = each.key == "audit_consumer" ? "${var.name}-audit-consumer-sqs" : each.key == "agent" ? "${var.name}-agent-runtime" : "${var.name}-${each.key}-audit-sqs"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+    }]
+  })
+  tags = var.tags
+}
+
+moved {
+  from = aws_iam_role.audit_sqs_producer["backend"]
+  to   = aws_iam_role.application_task["backend"]
+}
+
+moved {
+  from = aws_iam_role.audit_sqs_producer["gateway"]
+  to   = aws_iam_role.application_task["gateway"]
+}
+
+moved {
+  from = aws_iam_role.audit_sqs_consumer[0]
+  to   = aws_iam_role.application_task["audit_consumer"]
+}
+
+locals {
+  application_task_role_arns = { for service, role in aws_iam_role.application_task : service => role.arn }
+  ecs_secret_arns = concat([
+    aws_secretsmanager_secret.jwt.arn,
+    aws_secretsmanager_secret.jwt_v2.arn,
+    aws_secretsmanager_secret.session.arn,
+    aws_secretsmanager_secret.session_v2.arn,
+    aws_secretsmanager_secret.envelope.arn,
+    aws_secretsmanager_secret.envelope_v2.arn,
+    aws_secretsmanager_secret.bootstrap_database_url.arn,
+    aws_secretsmanager_secret.backend_migration_database_url.arn,
+    aws_secretsmanager_secret.backend_database_url.arn,
+    aws_secretsmanager_secret.app_database_url.arn,
+    aws_secretsmanager_secret.agent_migration_database_url.arn,
+    aws_secretsmanager_secret.agent_database_url.arn,
+    aws_secretsmanager_secret.internal_service.arn,
+    aws_secretsmanager_secret.bff_client_ip.arn,
+    aws_secretsmanager_secret.oidc_bff_exchange.arn,
+    aws_secretsmanager_secret.worker_token_hmac.arn,
+    aws_secretsmanager_secret.agent_encryption.arn,
+    aws_secretsmanager_secret.agent_redaction.arn,
+  ], var.clickhouse_password != "" ? [aws_secretsmanager_secret.clickhouse_password[0].arn] : [])
+
+  runtime_s3_bucket_arns  = sort(distinct(flatten([for arns in values(var.runtime_s3_bucket_arns) : tolist(arns)])))
+  runtime_kms_key_arns    = sort(distinct(flatten([for arns in values(var.runtime_kms_key_arns) : tolist(arns)])))
+  runtime_secret_arns     = sort(distinct(flatten([for arns in values(var.runtime_secrets_manager_secret_arns) : tolist(arns)])))
+  runtime_principal_arns  = distinct(concat([aws_iam_role.application_task["backend"].arn, aws_iam_role.application_task["agent"].arn], sort(tolist(var.vpc_endpoint_external_principal_arns))))
+  execution_principal_arn = aws_iam_role.task_execution.arn
+
+  deny_insecure_transport_statement = {
+    Sid       = "DenyInsecureTransport"
+    Effect    = "Deny"
+    Principal = "*"
+    Action    = "*"
+    Resource  = "*"
+    Condition = { Bool = { "aws:SecureTransport" = "false" } }
+  }
+
+  gateway_endpoint_policies = {
+    s3 = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowECRImageLayers"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = "s3:GetObject"
+          Resource  = "arn:${data.aws_partition.current.partition}:s3:::prod-${var.region}-starport-layer-bucket/*"
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeBucketActions"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action = [
+              "s3:ListBucket",
+              "s3:GetBucketLocation",
+              "s3:GetBucketPublicAccessBlock",
+              "s3:GetEncryptionConfiguration",
+              "s3:GetBucketVersioning",
+              "s3:GetBucketLogging",
+              "s3:GetBucketPolicyStatus",
+              "s3:PutBucketPublicAccessBlock",
+              "s3:GetObject",
+              "s3:PutObject",
+            ]
+            Resource = concat(local.runtime_s3_bucket_arns, [for arn in local.runtime_s3_bucket_arns : "${arn}/*"])
+          },
+          {
+            Sid       = "AllowApprovedRuntimeBucketDiscovery"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action    = "s3:ListAllMyBuckets"
+            Resource  = "*"
+          }
+      ] : statement if length(local.runtime_s3_bucket_arns) > 0])
+    })
+  }
+
+  interface_endpoint_policies = {
+    ecr_api = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskECRToken"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = "ecr:GetAuthorizationToken"
+          Resource  = "*"
+        },
+        {
+          Sid       = "AllowTaskImagePull"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+          Resource  = sort(tolist(var.ecr_repository_arns))
+        }
+      ]
+    })
+    ecr_dkr = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskRegistryPull"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+          Resource  = sort(tolist(var.ecr_repository_arns))
+        }
+      ]
+    })
+    logs = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskLogDelivery"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = ["logs:CreateLogStream", "logs:PutLogEvents"]
+          Resource  = concat([for group in values(aws_cloudwatch_log_group.service) : "${group.arn}:*"], [for group in values(aws_cloudwatch_log_group.database_job) : "${group.arn}:*"])
+        }
+      ]
+    })
+    secretsmanager = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskSecretInjection"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = "secretsmanager:GetSecretValue"
+          Resource  = local.ecs_secret_arns
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeSecrets"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action    = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:CreateSecret", "secretsmanager:DeleteSecret"]
+            Resource  = local.runtime_secret_arns
+          }
+      ] : statement if length(local.runtime_secret_arns) > 0])
+    })
+    kms = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskSecretDecryption"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arn }
+          Action    = "kms:Decrypt"
+          Resource  = aws_kms_key.main.arn
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeCryptography"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action    = ["kms:Decrypt", "kms:GenerateDataKey"]
+            Resource  = local.runtime_kms_key_arns
+          }
+      ] : statement if length(local.runtime_kms_key_arns) > 0])
+    })
+    sts = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowRuntimeIdentityCheck"
+          Effect    = "Allow"
+          Principal = { AWS = distinct(concat(values(local.application_task_role_arns), sort(tolist(var.vpc_endpoint_external_principal_arns)))) }
+          Action    = "sts:GetCallerIdentity"
+          Resource  = "*"
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeRoleAssumption"
+            Effect    = "Allow"
+            Principal = { AWS = aws_iam_role.application_task["agent"].arn }
+            Action    = "sts:AssumeRole"
+            Resource  = sort(tolist(var.runtime_sts_assume_role_arns))
+          }
+      ] : statement if length(var.runtime_sts_assume_role_arns) > 0])
+    })
+    sqs = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowAuditTransport"
+          Effect    = "Allow"
+          Principal = { AWS = [aws_iam_role.application_task["backend"].arn, aws_iam_role.application_task["gateway"].arn, aws_iam_role.application_task["audit_consumer"].arn] }
+          Action    = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"]
+          Resource  = try(aws_sqs_queue.audit[0].arn, "*")
+        }
+      ]
+    })
+  }
+}
+
+resource "aws_iam_role_policy" "runtime_s3" {
+  for_each = { for service, arns in var.runtime_s3_bucket_arns : service => arns if length(arns) > 0 }
+
+  name = "${var.name}-${each.key}-runtime-s3"
+  role = aws_iam_role.application_task[each.key].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ListApprovedBuckets"
+        Effect = "Allow"
+        Action = each.key == "backend" ? [
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:PutBucketPublicAccessBlock",
+          ] : [
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:GetBucketPublicAccessBlock",
+          "s3:GetEncryptionConfiguration",
+          "s3:GetBucketVersioning",
+          "s3:GetBucketLogging",
+          "s3:GetBucketPolicyStatus",
+        ]
+        Resource = sort(tolist(each.value))
+      },
+      {
+        Sid      = "ReadWriteApprovedObjects"
+        Effect   = "Allow"
+        Action   = each.key == "backend" ? ["s3:GetObject", "s3:PutObject"] : ["s3:GetObject"]
+        Resource = [for arn in sort(tolist(each.value)) : "${arn}/*"]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "runtime_kms" {
+  for_each = { for service, arns in var.runtime_kms_key_arns : service => arns if length(arns) > 0 }
+
+  name = "${var.name}-${each.key}-runtime-kms"
+  role = aws_iam_role.application_task[each.key].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = each.key == "agent" ? ["kms:Decrypt", "kms:GenerateDataKey"] : ["kms:Decrypt"]
+      Resource = sort(tolist(each.value))
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "runtime_secrets_manager" {
+  for_each = { for service, arns in var.runtime_secrets_manager_secret_arns : service => arns if length(arns) > 0 }
+
+  name = "${var.name}-${each.key}-runtime-secrets-manager"
+  role = aws_iam_role.application_task[each.key].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret"
+      ]
+      Resource = sort(tolist(each.value))
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "runtime_sts" {
+  count = length(var.runtime_sts_assume_role_arns) > 0 ? 1 : 0
+
+  name = "${var.name}-agent-runtime-sts"
+  role = aws_iam_role.application_task["agent"].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "sts:AssumeRole"
+      Resource = sort(tolist(var.runtime_sts_assume_role_arns))
+    }]
+  })
+}
+
 resource "aws_iam_role_policy" "task_secrets" {
   name = "${var.name}-ecs-secrets"
   role = aws_iam_role.task_execution.id
@@ -800,48 +1166,301 @@ resource "aws_iam_role_policy" "task_secrets" {
           "secretsmanager:GetSecretValue",
           "kms:Decrypt"
         ]
-        Resource = concat([
-          aws_secretsmanager_secret.jwt.arn,
-          aws_secretsmanager_secret.jwt_v2.arn,
-          aws_secretsmanager_secret.session.arn,
-          aws_secretsmanager_secret.session_v2.arn,
-          aws_secretsmanager_secret.envelope.arn,
-          aws_secretsmanager_secret.envelope_v2.arn,
-          aws_secretsmanager_secret.bootstrap_database_url.arn,
-          aws_secretsmanager_secret.backend_migration_database_url.arn, aws_secretsmanager_secret.backend_database_url.arn,
-          aws_secretsmanager_secret.app_database_url.arn,
-          aws_secretsmanager_secret.agent_migration_database_url.arn,
-          aws_secretsmanager_secret.agent_database_url.arn,
-          aws_secretsmanager_secret.internal_service.arn,
-          aws_secretsmanager_secret.bff_client_ip.arn,
-          aws_secretsmanager_secret.oidc_bff_exchange.arn,
-          aws_secretsmanager_secret.worker_token_hmac.arn,
-          aws_secretsmanager_secret.agent_encryption.arn,
-          aws_secretsmanager_secret.agent_redaction.arn,
-          aws_kms_key.main.arn
-        ], var.clickhouse_password != "" ? [aws_secretsmanager_secret.clickhouse_password[0].arn] : [])
+        Resource = concat(local.ecs_secret_arns, [aws_kms_key.main.arn])
       }
     ]
   })
 }
 
-resource "aws_lb" "main" {
-  name = substr(replace("${var.name}-alb", "_", "-"), 0, 32)
-  #trivy:ignore:AVD-AWS-0053 This ALB is the intentional public ingress for console/API/gateway traffic; private services are not attached.
-  internal                   = false
+resource "aws_iam_role" "ecs_instance" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name = "${var.name}-ecs-instance"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+  })
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_instance" {
+  for_each = var.ecs_ec2_graviton.enabled ? toset([
+    "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role",
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+  ]) : toset([])
+
+  role       = aws_iam_role.ecs_instance[0].name
+  policy_arn = each.value
+}
+
+resource "aws_iam_instance_profile" "ecs_instance" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name = "${var.name}-ecs-instance"
+  role = aws_iam_role.ecs_instance[0].name
+  tags = var.tags
+}
+
+resource "aws_launch_template" "ecs_graviton" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name_prefix   = "${var.name}-ecs-graviton-"
+  image_id      = local.ec2_ami_id
+  instance_type = var.ecs_ec2_graviton.instance_type
+  user_data = base64encode(join("\n", [
+    "#!/bin/bash",
+    "set -euo pipefail",
+    "cat >/etc/ecs/ecs.config <<'EOF'",
+    "ECS_CLUSTER=${aws_ecs_cluster.main.name}",
+    "ECS_ENABLE_SPOT_INSTANCE_DRAINING=true",
+    "ECS_CONTAINER_INSTANCE_PROPAGATE_TAGS_FROM=ec2_instance",
+    "EOF",
+  ]))
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      encrypted             = true
+      kms_key_id            = aws_kms_key.main.arn
+      volume_size           = var.ecs_ec2_graviton.root_volume_size
+      volume_type           = "gp3"
+      delete_on_termination = true
+    }
+  }
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ecs_instance[0].name
+  }
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  monitoring {
+    enabled = true
+  }
+
+  network_interfaces {
+    associate_public_ip_address = false
+    delete_on_termination       = true
+    security_groups             = [aws_security_group.app.id]
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = merge(var.tags, { Name = "${var.name}-ecs-graviton" })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = merge(var.tags, { Name = "${var.name}-ecs-graviton-root" })
+  }
+
+  update_default_version = true
+  tags                   = var.tags
+}
+
+resource "aws_autoscaling_group" "ecs_graviton" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name                      = "${var.name}-ecs-graviton"
+  min_size                  = var.ecs_ec2_graviton.min_size
+  desired_capacity          = var.ecs_ec2_graviton.desired_size
+  max_size                  = var.ecs_ec2_graviton.max_size
+  vpc_zone_identifier       = values(aws_subnet.private)[*].id
+  health_check_type         = "EC2"
+  health_check_grace_period = 300
+  protect_from_scale_in     = true
+  termination_policies      = ["OldestLaunchTemplate", "OldestInstance"]
+  enabled_metrics           = ["GroupDesiredCapacity", "GroupInServiceInstances", "GroupPendingInstances", "GroupStandbyInstances", "GroupTerminatingInstances", "GroupTotalInstances"]
+
+  launch_template {
+    id      = aws_launch_template.ecs_graviton[0].id
+    version = "$Latest"
+  }
+
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 100
+      instance_warmup        = 300
+    }
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${var.name}-ecs-graviton"
+    propagate_at_launch = true
+  }
+
+  dynamic "tag" {
+    for_each = var.tags
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+}
+
+resource "aws_ecs_capacity_provider" "graviton" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name = local.ec2_capacity_provider_name
+
+  auto_scaling_group_provider {
+    auto_scaling_group_arn         = aws_autoscaling_group.ecs_graviton[0].arn
+    managed_draining               = "ENABLED"
+    managed_termination_protection = "ENABLED"
+
+    managed_scaling {
+      status                    = "ENABLED"
+      target_capacity           = 80
+      minimum_scaling_step_size = 1
+      maximum_scaling_step_size = max(1, var.ecs_ec2_graviton.max_size - var.ecs_ec2_graviton.min_size)
+      instance_warmup_period    = 300
+    }
+  }
+
+  tags = var.tags
+}
+
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = [aws_ecs_capacity_provider.graviton[0].name]
+
+  default_capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+    weight            = 1
+    base              = 0
+  }
+}
+
+resource "random_id" "alb_log_bucket" {
+  byte_length = 4
+}
+
+resource "aws_s3_bucket" "alb_logs" {
+  bucket        = substr(lower("${var.name}-${var.region}-alb-logs-${random_id.alb_log_bucket.hex}"), 0, 63)
+  force_destroy = false
+  tags          = merge(var.tags, { DataClass = "security-telemetry" })
+}
+
+resource "aws_s3_bucket_public_access_block" "alb_logs" {
+  bucket                  = aws_s3_bucket.alb_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+#trivy:ignore:AVD-AWS-0132 ALB access-log delivery supports SSE-S3, not customer-managed SSE-KMS keys.
+resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  rule {
+    id     = "retention"
+    status = "Enabled"
+    filter {}
+    expiration { days = var.alb_access_log_retention_days }
+  }
+}
+
+data "aws_iam_policy_document" "alb_logs" {
+  statement {
+    sid       = "AllowALBLogDelivery"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.alb_logs.arn}/AWSLogs/${var.aws_account_id != "" ? var.aws_account_id : "*"}/*"]
+    principals {
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+    }
+    dynamic "condition" {
+      for_each = var.aws_account_id != "" ? [1] : []
+      content {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [var.aws_account_id]
+      }
+    }
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:${data.aws_partition.current.partition}:elasticloadbalancing:${var.region}:${var.aws_account_id != "" ? var.aws_account_id : "*"}:loadbalancer/*"]
+    }
+  }
+
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.alb_logs.arn, "${aws_s3_bucket.alb_logs.arn}/*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  policy = data.aws_iam_policy_document.alb_logs.json
+}
+
+moved {
+  from = aws_lb.main
+  to   = aws_lb.service["console"]
+}
+
+resource "aws_lb" "service" {
+  for_each = local.public_services
+
+  name                       = trim(substr(replace("${substr(var.name, 0, 20)}-${each.key}-alb", "_", "-"), 0, 32), "-")
+  internal                   = true
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
-  subnets                    = values(aws_subnet.public)[*].id
+  subnets                    = values(aws_subnet.private)[*].id
   drop_invalid_header_fields = true
   xff_header_processing_mode = "append"
   enable_xff_client_port     = false
   tags                       = var.tags
+
+  access_logs {
+    bucket  = aws_s3_bucket.alb_logs.id
+    prefix  = each.key
+    enabled = true
+  }
+
+  depends_on = [aws_s3_bucket_policy.alb_logs]
 }
 
 resource "aws_lb_target_group" "service" {
   for_each = local.public_services
 
-  name        = substr(replace("${var.name}-${each.key}", "_", "-"), 0, 32)
+  name        = trim(substr(replace("${substr(var.name, 0, 20)}-${each.key}", "_", "-"), 0, 32), "-")
   port        = each.value.container_port
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -862,8 +1481,8 @@ resource "aws_lb_target_group" "service" {
 resource "aws_lb_listener" "service" {
   for_each = local.public_services
 
-  load_balancer_arn = aws_lb.main.arn
-  port              = each.value.listener_port
+  load_balancer_arn = aws_lb.service[each.key].arn
+  port              = 443
   protocol          = local.listener_protocol
   certificate_arn   = var.certificate_arn
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
@@ -980,7 +1599,7 @@ resource "aws_cloudwatch_log_group" "database_job" {
 resource "aws_ecs_task_definition" "database_job" {
   for_each                 = local.database_jobs
   family                   = "${var.name}-database-${replace(each.key, "_", "-")}"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.service_cpu
   memory                   = var.service_memory
@@ -988,7 +1607,7 @@ resource "aws_ecs_task_definition" "database_job" {
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, each.key == "agent_migrations" ? "agent" : "backend", "X86_64")
+    cpu_architecture        = local.runtime_architectures[each.key == "agent_migrations" ? "agent" : "backend"]
   }
 
   container_definitions = jsonencode([{
@@ -1014,16 +1633,16 @@ resource "aws_ecs_task_definition" "service" {
   for_each = local.task_definition_configs
 
   family                   = "${var.name}-${each.key}"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.service_cpu
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = lookup(local.audit_sqs_task_role_arns, each.key, null)
+  task_role_arn            = lookup(local.application_task_role_arns, each.key, null)
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, each.key, "X86_64")
+    cpu_architecture        = local.runtime_architectures[each.key]
   }
 
   container_definitions = jsonencode([
@@ -1137,15 +1756,16 @@ resource "aws_ecs_task_definition" "service" {
 
 resource "aws_ecs_task_definition" "gateway_with_sidecars" {
   family                   = "${var.name}-gateway-sidecars"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.gateway_sidecar_task_cpu
   memory                   = var.gateway_sidecar_task_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.application_task["gateway"].arn
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "gateway", "X86_64")
+    cpu_architecture        = local.runtime_architectures.gateway
   }
 
   container_definitions = jsonencode([
@@ -1258,15 +1878,16 @@ resource "aws_ecs_task_definition" "gateway_with_sidecars" {
 
 resource "aws_ecs_task_definition" "backend_with_presidio" {
   family                   = "${var.name}-backend-presidio"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.backend_sidecar_task_cpu
   memory                   = var.backend_sidecar_task_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.application_task["backend"].arn
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "backend", "X86_64")
+    cpu_architecture        = local.runtime_architectures.backend
   }
 
   container_definitions = jsonencode([
@@ -1359,15 +1980,16 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
 
 resource "aws_ecs_task_definition" "agent_with_opa" {
   family                   = "${var.name}-agent-opa"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.agent_sidecar_task_cpu
   memory                   = var.agent_sidecar_task_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
+  task_role_arn            = aws_iam_role.application_task["agent"].arn
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "agent", "X86_64")
+    cpu_architecture        = local.runtime_architectures.agent
   }
 
   container_definitions = jsonencode([
@@ -1452,7 +2074,16 @@ resource "aws_ecs_service" "public" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = each.key == "gateway" ? aws_ecs_task_definition.gateway_with_sidecars.arn : each.key == "backend" ? aws_ecs_task_definition.backend_with_presidio.arn : aws_ecs_task_definition.service[each.key].arn
   desired_count   = var.desired_count
-  launch_type     = "FARGATE"
+  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.ecs_ec2_graviton.enabled ? [1] : []
+    content {
+      capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+      weight            = 1
+      base              = 0
+    }
+  }
 
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
@@ -1470,7 +2101,7 @@ resource "aws_ecs_service" "public" {
     registry_arn = aws_service_discovery_service.service[each.key].arn
   }
 
-  depends_on = [aws_lb_listener.service]
+  depends_on = [aws_lb_listener.service, aws_ecs_cluster_capacity_providers.main]
   tags       = var.tags
 }
 
@@ -1481,7 +2112,16 @@ resource "aws_ecs_service" "private" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = each.key == "agent" ? aws_ecs_task_definition.agent_with_opa.arn : aws_ecs_task_definition.service[each.key].arn
   desired_count   = var.desired_count
-  launch_type     = "FARGATE"
+  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.ecs_ec2_graviton.enabled ? [1] : []
+    content {
+      capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+      weight            = 1
+      base              = 0
+    }
+  }
 
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
@@ -1493,19 +2133,20 @@ resource "aws_ecs_service" "private" {
     registry_arn = aws_service_discovery_service.service[each.key].arn
   }
 
-  tags = var.tags
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
+  tags       = var.tags
 }
 
 resource "aws_ecs_task_definition" "audit_consumer" {
   count = var.enable_audit_consumer ? 1 : 0
 
   family                   = "${var.name}-audit-consumer"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.service_cpu
   memory                   = var.service_memory
   execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = lookup(local.audit_sqs_task_role_arns, "audit_consumer", null)
+  task_role_arn            = aws_iam_role.application_task["audit_consumer"].arn
 
   lifecycle {
     precondition {
@@ -1520,7 +2161,7 @@ resource "aws_ecs_task_definition" "audit_consumer" {
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "audit_consumer", "X86_64")
+    cpu_architecture        = local.runtime_architectures.audit_consumer
   }
 
   container_definitions = jsonencode([
@@ -1568,7 +2209,16 @@ resource "aws_ecs_service" "audit_consumer" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.audit_consumer[0].arn
   desired_count   = 1
-  launch_type     = "FARGATE"
+  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.ecs_ec2_graviton.enabled ? [1] : []
+    content {
+      capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+      weight            = 1
+      base              = 0
+    }
+  }
 
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
@@ -1576,7 +2226,8 @@ resource "aws_ecs_service" "audit_consumer" {
     assign_public_ip = false
   }
 
-  tags = var.tags
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
+  tags       = var.tags
 }
 
 resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
@@ -1592,9 +2243,10 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
   statistic           = "Maximum"
   threshold           = 0
   treat_missing_data  = "breaching"
+  alarm_actions       = var.edge_alarm_action_arns
 
   dimensions = {
-    LoadBalancer = aws_lb.main.arn_suffix
+    LoadBalancer = aws_lb.service[each.key].arn_suffix
     TargetGroup  = aws_lb_target_group.service[each.key].arn_suffix
   }
 
@@ -1617,8 +2269,156 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
 
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_capacity_provider_reservation" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  alarm_name          = "${var.name}-ecs-graviton-capacity-reservation"
+  alarm_description   = "ECS Graviton capacity provider reservation is above 90 percent"
+  namespace           = "AWS/ECS/ManagedScaling"
+  metric_name         = "CapacityProviderReservation"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  period              = 60
+  statistic           = "Average"
+  threshold           = 90
+  treat_missing_data  = "breaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  dimensions = {
+    CapacityProviderName = aws_ecs_capacity_provider.graviton[0].name
+    ClusterName          = aws_ecs_cluster.main.name
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_pending_tasks" {
+  for_each = var.ecs_ec2_graviton.enabled ? local.ecs_alarm_services : toset([])
+
+  alarm_name          = "${var.name}-${each.key}-pending-tasks"
+  alarm_description   = "AuthClaw ${each.key} has pending ECS tasks"
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "PendingTaskCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
     ServiceName = "${var.name}-${each.key}"
   }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_instance_health" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  alarm_name          = "${var.name}-ecs-graviton-instance-health"
+  alarm_description   = "At least one ECS Graviton container instance has failed EC2 status checks"
+  namespace           = "AWS/EC2"
+  metric_name         = "StatusCheckFailed"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.ecs_graviton[0].name
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_event_rule" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name        = "${var.name}-ecs-placement-failure"
+  description = "Captures ECS placement failures for AuthClaw services"
+  event_pattern = jsonencode({
+    source        = ["aws.ecs"]
+    "detail-type" = ["ECS Service Action"]
+    detail = {
+      clusterArn = [aws_ecs_cluster.main.arn]
+      eventName  = ["SERVICE_TASK_PLACEMENT_FAILURE"]
+    }
+  })
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_log_group" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name              = "/authclaw/${var.name}/ecs-placement-failure"
+  retention_in_days = 30
+  tags              = var.tags
+}
+
+resource "aws_cloudwatch_log_resource_policy" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  policy_name = "${var.name}-ecs-placement-failure"
+  policy_document = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "events.amazonaws.com"
+      }
+      Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+      Resource = "${aws_cloudwatch_log_group.ecs_placement_failure[0].arn}:*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_event_target" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  rule = aws_cloudwatch_event_rule.ecs_placement_failure[0].name
+  arn  = aws_cloudwatch_log_group.ecs_placement_failure[0].arn
+}
+
+resource "aws_cloudwatch_log_metric_filter" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name           = "${var.name}-ecs-placement-failure"
+  log_group_name = aws_cloudwatch_log_group.ecs_placement_failure[0].name
+  pattern        = "{ $.detail.eventName = \"SERVICE_TASK_PLACEMENT_FAILURE\" }"
+
+  metric_transformation {
+    name      = "PlacementFailureCount"
+    namespace = "AuthClaw/ECS"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  alarm_name          = "${var.name}-ecs-placement-failure"
+  alarm_description   = "ECS reported at least one AuthClaw task placement failure"
+  namespace           = "AuthClaw/ECS"
+  metric_name         = "PlacementFailureCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
 
   tags = var.tags
 }

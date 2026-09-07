@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { sessionCookieOptions } from "@/lib/cookie-options";
+import { oidcStateCookieName, sessionCookieName, sessionCookieOptions } from "@/lib/cookie-options";
 import { openOidcState } from "@/lib/oidc-state";
 import { oidcServiceHeaders } from "@/lib/oidc-service";
 
@@ -11,7 +11,7 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const requestId = request.headers.get("x-request-id") || "";
   const cookieStore = await cookies();
-  const stateCookie = cookieStore.get("authclaw_oidc_state")?.value;
+  const stateCookie = cookieStore.get(oidcStateCookieName())?.value;
   const auditStateFailure = () => console.warn(JSON.stringify({
     tenant_id: "",
     actor_id: "",
@@ -22,7 +22,7 @@ export async function GET(request: Request) {
   }));
   const fail = (message: string) => {
     const response = NextResponse.redirect(`${url.origin}/login?sso_error=${encodeURIComponent(message)}`);
-    response.cookies.delete("authclaw_oidc_state");
+    response.cookies.delete(oidcStateCookieName());
     return response;
   };
 
@@ -48,24 +48,24 @@ export async function GET(request: Request) {
     return fail("Invalid SSO callback state");
   }
   try {
-  // Backend atomically consumes the server-owned record before token exchange.
-  const body = JSON.stringify({ code, transaction_id: expected });
-  const backendResponse = await fetch(`${BACKEND_URL}/v1/auth/oidc/callback`, {
-    method: "POST",
-    headers: oidcServiceHeaders("/v1/auth/oidc/callback", body),
-    body,
-  });
-  const data = await backendResponse.json().catch(() => ({}));
-  if (!backendResponse.ok) {
-    return fail(GENERIC_AUTH_FAILURE);
-  }
+    // Backend atomically consumes the server-owned record before token exchange.
+    const body = JSON.stringify({ code, transaction_id: expected });
+    const backendResponse = await fetch(`${BACKEND_URL}/v1/auth/oidc/callback`, {
+      method: "POST",
+      headers: oidcServiceHeaders("/v1/auth/oidc/callback", body),
+      body,
+    });
+    const data = await backendResponse.json().catch(() => ({}));
+    if (!backendResponse.ok) {
+      return fail(GENERIC_AUTH_FAILURE);
+    }
 
-  const response = NextResponse.redirect(`${url.origin}/overview`);
-  response.cookies.set("authclaw_session", data.session_token, {
-    ...sessionCookieOptions(60 * 60 * 24),
-  });
-  response.cookies.delete("authclaw_oidc_state");
-  return response;
+    const response = NextResponse.redirect(`${url.origin}/overview`);
+    response.cookies.set(sessionCookieName(), data.session_token, {
+      ...sessionCookieOptions(60 * 60 * 24),
+    });
+    response.cookies.delete(oidcStateCookieName());
+    return response;
   } catch {
     return fail(GENERIC_AUTH_FAILURE);
   }
