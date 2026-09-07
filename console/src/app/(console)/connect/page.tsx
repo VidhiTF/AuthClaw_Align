@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -23,6 +24,14 @@ import { fetchJson } from "@/lib/client-fetch";
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
 import { isProvider, providerCatalog, type Provider } from "@/lib/providers";
+
+const providerLogos: Record<Provider, string> = {
+  openai: "/provider-logos/openai.svg",
+  anthropic: "/provider-logos/anthropic.svg",
+  cohere: "/provider-logos/cohere.svg",
+  azure_openai: "/provider-logos/azure.svg",
+  gemini: "/provider-logos/gemini.svg",
+};
 
 interface GatewayApproval {
   id: string;
@@ -457,8 +466,16 @@ print(response)`;
                 return (
                   <button key={id} type="button" onClick={() => selectProvider(id)} aria-pressed={isSelected}
                     className={`flex w-full items-center gap-3 rounded-[14px] border p-3.5 text-left transition ${isSelected ? "border-[#6D28D9] bg-[#F8F5FF]" : "border-[#E6E9F0] hover:border-[#A78BFA] hover:bg-[#FBFAFF]"}`}>
-                    <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] text-xs font-black ${isSelected ? "bg-[#6D28D9] text-white" : "bg-[#F5F7FA] text-[#475069]"}`}>
-                      {item.shortLabel === "Azure OpenAI" ? "AZ" : item.shortLabel.slice(0, 2).toUpperCase()}
+                    <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border bg-white ${isSelected ? "border-[#C4B5FD]" : "border-[#EDF0F5]"}`}>
+                      <Image
+                        src={providerLogos[id]}
+                        alt=""
+                        width={24}
+                        height={24}
+                        loading="eager"
+                        unoptimized
+                        className="h-6 w-6 object-contain"
+                      />
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block text-sm font-bold text-[#0E1726]">{item.shortLabel}</span>
