@@ -409,6 +409,7 @@ jobs:
           terraform -chdir=infra/terraform validate
           cat > infra/terraform/ci.auto.tfvars.json <<'JSON'
           {
+            "environment": "ci",
             "ci_skip_aws_validation": true,
             "enable_secondary": false,
             "enable_cross_region_db_replica": false,
