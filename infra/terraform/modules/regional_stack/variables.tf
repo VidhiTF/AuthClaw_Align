@@ -104,9 +104,11 @@ variable "ecs_ec2_graviton" {
   type = object({
     enabled              = optional(bool, false)
     instance_type        = optional(string, "m7g.2xlarge")
-    min_size             = optional(number, 2)
-    desired_size         = optional(number, 2)
-    max_size             = optional(number, 4)
+    min_size             = optional(number, 4)
+    desired_size         = optional(number, 4)
+    max_size             = optional(number, 8)
+    usable_cpu_units     = optional(number, 8192)
+    usable_memory_mib    = optional(number, 30000)
     image_id             = optional(string, "")
     root_volume_size     = optional(number, 50)
     alarm_action_arns    = optional(list(string), [])
@@ -159,6 +161,118 @@ variable "session_key_version" {
 variable "desired_count" {
   type    = number
   default = 2
+}
+
+variable "service_min_capacity" {
+  description = "Minimum task count per service in staging/production; values must preserve task-failure availability."
+  type        = map(number)
+  default = {
+    console        = 2
+    backend        = 2
+    gateway        = 2
+    agent          = 2
+    audit_consumer = 2
+  }
+  validation {
+    condition     = alltrue([for service in ["console", "backend", "gateway", "agent", "audit_consumer"] : contains(keys(var.service_min_capacity), service)])
+    error_message = "service_min_capacity must define console, backend, gateway, agent, and audit_consumer."
+  }
+}
+
+variable "service_max_capacity" {
+  description = "Hard task ceilings selected to remain inside the RDS and downstream capacity budget."
+  type        = map(number)
+  default = {
+    console        = 4
+    backend        = 5
+    gateway        = 6
+    agent          = 4
+    audit_consumer = 4
+  }
+}
+
+variable "service_cpu_target" {
+  type = map(number)
+  default = {
+    console = 60, backend = 60, gateway = 55, agent = 60, audit_consumer = 65
+  }
+}
+
+variable "service_memory_target" {
+  type = map(number)
+  default = {
+    console = 70, backend = 70, gateway = 65, agent = 70, audit_consumer = 70
+  }
+}
+
+variable "alb_requests_per_target" {
+  description = "One-minute ALB request targets. Tune from staging latency and saturation measurements."
+  type        = map(number)
+  default     = { console = 1200, backend = 600, gateway = 600 }
+}
+
+variable "scale_out_cooldown_seconds" {
+  type    = number
+  default = 60
+}
+
+variable "scale_in_cooldown_seconds" {
+  type    = number
+  default = 300
+}
+
+variable "deployment_minimum_healthy_percent" {
+  type    = number
+  default = 100
+}
+
+variable "deployment_maximum_percent" {
+  type    = number
+  default = 200
+}
+
+variable "health_check_grace_period_seconds" {
+  type    = number
+  default = 60
+}
+
+variable "alb_deregistration_delay_seconds" {
+  type    = number
+  default = 60
+}
+
+variable "service_log_retention_days" {
+  type    = number
+  default = 90
+}
+
+variable "db_connections_per_task" {
+  description = "Maximum open PostgreSQL connections per runtime task, kept equal to application pool settings."
+  type        = map(number)
+  default     = { backend = 15, gateway = 10, agent = 10 }
+}
+
+variable "rds_max_connections" {
+  description = "Measured safe PostgreSQL connection ceiling configured on the RDS parameter group."
+  type        = number
+  default     = 200
+}
+
+variable "rds_connection_reserve" {
+  description = "Connections reserved for migrations, monitoring, administration, and failure recovery."
+  type        = number
+  default     = 25
+}
+
+variable "rds_slow_query_milliseconds" {
+  type    = number
+  default = 1000
+}
+
+variable "audit_sqs_scale_out_backlog" {
+  description = "SQS visible-message depth that triggers one bounded audit-consumer scale-out step."
+  type        = number
+  default     = 500
 }
 
 variable "is_primary" {
@@ -226,6 +340,11 @@ variable "db_instance_class" {
 variable "db_engine_version" {
   type    = string
   default = "16"
+
+  validation {
+    condition     = startswith(var.db_engine_version, "16")
+    error_message = "The managed PostgreSQL parameter group currently supports engine major version 16."
+  }
 }
 
 variable "db_allocated_storage" {
@@ -291,8 +410,32 @@ variable "alb_access_log_retention_days" {
 }
 
 variable "edge_alarm_action_arns" {
-  type    = list(string)
-  default = []
+  description = "Approved SNS or incident-routing action ARNs. Leave empty until a real destination is approved."
+  type        = list(string)
+  default     = []
+}
+
+variable "alarm_owner" {
+  description = "Operations team or rotation responsible for acknowledging critical alarms."
+  type        = string
+  default     = "platform-operations-unassigned"
+}
+
+variable "alarm_acknowledgement_minutes" {
+  description = "Expected acknowledgement time for critical alarms."
+  type        = number
+  default     = 15
+
+  validation {
+    condition     = var.alarm_acknowledgement_minutes >= 1 && var.alarm_acknowledgement_minutes <= 120
+    error_message = "alarm_acknowledgement_minutes must be between 1 and 120."
+  }
+}
+
+variable "alarm_escalation_path" {
+  description = "Non-secret incident escalation policy label or runbook reference."
+  type        = string
+  default     = "approved-escalation-policy-required"
 }
 
 variable "smtp_host" {

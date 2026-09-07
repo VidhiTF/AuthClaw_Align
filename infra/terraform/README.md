@@ -113,3 +113,4 @@ terraform test
 - Configure ACM certificates in every region where HTTPS listeners are used.
 - Test RDS replica promotion regularly; Terraform creates the standby path, but operations prove the RTO.
 - Avoid committing real `*.tfvars` files; only `*.tfvars.example` is tracked.
+- Service scaling, the PostgreSQL connection budget, dashboards, alarms, graceful shutdown, and required staging failure drills are documented in [P0-14/P0-15 operations](../../docs/runbooks/P0_14_P0_15_OPERATIONS.md).

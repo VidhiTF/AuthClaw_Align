@@ -3,12 +3,29 @@ clickhouse_writer.py — Writes audit event rows to ClickHouse with retry logic.
 """
 
 import logging
+import os
 import time
 from typing import Any
 
 import clickhouse_connect
 
 logger = logging.getLogger(__name__)
+
+
+def _bounded_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def get_client(
@@ -25,6 +42,8 @@ def get_client(
         database=database,
         username=username,
         password=password,
+        connect_timeout=_bounded_float("CLICKHOUSE_CONNECT_TIMEOUT_SECONDS", 3.0, 0.5, 30.0),
+        send_receive_timeout=_bounded_float("CLICKHOUSE_READ_TIMEOUT_SECONDS", 10.0, 1.0, 60.0),
     )
 
 
@@ -59,8 +78,9 @@ _COLUMNS = [
 def insert_audit_event(
     client: clickhouse_connect.driver.Client,
     row: dict[str, Any],
-    max_retries: int = 3,
-    retry_delay: float = 0.5,
+    max_retries: int | None = None,
+    retry_delay: float | None = None,
+    max_retry_delay: float | None = None,
 ) -> bool:
     """
     Insert a single audit event row into authclaw.audit_events.
@@ -68,13 +88,20 @@ def insert_audit_event(
     Retries up to max_retries times on transient errors.
     Returns False when the event already exists and no insert is needed.
     """
+    attempts = max_retries if max_retries is not None else _bounded_int("CLICKHOUSE_MAX_ATTEMPTS", 3, 1, 5)
+    base_delay = retry_delay if retry_delay is not None else _bounded_float("CLICKHOUSE_RETRY_BASE_SECONDS", 0.5, 0.05, 5.0)
+    delay_cap = max_retry_delay if max_retry_delay is not None else _bounded_float("CLICKHOUSE_RETRY_MAX_SECONDS", 2.0, 0.1, 10.0)
+    attempts = max(1, min(attempts, 5))
+    base_delay = max(0.0, min(base_delay, 5.0))
+    delay_cap = max(base_delay, min(delay_cap, 10.0))
+
     if audit_event_exists(client, str(row.get("record_id", ""))):
         logger.info("Skipping duplicate audit event record_id=%s", row.get("record_id"))
         return False
 
     data = [[row.get(col) for col in _COLUMNS]]
 
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, attempts + 1):
         try:
             client.insert(
                 table="authclaw.audit_events",
@@ -82,24 +109,24 @@ def insert_audit_event(
                 column_names=_COLUMNS,
             )
             logger.debug(
-                "Inserted audit event record_id=%s tenant_id=%s",
+                "Inserted audit event record_id=%s",
                 row.get("record_id"),
-                row.get("tenant_id"),
             )
             return True
         except Exception as exc:  # noqa: BLE001
-            if attempt == max_retries:
+            if attempt == attempts:
                 logger.error(
-                    "Failed to insert audit event after %d attempts: %s", max_retries, exc
+                    "Failed to insert audit event after %d attempts: %s", attempts, type(exc).__name__
                 )
                 raise
+            delay = min(base_delay * (2 ** (attempt - 1)), delay_cap)
             logger.warning(
-                "ClickHouse insert attempt %d failed: %s — retrying in %.1fs",
+                "ClickHouse insert attempt %d failed: error_type=%s retrying_in_seconds=%.2f",
                 attempt,
-                exc,
-                retry_delay,
+                type(exc).__name__,
+                delay,
             )
-            time.sleep(retry_delay)
+            time.sleep(delay)
     return False
 
 

@@ -8,6 +8,8 @@ HTTP endpoint started by ``consumer.py``.
 from __future__ import annotations
 
 import threading
+import json
+import time
 from collections import defaultdict
 from typing import DefaultDict
 
@@ -39,6 +41,26 @@ class MetricsRegistry:
             lines.append(f"# TYPE {safe_name} gauge")
             lines.append(f"{safe_name} {value}")
         return "\n".join(lines) + "\n"
+
+    def render_cloudwatch_emf(self, *, environment: str, release: str) -> str:
+        """Return one payload-free Embedded Metric Format event for CloudWatch Logs."""
+        values = self.snapshot()
+        definitions = [{"Name": name, "Unit": "Count"} for name in sorted(values)]
+        event: dict[str, object] = {
+            "_aws": {
+                "Timestamp": int(time.time() * 1000),
+                "CloudWatchMetrics": [{
+                    "Namespace": "AuthClaw/Audit",
+                    "Dimensions": [["Environment", "Service", "Release"]],
+                    "Metrics": definitions,
+                }],
+            },
+            "Environment": environment,
+            "Service": "audit_consumer",
+            "Release": release,
+        }
+        event.update(values)
+        return json.dumps(event, separators=(",", ":"), sort_keys=True)
 
 
 metrics = MetricsRegistry()

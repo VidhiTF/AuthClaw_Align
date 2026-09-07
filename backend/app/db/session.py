@@ -8,12 +8,36 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 
+
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+DB_POOL_SIZE = _bounded_int("BACKEND_DB_POOL_SIZE", 10, 1, 50)
+DB_MAX_OVERFLOW = _bounded_int("BACKEND_DB_MAX_OVERFLOW", 5, 0, 50)
+DB_POOL_TIMEOUT_SECONDS = _bounded_int("DB_POOL_TIMEOUT_SECONDS", 5, 1, 60)
+DB_POOL_RECYCLE_SECONDS = _bounded_int("DB_POOL_RECYCLE_SECONDS", 300, 30, 3600)
+DB_CONNECT_TIMEOUT_SECONDS = _bounded_int("DB_CONNECT_TIMEOUT_SECONDS", 5, 1, 30)
+
 engine = create_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
+    pool_timeout=DB_POOL_TIMEOUT_SECONDS,
+    pool_recycle=DB_POOL_RECYCLE_SECONDS,
+    connect_args=(
+        {"connect_timeout": DB_CONNECT_TIMEOUT_SECONDS}
+        if settings.DATABASE_URL.startswith("postgresql")
+        else {}
+    ),
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -157,7 +157,7 @@ resource "aws_cloudwatch_metric_alarm" "audit_sqs" {
   } : {}
 
   alarm_name          = "${var.name}-audit-sqs-${each.key}"
-  alarm_description   = "AuthClaw audit SQS FIFO ${each.key} alarm"
+  alarm_description   = "AuthClaw audit SQS FIFO ${each.key} alarm; ${local.alarm_context}"
   namespace           = "AWS/SQS"
   metric_name         = each.value.metric
   comparison_operator = "GreaterThanThreshold"
@@ -173,5 +173,7 @@ resource "aws_cloudwatch_metric_alarm" "audit_sqs" {
     QueueName = each.value.queue
   }
 
-  tags = var.tags
+  tags = merge(var.tags, local.alarm_tags, {
+    Severity = contains(["dlq_depth", "dlq_age"], each.key) ? "critical" : "warning"
+  })
 }

@@ -57,10 +57,10 @@ run "ec2_graviton_capacity_provider" {
   variables {
     ecs_ec2_graviton = {
       enabled           = true
-      instance_type     = "m7g.large"
-      min_size          = 2
-      desired_size      = 3
-      max_size          = 5
+      instance_type     = "m7g.2xlarge"
+      min_size          = 4
+      desired_size      = 4
+      max_size          = 8
       image_id          = "ami-0123456789abcdef0"
       root_volume_size  = 80
       alarm_action_arns = ["arn:aws:sns:us-east-1:123456789012:platform-alerts"]
@@ -83,7 +83,7 @@ run "ec2_graviton_capacity_provider" {
   }
 
   assert {
-    condition     = output.primary.ecs_launch_model.asg_min_size == 2 && output.primary.ecs_launch_model.asg_desired_size == 3 && output.primary.ecs_launch_model.asg_max_size == 5
+    condition     = output.primary.ecs_launch_model.asg_min_size == 4 && output.primary.ecs_launch_model.asg_desired_size == 4 && output.primary.ecs_launch_model.asg_max_size == 8
     error_message = "P0-05 ASG capacity must use the measured reservation and headroom inputs."
   }
 

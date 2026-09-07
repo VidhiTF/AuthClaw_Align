@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -33,13 +32,28 @@ func InitRedis() {
 	if strings.HasPrefix(redisURL, "redis://") || strings.HasPrefix(redisURL, "rediss://") {
 		opts, err := redis.ParseURL(redisURL)
 		if err == nil {
+			configureRedisOptions(opts)
 			opts.MaxRetries = -1
 			RedisClient = redis.NewClient(opts)
 			return
 		}
 		log.Printf("Invalid REDIS_URL %q, falling back to raw address: %v", redisURL, err)
 	}
-	RedisClient = redis.NewClient(&redis.Options{Addr: redisURL, MaxRetries: -1})
+	opts := &redis.Options{Addr: redisURL, MaxRetries: -1}
+	configureRedisOptions(opts)
+	RedisClient = redis.NewClient(opts)
+}
+
+func configureRedisOptions(opts *redis.Options) {
+	opts.DialTimeout = boundedDuration("REDIS_CONNECT_TIMEOUT_SECONDS", 2, 1, 10)
+	opts.ReadTimeout = boundedDuration("REDIS_READ_TIMEOUT_SECONDS", 2, 1, 10)
+	opts.WriteTimeout = boundedDuration("REDIS_WRITE_TIMEOUT_SECONDS", 2, 1, 10)
+	opts.PoolTimeout = boundedDuration("REDIS_POOL_TIMEOUT_SECONDS", 3, 1, 15)
+	opts.ConnMaxIdleTime = boundedDuration("REDIS_CONN_MAX_IDLE_SECONDS", 60, 5, 300)
+	// Atomic counters are deliberately not retried: a lost response is ambiguous
+	// and replaying INCR would corrupt enforcement state. Reconnection remains
+	// automatic through the replication-group endpoint and connection pool.
+	opts.MaxRetries = -1
 }
 
 // Policy definitions
@@ -553,8 +567,7 @@ func EvaluatePolicy(ctx context.Context, tenantID, model, route string, prompts 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("[POLICY-ERROR] OPA returned status %d: %s", resp.StatusCode, string(body))
+		log.Printf("[POLICY-ERROR] OPA returned status=%d response_body=[REDACTED]", resp.StatusCode)
 		return false, defaultDenyReason, policyID, fmt.Errorf("OPA status error: %d", resp.StatusCode)
 	}
 

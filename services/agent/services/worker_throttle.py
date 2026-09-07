@@ -33,9 +33,9 @@ class WorkerThrottle:
     def _active_count(self, tenant_id: int) -> int:
         if self.redis_url:
             try:
-                import redis
+                from services.redis_client import get_redis_client
 
-                client = redis.Redis.from_url(self.redis_url)
+                client = get_redis_client()
                 key = f"authclaw:workers:{self.worker_type}:{tenant_id}:active"
                 return int(client.get(key) or 0)
             except Exception:

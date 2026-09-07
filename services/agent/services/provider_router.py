@@ -181,7 +181,7 @@ class ProviderRouter:
                         return {"provider": provider, "payload": normalize_provider_payload(provider, json_payload)}
                     api_key = manager.get_secret(f"{prefix}_API_KEY")
                 except SecretManagerError as exc:
-                    logger.warning(f"Provider secret lookup failed for tenant {self.tenant_id}: {exc}")
+                    logger.warning("Provider secret lookup failed error_type=%s", type(exc).__name__)
                     continue
                 if api_key:
                     payload = {
@@ -241,7 +241,7 @@ class ProviderRouter:
             provider = credential_row.get("provider")
             return normalize_provider_payload(provider, SecretManager().resolve_provider_payload(credential_row))
         except Exception as exc:
-            logger.warning(f"Failed to decrypt provider credential for tenant {self.tenant_id}: {exc}")
+            logger.warning("Failed to decrypt provider credential error_type=%s", type(exc).__name__)
             return None
 
     def _normalize_provider(self, provider: str) -> str:

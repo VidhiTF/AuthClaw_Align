@@ -11,8 +11,6 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import redis
-from redis.backoff import NoBackoff
-from redis.retry import Retry
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +20,7 @@ from app.core.auth import get_tenant_db, hash_key, require_scopes
 from app.db.session import SessionLocal
 from app.core.crypto import get_session_key_ring
 from app.core.passwords import hash_password, validate_password
+from app.core.redis_client import get_redis_client
 from app.db.models import (
     APIKey,
     OnboardingEmailOTP,
@@ -57,9 +56,6 @@ ONBOARDING_SIGNUP_EMAIL_PER_HOUR = int(os.getenv("ONBOARDING_SIGNUP_EMAIL_PER_HO
 ONBOARDING_SIGNUP_IP_PER_DAY = int(os.getenv("ONBOARDING_SIGNUP_IP_PER_DAY", "10"))
 ONBOARDING_VERIFY_IP_PER_HOUR = int(os.getenv("ONBOARDING_VERIFY_IP_PER_HOUR", "30"))
 INVALID_INVITATION_DETAIL = "Invitation is invalid or unavailable"
-
-_redis_client: redis.Redis | None = None
-
 
 def _emit_invitation_audit(
     invitation: OnboardingEmailOTP | None,
@@ -145,20 +141,7 @@ def _client_ip(request: Request) -> str:
 
 
 def _get_redis() -> redis.Redis:
-    global _redis_client
-    if _redis_client is None:
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-        if redis_url and not redis_url.startswith(("redis://", "rediss://")):
-            redis_url = f"redis://{redis_url}"
-        _redis_client = redis.from_url(
-            redis_url,
-            decode_responses=True,
-            socket_connect_timeout=1.0,
-            socket_timeout=1.0,
-            retry_on_timeout=False,
-            retry=Retry(NoBackoff(), 0),
-        )
-    return _redis_client
+    return get_redis_client()
 
 
 def _enforce_onboarding_rate_limit(key: str, limit: int, window_seconds: int, message: str) -> None:

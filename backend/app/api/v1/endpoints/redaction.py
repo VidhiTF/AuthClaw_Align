@@ -4,6 +4,7 @@ from sqlalchemy import func, or_
 from uuid import UUID
 from typing import List
 from datetime import datetime, timedelta, timezone
+import logging
 
 from app.db.models import RedactionToken
 from app.schemas.models import RedactionTokenMapResponse
@@ -12,6 +13,7 @@ from app.core.crypto import decrypt_secret
 from app.services.privacy_lifecycle import purge_expired_redaction_mappings
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/metrics", dependencies=[require_scopes(["read"])])
@@ -63,7 +65,7 @@ def get_tokenization_map(
         try:
             decrypted = decrypt_secret(t.original_value)
         except Exception as dec_err:
-            print(f"[WARN] Failed to decrypt token value for mapping ID {t.id}: {dec_err}")
+            logger.warning("Token mapping decryption failed error_type=%s", type(dec_err).__name__)
             decrypted = "[Decryption Failed]"
 
         response.append(
