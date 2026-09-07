@@ -23,9 +23,13 @@ locals {
 }
 
 module "primary" {
+  direct_aws                   = var.direct_aws
+  internal_tls                 = var.internal_tls
+  iam_account_id               = var.ci_skip_aws_validation ? "123456789012" : null
+  kms_break_glass_role_arns    = var.kms_break_glass_role_arns
+  agent_customer_role_arns     = var.agent_customer_role_arns
+  iam_permissions_boundary_arn = var.iam_permissions_boundary_arn
   source                       = "./modules/regional_stack"
-  oidc_bff_exchange_secret     = random_password.oidc_bff_exchange.result
-  worker_token_hmac_secret     = random_password.worker_token_hmac.result
   worker_token_issuance_paused = var.worker_token_issuance_paused
   oidc_login_paused            = var.oidc_login_paused
 
@@ -63,7 +67,6 @@ module "primary" {
   forwarded_header_mode                = var.forwarded_header_mode
   bff_client_ip_enabled                = var.bff_client_ip_enabled
   bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled
-  bff_client_ip_secret                 = random_password.bff_client_ip.result
   secret_key_version                   = var.secret_key_version
   jwt_key_version                      = var.jwt_key_version
   session_key_version                  = var.session_key_version
@@ -98,17 +101,20 @@ module "primary" {
   clickhouse_port                      = var.clickhouse_port
   clickhouse_db                        = var.clickhouse_db
   clickhouse_user                      = var.clickhouse_user
-  clickhouse_password                  = var.clickhouse_password
   enable_audit_consumer                = var.enable_audit_consumer
   replica_source_db_arn                = ""
   tags                                 = local.tags
 }
 
 module "secondary" {
+  direct_aws                   = var.secondary_direct_aws
+  internal_tls                 = var.internal_tls
+  iam_account_id               = var.ci_skip_aws_validation ? "123456789012" : null
+  kms_break_glass_role_arns    = var.kms_break_glass_role_arns
+  agent_customer_role_arns     = var.agent_customer_role_arns
+  iam_permissions_boundary_arn = var.iam_permissions_boundary_arn
   count                        = var.enable_secondary ? 1 : 0
   source                       = "./modules/regional_stack"
-  oidc_bff_exchange_secret     = random_password.oidc_bff_exchange.result
-  worker_token_hmac_secret     = random_password.worker_token_hmac.result
   worker_token_issuance_paused = var.worker_token_issuance_paused
   oidc_login_paused            = var.oidc_login_paused
 
@@ -146,7 +152,6 @@ module "secondary" {
   forwarded_header_mode                = var.forwarded_header_mode
   bff_client_ip_enabled                = var.bff_client_ip_enabled
   bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled
-  bff_client_ip_secret                 = random_password.bff_client_ip.result
   secret_key_version                   = var.secret_key_version
   jwt_key_version                      = var.jwt_key_version
   session_key_version                  = var.session_key_version
@@ -181,9 +186,7 @@ module "secondary" {
   clickhouse_port                      = var.clickhouse_port
   clickhouse_db                        = var.clickhouse_db
   clickhouse_user                      = var.clickhouse_user
-  clickhouse_password                  = var.clickhouse_password
   enable_audit_consumer                = var.enable_audit_consumer
   replica_source_db_arn                = var.enable_cross_region_db_replica ? module.primary.rds_instance_arn : ""
-  db_password                          = var.enable_cross_region_db_replica ? module.primary.db_password : ""
   tags                                 = local.tags
 }

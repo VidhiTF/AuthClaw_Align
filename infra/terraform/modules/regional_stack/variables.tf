@@ -234,9 +234,14 @@ variable "db_allocated_storage" {
 }
 
 variable "db_password" {
-  type      = string
-  default   = ""
-  sensitive = true
+  description = "Deprecated: provision the secret externally; values must not enter Terraform."
+  type        = string
+  default     = ""
+  sensitive   = true
+  validation {
+    condition     = var.db_password == null || var.db_password == ""
+    error_message = "Secret values must be supplied by the external provisioner, not Terraform variables."
+  }
 }
 
 variable "replica_source_db_arn" {
@@ -439,9 +444,14 @@ variable "clickhouse_user" {
 }
 
 variable "clickhouse_password" {
-  type      = string
-  default   = ""
-  sensitive = true
+  description = "Deprecated: provision the secret externally; values must not enter Terraform."
+  type        = string
+  default     = ""
+  sensitive   = true
+  validation {
+    condition     = var.clickhouse_password == null || var.clickhouse_password == ""
+    error_message = "Secret values must be supplied by the external provisioner, not Terraform variables."
+  }
 }
 
 variable "enable_audit_consumer" {

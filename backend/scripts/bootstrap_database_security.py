@@ -35,7 +35,6 @@ AUTHN_RUNTIME_FUNCTIONS = {
     "bind_session_context",
     "consume_onboarding_invite_for_otp",
     "confirm_password_reset",
-    "create_platform_session",
     "create_platform_tenant_owner_invite",
     "create_password_reset",
     "create_session",
@@ -458,6 +457,18 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
     definer = quote(AUTH_DEFINER_ROLE)
     runtime = quote(backend_runtime.name)
     migrator = quote(configured_roles()[0].name)
+    issuer = None
+    if os.getenv("PLATFORM_AUTH_PASSWORD") or os.getenv("PLATFORM_AUTH_DATABASE_URL"):
+        role = role_from_url("PLATFORM_AUTH_DATABASE_URL", "PLATFORM_AUTH", "authclaw_platform_auth", "", "authn")
+        if role.name in {r.name for r in configured_roles()} | {AUTH_DEFINER_ROLE, AGENT_AUTH_DEFINER_ROLE}:
+            raise ValueError("Platform issuer must be a separate database role")
+        ensure_login_role(conn, role)
+        issuer = quote(role.name)
+        conn.execute(text(f"GRANT CONNECT ON DATABASE {quote(conn.engine.url.database)} TO {issuer}"))
+        conn.execute(text(f"GRANT USAGE ON SCHEMA authn TO {issuer}"))
+        conn.execute(text(f"REVOKE {issuer} FROM {runtime}"))
+        conn.execute(text(f"REVOKE {definer}, {runtime}, {migrator} FROM {issuer}"))
+        conn.execute(text(f"REVOKE ALL ON ALL TABLES IN SCHEMA authn, public FROM {issuer}"))
 
     for role in (runtime, migrator):
         conn.execute(text(f"REVOKE {definer} FROM {role}"))
@@ -518,6 +529,10 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
         conn.execute(text(f"ALTER FUNCTION {signature} OWNER TO {definer}"))
         conn.execute(text(f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC"))
         conn.execute(text(f"REVOKE ALL ON FUNCTION {signature} FROM {runtime}"))
+        if issuer:
+            conn.execute(text(f"REVOKE ALL ON FUNCTION {signature} FROM {issuer}"))
+            if function_name == "create_platform_session":
+                conn.execute(text(f"GRANT EXECUTE ON FUNCTION {signature} TO {issuer}"))
         if function_name in AUTHN_RUNTIME_FUNCTIONS:
             conn.execute(text(f"GRANT EXECUTE ON FUNCTION {signature} TO {runtime}"))
 

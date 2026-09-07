@@ -136,6 +136,10 @@ class SecretManager:
         }
 
     def get_secret(self, name: str) -> Optional[str]:
+        if self.backend == "ecs_injected" and name in SENSITIVE_ENV_NAMES:
+            return os.getenv(name)
+        if self.backend == "ecs_injected":
+            return self._get_aws_secret(name)
         if self.backend in {"local_env", "local"}:
             return os.getenv(name) or _LOCAL_SECRET_CACHE.get(name)
         if self.backend == "aws_secrets_manager":
@@ -155,13 +159,15 @@ class SecretManager:
         return value
 
     def put_secret(self, name: str, value: str) -> StoredSecret:
+        if self.backend == "ecs_injected" and name in SENSITIVE_ENV_NAMES:
+            raise _safe_error(name, "is injected read-only; rotate it through deployment")
         if not value:
             raise _safe_error(name, "cannot be stored with an empty value")
         if self.backend in {"local_env", "local"}:
             _LOCAL_SECRET_CACHE[name] = value
             os.environ[name] = value
             return StoredSecret(name=name, backend=self.backend, version_id=self._version(value), value=value)
-        if self.backend == "aws_secrets_manager":
+        if self.backend in {"aws_secrets_manager", "ecs_injected"}:
             version_id = self._put_aws_secret(name, value)
             return StoredSecret(name=name, backend=self.backend, version_id=version_id, value=value)
         if self.backend in {"hashicorp_vault", "vault"}:
@@ -181,11 +187,13 @@ class SecretManager:
         return stored
 
     def delete_secret(self, name: str) -> None:
+        if self.backend == "ecs_injected" and name in SENSITIVE_ENV_NAMES:
+            raise _safe_error(name, "is injected read-only; rotate it through deployment")
         if self.backend in {"local_env", "local"}:
             _LOCAL_SECRET_CACHE.pop(name, None)
             os.environ.pop(name, None)
             return
-        if self.backend == "aws_secrets_manager":
+        if self.backend in {"aws_secrets_manager", "ecs_injected"}:
             self._delete_aws_secret(name)
             return
         raise SecretManagerError(f"Secret deletion is not implemented for backend '{self.backend}'.")
@@ -280,7 +288,7 @@ class SecretManager:
 
     def health_check(self) -> SecretHealth:
         try:
-            if self.backend in {"local_env", "local"}:
+            if self.backend in {"local_env", "local", "ecs_injected"}:
                 self.get_required_secret("JWT_SECRET", min_length=32)
                 self.encryption_key()
                 self.redaction_salt()
@@ -305,7 +313,7 @@ class SecretManager:
         if not health.healthy:
             errors.append(health.message)
         if production and self.backend in {"local_env", "local"}:
-            errors.append("production requires AUTHCLAW_SECRET_BACKEND to be aws_secrets_manager, hashicorp_vault, azure_key_vault, or google_secret_manager")
+            errors.append("production requires a managed secret backend or read-only ecs_injected secrets")
         if errors:
             raise SecretValidationError("; ".join(errors))
 
@@ -474,10 +482,16 @@ class SecretManager:
             raise SecretManagerError("AWS_REGION or AWS_DEFAULT_REGION is required for AWS Secrets Manager.")
         return boto3.client("secretsmanager", region_name=self.region_name)
 
+    def _aws_secret_id(self, name: str) -> str:
+        mapping = json.loads(os.getenv("AUTHCLAW_AWS_SECRET_ARNS") or "{}")
+        if (mapping or self.backend == "ecs_injected") and name not in mapping:
+            raise _safe_error(name, "is not in the configured AWS secret allowlist")
+        return mapping.get(name, name)
+
     def _get_aws_secret(self, name: str) -> Optional[str]:
         client = self._client()
         try:
-            response = client.get_secret_value(SecretId=name)
+            response = client.get_secret_value(SecretId=self._aws_secret_id(name))
         except Exception as exc:
             raise _safe_error(name, f"could not be read from AWS Secrets Manager: {type(exc).__name__}") from exc
         return response.get("SecretString")
@@ -486,8 +500,10 @@ class SecretManager:
         client = self._client()
         try:
             try:
-                response = client.put_secret_value(SecretId=name, SecretString=value)
+                response = client.put_secret_value(SecretId=self._aws_secret_id(name), SecretString=value)
             except client.exceptions.ResourceNotFoundException:
+                if self.backend == "ecs_injected" or os.getenv("AUTHCLAW_AWS_SECRET_ARNS"):
+                    raise
                 response = client.create_secret(Name=name, SecretString=value)
             return response.get("VersionId")
         except Exception as exc:
@@ -496,7 +512,7 @@ class SecretManager:
     def _delete_aws_secret(self, name: str) -> None:
         client = self._client()
         try:
-            client.delete_secret(SecretId=name, ForceDeleteWithoutRecovery=True)
+            client.delete_secret(SecretId=self._aws_secret_id(name), RecoveryWindowInDays=7)
         except client.exceptions.ResourceNotFoundException:
             return
         except Exception as exc:

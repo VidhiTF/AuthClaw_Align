@@ -1,6 +1,8 @@
-resource "random_password" "oidc_bff_exchange" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.oidc_bff_exchange
+  lifecycle {
+    destroy = false
+  }
 }
 
 variable "oidc_login_paused" {

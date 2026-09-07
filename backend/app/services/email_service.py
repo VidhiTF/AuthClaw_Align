@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import smtplib
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -35,11 +36,13 @@ def _send_smtp_message(message: EmailMessage) -> None:
     smtp_tls = (
         os.getenv("SMTP_TLS", os.getenv("SMTP_STARTTLS", "true")).lower() == "true"
     )
+    if os.getenv("AUTHCLAW_ENV", "").lower() in {"production", "prod"} and not smtp_tls:
+        raise EmailDeliveryError("Production SMTP requires TLS")
 
     try:
         with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
             if smtp_tls:
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
             if smtp_user:
                 server.login(smtp_user, smtp_password)
             server.send_message(message)
@@ -51,7 +54,7 @@ def send_email(email: str, subject: str, body: str) -> EmailDeliveryResult:
     """Send a non-OTP email through the existing SMTP transport."""
     smtp_host = os.getenv("SMTP_HOST", "").strip()
     if not smtp_host:
-        if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
+        if os.getenv("AUTHCLAW_ENV", "").lower() in {"production", "prod"}:
             raise EmailDeliveryError("Email delivery is not configured")
         return _write_local_email(email, subject, body)
 
@@ -76,7 +79,7 @@ def send_otp_email(
 ) -> EmailDeliveryResult:
     smtp_host = os.getenv("SMTP_HOST", "").strip()
     if not smtp_host:
-        if os.getenv("AUTHCLAW_ENV", "").lower() != "production":
+        if os.getenv("AUTHCLAW_ENV", "").lower() not in {"production", "prod"}:
             return _write_local_outbox(
                 email, otp, tenant_name, purpose=purpose, action_url=action_url
             )

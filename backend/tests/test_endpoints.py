@@ -607,6 +607,85 @@ def test_access_request_retention_policy(db_session: Session):
     assert all(history.event_type == "DELETED" for history in histories)
 
 
+def test_platform_session_issuer_isolation(client, db_session, monkeypatch):
+    from app.api.v1.endpoints import auth
+    from app.core.passwords import hash_password
+    from scripts.bootstrap_database_security import configured_roles, secure_authentication_boundary
+    from sqlalchemy.exc import DBAPIError
+
+    monkeypatch.setenv("PLATFORM_AUTH_PASSWORD", "test-only-issuer-password")
+    monkeypatch.setenv("PLATFORM_AUTH_USER", "authclaw_platform_auth_test")
+    with owner_engine.begin() as conn:
+        secure_authentication_boundary(conn, configured_roles()[1])
+        secure_authentication_boundary(conn, configured_roles()[1])
+    issuer_engine = create_engine(owner_engine.url.set(
+        username="authclaw_platform_auth_test", password="test-only-issuer-password"
+    ))
+    monkeypatch.setattr(auth, "PlatformSessionLocal", sessionmaker(bind=issuer_engine))
+    admin_id = uuid4()
+    email = f"{admin_id}@platform.test"
+    password = "Platform-Test-Only-Password-42!"
+    with owner_engine.begin() as conn:
+        conn.execute(text("INSERT INTO authn.platform_admins (id, email, password_hash) VALUES (:id, :email, :hash)"),
+                     {"id": admin_id, "email": email, "hash": hash_password(password)})
+    try:
+        for sql in (
+            "SELECT authn.create_platform_session(:hash, :id, 'password', now() + interval '1 hour', '{}'::jsonb)",
+            "SELECT authn.set_platform_context(:id, :id)",
+            "SET ROLE authclaw_platform_auth_test",
+            "INSERT INTO authn.platform_sessions DEFAULT VALUES",
+        ):
+            with engine.begin() as conn, pytest.raises(DBAPIError) as denied:
+                conn.execute(text(sql), {"hash": "0" * 64, "id": admin_id})
+            assert denied.value.orig.sqlstate == "42501"
+        with issuer_engine.begin() as conn, pytest.raises(DBAPIError):
+            conn.execute(text("SELECT * FROM authn.platform_admins"))
+        rejected = client.post("/v1/auth/login", json={"email": email, "password": "wrong"})
+        assert rejected.status_code == 401
+        logged_in = client.post("/v1/auth/login", json={"email": email, "password": password})
+        assert logged_in.status_code == 200, logged_in.text
+        headers = {"Authorization": f"Bearer {logged_in.json()['session_token']}"}
+        profile = client.get("/v1/auth/me", headers=headers)
+        assert profile.status_code == 200
+        assert profile.json()["tenant_id"] is None
+        assert client.post("/v1/tenants", json={"name": "Issuer test tenant", "tier": "starter"}, headers=headers).status_code == 201
+        from types import SimpleNamespace
+        monkeypatch.setattr(access_request_service, "send_otp_email", lambda *_a, **_kw: SimpleNamespace(method="local_outbox"))
+        invitee = f"invite-{uuid4().hex}@example.com"
+        submitted = client.post("/api/public/v1/access-requests", json={
+            "name": "Invite test", "business_email": invitee, "company": f"Invite-{uuid4().hex}",
+            "role": "Owner", "use_case": "Test onboarding", "requested_access": "EARLY_ACCESS",
+            "consent": True, "source_page": "/early-access",
+        })
+        assert submitted.status_code == 202
+        reference = submitted.json()["reference"]
+        approved = client.patch(f"/api/public/v1/access-requests/{reference}/status", params={"new_status": "APPROVED"}, headers=headers)
+        assert approved.status_code == 204, approved.text
+        history = client.get("/api/public/v1/access-requests", params={"status_filter": "APPROVED", "limit": 1}, headers=headers).json()
+        record = next(row for row in history if row["reference"] == reference)
+        invite = next(row["metadata"] for row in record["history"] if "invite_id" in row["metadata"])
+        assert invite["invite_id"] in invite["invite_link"]
+        verification = {
+            "signup_id": invite["invite_id"], "otp": invite["dev_otp"], "password": password,
+            "terms_accepted": True, "terms_version": "2026-07-20",
+            "privacy_notice_acknowledged": True, "privacy_notice_version": "2026-07-20",
+        }
+        joined = client.post("/v1/onboarding/verify", json=verification)
+        assert joined.status_code == 200, joined.text
+        assert client.post("/v1/onboarding/verify", json=verification).status_code == 400
+        tenant_login = client.post("/v1/auth/login", json={"email": invitee, "password": password})
+        assert tenant_login.status_code == 200
+        tenant_headers = {"Authorization": f"Bearer {tenant_login.json()['session_token']}"}
+        assert client.get("/api/public/v1/access-requests", headers=tenant_headers).status_code == 403
+        assert client.get("/v1/gateways", headers=tenant_headers).status_code == 200
+        monkeypatch.setattr(auth, "PlatformSessionLocal", None)
+        assert client.post("/v1/auth/login", json={"email": email, "password": password}).status_code == 503
+    finally:
+        with owner_engine.begin() as conn:
+            conn.execute(text("DELETE FROM authn.platform_admins WHERE id = :id"), {"id": admin_id})
+        issuer_engine.dispose()
+
+
 def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     """Test full CRUD endpoints, YAML validations, and tenant RLS isolation"""
     

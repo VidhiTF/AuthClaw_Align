@@ -516,10 +516,14 @@ variable "clickhouse_user" {
 }
 
 variable "clickhouse_password" {
-  description = "ClickHouse account password, required when the shared audit consumer is enabled. Pass via a secured tfvars source."
+  description = "Deprecated: provision the secret externally; values must not enter Terraform."
   type        = string
   default     = ""
   sensitive   = true
+  validation {
+    condition     = var.clickhouse_password == null || var.clickhouse_password == ""
+    error_message = "Secret values must be supplied by the external provisioner, not Terraform variables."
+  }
 }
 
 variable "enable_audit_consumer" {
@@ -530,5 +534,56 @@ variable "enable_audit_consumer" {
 
 variable "tags" {
   type    = map(string)
+  default = {}
+}
+variable "iam_permissions_boundary_arn" {
+  type        = string
+  default     = null
+  description = "Optional organization-approved ECS execution-role boundary ARN."
+}
+variable "agent_customer_role_arns" {
+  type    = set(string)
+  default = []
+}
+variable "kms_break_glass_role_arns" {
+  type    = set(string)
+  default = []
+}
+variable "internal_tls" {
+  type = object({
+    enabled     = optional(bool, false)
+    namespace   = optional(string, "")
+    proxy_image = optional(string, "nginxinc/nginx-unprivileged@sha256:9b87ad3dd9f431c733f19dfb278c7eb3dba9dca381942c79818bb42f1a566a83")
+  })
+  default = {}
+}
+variable "direct_aws" {
+  type = object({
+    backend_kms_versions    = optional(map(string), {})
+    agent_kms_key           = optional(string, "")
+    agent_previous_kms_keys = optional(set(string), [])
+    agent_secrets           = optional(map(string), {})
+    agent_secret_kms_keys   = optional(set(string), [])
+    agent_s3_buckets        = optional(set(string), [])
+    agent_s3_objects        = optional(set(string), [])
+    document_role_arn       = optional(string, "")
+    document_external_id    = optional(string, "")
+  })
+  default = {}
+}
+
+variable "secondary_direct_aws" {
+  description = "Secondary-region exact resources; never inherit primary-region KMS or secrets."
+  type = object({
+    backend_kms_versions    = optional(map(string), {})
+    agent_kms_key           = optional(string, "")
+    agent_previous_kms_keys = optional(set(string), [])
+    agent_secrets           = optional(map(string), {})
+    agent_secret_kms_keys   = optional(set(string), [])
+    agent_s3_buckets        = optional(set(string), [])
+    agent_s3_objects        = optional(set(string), [])
+    document_role_arn       = optional(string, "")
+    document_external_id    = optional(string, "")
+  })
   default = {}
 }

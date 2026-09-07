@@ -22,6 +22,10 @@ def test_jwt_rotation_preserves_previous_tokens(monkeypatch):
     assert json.loads(base64_url_decode(active_token.split(".")[0]))["kid"] == "v2"
     assert decode_jwt(previous_token)["sub"] == "rotation-test"
     assert decode_jwt(active_token)["sub"] == "rotation-test"
+    monkeypatch.setenv("AUTHCLAW_JWT_KEY_VERSION", "v1")
+    assert decode_jwt(active_token)["sub"] == "rotation-test"
+    monkeypatch.delenv("JWT_SECRET_V2")
+    assert decode_jwt(active_token) is None
 
     header = base64_url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
     payload = base64_url_encode(json.dumps({"sub": "legacy-token"}).encode())

@@ -12,7 +12,7 @@ WORKFLOWS = tuple((ROOT / ".github/workflows").glob("*.yml")) + tuple(
 )
 REGISTRY = (ROOT / "infra/terraform/registry.tf").read_text(encoding="utf-8")
 VARIABLES = (ROOT / "infra/terraform/variables.tf").read_text(encoding="utf-8")
-REGIONAL_STACK = (ROOT / "infra/terraform/modules/regional_stack/main.tf").read_text(encoding="utf-8")
+REGIONAL_STACK = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "infra/terraform/modules/regional_stack").glob("*.tf"))
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
@@ -36,7 +36,9 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("bootstrap_prepare backend_migrations agent_migrations bootstrap_finalize database_security_check", gate)
         self.assertIn("run_job crypto_preflight", gate)
         self.assertNotIn("-target=module.primary.aws_ecs_service", gate)
-        self.assertIn("-target=module.primary.aws_secretsmanager_secret_version.envelope_v2", gate)
+        self.assertIn("aws secretsmanager describe-secret", gate)
+        self.assertIn("AWSCURRENT", gate)
+        self.assertNotIn("aws_secretsmanager_secret_version", gate)
         self.assertIn("all(.tasks[0].containers[]; .exitCode == 0)", gate)
         self.assertIn("vars.CRYPTO_STRICT_ROLLBACK_APPROVED == 'true'", DEPLOY)
         self.assertIn("steps.runtime_release.outcome", DEPLOY)

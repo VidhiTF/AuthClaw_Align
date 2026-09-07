@@ -174,11 +174,6 @@ output "replica_source_db_arn" {
   value = var.replica_source_db_arn
 }
 
-output "db_password" {
-  value     = local.db_password
-  sensitive = true
-}
-
 output "redis_endpoint" {
   value = aws_elasticache_replication_group.redis.primary_endpoint_address
 }
@@ -225,8 +220,8 @@ output "audit_sqs" {
     queue_arn          = try(aws_sqs_queue.audit[0].arn, null)
     dlq_url            = try(aws_sqs_queue.audit_dlq[0].url, null)
     dlq_arn            = try(aws_sqs_queue.audit_dlq[0].arn, null)
-    producer_role_arns = { for service in local.audit_sqs_producer_services : service => aws_iam_role.application_task[service].arn }
-    consumer_role_arn  = aws_iam_role.application_task["audit_consumer"].arn
+    producer_role_arns = { for service in local.audit_sqs_producer_services : service => aws_iam_role.runtime[service].arn }
+    consumer_role_arn  = try(aws_iam_role.runtime["audit_consumer"].arn, null)
     alarm_names        = values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name
   }
 }

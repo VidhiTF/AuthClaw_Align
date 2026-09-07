@@ -17,6 +17,11 @@ engine = create_engine(
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+_platform_url = os.getenv("PLATFORM_AUTH_DATABASE_URL", "").strip()
+PlatformSessionLocal = (
+    sessionmaker(bind=create_engine(_platform_url, pool_pre_ping=True, pool_size=1, max_overflow=2))
+    if _platform_url else None
+)
 _database_auth_context: ContextVar[tuple[str, str] | None] = ContextVar(
     "database_auth_context", default=None
 )

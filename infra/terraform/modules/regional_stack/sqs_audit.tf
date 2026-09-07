@@ -12,7 +12,6 @@ locals {
     { name = "SQS_MAX_MESSAGES", value = tostring(var.audit_sqs_max_messages) },
     { name = "SQS_VISIBILITY_TIMEOUT_SECONDS", value = tostring(var.audit_sqs_visibility_timeout_seconds) }
   ] : []
-  audit_sqs_task_role_arns = local.audit_sqs_enabled ? { for service in setunion(local.audit_sqs_producer_services, toset(["audit_consumer"])) : service => aws_iam_role.application_task[service].arn } : {}
 }
 
 resource "aws_sqs_queue" "audit_dlq" {
@@ -96,7 +95,7 @@ resource "aws_iam_role_policy" "audit_sqs_producer" {
   for_each = local.audit_sqs_enabled ? local.audit_sqs_producer_services : toset([])
 
   name = "${var.name}-${each.key}-audit-sqs-producer"
-  role = aws_iam_role.application_task[each.key].id
+  role = aws_iam_role.runtime[each.key].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -118,10 +117,10 @@ resource "aws_iam_role_policy" "audit_sqs_producer" {
 }
 
 resource "aws_iam_role_policy" "audit_sqs_consumer" {
-  count = local.audit_sqs_enabled ? 1 : 0
+  count = local.audit_sqs_enabled && var.enable_audit_consumer ? 1 : 0
 
   name = "${var.name}-audit-consumer-sqs"
-  role = aws_iam_role.application_task["audit_consumer"].id
+  role = aws_iam_role.runtime["audit_consumer"].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [

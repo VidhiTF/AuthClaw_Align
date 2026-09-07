@@ -165,6 +165,7 @@ run "prod_runtime_rejects_a_missing_public_edge" {
   variables {
     authclaw_env       = "prod"
     enable_public_edge = false
+    internal_tls       = { enabled = true, namespace = "internal.example.com" }
   }
 
   expect_failures = [terraform_data.production_edge_required]
