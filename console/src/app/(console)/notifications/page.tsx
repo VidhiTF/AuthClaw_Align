@@ -37,6 +37,8 @@ export default function NotificationsPage() {
   const [items, setItems] = useState<Notification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [mutating, setMutating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -59,16 +61,31 @@ export default function NotificationsPage() {
   }, [load]);
 
   const markRead = async (id: string) => {
-    const wasUnread = items.some((item) => item.id === id && !item.read_at);
-    setItems((current) => current.map((item) => item.id === id ? { ...item, read_at: new Date().toISOString() } : item));
-    if (wasUnread) setUnreadCount((current) => Math.max(0, current - 1));
-    await fetch(`/api/notifications/${id}/read`, { method: "POST" }).catch(() => undefined);
+    setMutationError(null);
+    setMutating(true);
+    try {
+      const response = await fetch(`/api/notifications/${id}/read`, { method: "POST" });
+      if (!response.ok) throw new Error("notification update failed");
+      await load();
+    } catch {
+      setMutationError("Could not mark the notification as read. Please try again.");
+    } finally {
+      setMutating(false);
+    }
   };
 
   const markAllRead = async () => {
-    setItems((current) => current.map((item) => ({ ...item, read_at: item.read_at || new Date().toISOString() })));
-    setUnreadCount(0);
-    await fetch("/api/notifications/read-all", { method: "POST" }).catch(() => undefined);
+    setMutationError(null);
+    setMutating(true);
+    try {
+      const response = await fetch("/api/notifications/read-all", { method: "POST" });
+      if (!response.ok) throw new Error("notification update failed");
+      await load();
+    } catch {
+      setMutationError("Could not mark notifications as read. Please try again.");
+    } finally {
+      setMutating(false);
+    }
   };
 
   return (
@@ -86,13 +103,19 @@ export default function NotificationsPage() {
         </div>
         <button
           onClick={markAllRead}
-          disabled={unreadCount === 0}
+          disabled={unreadCount === 0 || mutating}
           className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#E6E9F0] bg-white px-4 py-2.5 text-xs font-bold text-[#475069] shadow-sm hover:bg-[#F5F7FA] disabled:text-[#A8B0C0]"
         >
           <CheckCheck className="h-4 w-4" />
           Mark all read
         </button>
       </div>
+
+      {mutationError && (
+        <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+          {mutationError}
+        </div>
+      )}
 
       <div className="rounded-[20px] border border-[#E6E9F0] bg-white shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
         <div className="flex items-center justify-between border-b border-[#E6E9F0] px-5 py-4">
@@ -130,6 +153,7 @@ export default function NotificationsPage() {
                       {!item.read_at && (
                         <button
                           onClick={() => void markRead(item.id)}
+                          disabled={mutating}
                           className="rounded-lg border border-[#E6E9F0] px-3 py-2 text-[10px] font-bold text-[#475069] hover:bg-[#F5F7FA]"
                         >
                           Mark read

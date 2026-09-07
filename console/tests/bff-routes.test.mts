@@ -28,3 +28,18 @@ test("maps approved BFF routes and rejects broader proxy access", () => {
   assert.equal(resolveBffRoute("POST", "auth/login"), null);
   assert.equal(resolveBffRoute("GET", "admin/secrets"), null);
 });
+
+test("notification mutations surface failures instead of reporting stale success", () => {
+  const components = [
+    "../src/components/notification-bell.tsx",
+    "../src/app/(console)/notifications/page.tsx",
+  ];
+
+  for (const component of components) {
+    const source = readFileSync(new URL(component, import.meta.url), "utf8");
+    assert.ok(source.includes("if (!response.ok) throw new Error"), component);
+    assert.ok(source.includes('role="alert"'), component);
+    assert.ok(source.includes("await load()"), component);
+    assert.ok(!source.includes(".catch(() => undefined)"), component);
+  }
+});
