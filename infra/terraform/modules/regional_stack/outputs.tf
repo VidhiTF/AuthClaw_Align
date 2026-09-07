@@ -62,6 +62,8 @@ output "alarm_names" {
   value = concat(
     values(aws_cloudwatch_metric_alarm.unhealthy_hosts)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.ecs_cpu)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_memory)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_running_tasks)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.ecs_pending_tasks)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.nat_port_allocation)[*].alarm_name,
@@ -70,6 +72,7 @@ output "alarm_names" {
     aws_cloudwatch_metric_alarm.ecs_capacity_provider_reservation[*].alarm_name,
     aws_cloudwatch_metric_alarm.ecs_instance_health[*].alarm_name,
     aws_cloudwatch_metric_alarm.ecs_placement_failure[*].alarm_name,
+    [aws_cloudwatch_metric_alarm.ecs_deployment_failure.alarm_name],
   )
 }
 

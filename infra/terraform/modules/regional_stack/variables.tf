@@ -188,6 +188,12 @@ variable "gateway_sidecar_task_cpu" {
   default     = 2048
 }
 
+variable "enable_policy_sidecar_colocation" {
+  description = "Place OPA and Presidio beside their callers and remove the standalone policy services. Enable only for release-sequence step 7."
+  type        = bool
+  default     = false
+}
+
 variable "gateway_sidecar_task_memory" {
   description = "Fargate memory in MiB for the combined Gateway, OPA, and Presidio task."
   type        = number

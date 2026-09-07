@@ -16,6 +16,14 @@ REGIONAL_STACK = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / 
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
+    def test_all_ecs_services_enable_health_based_circuit_breaker_rollback(self):
+        services = re.findall(r'resource "aws_ecs_service" "[^"]+" \{(.*?)(?=\nresource |\Z)', REGIONAL_STACK, re.S)
+        self.assertEqual(len(services), 3)
+        for service in services:
+            self.assertRegex(service, r'deployment_circuit_breaker\s*\{\s*enable\s*=\s*true\s*rollback\s*=\s*true')
+        self.assertIn('.services[0].taskDefinition == $definition', DEPLOY)
+        self.assertIn('.rolloutState == "COMPLETED"', DEPLOY)
+
     def test_deployment_requires_push_and_complete_release_jobs(self):
         self.assertIn("github.event.workflow_run.event == 'push'", DEPLOY)
         self.assertIn("if: needs.eligibility.outputs.ready == 'true'", DEPLOY)
@@ -36,10 +44,14 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("bootstrap_prepare backend_migrations agent_migrations bootstrap_finalize database_security_check", gate)
         self.assertIn("run_job crypto_preflight", gate)
         self.assertNotIn("-target=module.primary.aws_ecs_service", gate)
+        self.assertIn("-target=module.primary.aws_ecs_cluster_capacity_providers.main", gate)
         self.assertIn("aws secretsmanager describe-secret", gate)
         self.assertIn("AWSCURRENT", gate)
         self.assertNotIn("aws_secretsmanager_secret_version", gate)
-        self.assertIn("all(.tasks[0].containers[]; .exitCode == 0)", gate)
+        self.assertIn('scripts/ecs_database_job.py database-gate.json "$1"', gate)
+        self.assertIn('for job in backend_migrations agent_migrations database_security_check', gate)
+        self.assertIn('DATABASE_EXPAND_COMPATIBILITY_APPROVED', gate)
+        self.assertIn("launch_model", (ROOT / "infra/terraform/outputs.tf").read_text(encoding="utf-8"))
         self.assertIn("vars.CRYPTO_STRICT_ROLLBACK_APPROVED == 'true'", DEPLOY)
         self.assertIn("steps.runtime_release.outcome", DEPLOY)
 
@@ -142,6 +154,32 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn('AUTHCLAW_INTERNAL_SERVICE_SECRET', REGIONAL_STACK)
         self.assertIn("Roll back to previous task definitions", DEPLOY)
         self.assertIn("Reject active deployment alarms", DEPLOY)
+
+    def test_colocation_is_an_explicit_reversible_release_switch(self):
+        self.assertIn('variable "enable_policy_sidecar_colocation"', VARIABLES)
+        self.assertIn("default     = false", VARIABLES)
+        self.assertIn("TF_VAR_enable_policy_sidecar_colocation", DEPLOY)
+        self.assertIn("ENABLE_POLICY_SIDECAR_COLOCATION must be true or false", DEPLOY)
+        self.assertIn('port_mappings = []', REGIONAL_STACK)
+        self.assertIn('http://127.0.0.1:8181', REGIONAL_STACK)
+        self.assertIn('http://127.0.0.1:3000', REGIONAL_STACK)
+
+    def test_deployment_captures_and_verifies_policy_topology(self):
+        self.assertIn("Capture and verify deployed policy topology", DEPLOY)
+        self.assertIn("scripts/verify_ecs_colocation.py", DEPLOY)
+        self.assertIn('--architecture-map "$TF_VAR_service_cpu_architectures"', DEPLOY)
+        self.assertIn("ecs-services.json", DEPLOY)
+        self.assertIn("*-task-definition.json", DEPLOY)
+        self.assertIn("colocation-verification.json", DEPLOY)
+
+    def test_live_architecture_changes_are_protected_configuration(self):
+        self.assertIn("TF_VAR_service_cpu_architectures", DEPLOY)
+        self.assertIn("SERVICE_CPU_ARCHITECTURES_JSON must map services", DEPLOY)
+        self.assertIn("TF_VAR_audit_stream_transport", DEPLOY)
+        self.assertIn("AUDIT_STREAM_TRANSPORT must be kafka or sqs_fifo", DEPLOY)
+        self.assertIn("AUDIT_SQS_ALARM_ACTION_ARNS_JSON must be a JSON string array", DEPLOY)
+        self.assertIn("EDGE_ALARM_ACTION_ARNS_JSON must contain at least one alarm destination ARN", DEPLOY)
+        self.assertIn("CLICKHOUSE_HOST is required when the audit consumer is enabled", DEPLOY)
 
     def test_master_protection_requires_review_and_pre_merge_ci(self):
         protection = json.loads((ROOT / ".github/branch-protection-master.json").read_text(encoding="utf-8"))

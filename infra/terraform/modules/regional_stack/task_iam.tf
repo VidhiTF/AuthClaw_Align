@@ -11,8 +11,15 @@ locals {
   execution_tasks = merge(
     { for name, config in local.task_definition_configs : name => {
       secrets = concat(local.service_secrets[name], lookup(local.tls_secrets, name, []))
-      images  = concat([config.image], contains(local.tls_services, name) ? [var.internal_tls.proxy_image] : [])
-      logs    = [aws_cloudwatch_log_group.service[name].arn]
+      images = concat(
+        [config.image],
+        [for sidecar in local.policy_sidecars[name] : local.policy_sidecar_configs[sidecar].image],
+        contains(local.tls_services, name) ? [var.internal_tls.proxy_image] : [],
+      )
+      logs = concat(
+        [aws_cloudwatch_log_group.service[name].arn],
+        [for sidecar in local.policy_sidecars[name] : aws_cloudwatch_log_group.service[sidecar].arn],
+      )
     } },
     { for name, config in local.database_jobs : "database_${name}" => {
       secrets = config.secrets

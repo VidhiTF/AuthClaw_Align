@@ -257,6 +257,12 @@ variable "gateway_sidecar_task_cpu" {
   default = 2048
 }
 
+variable "enable_policy_sidecar_colocation" {
+  description = "Enable the separately reviewed gateway/OPA/Presidio co-location release."
+  type        = bool
+  default     = false
+}
+
 variable "gateway_sidecar_task_memory" {
   type    = number
   default = 4096
@@ -358,7 +364,7 @@ variable "waf_rate_limit" {
 }
 
 variable "edge_alarm_action_arns" {
-  description = "Approved SNS or incident-action ARNs for CloudFront, WAF, and origin health alarms."
+  description = "Approved SNS or incident-action ARNs for edge, origin-health, and ECS service alarms."
   type        = list(string)
   default     = []
 }

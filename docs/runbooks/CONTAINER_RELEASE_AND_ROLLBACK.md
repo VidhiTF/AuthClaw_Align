@@ -1,5 +1,8 @@
 # Container release and rollback
 
+For migration checkpoints, production execution, rollback authority and the full
+evidence gate, use [P0-16–18 production release](PRODUCTION_RELEASE.md).
+
 The controlled deployment accepts only immutable multi-platform ECR indexes. GitHub Actions builds `linux/amd64` and `linux/arm64`, attaches SBOM and provenance attestations, scans both child images, signs the GHCR index, and records compressed size changes. The deployment verifies that signature, copies the complete index to ECR, signs it again with the deployment identity, waits for ECR scans, and verifies the configured ECS architecture before Terraform runs.
 
 ## Required environment inputs

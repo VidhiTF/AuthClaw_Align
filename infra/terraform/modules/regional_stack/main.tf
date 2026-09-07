@@ -50,8 +50,8 @@ locals {
   api_base_url          = "${local.public_scheme}://${local.api_host}${var.enable_public_edge ? "/api/v1" : ":8000"}"
   gateway_base_url      = "${local.public_scheme}://${local.gateway_host}${var.enable_public_edge ? "" : ":8080"}"
   internal_agent_url    = local.internal_urls.agent
-  internal_opa_url      = local.internal_urls.opa
-  internal_presidio_url = local.internal_urls.presidio
+  internal_opa_url      = var.enable_policy_sidecar_colocation ? "http://127.0.0.1:8181" : local.internal_urls.opa
+  internal_presidio_url = var.enable_policy_sidecar_colocation ? "http://127.0.0.1:3000" : local.internal_urls.presidio
   db_address            = var.create_db_replica ? aws_db_instance.postgres_replica[0].address : aws_db_instance.postgres_primary[0].address
   db_arn                = var.create_db_replica ? aws_db_instance.postgres_replica[0].arn : aws_db_instance.postgres_primary[0].arn
   nat_subnets           = var.nat_gateway_mode == "per_az" ? aws_subnet.public : { "0" = aws_subnet.public["0"] }
@@ -98,9 +98,59 @@ locals {
     }
   }
 
-  service_configs         = merge(local.public_services, local.private_services, local.legacy_sidecar_services)
+  policy_sidecars = var.enable_policy_sidecar_colocation ? {
+    agent   = ["opa"]
+    backend = ["presidio"]
+    console = []
+    gateway = ["opa", "presidio"]
+  } : { for name in concat(keys(local.public_services), keys(local.private_services), keys(local.legacy_sidecar_services)) : name => [] }
+  policy_sidecar_configs = {
+    opa = {
+      image         = var.container_images.opa
+      cpu           = 256
+      memory        = 384
+      command       = ["run", "--server", "--addr=127.0.0.1:8181", "/policies"]
+      port_mappings = []
+    }
+    presidio = {
+      image         = var.container_images.presidio
+      cpu           = 768
+      memory        = 2048
+      command       = ["poetry", "run", "gunicorn", "-w", "1", "-b", "127.0.0.1:3000", "app:create_app()"]
+      port_mappings = []
+    }
+  }
+  policy_environment = [
+    { name = "OPA_URL", value = local.internal_opa_url },
+    { name = "PRESIDIO_URL", value = local.internal_presidio_url },
+    { name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" },
+  ]
+  service_policy_environment = var.enable_policy_sidecar_colocation ? {
+    agent   = [{ name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" }]
+    backend = [{ name = "PRESIDIO_URL", value = local.internal_presidio_url }]
+    console = []
+    gateway = local.policy_environment
+  } : { for name in keys(local.service_configs) : name => local.policy_environment }
+  colocated_task_cpu = {
+    agent = var.agent_sidecar_task_cpu, backend = var.backend_sidecar_task_cpu, gateway = var.gateway_sidecar_task_cpu
+  }
+  colocated_task_memory = {
+    agent = var.agent_sidecar_task_memory, backend = var.backend_sidecar_task_memory, gateway = var.gateway_sidecar_task_memory
+  }
+  colocated_primary_cpu    = { agent = 768, backend = 768, gateway = 768 }
+  colocated_primary_memory = { agent = 1536, backend = 1536, gateway = 1280 }
+
+  service_configs = merge(
+    local.public_services,
+    local.private_services,
+    var.enable_policy_sidecar_colocation ? {} : local.legacy_sidecar_services,
+  )
   task_definition_configs = local.service_configs
   ecs_alarm_services      = toset(concat(keys(local.service_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
+  ecs_service_desired_counts = merge(
+    { for name in keys(local.service_configs) : name => var.desired_count },
+    var.enable_audit_consumer ? { audit_consumer = 1 } : {},
+  )
 
   service_writable_paths = {
     agent          = ["/tmp", "/app/logs", "/app/watched_documents", "/app/scratch"]
@@ -137,11 +187,8 @@ locals {
     { name = "AUTHCLAW_JWT_KEY_VERSION", value = var.jwt_key_version },
     { name = "AUTHCLAW_SESSION_KEY_VERSION", value = var.session_key_version },
     { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379" },
-    { name = "OPA_URL", value = local.internal_opa_url },
-    { name = "PRESIDIO_URL", value = local.internal_presidio_url },
     { name = "AGENT_INTERNAL_URL", value = local.internal_agent_url },
     { name = "AUTHCLAW_GO_GATEWAY_URL", value = local.internal_urls.gateway },
-    { name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" },
     { name = "AUTHCLAW_DISABLE_BACKGROUND_MONITOR", value = "true" },
     { name = "AWS_STS_REGIONAL_ENDPOINTS", value = "regional" },
     { name = "PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
@@ -885,7 +932,7 @@ resource "aws_service_discovery_service" "service" {
 }
 
 resource "aws_cloudwatch_log_group" "service" {
-  for_each          = toset(concat(keys(local.task_definition_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
+  for_each          = toset(concat(keys(local.task_definition_configs), ["opa", "presidio"], var.enable_audit_consumer ? ["audit_consumer"] : []))
   name              = "/authclaw/${var.name}/${each.key}"
   retention_in_days = 30
   tags              = var.tags
@@ -1583,8 +1630,8 @@ resource "aws_ecs_task_definition" "service" {
   family                   = "${var.name}-${each.key}"
   requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
-  cpu                      = var.service_cpu
-  memory                   = var.service_memory
+  cpu                      = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_task_cpu), each.key) ? local.colocated_task_cpu[each.key] : var.service_cpu
+  memory                   = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_task_memory), each.key) ? local.colocated_task_memory[each.key] : var.service_memory
   execution_role_arn       = aws_iam_role.task_execution[each.key].arn
   task_role_arn            = lookup(local.application_task_role_arns, each.key, null)
 
@@ -1603,19 +1650,25 @@ resource "aws_ecs_task_definition" "service" {
     content { name = "tls-${volume.value}" }
   }
 
+  dynamic "volume" {
+    for_each = toset(local.policy_sidecars[each.key])
+    content { name = "sidecar-${volume.value}-tmp" }
+  }
+
   container_definitions = jsonencode(concat([
     merge({
       name      = each.key
       image     = each.value.image
       essential = true
-      cpu       = var.service_cpu
-      memory    = contains(local.tls_services, each.key) ? var.service_memory - 128 : var.service_memory
+      cpu       = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_primary_cpu), each.key) ? local.colocated_primary_cpu[each.key] : var.service_cpu
+      memory    = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_primary_memory), each.key) ? local.colocated_primary_memory[each.key] : (contains(local.tls_services, each.key) ? var.service_memory - 128 : var.service_memory)
       portMappings = [{
         containerPort = each.value.container_port
         protocol      = "tcp"
       }]
       environment = concat(
         local.common_environment,
+        local.service_policy_environment[each.key],
         each.key == "console" ? [
           { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_signing_enabled) },
           { name = "AUTHCLAW_OIDC_LOGIN_PAUSED", value = tostring(var.oidc_login_paused) },
@@ -1658,6 +1711,10 @@ resource "aws_ecs_task_definition" "service" {
         retries     = 3
         startPeriod = 30
       }
+      dependsOn = [for sidecar in local.policy_sidecars[each.key] : {
+        containerName = sidecar
+        condition     = "HEALTHY"
+      }]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -1668,8 +1725,41 @@ resource "aws_ecs_task_definition" "service" {
       }
       },
       each.value.command == null ? {} : { command = each.value.command }
-    )
-  ], contains(local.tls_services, each.key) ? [local.tls_containers[each.key]] : []))
+    )],
+    [for sidecar in local.policy_sidecars[each.key] : {
+      name                   = sidecar
+      image                  = local.policy_sidecar_configs[sidecar].image
+      essential              = true
+      cpu                    = local.policy_sidecar_configs[sidecar].cpu
+      memory                 = local.policy_sidecar_configs[sidecar].memory
+      command                = local.policy_sidecar_configs[sidecar].command
+      portMappings           = local.policy_sidecar_configs[sidecar].port_mappings
+      readonlyRootFilesystem = true
+      privileged             = false
+      stopTimeout            = 30
+      mountPoints            = [{ sourceVolume = "sidecar-${sidecar}-tmp", containerPath = "/tmp", readOnly = false }]
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities       = { drop = ["ALL"] }
+      }
+      healthCheck = {
+        command     = local.service_health_checks[sidecar]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = sidecar == "presidio" ? 60 : 10
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service[sidecar].name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "${each.key}-${sidecar}"
+        }
+      }
+    }],
+    contains(local.tls_services, each.key) ? [local.tls_containers[each.key]] : [],
+  ))
 
   lifecycle {
     precondition {
@@ -1679,11 +1769,11 @@ resource "aws_ecs_task_definition" "service" {
     precondition {
       condition = !contains(["production", "prod"], var.authclaw_env) || alltrue([
         startswith(local.internal_agent_url, "https://"),
-        startswith(local.internal_opa_url, "https://"),
-        startswith(local.internal_presidio_url, "https://"),
+        startswith(local.internal_opa_url, "https://") || local.internal_opa_url == "http://127.0.0.1:8181",
+        startswith(local.internal_presidio_url, "https://") || local.internal_presidio_url == "http://127.0.0.1:3000",
         startswith(local.internal_urls.gateway, "https://")
       ])
-      error_message = "Production is blocked until agent, gateway, OPA, and Presidio remote calls use authenticated TLS."
+      error_message = "Production is blocked until agent, gateway, OPA, and Presidio use authenticated TLS or exact task-local loopback policy endpoints."
     }
   }
 
@@ -1692,6 +1782,11 @@ resource "aws_ecs_task_definition" "service" {
 
 resource "aws_ecs_service" "public" {
   for_each = local.public_services
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   name                   = "${var.name}-${each.key}"
   cluster                = aws_ecs_cluster.main.id
@@ -1730,7 +1825,12 @@ resource "aws_ecs_service" "public" {
 }
 
 resource "aws_ecs_service" "private" {
-  for_each = merge(local.private_services, local.legacy_sidecar_services)
+  for_each = merge(local.private_services, var.enable_policy_sidecar_colocation ? {} : local.legacy_sidecar_services)
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   name                   = "${var.name}-${each.key}"
   cluster                = aws_ecs_cluster.main.id
@@ -1845,6 +1945,11 @@ resource "aws_ecs_task_definition" "audit_consumer" {
 resource "aws_ecs_service" "audit_consumer" {
   count = var.enable_audit_consumer ? 1 : 0
 
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   name                   = "${var.name}-audit-consumer"
   cluster                = aws_ecs_cluster.main.id
   task_definition        = aws_ecs_task_definition.audit_consumer[0].arn
@@ -1895,7 +2000,7 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
-  for_each = local.service_configs
+  for_each = local.ecs_alarm_services
 
   alarm_name          = "${var.name}-${each.key}-high-cpu"
   alarm_description   = "AuthClaw ${each.key} ECS CPU is above 85 percent"
@@ -1907,6 +2012,53 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
   statistic           = "Average"
   threshold           = 85
   treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_memory" {
+  for_each = local.ecs_alarm_services
+
+  alarm_name          = "${var.name}-${replace(each.key, "_", "-")}-high-memory"
+  alarm_description   = "AuthClaw ${each.key} ECS memory is above 85 percent"
+  namespace           = "AWS/ECS"
+  metric_name         = "MemoryUtilization"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  period              = 60
+  statistic           = "Average"
+  threshold           = 85
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_running_tasks" {
+  for_each = local.ecs_service_desired_counts
+
+  alarm_name          = "${var.name}-${replace(each.key, "_", "-")}-running-tasks-low"
+  alarm_description   = "AuthClaw ${each.key} has fewer running ECS tasks than its desired count"
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "RunningTaskCount"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Minimum"
+  threshold           = each.value
+  treat_missing_data  = "breaching"
+  alarm_actions       = var.edge_alarm_action_arns
 
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
@@ -1940,7 +2092,7 @@ resource "aws_cloudwatch_metric_alarm" "ecs_capacity_provider_reservation" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "ecs_pending_tasks" {
-  for_each = var.ecs_ec2_graviton.enabled ? local.ecs_alarm_services : toset([])
+  for_each = local.ecs_alarm_services
 
   alarm_name          = "${var.name}-${each.key}-pending-tasks"
   alarm_description   = "AuthClaw ${each.key} has pending ECS tasks"
@@ -1952,11 +2104,11 @@ resource "aws_cloudwatch_metric_alarm" "ecs_pending_tasks" {
   statistic           = "Maximum"
   threshold           = 0
   treat_missing_data  = "notBreaching"
-  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+  alarm_actions       = distinct(concat(var.edge_alarm_action_arns, var.ecs_ec2_graviton.alarm_action_arns))
 
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
-    ServiceName = "${var.name}-${each.key}"
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
   }
 
   tags = var.tags
@@ -2060,6 +2212,72 @@ resource "aws_cloudwatch_metric_alarm" "ecs_placement_failure" {
   threshold           = 0
   treat_missing_data  = "notBreaching"
   alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_event_rule" "ecs_deployment_failure" {
+  name        = "${var.name}-ecs-deployment-failure"
+  description = "Captures failed ECS circuit-breaker deployments"
+  event_pattern = jsonencode({
+    source        = ["aws.ecs"]
+    "detail-type" = ["ECS Deployment State Change"]
+    detail = {
+      clusterArn = [aws_ecs_cluster.main.arn]
+      eventName  = ["SERVICE_DEPLOYMENT_FAILED"]
+    }
+  })
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_log_group" "ecs_deployment_failure" {
+  name              = "/authclaw/${var.name}/ecs-deployment-failure"
+  retention_in_days = 30
+  tags              = var.tags
+}
+
+resource "aws_cloudwatch_log_resource_policy" "ecs_deployment_failure" {
+  policy_name = "${var.name}-ecs-deployment-failure"
+  policy_document = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "events.amazonaws.com" }
+      Action    = ["logs:CreateLogStream", "logs:PutLogEvents"]
+      Resource  = "${aws_cloudwatch_log_group.ecs_deployment_failure.arn}:*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_event_target" "ecs_deployment_failure" {
+  rule = aws_cloudwatch_event_rule.ecs_deployment_failure.name
+  arn  = aws_cloudwatch_log_group.ecs_deployment_failure.arn
+}
+
+resource "aws_cloudwatch_log_metric_filter" "ecs_deployment_failure" {
+  name           = "${var.name}-ecs-deployment-failure"
+  log_group_name = aws_cloudwatch_log_group.ecs_deployment_failure.name
+  pattern        = "{ $.detail.eventName = \"SERVICE_DEPLOYMENT_FAILED\" }"
+
+  metric_transformation {
+    name      = "DeploymentFailureCount"
+    namespace = "AuthClaw/ECS"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_deployment_failure" {
+  alarm_name          = "${var.name}-ecs-deployment-failure"
+  alarm_description   = "ECS reported a failed AuthClaw deployment and circuit-breaker rollback"
+  namespace           = "AuthClaw/ECS"
+  metric_name         = "DeploymentFailureCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
 
   tags = var.tags
 }

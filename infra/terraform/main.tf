@@ -57,6 +57,7 @@ module "primary" {
   desired_count                        = var.desired_count_primary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
+  enable_policy_sidecar_colocation     = var.enable_policy_sidecar_colocation
   backend_sidecar_task_cpu             = var.backend_sidecar_task_cpu
   backend_sidecar_task_memory          = var.backend_sidecar_task_memory
   agent_sidecar_task_cpu               = var.agent_sidecar_task_cpu
@@ -142,6 +143,7 @@ module "secondary" {
   desired_count                        = var.desired_count_secondary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
+  enable_policy_sidecar_colocation     = var.enable_policy_sidecar_colocation
   backend_sidecar_task_cpu             = var.backend_sidecar_task_cpu
   backend_sidecar_task_memory          = var.backend_sidecar_task_memory
   agent_sidecar_task_cpu               = var.agent_sidecar_task_cpu

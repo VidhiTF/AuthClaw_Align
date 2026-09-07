@@ -4,6 +4,7 @@ output "crypto_preflight" {
     task_definition       = module.primary.database_job_task_definition_arns["crypto_preflight"]
     task_definitions      = module.primary.database_job_task_definition_arns
     network_configuration = module.primary.database_job_network_configuration
+    launch_model          = module.primary.ecs_launch_model
   }
 }
 

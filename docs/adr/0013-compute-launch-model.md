@@ -15,9 +15,11 @@
 
 P0-05 asks whether AuthClaw should run on ARM64 Fargate or on ECS using
 Graviton EC2 instances in an Auto Scaling group (ASG) capacity provider. This ADR is
-the decision and evidence gate only. It does not authorize or implement an ASG,
-launch template, capacity provider, EC2 task definition, service migration, or live
-AWS change. It also does not implement P0-04 ARM64 images or task configuration.
+the decision and evidence gate. Terraform now contains a default-off ASG/capacity
+provider implementation so an approved future plan needs no new production code;
+its presence does not authorize activation or a live AWS change. P0-04 also publishes
+and locally smoke-tests multi-platform images, while a live ARM64 Fargate canary is
+still required.
 
 The older `AuthClaw architecture plan (1).docx` recommends EC2 Graviton for
 placement control, native ARM64, host tuning, and packing density. It also says that
@@ -31,15 +33,15 @@ P0-05 conditional on this ADR:
 
 ### Compute and task topology
 
-- Every ECS task definition declares `requires_compatibilities = ["FARGATE"]`, and
-  every ECS service declares `launch_type = "FARGATE"` in
-  [regional_stack/main.tf](../../infra/terraform/modules/regional_stack/main.tf).
-- No task definition sets `runtime_platform`, `cpu_architecture`, or
-  `operating_system_family`. ARM64 placement is therefore not explicit.
-- The repository already proves that task-local sidecars do not require EC2. The
-  gateway task contains gateway, OPA, and Presidio; the backend task contains backend
-  and Presidio; and the agent task contains agent and OPA. They use `awsvpc`, loopback
-  URLs, container health checks, and startup dependencies.
+- Fargate remains the default. The default-off `ecs_ec2_graviton.enabled` switch
+  changes task compatibility and services to the gated capacity provider only after
+  this ADR is revised and approved.
+- Every task definition now sets Linux and an explicit per-service CPU architecture.
+  ARM64 can therefore be canaried on Fargate without selecting EC2.
+- The default-off `enable_policy_sidecar_colocation` switch prepares the separate
+  step-7 release. It uses `awsvpc` loopback, essential healthy dependencies and no
+  policy-sidecar port mappings; the default retains standalone services as the
+  pre-cutover rollback topology.
 - The primary regional desired-count default is 2 per service and the secondary
   default is 1. The optional audit consumer has a fixed desired count of 1. The
   controlled-beta workflow overrides the primary desired count to 1. These are
@@ -76,11 +78,13 @@ CPU or memory utilization, peaks, task density, or safe instance counts.
 
 ### Observability and measurement artifacts
 
-- ECS Container Insights is enabled. Terraform creates 30-day service log groups,
-  public-target unhealthy-host alarms, and average ECS CPU alarms for application
-  services.
-- Terraform does not create ECS memory, running/pending task-count, placement-failure,
-  container-instance health, ASG capacity, or capacity-provider reservation alarms.
+- ECS Container Insights is enabled. Terraform creates 30-day service and failed-
+  deployment log groups; public-target health; ECS CPU, memory, running-task and
+  pending-task alarms; and a circuit-breaker deployment-failure alarm. Live alarm
+  delivery and rollback-event evidence is still required.
+- The default-off EC2 foundation additionally defines placement-failure,
+  container-instance health, ASG capacity and capacity-provider reservation alarms.
+  Those EC2-only signals cannot be exercised unless Stage A authorizes Stage B.
 - The repository contains local gateway load and recovery artifacts, and those
   artifacts explicitly distinguish local validation from hosted beta evidence. They
   do not contain representative per-service CPU/memory measurements or an EC2 versus
@@ -155,7 +159,7 @@ restore a capacity-provider strategy. Migration must:
 | Host tuning | No host kernel, storage, or agent tuning | Available, but no concrete AuthClaw requirement is documented | Use only to validate a named requirement; tuning opportunity alone is not evidence |
 | Failure recovery | AWS replaces underlying Fargate capacity; service/task recovery still requires tests | Team must prove instance and AZ loss, replacement capacity, draining, and task rescheduling | Rollback routes to the healthy Fargate service; EC2 failure must not consume rollback headroom |
 | Security | Fargate isolates tasks and AWS maintains the compute layer; team owns images, IAM, network, and data controls | Adds host IAM, IMDS, host hardening, disk, agent, SSH/SSM, vulnerability, and tenant-density concerns | Two compute paths expand the temporary review surface and credential/route inventory |
-| Observability | Existing Container Insights/logs/CPU alarms are a partial base; memory and task-count coverage is missing | Requires all Fargate signals plus ASG, instance, capacity-provider, pending-task, placement, draining, and AMI-age signals | Dashboards and alarms must distinguish old/new services and compute paths |
+| Observability | Container Insights, service logs, CPU/memory, running/pending-task, target-health and deployment-failure alarms are configured; live delivery evidence is pending | Requires all Fargate signals plus ASG, instance, capacity-provider, placement, draining, and AMI-age signals | Dashboards and alarms must distinguish old/new services and compute paths |
 | Rollback | Prefer a tested x86 Fargate task/service path while ARM64 compatibility is proved | In-place task-definition rollback is insufficient if capacity configuration or architecture changed | Preferred: keep x86 Fargate service/digests and route traffic back; do not create x86 EC2 capacity without a blocker |
 
 AWS assigns the underlying compute patching to AWS for Fargate and the ECS agent,
@@ -178,14 +182,15 @@ quantified EC2 benefit, a concrete host-tuning requirement, or explicit host
 operational ownership. P0-05 EC2 implementation is therefore **not currently
 applicable**. This ADR does not claim P0-05 complete.
 
-ARM64 enablement remains separate P0-04 work: build and verify ARM64 images, set the
-Linux/ARM64 runtime platform, canary on Fargate, and prove an x86 Fargate rollback.
+ARM64 enablement remains separate P0-04 work. Multi-platform build, local ARM64
+startup/health checks, and per-service Linux/ARM64 runtime configuration are present;
+the hosted Fargate canary and retained x86 Fargate rollback still require live evidence.
 The sidecar topology remains on the current launch model and is not a reason to reopen
 this decision.
 
-The next currently authorized compute implementation stream is P0-04 ARM64 Fargate
-work, subject to its own review and deployment controls. No P0-05 EC2 experiment or
-foundation work is authorized until Stage A below passes.
+The next currently authorized compute activity is the P0-04 ARM64 Fargate canary and
+rollback drill under its own review and deployment controls. No P0-05 EC2 experiment
+or foundation work is authorized until Stage A below passes.
 
 No temporary x86 EC2 capacity provider is approved. The preferred compatibility and
 rollback arrangement is a tested x86 Fargate service using retained immutable x86
@@ -198,7 +203,7 @@ security, observability, recovery, and rollback gates as the ARM64 EC2 provider.
 
 | Required evidence | Repository evidence used | Current result | Gate stage |
 | --- | --- | --- | --- |
-| P0-04 ARM64 compatibility | CI has no explicit ARM64 build, manifest, or startup gate | Missing | Stage A |
+| P0-04 ARM64 compatibility | CI contains explicit multi-platform build/manifest gates and local ARM64 startup/health evidence | Local controls complete; hosted Fargate canary and x86 rollback evidence missing | Stage A |
 | Tested x86 Fargate rollback | Workflow restores task definitions but does not demonstrate architecture rollback | Missing | Stage A |
 | Representative Fargate CPU and memory utilization | No hosted per-service utilization artifact found | Missing | Stage A |
 | Task counts by service and environment | Terraform defaults and controlled-beta override | Configured counts exist; representative steady/peak requirements missing | Stage A |
@@ -210,7 +215,7 @@ security, observability, recovery, and rollback gates as the ARM64 EC2 provider.
 | Reviewed host-security and observability design | No approved experimental design found | Missing | Stage A |
 | Placement, scale-out, and failure-headroom results | No EC2 capacity provider or exercise exists | Collect only after Stage A | Stage B |
 | Recovery, draining, patching, and AMI-refresh results | Local/regional recovery material is not an EC2 container-instance drill | Collect only after Stage A | Stage B |
-| ASG, capacity-provider, instance, and task alarm evidence | Current observability covers only part of the Fargate service surface | Collect only after Stage A | Stage B |
+| ASG, capacity-provider, instance, and task alarm evidence | Fargate service alarms and conditional EC2 alarms are configured; live delivery remains unproven | Collect only after Stage A | Stage B |
 | Parallel canary and x86 Fargate rollback rehearsal | No EC2 canary exists | Collect only after Stage A | Stage B |
 | Quantified EC2 benefit and accepted host ownership | No experimental result or written host-operations acceptance exists | Requires successful Stage B | Stage C |
 | Final Security and architecture approval | No EC2 production selection is approved | Requires successful Stage B | Stage C |
@@ -332,12 +337,11 @@ Stage C.
 
 ### Gate to start P0-04 ARM64 Fargate work
 
-P0-04 is the next currently authorized compute implementation stream and may proceed
-now under its own review controls. It must remain on Fargate and deliver explicit
-ARM64 or multi-platform builds, dependency compatibility, manifest verification,
-Linux/ARM64 task runtime configuration, a Fargate canary, and a tested x86 Fargate
-rollback. It must not add P0-05 EC2 infrastructure or combine the compute-model
-experiment with the ARM64 rollout.
+P0-04 may proceed under its own review controls and must remain on Fargate. The
+repository supplies multi-platform builds, dependency and manifest verification,
+Linux/ARM64 task runtime configuration, and local startup/health checks. Stage A still
+requires the live Fargate canary and tested x86 Fargate rollback. It must not add
+P0-05 EC2 infrastructure or combine the compute-model experiment with the ARM64 rollout.
 
 ### Gate to start a non-production P0-05 EC2 experiment
 
@@ -355,13 +359,12 @@ AWS's support for in-place capacity-provider transitions does not waive this pol
 
 ### Follow-up work under the current decision
 
-- Complete P0-04 separately: explicit ARM64/multi-platform image builds, dependency
-  compatibility, manifest verification, task runtime platform, Fargate canary, and x86
-  Fargate rollback drill.
+- Complete P0-04 live evidence separately: Fargate canary and x86 Fargate rollback
+  drill using the already gated multi-platform images and runtime configuration.
 - Capture hosted per-service CPU/memory/task-count and deployment-surge evidence without
   treating local load results as production sizing.
-- Add missing Fargate memory, running/pending task-count, and rollback signals as part
-  of the observability backlog, independent of whether EC2 is ever selected.
+- Capture live Fargate memory, running/pending task-count and circuit-breaker rollback
+  alarm delivery during the staging drills.
 - Keep compute migration separate from audit transport, database consolidation, and
   sidecar topology releases.
 - Recheck current AWS API and target-region behavior when the ADR is reopened because

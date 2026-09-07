@@ -240,7 +240,7 @@ def test_service_tls_boundary_accepts_task_local_sidecars(monkeypatch):
     _set_shared_environment_secrets(monkeypatch)
     monkeypatch.setenv("AUTHCLAW_REQUIRE_SERVICE_TLS", "true")
     monkeypatch.setenv("GATEWAY_INTERNAL_URL", "https://gateway.internal")
-    monkeypatch.setenv("OPA_URL", "http://127.0.0.1:8181")
+    monkeypatch.delenv("OPA_URL", raising=False)
     monkeypatch.setenv("PRESIDIO_URL", "http://127.0.0.1:3000")
 
     validate_production_environment()

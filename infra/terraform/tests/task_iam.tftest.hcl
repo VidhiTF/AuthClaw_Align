@@ -138,6 +138,20 @@ run "execution_roles_only_receive_their_task_secrets" {
   }
 }
 
+run "fargate_service_alarms_cover_memory_and_task_health" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      contains(output.primary.alarm_names, "authclaw-test-test-primary-backend-high-memory"),
+      contains(output.primary.alarm_names, "authclaw-test-test-primary-backend-running-tasks-low"),
+      contains(output.primary.alarm_names, "authclaw-test-test-primary-backend-pending-tasks"),
+      contains(output.primary.alarm_names, "authclaw-test-test-primary-ecs-deployment-failure"),
+    ])
+    error_message = "Fargate services must alarm on memory pressure and running/pending task health."
+  }
+}
+
 run "sqs_runtime_roles_remain_separate" {
   command = plan
   variables {
@@ -157,6 +171,47 @@ run "sqs_runtime_roles_remain_separate" {
   assert {
     condition     = length(output.runtime_iam_review.customer_roles) == 1
     error_message = "Only the configured customer role may be assumed."
+  }
+}
+
+run "policy_sidecars_are_task_local_when_enabled" {
+  command = plan
+  variables {
+    enable_policy_sidecar_colocation = true
+  }
+  assert {
+    condition     = output.runtime_iam_review.policy_sidecars_colocated && output.runtime_iam_review.sidecars_isolated
+    error_message = "The step-7 switch must use loopback endpoints and remove standalone policy services."
+  }
+  assert {
+    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "audit_consumer"])
+    error_message = "Co-located policy containers must share only the caller task role and have no standalone runtime roles."
+  }
+  assert {
+    condition = (
+      toset(output.runtime_iam_review.task_containers.gateway) == toset(["gateway", "opa", "presidio"]) &&
+      toset(output.runtime_iam_review.task_containers.backend) == toset(["backend", "presidio"]) &&
+      toset(output.runtime_iam_review.task_containers.agent) == toset(["agent", "opa"])
+    )
+    error_message = "Every OPA/Presidio caller must receive its required local sidecar."
+  }
+  assert {
+    condition = (
+      !contains(keys(output.execution_iam_review), "opa") &&
+      !contains(keys(output.execution_iam_review), "presidio") &&
+      output.runtime_iam_review.sidecars_have_no_port_mappings
+    )
+    error_message = "Co-location must remove standalone policy identities and expose no sidecar ENI ports."
+  }
+  assert {
+    condition = (
+      { for item in output.runtime_iam_review.task_policy_environment.gateway : item.name => item.value }["OPA_URL"] == "http://127.0.0.1:8181" &&
+      { for item in output.runtime_iam_review.task_policy_environment.gateway : item.name => item.value }["PRESIDIO_URL"] == "http://127.0.0.1:3000" &&
+      !contains([for item in output.runtime_iam_review.task_policy_environment.backend : item.name], "OPA_URL") &&
+      !contains([for item in output.runtime_iam_review.task_policy_environment.agent : item.name], "PRESIDIO_URL") &&
+      length(output.runtime_iam_review.task_policy_environment.console) == 0
+    )
+    error_message = "Task-local policy URLs must only be injected into tasks that own the corresponding sidecar."
   }
 }
 

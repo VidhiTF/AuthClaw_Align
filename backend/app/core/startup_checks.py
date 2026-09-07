@@ -98,12 +98,14 @@ def validate_production_environment() -> None:
 
     errors: list[str] = []
     if require_service_tls:
-        for name in ("GATEWAY_INTERNAL_URL", "OPA_URL", "PRESIDIO_URL"):
+        for name in ("GATEWAY_INTERNAL_URL", "PRESIDIO_URL"):
             value = os.getenv(name, "").strip()
             valid = _is_https_url(value) if name == "GATEWAY_INTERNAL_URL" else _is_secure_sidecar_url(value)
             if not valid:
                 requirement = "https" if name == "GATEWAY_INTERNAL_URL" else "https or task-local loopback http"
                 errors.append(f"{name} must use {requirement} when service TLS is required")
+        if os.getenv("OPA_URL") and not _is_secure_sidecar_url(os.getenv("OPA_URL")):
+            errors.append("OPA_URL must use https or task-local loopback http when configured")
 
     if shared_environment and os.getenv("CLICKHOUSE_HOST", "").strip() and _is_missing_or_demo(
         os.getenv("CLICKHOUSE_PASSWORD")

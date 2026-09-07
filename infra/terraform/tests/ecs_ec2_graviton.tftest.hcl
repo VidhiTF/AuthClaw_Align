@@ -50,6 +50,11 @@ run "fargate_remains_default" {
     condition     = output.primary.ecs_launch_model.capacity_provider_name == null
     error_message = "Default plans must not create the EC2 capacity provider."
   }
+
+  assert {
+    condition     = output.crypto_preflight.launch_model.mode == "FARGATE"
+    error_message = "Database one-off tasks must inherit the default Fargate launch model."
+  }
 }
 
 run "ec2_graviton_capacity_provider" {
@@ -91,6 +96,11 @@ run "ec2_graviton_capacity_provider" {
   assert {
     condition     = output.primary.ecs_launch_model.capacity_provider_name == "authclaw-test-test-primary-graviton"
     error_message = "P0-05 must create the expected ECS capacity provider."
+  }
+
+  assert {
+    condition     = output.crypto_preflight.launch_model.capacity_provider_name == output.primary.ecs_launch_model.capacity_provider_name
+    error_message = "Database one-off tasks must use the selected Graviton capacity provider."
   }
 
   assert {
