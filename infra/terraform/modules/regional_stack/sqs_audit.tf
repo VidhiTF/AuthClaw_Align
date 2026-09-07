@@ -12,7 +12,6 @@ locals {
     { name = "SQS_MAX_MESSAGES", value = tostring(var.audit_sqs_max_messages) },
     { name = "SQS_VISIBILITY_TIMEOUT_SECONDS", value = tostring(var.audit_sqs_visibility_timeout_seconds) }
   ] : []
-
 }
 
 resource "aws_sqs_queue" "audit_dlq" {

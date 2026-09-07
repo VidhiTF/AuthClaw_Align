@@ -49,6 +49,7 @@ override_resource {
 
 variables {
   project                    = "authclaw-test"
+  aws_account_id             = "123456789012"
   environment                = "test"
   primary_region             = "us-east-1"
   secondary_region           = "us-west-2"
@@ -89,7 +90,7 @@ run "execution_roles_only_receive_their_task_secrets" {
     error_message = "OPA/Presidio must run in independent tasks."
   }
   assert {
-    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway"])
+    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "audit_consumer"])
     error_message = "Only AWS-calling application workloads may have runtime roles."
   }
   assert {
@@ -162,9 +163,13 @@ run "tls_and_direct_aws_are_scoped" {
   command = plan
   variables {
     # New writes use env v2; retained KMS v1 reads must remain independently configurable.
-    secret_key_version = "v2"
-    authclaw_env       = "production"
-    internal_tls       = { enabled = true, namespace = "internal.example.com" }
+    secret_key_version     = "v2"
+    authclaw_env           = "production"
+    enable_public_edge     = true
+    hosted_zone_id         = "Z1234567890"
+    edge_certificate_arn   = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000010"
+    edge_alarm_action_arns = ["arn:aws:sns:us-east-1:123456789012:authclaw-edge-alerts"]
+    internal_tls           = { enabled = true, namespace = "internal.example.com" }
     direct_aws = {
       backend_kms_versions    = { v1 = "arn:aws:kms:us-east-1:123456789012:key/backend" }
       agent_kms_key           = "arn:aws:kms:us-east-1:123456789012:key/agent"

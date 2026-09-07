@@ -35,7 +35,7 @@ locals {
 
 resource "aws_iam_role" "task_execution" {
   for_each             = local.execution_tasks
-  name                 = "${var.name}-${replace(each.key, "_", "-")}-exec"
+  name                 = trimsuffix(substr("${var.name}-${replace(each.key, "_", "-")}-exec", 0, 64), "-")
   permissions_boundary = var.iam_permissions_boundary_arn
   assume_role_policy = jsonencode({
     Version = "2012-10-17"

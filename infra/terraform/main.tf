@@ -1,5 +1,19 @@
 locals {
-  name = "${var.project}-${var.environment}"
+  name          = "${var.project}-${var.environment}"
+  is_production = contains(["prod", "production"], lower(trimspace(var.environment))) || contains(["prod", "production"], lower(trimspace(var.authclaw_env))) || var.public_url_environment == "production"
+  approved_public_domains = var.public_url_environment == "production" ? {
+    marketing = "authclaw.ai"
+    www       = "www.authclaw.ai"
+    console   = "app.authclaw.ai"
+    api       = "api.authclaw.ai"
+    gateway   = "gateway.authclaw.ai"
+    } : {
+    marketing = "dev.authclaw.ai"
+    www       = ""
+    console   = "dev.authclaw.ai"
+    api       = "api.dev.authclaw.ai"
+    gateway   = "gateway.dev.authclaw.ai"
+  }
   tags = merge(var.tags, {
     Project     = var.project
     Environment = var.environment
@@ -26,12 +40,20 @@ module "primary" {
   name                                 = "${local.name}-primary"
   environment                          = var.environment
   region                               = var.primary_region
+  aws_account_id                       = var.aws_account_id
   vpc_cidr                             = var.primary_vpc_cidr
   availability_zones                   = var.primary_availability_zones
   nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
+  runtime_s3_bucket_arns               = var.runtime_s3_bucket_arns
+  runtime_kms_key_arns                 = var.runtime_kms_key_arns
+  runtime_secrets_manager_secret_arns  = var.runtime_secrets_manager_secret_arns
+  runtime_sts_assume_role_arns         = var.runtime_sts_assume_role_arns
+  vpc_endpoint_external_principal_arns = var.vpc_endpoint_external_principal_arns
   container_images                     = var.container_images
+  ecr_repository_arns                  = toset(values(aws_ecr_repository.service)[*].arn)
   service_cpu_architectures            = var.service_cpu_architectures
+  ecs_ec2_graviton                     = var.ecs_ec2_graviton
   desired_count                        = var.desired_count_primary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
@@ -50,6 +72,15 @@ module "primary" {
   session_key_version                  = var.session_key_version
   certificate_arn                      = var.primary_certificate_arn != "" ? var.primary_certificate_arn : var.certificate_arn
   domain_name                          = var.domain_name
+  enable_public_edge                   = var.enable_public_edge
+  public_domain_names = {
+    console = local.approved_public_domains.console
+    api     = local.approved_public_domains.api
+    gateway = local.approved_public_domains.gateway
+  }
+  public_url_environment               = var.public_url_environment
+  alb_access_log_retention_days        = var.edge_log_retention_days
+  edge_alarm_action_arns               = var.edge_alarm_action_arns
   smtp_host                            = var.smtp_host
   smtp_from                            = var.smtp_from
   kafka_brokers                        = var.kafka_brokers
@@ -94,12 +125,20 @@ module "secondary" {
   name                                 = "${local.name}-secondary"
   environment                          = var.environment
   region                               = var.secondary_region
+  aws_account_id                       = var.aws_account_id
   vpc_cidr                             = var.secondary_vpc_cidr
   availability_zones                   = var.secondary_availability_zones
   nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
+  runtime_s3_bucket_arns               = var.runtime_s3_bucket_arns
+  runtime_kms_key_arns                 = var.runtime_kms_key_arns
+  runtime_secrets_manager_secret_arns  = var.runtime_secrets_manager_secret_arns
+  runtime_sts_assume_role_arns         = var.runtime_sts_assume_role_arns
+  vpc_endpoint_external_principal_arns = var.vpc_endpoint_external_principal_arns
   container_images                     = var.container_images
+  ecr_repository_arns                  = toset(values(aws_ecr_repository.service)[*].arn)
   service_cpu_architectures            = var.service_cpu_architectures
+  ecs_ec2_graviton                     = var.ecs_ec2_graviton
   desired_count                        = var.desired_count_secondary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
@@ -118,6 +157,15 @@ module "secondary" {
   session_key_version                  = var.session_key_version
   certificate_arn                      = var.secondary_certificate_arn != "" ? var.secondary_certificate_arn : var.certificate_arn
   domain_name                          = var.domain_name
+  enable_public_edge                   = var.enable_public_edge
+  public_domain_names = {
+    console = local.approved_public_domains.console
+    api     = local.approved_public_domains.api
+    gateway = local.approved_public_domains.gateway
+  }
+  public_url_environment               = var.public_url_environment
+  alb_access_log_retention_days        = var.edge_log_retention_days
+  edge_alarm_action_arns               = var.edge_alarm_action_arns
   smtp_host                            = var.smtp_host
   smtp_from                            = var.smtp_from
   kafka_brokers                        = var.kafka_brokers
@@ -141,44 +189,4 @@ module "secondary" {
   enable_audit_consumer                = var.enable_audit_consumer
   replica_source_db_arn                = var.enable_cross_region_db_replica ? module.primary.rds_instance_arn : ""
   tags                                 = local.tags
-}
-
-resource "aws_route53_record" "console_primary" {
-  provider = aws.primary
-  count    = var.hosted_zone_id != "" && var.domain_name != "" ? 1 : 0
-
-  zone_id = var.hosted_zone_id
-  name    = var.domain_name
-  type    = "A"
-
-  set_identifier = "primary"
-  failover_routing_policy {
-    type = "PRIMARY"
-  }
-
-  alias {
-    name                   = module.primary.alb_dns_name
-    zone_id                = module.primary.alb_zone_id
-    evaluate_target_health = true
-  }
-}
-
-resource "aws_route53_record" "console_secondary" {
-  provider = aws.primary
-  count    = var.enable_secondary && var.hosted_zone_id != "" && var.domain_name != "" ? 1 : 0
-
-  zone_id = var.hosted_zone_id
-  name    = var.domain_name
-  type    = "A"
-
-  set_identifier = "secondary"
-  failover_routing_policy {
-    type = "SECONDARY"
-  }
-
-  alias {
-    name                   = module.secondary[0].alb_dns_name
-    zone_id                = module.secondary[0].alb_zone_id
-    evaluate_target_health = true
-  }
 }

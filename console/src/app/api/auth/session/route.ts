@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { sessionCookieName } from "@/lib/cookie-options";
 
 export async function GET() {
   try {
     const cookieStore = await cookies();
-    const sessionToken = cookieStore.get("authclaw_session")?.value;
+    const sessionToken = cookieStore.get(sessionCookieName())?.value;
     if (!sessionToken) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -14,7 +15,7 @@ export async function GET() {
     );
     if (!backend.ok) {
       const response = NextResponse.json({ error: "Unauthorized: Session expired or invalid" }, { status: 401 });
-      response.cookies.delete("authclaw_session");
+      response.cookies.delete(sessionCookieName());
       return response;
     }
     const principal = await backend.json();

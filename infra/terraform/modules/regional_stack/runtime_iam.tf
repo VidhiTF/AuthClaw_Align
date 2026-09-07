@@ -11,10 +11,10 @@ variable "agent_customer_role_arns" {
 }
 
 resource "aws_iam_role" "runtime" {
-  for_each             = toset(concat(["backend", "agent", "gateway"], var.enable_audit_consumer ? ["audit_consumer"] : [], local.backend_kms_enabled ? ["database_crypto_preflight"] : []))
+  for_each             = toset(concat(["backend", "agent", "gateway", "audit_consumer"], local.backend_kms_enabled ? ["database_crypto_preflight"] : []))
   name                 = "${var.name}-${replace(each.key, "_", "-")}-runtime"
   permissions_boundary = var.iam_permissions_boundary_arn
-  assume_role_policy   = aws_iam_role.task_execution[each.key].assume_role_policy
+  assume_role_policy   = try(aws_iam_role.task_execution[each.key].assume_role_policy, aws_iam_role.task_execution["backend"].assume_role_policy)
   tags                 = var.tags
 }
 

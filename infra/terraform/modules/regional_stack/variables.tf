@@ -10,6 +10,11 @@ variable "region" {
   type = string
 }
 
+variable "aws_account_id" {
+  type    = string
+  default = ""
+}
+
 variable "vpc_cidr" {
   type = string
 }
@@ -29,6 +34,31 @@ variable "enable_private_aws_endpoints" {
   description = "Route supported AWS service traffic privately through VPC gateway and interface endpoints."
   type        = bool
   default     = true
+}
+
+variable "runtime_s3_bucket_arns" {
+  type    = map(set(string))
+  default = {}
+}
+
+variable "runtime_kms_key_arns" {
+  type    = map(set(string))
+  default = {}
+}
+
+variable "runtime_secrets_manager_secret_arns" {
+  type    = map(set(string))
+  default = {}
+}
+
+variable "runtime_sts_assume_role_arns" {
+  type    = set(string)
+  default = []
+}
+
+variable "vpc_endpoint_external_principal_arns" {
+  type    = set(string)
+  default = []
 }
 
 variable "nat_gateway_mode" {
@@ -67,6 +97,38 @@ variable "service_cpu_architectures" {
     condition     = alltrue([for architecture in values(var.service_cpu_architectures) : contains(["ARM64", "X86_64"], architecture)])
     error_message = "service_cpu_architectures values must be ARM64 or X86_64."
   }
+}
+
+variable "ecs_ec2_graviton" {
+  description = "Optional ECS on EC2 Graviton capacity provider for P0-05."
+  type = object({
+    enabled              = optional(bool, false)
+    instance_type        = optional(string, "m7g.2xlarge")
+    min_size             = optional(number, 2)
+    desired_size         = optional(number, 2)
+    max_size             = optional(number, 4)
+    image_id             = optional(string, "")
+    root_volume_size     = optional(number, 50)
+    alarm_action_arns    = optional(list(string), [])
+    x86_provider_enabled = optional(bool, false)
+  })
+  default = {}
+
+  validation {
+    condition     = var.ecs_ec2_graviton.min_size >= 0 && var.ecs_ec2_graviton.desired_size >= var.ecs_ec2_graviton.min_size && var.ecs_ec2_graviton.max_size >= var.ecs_ec2_graviton.desired_size
+    error_message = "ecs_ec2_graviton capacity must satisfy min_size <= desired_size <= max_size."
+  }
+
+  validation {
+    condition     = can(regex("^[a-z][0-9]+g\\.", var.ecs_ec2_graviton.instance_type))
+    error_message = "ecs_ec2_graviton.instance_type must be an ARM64 Graviton instance family such as m7g.large."
+  }
+}
+
+variable "ecr_repository_arns" {
+  description = "Approved ECR repositories used by ECS task image pulls."
+  type        = set(string)
+  default     = []
 }
 
 variable "authclaw_env" {
@@ -195,6 +257,47 @@ variable "certificate_arn" {
 variable "domain_name" {
   type    = string
   default = ""
+}
+
+variable "enable_public_edge" {
+  description = "Allow CloudFront ingress to the always-private application ALBs."
+  type        = bool
+  default     = false
+}
+
+variable "public_domain_names" {
+  description = "Approved public hostnames used to construct browser-facing runtime URLs."
+  type = object({
+    console = string
+    api     = string
+    gateway = string
+  })
+  default = {
+    console = ""
+    api     = ""
+    gateway = ""
+  }
+}
+
+variable "public_url_environment" {
+  type    = string
+  default = "staging"
+}
+
+variable "alb_access_log_retention_days" {
+  description = "Retention for regional ALB access logs."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.alb_access_log_retention_days >= 30
+    error_message = "alb_access_log_retention_days must be at least 30 days."
+  }
+}
+
+variable "edge_alarm_action_arns" {
+  type    = list(string)
+  default = []
 }
 
 variable "smtp_host" {

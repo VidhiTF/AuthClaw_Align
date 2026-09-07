@@ -77,7 +77,7 @@ jobs:
           fetch-depth: 2
       - run: |
           git diff --check HEAD^
-          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test scripts.test_iam_release_evidence
+          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test scripts.test_iam_release_evidence scripts.test_verify_p007_edge_evidence scripts.test_p008_private_paths_evidence
 
   smoke:
     name: Master Smoke and Contract Integration
@@ -409,6 +409,7 @@ jobs:
           terraform -chdir=infra/terraform validate
           cat > infra/terraform/ci.auto.tfvars.json <<'JSON'
           {
+            "environment": "ci",
             "ci_skip_aws_validation": true,
             "enable_secondary": false,
             "enable_cross_region_db_replica": false,
