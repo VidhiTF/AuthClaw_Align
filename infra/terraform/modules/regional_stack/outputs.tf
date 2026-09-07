@@ -53,7 +53,7 @@ output "ecs_service_names" {
 output "public_endpoints" {
   value = {
     console = local.console_base_url
-    backend = "${local.api_base_url}/health"
+    backend = "${local.public_scheme}://${local.api_host}${var.enable_public_edge ? "" : ":8000"}/health"
     gateway = "${local.gateway_base_url}/health"
   }
 }

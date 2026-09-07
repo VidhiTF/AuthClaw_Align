@@ -81,6 +81,11 @@ run "staging_has_one_documented_edge_per_public_hostname" {
   }
 
   assert {
+    condition     = output.primary.public_endpoints.backend == "https://api.dev.authclaw.ai/health"
+    error_message = "The public backend health endpoint must not include the API route prefix."
+  }
+
+  assert {
     condition = output.public_edge.runtime_url_boundary == {
       console_url       = "https://dev.authclaw.ai"
       api_url           = "https://api.dev.authclaw.ai/api/v1"

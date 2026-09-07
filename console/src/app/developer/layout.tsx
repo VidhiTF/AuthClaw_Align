@@ -2,10 +2,11 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import type React from "react";
 import DeveloperShell from "@/components/developer-shell";
+import { sessionCookieName } from "@/lib/cookie-options";
 
 export default async function DeveloperLayout({ children }: { children: React.ReactNode }) {
   const cookieStore = await cookies();
-  const sessionToken = cookieStore.get("authclaw_session")?.value;
+  const sessionToken = cookieStore.get(sessionCookieName())?.value;
   if (!sessionToken) redirect("/login?developer=1");
 
   const response = await fetch(

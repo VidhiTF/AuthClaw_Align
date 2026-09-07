@@ -9,6 +9,8 @@ test("developer layout requires an active tenantless platform profile", () => {
   assert.ok(source.includes('principal.role === "platform_admin"'));
   assert.ok(source.includes("principal.is_active === true"));
   assert.ok(source.includes('scopes.includes("platform.admin")'));
+  assert.ok(source.includes("cookieStore.get(sessionCookieName())"));
+  assert.ok(!source.includes('cookieStore.get("authclaw_session")'));
 });
 
 test("maps approved BFF routes and rejects broader proxy access", () => {
