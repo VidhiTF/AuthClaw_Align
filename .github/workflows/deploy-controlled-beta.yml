@@ -62,6 +62,9 @@ jobs:
       BETA_CERTIFICATE_ARN: ${{ vars.BETA_CERTIFICATE_ARN }}
       BETA_DOMAIN_NAME: ${{ vars.BETA_DOMAIN_NAME }}
       SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      ROLLBACK_PROTECTED_UNTIL: ${{ vars.ROLLBACK_PROTECTED_UNTIL }}
+      DATABASE_COMPATIBLE_UNTIL: ${{ vars.DATABASE_COMPATIBLE_UNTIL }}
+      DEEP_ROLLBACK_INVENTORY_JSON: ${{ vars.DEEP_ROLLBACK_INVENTORY_JSON }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
       TF_STATE_KMS_KEY_ID: ${{ vars.TF_STATE_KMS_KEY_ID }}
@@ -79,9 +82,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in AWS_REGION AWS_ROLE_ARN BETA_CERTIFICATE_ARN BETA_DOMAIN_NAME TF_STATE_BUCKET TF_STATE_KMS_KEY_ID; do
+          for name in AWS_REGION AWS_ROLE_ARN BETA_CERTIFICATE_ARN BETA_DOMAIN_NAME TF_STATE_BUCKET TF_STATE_KMS_KEY_ID ROLLBACK_PROTECTED_UNTIL DATABASE_COMPATIBLE_UNTIL DEEP_ROLLBACK_INVENTORY_JSON; do
             [[ -n "${!name}" ]] || { echo "::error::Missing controlled-beta variable ${name}"; exit 1; }
           done
+          date -d "$ROLLBACK_PROTECTED_UNTIL" >/dev/null
+          date -d "$DATABASE_COMPATIBLE_UNTIL" >/dev/null
+          jq -e '.services | type == "array"' <<<"$DEEP_ROLLBACK_INVENTORY_JSON" >/dev/null
 
       - name: Configure short-lived AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -95,6 +101,9 @@ jobs:
         with:
           terraform_version: 1.15.7
           terraform_wrapper: false
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Initialize KMS-encrypted remote state
         shell: bash
@@ -113,6 +122,7 @@ jobs:
         run: |
           jq -n '{
             environment: "controlled-beta",
+            authclaw_env: "ci",
             enable_secondary: false,
             require_immutable_images: false,
             container_images: {
@@ -147,19 +157,27 @@ jobs:
           repo="${GITHUB_REPOSITORY,,}"
 
           promote() {
-            local key="$1" source="$2" destination repository digest
+            local key="$1" source="$2" destination repository source_digest digest source_manifest manifest
             destination="$(jq -r --arg key "$key" '.[$key]' <<<"$repositories")"
             repository="${destination#*/}"
+            source_digest="$(docker buildx imagetools inspect "$source" --format '{{json .Manifest}}' | jq -er '.digest')"
+            cosign verify \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml@refs/heads/master" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${source%:*}@$source_digest" >/dev/null
+            source_manifest="$(docker buildx imagetools inspect "${source%:*}@$source_digest" --raw)"
             digest="$(aws ecr describe-images --repository-name "$repository" \
-              --image-ids imageTag="$SOURCE_SHA" --query 'imageDetails[0].imageDigest' \
+              --image-ids imageTag="candidate-$SOURCE_SHA" --query 'imageDetails[0].imageDigest' \
               --output text 2>/dev/null || true)"
             if [[ -z "$digest" || "$digest" == "None" ]]; then
-              docker pull "$source"
-              docker tag "$source" "$destination:$SOURCE_SHA"
-              docker push "$destination:$SOURCE_SHA"
+              docker buildx imagetools create --tag "$destination:candidate-$SOURCE_SHA" "${source%:*}@$source_digest"
               digest="$(aws ecr describe-images --repository-name "$repository" \
-                --image-ids imageTag="$SOURCE_SHA" --query 'imageDetails[0].imageDigest' --output text)"
+                --image-ids imageTag="candidate-$SOURCE_SHA" --query 'imageDetails[0].imageDigest' --output text)"
             fi
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            manifest="$(docker buildx imagetools inspect "$destination@$digest" --raw)"
+            jq -e '([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length) == 1 and ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length) == 1' <<<"$manifest" >/dev/null
+            [[ "$(jq -c '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | [.platform.architecture,.digest]] | sort' <<<"$manifest")" == "$(jq -c '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | [.platform.architecture,.digest]] | sort' <<<"$source_manifest")" ]]
             printf '%s@%s' "$destination" "$digest"
           }
 
@@ -189,7 +207,7 @@ jobs:
                 opa: $opa,
                 presidio: $presidio
               },
-              tags: {Environment: "controlled-beta", Jira: "ACL-14"}
+              tags: {Environment: "controlled-beta", Jira: "ACL-14", Release: $ENV.SOURCE_SHA}
             }' > infra/terraform/beta.auto.tfvars.json
 
       - name: Capture rollback task definitions
@@ -209,7 +227,45 @@ jobs:
                   --query 'services[0].taskDefinition' --output text)"
                 printf '%s\t%s\n' "$service" "$task_definition" >> previous-task-definitions.tsv
               done
+            python3 scripts/ecr_release_control.py inventory --cluster "$cluster" --output deployed-image-inventory.json
+          else
+            jq -n '{captured_at:(now|todate),services:[]}' > deployed-image-inventory.json
           fi
+          printf '%s' "$DEEP_ROLLBACK_INVENTORY_JSON" > deeper-rollback-inventory.json
+
+      - name: Sign, scan, and verify promoted image digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          while read -r image; do cosign sign --yes "$image"; done < <(jq -r '.container_images[]' infra/terraform/beta.auto.tfvars.json)
+          python3 scripts/ecr_release_control.py verify \
+            --tfvars infra/terraform/beta.auto.tfvars.json \
+            --identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy-controlled-beta.yml@refs/heads/master" \
+            --output promoted-image-verification.json
+
+      - name: Protect release and rollback digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ecr_release_control.py protect \
+            --tfvars infra/terraform/beta.auto.tfvars.json \
+            --inventory deployed-image-inventory.json \
+            --additional-inventory deeper-rollback-inventory.json \
+            --release-id "$SOURCE_SHA" \
+            --rollback-until "$ROLLBACK_PROTECTED_UNTIL" \
+            --database-compatible-until "$DATABASE_COMPATIBLE_UNTIL" \
+            --output promotion-record.json
+
+      - name: Preview rollback-safe lifecycle policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform -chdir=infra/terraform output -json ecr_repository_urls > ecr-repositories.json
+          python3 scripts/ecr_release_control.py preview \
+            --repositories ecr-repositories.json \
+            --policy infra/ecr-lifecycle-policy.json \
+            --inventory deployed-image-inventory.json \
+            --output lifecycle-preview.json
 
       - name: Gate runtime rollout on complete ciphertext and key inventory
         shell: bash
@@ -355,5 +411,10 @@ jobs:
             iam-review.json
             previous-task-definitions.tsv
             database-*-task.json
+            deployed-image-inventory.json
+            deeper-rollback-inventory.json
+            promoted-image-verification.json
+            promotion-record.json
+            lifecycle-preview.json
           if-no-files-found: warn
           retention-days: 30

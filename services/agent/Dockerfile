@@ -1,4 +1,4 @@
-FROM python:3.14.3-slim AS backend
+FROM python:3.14.3-slim@sha256:5e59aae31ff0e87511226be8e2b94d78c58f05216efda3b07dbbed938ec8583b AS build
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -6,16 +6,24 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        curl \
-        poppler-utils \
-        tesseract-ocr \
+    && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements-model.txt ./
-RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt -r requirements-model.txt
+RUN python -m pip install --no-cache-dir --require-hashes --prefix=/install -r requirements.txt -r requirements-model.txt
+
+FROM python:3.14.3-slim@sha256:5e59aae31ff0e87511226be8e2b94d78c58f05216efda3b07dbbed938ec8583b
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /install /usr/local
 
 COPY . .
 

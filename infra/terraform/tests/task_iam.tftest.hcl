@@ -48,6 +48,7 @@ override_resource {
 }
 
 variables {
+  authclaw_env               = "ci"
   project                    = "authclaw-test"
   aws_account_id             = "123456789012"
   environment                = "test"
@@ -90,8 +91,8 @@ run "execution_roles_only_receive_their_task_secrets" {
     error_message = "OPA/Presidio must run in independent tasks."
   }
   assert {
-    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "audit_consumer"])
-    error_message = "Only AWS-calling application workloads may have runtime roles."
+    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "opa", "presidio", "audit_consumer"])
+    error_message = "Every application service must have an independent runtime role."
   }
   assert {
     condition     = alltrue([for name in ["opa", "presidio"] : length(output.execution_iam_review[name].secret_names) == 0])
@@ -146,8 +147,8 @@ run "sqs_runtime_roles_remain_separate" {
     agent_customer_role_arns = ["arn:aws:iam::210987654321:role/authclaw-customer"]
   }
   assert {
-    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "audit_consumer"])
-    error_message = "SQS transport must retain four independent runtime identities."
+    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "opa", "presidio", "audit_consumer"])
+    error_message = "SQS transport must retain independent runtime identities for every service."
   }
   assert {
     condition     = toset(output.execution_iam_review.audit_consumer.secret_names) == toset(["CLICKHOUSE_PASSWORD"])
@@ -163,13 +164,23 @@ run "tls_and_direct_aws_are_scoped" {
   command = plan
   variables {
     # New writes use env v2; retained KMS v1 reads must remain independently configurable.
-    secret_key_version     = "v2"
-    authclaw_env           = "production"
-    enable_public_edge     = true
-    hosted_zone_id         = "Z1234567890"
-    edge_certificate_arn   = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000010"
-    edge_alarm_action_arns = ["arn:aws:sns:us-east-1:123456789012:authclaw-edge-alerts"]
-    internal_tls           = { enabled = true, namespace = "internal.example.com" }
+    secret_key_version       = "v2"
+    authclaw_env             = "production"
+    require_immutable_images = true
+    enable_public_edge       = true
+    hosted_zone_id           = "Z1234567890"
+    edge_certificate_arn     = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000010"
+    edge_alarm_action_arns   = ["arn:aws:sns:us-east-1:123456789012:authclaw-edge-alerts"]
+    container_images = {
+      agent          = "example.invalid/authclaw/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      backend        = "example.invalid/authclaw/backend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      gateway        = "example.invalid/authclaw/gateway@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      console        = "example.invalid/authclaw/console@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      audit_consumer = "example.invalid/authclaw/audit-consumer@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      opa            = "example.invalid/authclaw/opa@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      presidio       = "example.invalid/authclaw/presidio@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+    internal_tls = { enabled = true, namespace = "internal.example.com" }
     direct_aws = {
       backend_kms_versions    = { v1 = "arn:aws:kms:us-east-1:123456789012:key/backend" }
       agent_kms_key           = "arn:aws:kms:us-east-1:123456789012:key/agent"
@@ -184,7 +195,7 @@ run "tls_and_direct_aws_are_scoped" {
     condition = alltrue([for service in ["console", "backend", "agent", "gateway", "opa", "presidio"] :
       startswith(output.runtime_iam_review.internal_urls[service], "https://") &&
       contains(output.execution_iam_review[service].secret_names, "TLS_KEY_PEM")
-    ]) && !contains(output.runtime_iam_review.roles, "console")
+    ]) && contains(output.runtime_iam_review.roles, "console")
     error_message = "Protected services must use TLS with task-specific certificate injection."
   }
   assert {

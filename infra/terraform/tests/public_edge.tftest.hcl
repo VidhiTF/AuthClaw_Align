@@ -31,14 +31,15 @@ variables {
   edge_certificate_arn           = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000010"
   primary_certificate_arn        = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000011"
   edge_alarm_action_arns         = ["arn:aws:sns:us-east-1:123456789012:authclaw-edge-alerts"]
+  require_immutable_images       = true
   container_images = {
-    agent          = "example.invalid/authclaw/agent:test"
-    backend        = "example.invalid/authclaw/backend:test"
-    gateway        = "example.invalid/authclaw/gateway:test"
-    console        = "example.invalid/authclaw/console:test"
-    audit_consumer = "example.invalid/authclaw/audit-consumer:test"
-    opa            = "example.invalid/authclaw/opa:test"
-    presidio       = "example.invalid/authclaw/presidio:test"
+    agent          = "example.invalid/authclaw/agent@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    backend        = "example.invalid/authclaw/backend@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    gateway        = "example.invalid/authclaw/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    console        = "example.invalid/authclaw/console@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    audit_consumer = "example.invalid/authclaw/audit-consumer@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    opa            = "example.invalid/authclaw/opa@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    presidio       = "example.invalid/authclaw/presidio@sha256:0000000000000000000000000000000000000000000000000000000000000000"
   }
 }
 
