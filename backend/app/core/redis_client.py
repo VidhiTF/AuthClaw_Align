@@ -48,4 +48,3 @@ def close_redis_client() -> None:
     if get_redis_client.cache_info().currsize:
         get_redis_client().close()
         get_redis_client.cache_clear()
-

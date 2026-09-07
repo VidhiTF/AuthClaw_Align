@@ -21,4 +21,3 @@ def test_backend_redis_client_is_bounded_and_does_not_retry_ambiguous_writes(mon
     assert captured["retry_on_timeout"] is False
     assert captured["retry"]._retries == 0
     redis_client.get_redis_client.cache_clear()
-
