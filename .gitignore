@@ -85,3 +85,7 @@ Thumbs.db
 .venv_semantic_merge/
 .semantic_merge_cache.pkl
 semantic_merge_report.*
+
+# Local Codex/Graphify configuration and generated knowledge graphs
+.codex/
+**/graphify-out/
