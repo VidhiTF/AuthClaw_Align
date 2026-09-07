@@ -1,6 +1,6 @@
 """Configuration settings for AuthClaw Backend"""
 from typing import List
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     
     # Database
     DATABASE_URL: str = "postgresql://authclaw:authclaw@localhost:5432/authclaw"
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def select_installed_postgres_driver(cls, value: str) -> str:
+        return value.replace("postgresql://", "postgresql+psycopg://", 1) if value.startswith("postgresql://") else value
     
     # CORS
     ALLOWED_ORIGINS: List[str] = [

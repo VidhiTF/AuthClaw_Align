@@ -142,8 +142,8 @@ variable "service_cpu_architectures" {
   default     = {}
 
   validation {
-    condition     = length(setsubtract(keys(var.service_cpu_architectures), ["agent", "backend", "gateway", "console", "audit_consumer"])) == 0
-    error_message = "service_cpu_architectures supports only agent, backend, gateway, console, and audit_consumer."
+    condition     = length(setsubtract(keys(var.service_cpu_architectures), ["agent", "backend", "gateway", "console", "audit_consumer", "opa", "presidio"])) == 0
+    error_message = "service_cpu_architectures contains an unknown runtime service."
   }
 
   validation {
@@ -188,6 +188,13 @@ variable "require_immutable_images" {
       for image in values(var.container_images) : can(regex("@sha256:[0-9a-f]{64}$", image))
     ])
     error_message = "Controlled-beta container_images must all end in @sha256:<64 lowercase hex characters>."
+  }
+}
+
+check "controlled_environments_require_immutable_images" {
+  assert {
+    condition     = !contains(["controlled-beta", "staging", "stage", "production", "prod"], var.authclaw_env) || var.require_immutable_images
+    error_message = "Staging and production deployments must enable require_immutable_images."
   }
 }
 

@@ -102,6 +102,25 @@ locals {
   task_definition_configs = local.service_configs
   ecs_alarm_services      = toset(concat(keys(local.service_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
 
+  service_writable_paths = {
+    agent          = ["/tmp", "/app/logs", "/app/watched_documents", "/app/scratch"]
+    audit_consumer = ["/tmp"]
+    backend        = ["/tmp", "/app/.authclaw"]
+    console        = ["/tmp", "/app/.authclaw"]
+    gateway        = ["/tmp"]
+    opa            = ["/tmp"]
+    presidio       = ["/tmp"]
+  }
+  service_health_checks = {
+    agent          = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/agent/health/ready', timeout=3)\""]
+    audit_consumer = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9108/metrics', timeout=3)\""]
+    backend        = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
+    console        = ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+    gateway        = ["CMD", "/healthcheck", "http://127.0.0.1:8080/health"]
+    opa            = ["CMD", "/healthcheck"]
+    presidio       = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/health', timeout=3)\""]
+  }
+
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
     { name = "AUTHCLAW_FORWARDED_HEADER_MODE", value = var.forwarded_header_mode },
@@ -1527,13 +1546,25 @@ resource "aws_ecs_task_definition" "database_job" {
     cpu_architecture        = local.runtime_architectures[each.key == "agent_migrations" ? "agent" : "backend"]
   }
 
+  volume { name = "tmp" }
+
   container_definitions = jsonencode([{
-    name        = each.key
-    image       = each.value.image
-    essential   = true
-    command     = each.value.command
-    environment = each.value.environment
-    secrets     = each.value.secrets
+    name                   = each.key
+    image                  = each.value.image
+    essential              = true
+    cpu                    = var.service_cpu
+    memory                 = var.service_memory
+    command                = each.value.command
+    environment            = each.value.environment
+    secrets                = each.value.secrets
+    readonlyRootFilesystem = true
+    privileged             = false
+    stopTimeout            = 30
+    mountPoints            = [{ sourceVolume = "tmp", containerPath = "/tmp", readOnly = false }]
+    linuxParameters = {
+      initProcessEnabled = true
+      capabilities       = { drop = ["ALL"] }
+    }
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -1562,11 +1593,23 @@ resource "aws_ecs_task_definition" "service" {
     cpu_architecture        = local.runtime_architectures[each.key]
   }
 
+  dynamic "volume" {
+    for_each = local.service_writable_paths[each.key]
+    content { name = "writable-${volume.key}" }
+  }
+
+  dynamic "volume" {
+    for_each = contains(local.tls_services, each.key) ? ["tmp"] : []
+    content { name = "tls-${volume.value}" }
+  }
+
   container_definitions = jsonencode(concat([
     merge({
       name      = each.key
       image     = each.value.image
       essential = true
+      cpu       = var.service_cpu
+      memory    = contains(local.tls_services, each.key) ? var.service_memory - 128 : var.service_memory
       portMappings = [{
         containerPort = each.value.container_port
         protocol      = "tcp"
@@ -1595,7 +1638,26 @@ resource "aws_ecs_task_definition" "service" {
           { name = "AUTHCLAW_RUNTIME_DB_ROLE", value = "authclaw_agent_runtime" }
         ] : []
       )
-      secrets = local.service_secrets[each.key]
+      secrets                = local.service_secrets[each.key]
+      readonlyRootFilesystem = true
+      privileged             = false
+      stopTimeout            = 30
+      mountPoints = [for index, path in local.service_writable_paths[each.key] : {
+        sourceVolume  = "writable-${index}"
+        containerPath = path
+        readOnly      = false
+      }]
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities       = { drop = ["ALL"] }
+      }
+      healthCheck = {
+        command     = local.service_health_checks[each.key]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 30
+      }
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -1605,16 +1667,7 @@ resource "aws_ecs_task_definition" "service" {
         }
       }
       },
-      each.value.command == null ? {} : { command = each.value.command },
-      each.key == "agent" ? {
-        healthCheck = {
-          command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/agent/health/ready', timeout=3)\""]
-          interval    = 30
-          timeout     = 5
-          retries     = 3
-          startPeriod = 30
-        }
-      } : {}
+      each.value.command == null ? {} : { command = each.value.command }
     )
   ], contains(local.tls_services, each.key) ? [local.tls_containers[each.key]] : []))
 
@@ -1640,11 +1693,12 @@ resource "aws_ecs_task_definition" "service" {
 resource "aws_ecs_service" "public" {
   for_each = local.public_services
 
-  name            = "${var.name}-${each.key}"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.service[each.key].arn
-  desired_count   = var.desired_count
-  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  name                   = "${var.name}-${each.key}"
+  cluster                = aws_ecs_cluster.main.id
+  task_definition        = aws_ecs_task_definition.service[each.key].arn
+  desired_count          = var.desired_count
+  launch_type            = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  enable_execute_command = false
 
   dynamic "capacity_provider_strategy" {
     for_each = var.ecs_ec2_graviton.enabled ? [1] : []
@@ -1678,11 +1732,12 @@ resource "aws_ecs_service" "public" {
 resource "aws_ecs_service" "private" {
   for_each = merge(local.private_services, local.legacy_sidecar_services)
 
-  name            = "${var.name}-${each.key}"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.service[each.key].arn
-  desired_count   = var.desired_count
-  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  name                   = "${var.name}-${each.key}"
+  cluster                = aws_ecs_cluster.main.id
+  task_definition        = aws_ecs_task_definition.service[each.key].arn
+  desired_count          = var.desired_count
+  launch_type            = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  enable_execute_command = false
 
   dynamic "capacity_provider_strategy" {
     for_each = var.ecs_ec2_graviton.enabled ? [1] : []
@@ -1730,11 +1785,15 @@ resource "aws_ecs_task_definition" "audit_consumer" {
     cpu_architecture        = local.runtime_architectures.audit_consumer
   }
 
+  volume { name = "tmp" }
+
   container_definitions = jsonencode([
     {
       name      = "audit_consumer"
       image     = var.container_images.audit_consumer
       essential = true
+      cpu       = var.service_cpu
+      memory    = var.service_memory
       environment = concat(local.common_environment, local.audit_sqs_environment, local.audit_sqs_consumer_environment, [
         { name = "KAFKA_TOPICS", value = "gateway.traffic,audit.events" },
         { name = "KAFKA_DLQ_TOPIC", value = "audit.deadletter" },
@@ -1754,6 +1813,21 @@ resource "aws_ecs_task_definition" "audit_consumer" {
       secrets = var.clickhouse_host != "" ? [
         { name = "CLICKHOUSE_PASSWORD", valueFrom = aws_secretsmanager_secret.clickhouse_password[0].arn }
       ] : []
+      readonlyRootFilesystem = true
+      privileged             = false
+      stopTimeout            = 30
+      mountPoints            = [{ sourceVolume = "tmp", containerPath = "/tmp", readOnly = false }]
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities       = { drop = ["ALL"] }
+      }
+      healthCheck = {
+        command     = local.service_health_checks.audit_consumer
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 30
+      }
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -1771,11 +1845,12 @@ resource "aws_ecs_task_definition" "audit_consumer" {
 resource "aws_ecs_service" "audit_consumer" {
   count = var.enable_audit_consumer ? 1 : 0
 
-  name            = "${var.name}-audit-consumer"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.audit_consumer[0].arn
-  desired_count   = 1
-  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  name                   = "${var.name}-audit-consumer"
+  cluster                = aws_ecs_cluster.main.id
+  task_definition        = aws_ecs_task_definition.audit_consumer[0].arn
+  desired_count          = 1
+  launch_type            = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  enable_execute_command = false
 
   dynamic "capacity_provider_strategy" {
     for_each = var.ecs_ec2_graviton.enabled ? [1] : []

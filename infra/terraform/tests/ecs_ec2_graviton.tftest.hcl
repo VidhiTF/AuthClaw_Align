@@ -13,6 +13,7 @@ mock_provider "random" {
 }
 
 variables {
+  authclaw_env               = "ci"
   project                    = "authclaw-test"
   environment                = "test"
   primary_region             = "us-east-1"

@@ -24,17 +24,32 @@ locals {
     { name = "TLS_KEY_PEM", valueFrom = aws_secretsmanager_secret.tls["${name}/key"].arn }
   ] }
   tls_containers = { for name in local.tls_services : name => {
-    name              = "tls"
-    image             = var.internal_tls.proxy_image
-    user              = "101"
-    essential         = true
-    memoryReservation = 32
-    memory            = 128
-    portMappings      = [{ containerPort = 8443, protocol = "tcp" }]
-    entryPoint        = ["/bin/sh", "-ec"]
-    command           = [file("${path.module}/tls-entrypoint.sh")]
-    secrets           = local.tls_secrets[name]
-    environment       = [{ name = "TLS_CONFIG", value = templatefile("${path.module}/tls-nginx.conf.tftpl", { port = local.service_configs[name].container_port }) }]
+    name                   = "tls"
+    image                  = var.internal_tls.proxy_image
+    user                   = "101"
+    essential              = true
+    memoryReservation      = 32
+    memory                 = 128
+    readonlyRootFilesystem = true
+    privileged             = false
+    stopTimeout            = 30
+    mountPoints            = [{ sourceVolume = "tls-tmp", containerPath = "/tmp", readOnly = false }]
+    linuxParameters = {
+      initProcessEnabled = true
+      capabilities       = { drop = ["ALL"] }
+    }
+    healthCheck = {
+      command     = ["CMD-SHELL", "wget -q -O /dev/null --no-check-certificate https://127.0.0.1:8443/health"]
+      interval    = 30
+      timeout     = 5
+      retries     = 3
+      startPeriod = 30
+    }
+    portMappings = [{ containerPort = 8443, protocol = "tcp" }]
+    entryPoint   = ["/bin/sh", "-ec"]
+    command      = [file("${path.module}/tls-entrypoint.sh")]
+    secrets      = local.tls_secrets[name]
+    environment  = [{ name = "TLS_CONFIG", value = templatefile("${path.module}/tls-nginx.conf.tftpl", { port = local.service_configs[name].container_port }) }]
     logConfiguration = {
       logDriver = "awslogs"
       options = {

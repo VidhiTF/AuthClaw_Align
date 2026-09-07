@@ -33,6 +33,7 @@ override_resource {
 }
 
 variables {
+  authclaw_env               = "ci"
   project                    = "authclaw-test"
   environment                = "test"
   primary_region             = "us-east-1"
@@ -145,8 +146,8 @@ run "sqs_transport_adds_only_sqs_endpoint" {
   }
 
   assert {
-    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "backend", "gateway"])
-    error_message = "Backend, gateway, agent, and audit consumer must have separated application task roles."
+    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "backend", "console", "gateway", "opa", "presidio"])
+    error_message = "Every application service must have a separated task role."
   }
 }
 
@@ -174,8 +175,8 @@ run "approved_runtime_arn_allowlists_plan" {
   }
 
   assert {
-    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "backend", "gateway"])
-    error_message = "Approved runtime allowlists must plan with the separated application task roles."
+    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "backend", "console", "gateway", "opa", "presidio"])
+    error_message = "Approved runtime allowlists must plan with all separated application task roles."
   }
 }
 

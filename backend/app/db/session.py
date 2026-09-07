@@ -18,6 +18,8 @@ engine = create_engine(
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 _platform_url = os.getenv("PLATFORM_AUTH_DATABASE_URL", "").strip()
+if _platform_url.startswith("postgresql://"):
+    _platform_url = _platform_url.replace("postgresql://", "postgresql+psycopg://", 1)
 PlatformSessionLocal = (
     sessionmaker(bind=create_engine(_platform_url, pool_pre_ping=True, pool_size=1, max_overflow=2))
     if _platform_url else None
