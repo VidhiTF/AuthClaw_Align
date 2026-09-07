@@ -42,18 +42,37 @@ def test_bootstrap_creates_roles_before_worker_schema(monkeypatch):
         bootstrap.prepare(MagicMock(), "fresh_test", roles)
 
 
-def test_worker_migration_follows_platform_history_and_runtime_gates():
+def test_finding_status_migration_follows_platform_history_and_runtime_gates():
     backend = Path(__file__).resolve().parents[1]
     config = Config(str(backend / "alembic.ini"))
     config.set_main_option("script_location", str(backend / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["046"]
+    assert scripts.get_heads() == ["047"]
+    assert scripts.get_revision("047").down_revision == "046"
     assert scripts.get_revision("046").down_revision == "045"
     assert scripts.get_revision("045").down_revision == "044"
     revisions = list(scripts.walk_revisions())
     assert len({revision.revision for revision in revisions}) == len(revisions)
-    assert (
-        '"AUTHCLAW_EXPECTED_DB_REVISION", "046"'
-        in (backend / "app/core/startup_checks.py").read_text()
-    )
-    assert "version_num = '046'" in (backend.parent / "gateway/db.go").read_text()
+    backend_gate_source = (backend / "app/core/startup_checks.py").read_text()
+    assert "AUTHCLAW_EXPECTED_DB_REVISION" in backend_gate_source
+    assert 'or "047"' in backend_gate_source
+    gateway_source = (backend.parent / "gateway/db.go").read_text()
+    assert 'raw = "047"' in gateway_source
+    assert "AUTHCLAW_EXPECTED_DB_REVISION" in gateway_source
+
+
+def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch):
+    import pytest
+
+    from app.core.startup_checks import compatible_database_revisions
+
+    monkeypatch.delenv("AUTHCLAW_EXPECTED_DB_REVISION", raising=False)
+    assert compatible_database_revisions() == ("047",)
+
+    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "046, 047")
+    assert compatible_database_revisions() == ("046", "047")
+
+    for invalid in ("047,047", "46", "047,048", "045,046,047", "047,head"):
+        monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", invalid)
+        with pytest.raises(RuntimeError):
+            compatible_database_revisions()

@@ -79,6 +79,16 @@ variable "authclaw_env" {
   }
 }
 
+variable "expected_db_revision" {
+  type    = string
+  default = "047"
+
+  validation {
+    condition     = contains(["046", "047", "046,047"], var.expected_db_revision)
+    error_message = "expected_db_revision must be 046, 047, or the temporary 046,047 rollout bridge."
+  }
+}
+
 variable "secret_key_version" {
   type    = string
   default = "v1"

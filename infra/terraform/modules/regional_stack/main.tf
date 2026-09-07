@@ -78,6 +78,7 @@ locals {
 
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
+    { name = "AUTHCLAW_EXPECTED_DB_REVISION", value = var.expected_db_revision },
     { name = "AUTHCLAW_FORWARDED_HEADER_MODE", value = var.forwarded_header_mode },
     { name = "AUTHCLAW_FORWARDED_FOR_MAX_HOPS", value = "8" },
     { name = "AUTHCLAW_TRUSTED_PROXY_CIDRS", value = join(",", values(aws_subnet.public)[*].cidr_block) },

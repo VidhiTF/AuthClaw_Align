@@ -21,6 +21,7 @@ require_immutable_images = true
 
 # Use "production" only after regional ACM certificates, SMTP, and HTTPS DNS are configured.
 authclaw_env = "staging"
+expected_db_revision = "047"
 
 # Initial Fargate sizing for task-local OPA/Presidio sidecars. Confirm with staging measurements.
 gateway_sidecar_task_cpu    = 2048

@@ -1,6 +1,7 @@
 """Startup validation for production Lite deployments."""
 import logging
 import os
+import re
 from ipaddress import ip_address
 from urllib.parse import urlparse
 
@@ -29,6 +30,27 @@ _VALID_ENVIRONMENTS = {
 }
 
 logger = logging.getLogger("authclaw.backend.startup")
+
+_DB_REVISION_PATTERN = re.compile(r"^[0-9]{3}$")
+_ROLLOUT_DB_REVISIONS = frozenset({"046", "047"})
+
+
+def compatible_database_revisions() -> tuple[str, ...]:
+    """Return the tightly bounded schema heads allowed during a rollout."""
+    raw = os.getenv("AUTHCLAW_EXPECTED_DB_REVISION") or "047"
+    revisions = tuple(part.strip() for part in raw.split(",") if part.strip())
+    if (
+        not revisions
+        or len(revisions) > 2
+        or len(set(revisions)) != len(revisions)
+        or any(not _DB_REVISION_PATTERN.fullmatch(revision) for revision in revisions)
+        or not set(revisions).issubset(_ROLLOUT_DB_REVISIONS)
+    ):
+        raise RuntimeError(
+            "AUTHCLAW_EXPECTED_DB_REVISION must contain one or two unique "
+            "supported revisions (046 and 047)"
+        )
+    return revisions
 
 
 def is_production() -> bool:
@@ -215,13 +237,16 @@ def validate_database_security(connection) -> None:
     if connection.dialect.name != "postgresql":
         return
 
-    expected_revision = os.getenv("AUTHCLAW_EXPECTED_DB_REVISION", "046")
+    expected_revisions = compatible_database_revisions()
     failures: list[str] = []
-    if not connection.execute(
-        text("SELECT EXISTS (SELECT 1 FROM public.alembic_version WHERE version_num = :revision)"),
-        {"revision": expected_revision},
-    ).scalar_one():
-        failures.append(f"missing Alembic revision {expected_revision}")
+    migration_heads = tuple(
+        connection.execute(text("SELECT version_num FROM public.alembic_version")).scalars()
+    )
+    if len(migration_heads) != 1 or migration_heads[0] not in expected_revisions:
+        failures.append(
+            "database migration head is not compatible "
+            f"(expected one of {expected_revisions}, found {migration_heads})"
+        )
 
     function_security = connection.execute(text("""
         SELECT

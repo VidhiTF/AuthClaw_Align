@@ -38,6 +38,7 @@ module "primary" {
   is_primary                           = true
   create_db_replica                    = false
   authclaw_env                         = var.authclaw_env
+  expected_db_revision                 = var.expected_db_revision
   forwarded_header_mode                = var.forwarded_header_mode
   bff_client_ip_enabled                = var.bff_client_ip_enabled
   bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled
@@ -104,6 +105,7 @@ module "secondary" {
   is_primary                           = false
   create_db_replica                    = var.enable_cross_region_db_replica
   authclaw_env                         = var.authclaw_env
+  expected_db_revision                 = var.expected_db_revision
   forwarded_header_mode                = var.forwarded_header_mode
   bff_client_ip_enabled                = var.bff_client_ip_enabled
   bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled

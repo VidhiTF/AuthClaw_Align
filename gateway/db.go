@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,13 +15,80 @@ import (
 var DB *sql.DB
 var skipDatabaseSecurityValidationForTests bool
 
+var databaseRevisionPattern = regexp.MustCompile(`^[0-9]{3}$`)
+var rolloutDatabaseRevisions = map[string]struct{}{"046": {}, "047": {}}
+
+func compatibleDatabaseRevisions() ([]string, error) {
+	raw := os.Getenv("AUTHCLAW_EXPECTED_DB_REVISION")
+	if raw == "" {
+		raw = "047"
+	}
+	parts := strings.Split(raw, ",")
+	revisions := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		revision := strings.TrimSpace(part)
+		if revision == "" || !databaseRevisionPattern.MatchString(revision) {
+			return nil, fmt.Errorf("AUTHCLAW_EXPECTED_DB_REVISION contains an invalid revision")
+		}
+		if _, supported := rolloutDatabaseRevisions[revision]; !supported {
+			return nil, fmt.Errorf("AUTHCLAW_EXPECTED_DB_REVISION contains an unsupported revision")
+		}
+		if _, exists := seen[revision]; exists {
+			return nil, fmt.Errorf("AUTHCLAW_EXPECTED_DB_REVISION contains duplicate revisions")
+		}
+		seen[revision] = struct{}{}
+		revisions = append(revisions, revision)
+	}
+	if len(revisions) == 0 || len(revisions) > 2 {
+		return nil, fmt.Errorf("AUTHCLAW_EXPECTED_DB_REVISION must contain one or two revisions")
+	}
+	return revisions, nil
+}
+
 // ValidateDatabaseSecurity refuses startup against a stale or insecure database.
 func ValidateDatabaseSecurity() error {
+	expectedRevisions, err := compatibleDatabaseRevisions()
+	if err != nil {
+		return err
+	}
+	rows, err := DB.Query(`SELECT version_num FROM public.alembic_version`)
+	if err != nil {
+		return fmt.Errorf("database revision validation query failed: %w", err)
+	}
+	defer rows.Close()
+	actualRevisions := make([]string, 0, 1)
+	for rows.Next() {
+		var revision string
+		if err := rows.Scan(&revision); err != nil {
+			return fmt.Errorf("database revision validation scan failed: %w", err)
+		}
+		actualRevisions = append(actualRevisions, revision)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("database revision validation failed: %w", err)
+	}
+	if len(actualRevisions) != 1 {
+		return fmt.Errorf("database security validation failed: expected one migration head")
+	}
+	compatible := false
+	for _, expected := range expectedRevisions {
+		if actualRevisions[0] == expected {
+			compatible = true
+			break
+		}
+	}
+	if !compatible {
+		return fmt.Errorf(
+			"database security validation failed: migration head %q is not compatible",
+			actualRevisions[0],
+		)
+	}
+
 	var secure bool
-	err := DB.QueryRow(`
+	err = DB.QueryRow(`
 		SELECT
-			EXISTS (SELECT 1 FROM public.alembic_version WHERE version_num = '046')
-			AND EXISTS (
+			EXISTS (
 				SELECT 1
 				FROM pg_proc p
 				JOIN pg_namespace n ON n.oid = p.pronamespace

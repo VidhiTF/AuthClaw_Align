@@ -120,6 +120,17 @@ variable "authclaw_env" {
   }
 }
 
+variable "expected_db_revision" {
+  description = "Allowed Alembic head: use 046,047 only during the controlled 047 rollout, then tighten to 047."
+  type        = string
+  default     = "047"
+
+  validation {
+    condition     = contains(["046", "047", "046,047"], var.expected_db_revision)
+    error_message = "expected_db_revision must be 046, 047, or the temporary 046,047 rollout bridge."
+  }
+}
+
 variable "secret_key_version" {
   description = "Active envelope key version. Keep v1 through legacy migration, then set v2."
   type        = string

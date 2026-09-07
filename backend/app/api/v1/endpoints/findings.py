@@ -4,10 +4,11 @@ from typing import Any, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_tenant, get_tenant_db, require_roles, require_scopes
+from app.db.models import FindingStatus
 from app.services import findings_service
 
 router = APIRouter()
@@ -50,8 +51,15 @@ class DashboardSummaryResponse(BaseModel):
 
 
 class StatusUpdateRequest(BaseModel):
-    status: str
+    status: FindingStatus
     remediation_summary: Optional[str] = None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, value):
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
 
 
 class AssignOwnerRequest(BaseModel):
@@ -146,12 +154,14 @@ def update_status(
     tenant_id: str = Depends(get_current_tenant),
 ):
     """Update the status of a finding."""
-    if req.status.upper() in ("RESOLVED", "FALSE_POSITIVE", "ACCEPTED_RISK"):
-        if req.remediation_summary is None:
-            # Can be optional, but good to have
-            req.remediation_summary = f"Status changed to {req.status}"
+    if req.status in findings_service.TERMINAL_FINDING_STATUSES:
+        remediation_summary = req.remediation_summary or f"Status changed to {req.status.value}"
         finding = findings_service.resolve_finding(
-            db, tenant_id=tenant_id, finding_id=finding_id, remediation_summary=req.remediation_summary
+            db,
+            tenant_id=tenant_id,
+            finding_id=finding_id,
+            status=req.status,
+            remediation_summary=remediation_summary,
         )
     else:
         finding = findings_service.update_status(
