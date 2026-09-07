@@ -1,5 +1,6 @@
 locals {
-  name = "${var.project}-${var.environment}"
+  name          = "${var.project}-${var.environment}"
+  is_production = contains(["prod", "production"], lower(trimspace(var.environment))) || contains(["prod", "production"], lower(trimspace(var.authclaw_env))) || var.public_url_environment == "production"
   approved_public_domains = var.public_url_environment == "production" ? {
     marketing = "authclaw.ai"
     www       = "www.authclaw.ai"

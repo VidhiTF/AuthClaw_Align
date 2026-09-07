@@ -16,7 +16,7 @@ resource "terraform_data" "production_edge_required" {
 
   lifecycle {
     precondition {
-      condition     = var.public_url_environment != "production" || var.enable_public_edge
+      condition     = !local.is_production || var.enable_public_edge
       error_message = "Production must enable the CloudFront/WAF edge; private ALB origins have no alternate public entry."
     }
   }

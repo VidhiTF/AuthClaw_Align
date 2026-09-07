@@ -103,7 +103,7 @@ variable "ecs_ec2_graviton" {
   description = "Optional ECS on EC2 Graviton capacity provider for P0-05."
   type = object({
     enabled              = optional(bool, false)
-    instance_type        = optional(string, "m7g.large")
+    instance_type        = optional(string, "m7g.2xlarge")
     min_size             = optional(number, 2)
     desired_size         = optional(number, 2)
     max_size             = optional(number, 4)

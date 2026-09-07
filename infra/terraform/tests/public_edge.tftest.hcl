@@ -142,3 +142,25 @@ run "production_rejects_a_missing_public_edge" {
 
   expect_failures = [terraform_data.production_edge_required]
 }
+
+run "prod_environment_rejects_a_missing_public_edge" {
+  command = plan
+
+  variables {
+    environment        = "prod"
+    enable_public_edge = false
+  }
+
+  expect_failures = [terraform_data.production_edge_required]
+}
+
+run "prod_runtime_rejects_a_missing_public_edge" {
+  command = plan
+
+  variables {
+    authclaw_env       = "prod"
+    enable_public_edge = false
+  }
+
+  expect_failures = [terraform_data.production_edge_required]
+}

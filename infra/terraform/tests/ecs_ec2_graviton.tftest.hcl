@@ -107,3 +107,19 @@ run "ec2_graviton_capacity_provider" {
     error_message = "P0-05 must add cluster-capacity, instance-health, placement-failure, and pending-task alarms."
   }
 }
+
+run "ec2_graviton_defaults_have_capacity" {
+  command = plan
+
+  variables {
+    ecs_ec2_graviton = {
+      enabled  = true
+      image_id = "ami-0123456789abcdef0"
+    }
+  }
+
+  assert {
+    condition     = var.ecs_ec2_graviton.instance_type == "m7g.2xlarge"
+    error_message = "The default Graviton instances must fit the default ECS service CPU footprint."
+  }
+}
