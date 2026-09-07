@@ -27,7 +27,7 @@ test.describe('AuthClaw E2E Console Verification', () => {
 
     await page.waitForURL('/connect');
     await expect(page).toHaveURL(/.*connect/);
-    await expect(page.locator('body')).toContainText('Connect Your AI App');
+    await expect(page.getByRole('heading', { name: 'Integrations' })).toBeVisible();
     const sessionResponse = await page.evaluate(async () => {
       const response = await fetch('/api/auth/session');
       return { status: response.status, body: await response.json() };

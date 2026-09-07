@@ -3,14 +3,20 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  ArrowRight,
   Check,
+  CheckCircle2,
+  ChevronRight,
   Clipboard,
   Code2,
+  Eye,
+  EyeOff,
   KeyRound,
-  Link2,
+  LockKeyhole,
   Play,
-  Route,
+  RefreshCw,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
 import MfaChallengeModal from "@/components/mfa-challenge-modal";
 import { fetchJson } from "@/lib/client-fetch";
@@ -89,6 +95,8 @@ interface OnboardingConnectResult {
 export default function ConnectPage() {
   const [provider, setProvider] = useState<Provider>("gemini");
   const [copied, setCopied] = useState<string | null>(null);
+  const [codeTab, setCodeTab] = useState<"curl" | "python">("curl");
+  const [showCredentialKey, setShowCredentialKey] = useState(false);
   const [approvals, setApprovals] = useState<GatewayApproval[]>([]);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null);
@@ -359,581 +367,275 @@ print(response)`;
     (credential) => credential.provider === provider && credential.status === "active",
   );
 
+  const providerKeys = Object.keys(providerCatalog) as Provider[];
+  const connectedProviders = new Set(
+    credentials.filter((item) => item.status === "active").map((item) => item.provider),
+  );
+  const selectedCredentials = credentials.filter((item) => item.provider === provider);
+  const setupStep = activeCredentialForProvider ? (testResult?.ok ? 3 : 2) : 1;
+  const overallReady = healthReady && connectedProviders.size > 0;
+
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold uppercase tracking-wider">
-          <ShieldCheck className="w-4 h-4" />
-          Guided onboarding path
+    <div className="mx-auto max-w-7xl space-y-5 pb-10">
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-extrabold tracking-tight text-[#0E1726]">Integrations</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-[#475069]">
+            Connect your AI provider, store its credentials securely, and verify requests through the AuthClaw gateway.
+          </p>
         </div>
-        <h1 className="text-3xl font-extrabold tracking-tight text-[#0E1726]">Connect Your AI App</h1>
-        <p className="text-sm text-[#475069] max-w-3xl">
-          Point an existing chatbot or AI service at the AuthClaw gateway URL. AuthClaw checks the tenant key,
-          applies redaction and policy controls, forwards the request to the configured model provider, and records
-          the governance evidence.
-        </p>
-      </div>
+        <div className="flex w-fit items-center gap-3 rounded-[14px] border border-[#E6E9F0] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(11,31,63,.05)]">
+          <span className={`flex h-9 w-9 items-center justify-center rounded-full ${overallReady ? "bg-emerald-50 text-[#0F766E]" : "bg-amber-50 text-amber-700"}`}>
+            {overallReady ? <CheckCircle2 className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
+          </span>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">Overall readiness</p>
+            <p className={`text-sm font-bold ${overallReady ? "text-[#0F766E]" : "text-amber-700"}`}>
+              {overallReady ? "Ready" : "Setup needed"}
+            </p>
+          </div>
+        </div>
+      </header>
 
       {onboardingResult && (
-        <section className="rounded-[20px] border border-emerald-200 bg-emerald-50 overflow-hidden shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-          <div className="border-b border-emerald-200 px-5 py-4">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <div>
-                <div className="flex items-center gap-2 text-sm font-bold text-emerald-900">
-                  <ShieldCheck className="h-4 w-4 text-emerald-400" />
-                  Tenant Ready
-                </div>
-                <p className="mt-1 text-xs text-emerald-700">
-                  {onboardingResult.tenant_name} is signed in. Copy the first gateway key now, then save a provider key below.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={dismissOnboardingResult}
-                className="rounded-[10px] border border-emerald-200 px-3 py-2 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
-              >
-                Hide
-              </button>
-            </div>
-          </div>
-
-          <div className="grid gap-4 p-5 lg:grid-cols-2">
-            <div className="space-y-4">
-              <div>
-                <div className="mb-2 flex items-center justify-between gap-3">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-200/70">
-                    First AuthClaw Gateway Key
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => copy("onboarding-key", onboardingResult.api_key)}
-                    className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900"
-                  >
-                    {copied === "onboarding-key" ? <Check className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
-                    {copied === "onboarding-key" ? "Copied" : "Copy"}
+        <section className="rounded-[20px] border border-emerald-200 bg-emerald-50 p-5 shadow-[0_1px_2px_rgba(11,31,63,.05)]">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-[#0F766E]"><ShieldCheck className="h-5 w-5" /></span>
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold text-emerald-950">{onboardingResult.tenant_name} is ready</h2>
+                <p className="mt-1 text-xs text-emerald-800">Copy the one-time gateway key, then connect a model provider.</p>
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                  <code className="min-w-0 flex-1 truncate rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs">{onboardingResult.api_key}</code>
+                  <button type="button" onClick={() => copy("onboarding-key", onboardingResult.api_key)} className="inline-flex items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-800 hover:bg-emerald-100">
+                    {copied === "onboarding-key" ? <Check className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
+                    {copied === "onboarding-key" ? "Copied" : "Copy key"}
                   </button>
                 </div>
-                <pre className="overflow-x-auto rounded-[10px] border border-emerald-200 bg-white p-3 text-xs text-emerald-900">
-                  {onboardingResult.api_key}
-                </pre>
-                <p className="mt-2 text-[10px] text-emerald-700">This raw key is shown from onboarding only. Store it before hiding this panel.</p>
-              </div>
-
-              <div>
-                <div className="mb-2 flex items-center justify-between gap-3">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Gateway URL</span>
-                  <button
-                    type="button"
-                    onClick={() => copy("onboarding-gateway", onboardingResult.gateway_url)}
-                    className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900"
-                  >
-                    {copied === "onboarding-gateway" ? <Check className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
-                    {copied === "onboarding-gateway" ? "Copied" : "Copy"}
-                  </button>
-                </div>
-                <pre className="overflow-x-auto rounded-[10px] border border-emerald-200 bg-white p-3 text-xs text-emerald-900">
-                  {onboardingResult.gateway_url}
-                </pre>
               </div>
             </div>
-
-            <div>
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">PowerShell Starter Request</span>
-                <button
-                  type="button"
-                  onClick={() => copy("onboarding-powershell", onboardingResult.powershell_snippet)}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900"
-                >
-                  {copied === "onboarding-powershell" ? <Check className="h-3.5 w-3.5" /> : <Clipboard className="h-3.5 w-3.5" />}
-                  {copied === "onboarding-powershell" ? "Copied" : "Copy"}
-                </button>
-              </div>
-              <pre className="max-h-80 overflow-auto rounded-[10px] border border-emerald-200 bg-white p-3 text-xs text-emerald-900">
-                {onboardingResult.powershell_snippet}
-              </pre>
-              <button
-                type="button"
-                onClick={() => copy("onboarding-curl", onboardingResult.curl_snippet)}
-                className="mt-3 inline-flex items-center gap-2 rounded-[10px] bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
-              >
-                {copied === "onboarding-curl" ? <Check className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
-                {copied === "onboarding-curl" ? "Copied curl" : "Copy curl instead"}
-              </button>
-            </div>
+            <button type="button" onClick={dismissOnboardingResult} className="self-start rounded-lg px-3 py-2 text-xs font-semibold text-emerald-800 hover:bg-emerald-100">Dismiss</button>
           </div>
         </section>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <section className="rounded-[20px] bg-white border border-[#E6E9F0] p-5 shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-          <div className="flex items-center gap-2 mb-4">
-            <Link2 className="w-4 h-4 text-[#6D28D9]" />
-            <h2 className="text-sm font-bold text-[#0E1726]">1. Use The Gateway URL</h2>
+      <section aria-label="Integration setup progress" className="rounded-[20px] border border-[#E6E9F0] bg-white px-5 py-5 shadow-[0_1px_2px_rgba(11,31,63,.05)]">
+        <ol className="grid gap-4 md:grid-cols-3">
+          {[
+            ["Choose provider", "Select the service you want to connect"],
+            ["Add credentials", "Securely save your provider API key"],
+            ["Test connection", "Verify a request through AuthClaw"],
+          ].map(([label, detail], index) => {
+            const step = index + 1;
+            const complete = step < setupStep || (step === 3 && Boolean(testResult?.ok));
+            const active = step === setupStep;
+            return (
+              <li key={label} className="flex min-w-0 items-center gap-3">
+                <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-sm font-bold ${
+                  complete ? "border-[#0F766E] bg-[#0F766E] text-white" : active ? "border-[#6D28D9] bg-[#6D28D9] text-white" : "border-[#DDE3EC] text-[#6B7488]"
+                }`}>{complete ? <Check className="h-4 w-4" /> : step}</span>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold text-[#0E1726]">{label}</p>
+                  <p className="mt-0.5 truncate text-[11px] text-[#6B7488]">{detail}</p>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      </section>
+
+      <section className="overflow-hidden rounded-[20px] border border-[#E6E9F0] bg-white shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-18px_rgba(11,31,63,.18)]">
+        <div className="grid lg:grid-cols-[minmax(0,.9fr)_minmax(0,1.1fr)]">
+          <div className="border-b border-[#E6E9F0] p-5 sm:p-6 lg:border-b-0 lg:border-r">
+            <h2 className="text-base font-bold text-[#0E1726]">Choose provider</h2>
+            <p className="mt-1 text-xs text-[#6B7488]">Select a provider to configure or manage.</p>
+            <div className="mt-5 space-y-2.5">
+              {providerKeys.map((id) => {
+                const item = providerCatalog[id];
+                const connected = connectedProviders.has(id);
+                const isSelected = provider === id;
+                return (
+                  <button key={id} type="button" onClick={() => selectProvider(id)} aria-pressed={isSelected}
+                    className={`flex w-full items-center gap-3 rounded-[14px] border p-3.5 text-left transition ${isSelected ? "border-[#6D28D9] bg-[#F8F5FF]" : "border-[#E6E9F0] hover:border-[#A78BFA] hover:bg-[#FBFAFF]"}`}>
+                    <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] text-xs font-black ${isSelected ? "bg-[#6D28D9] text-white" : "bg-[#F5F7FA] text-[#475069]"}`}>
+                      {item.shortLabel === "Azure OpenAI" ? "AZ" : item.shortLabel.slice(0, 2).toUpperCase()}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-bold text-[#0E1726]">{item.shortLabel}</span>
+                      <span className="mt-0.5 block truncate text-[11px] text-[#6B7488]">{item.label}</span>
+                    </span>
+                    <span className={`hidden items-center gap-1.5 text-[11px] font-semibold sm:flex ${connected ? "text-[#0F766E]" : "text-[#6B7488]"}`}>
+                      <span className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-500" : "bg-[#C5CBD6]"}`} />
+                      {connected ? "Connected" : "Not connected"}
+                    </span>
+                    <ChevronRight className={`h-4 w-4 ${isSelected ? "text-[#6D28D9]" : "text-[#A8B0C0]"}`} />
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-5 flex gap-2 border-t border-[#E6E9F0] pt-4 text-[11px] leading-5 text-[#6B7488]">
+              <LockKeyhole className="mt-0.5 h-4 w-4 shrink-0 text-[#6D28D9]" />
+              Credentials are encrypted and never returned after save.
+            </div>
           </div>
-          <p className="text-xs text-[#6B7488] mb-3">Replace the model provider base URL in the customer app.</p>
-          <div className="flex items-center gap-2 rounded-[10px] border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2">
-            <code className="text-xs text-[#0E1726] flex-1 truncate">{gatewayUrl}</code>
-            <button
-              onClick={() => copy("gateway", gatewayUrl)}
-              className="p-1.5 rounded bg-white hover:bg-[#F1ECFE] text-[#475069] border border-[#E6E9F0]"
-              aria-label="Copy gateway URL"
-            >
-              {copied === "gateway" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Clipboard className="w-3.5 h-3.5" />}
-            </button>
+
+          <div className="p-5 sm:p-6">
+            <div className="flex flex-col gap-3 border-b border-[#E6E9F0] pb-5 sm:flex-row sm:justify-between">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-[#6D28D9]">Selected provider</p>
+                <h2 className="mt-1 text-xl font-extrabold text-[#0E1726]">Set up {selected.shortLabel}</h2>
+                <p className="mt-1 text-xs text-[#6B7488]">Add or rotate the credential used for governed upstream requests.</p>
+              </div>
+              <span className={`inline-flex h-fit w-fit items-center gap-2 rounded-full px-3 py-1.5 text-[11px] font-bold ${activeCredentialForProvider ? "bg-emerald-50 text-[#0F766E]" : "bg-[#F5F7FA] text-[#6B7488]"}`}>
+                <span className={`h-2 w-2 rounded-full ${activeCredentialForProvider ? "bg-emerald-500" : "bg-[#C5CBD6]"}`} />
+                {activeCredentialForProvider ? "Credential active" : "Credential required"}
+              </span>
+            </div>
+
+            <div className="mt-5 space-y-4">
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-bold text-[#0E1726]">Credential name</span>
+                <input value={credentialName} onChange={(event) => setCredentialName(event.target.value)} placeholder={`Production ${selected.shortLabel} key`}
+                  className="w-full rounded-[10px] border border-[#DDE3EC] px-3.5 py-2.5 text-sm text-[#0E1726] outline-none transition placeholder:text-[#A8B0C0] focus:border-[#6D28D9] focus:ring-2 focus:ring-[#F1ECFE]" />
+              </label>
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-bold text-[#0E1726]">Provider API key</span>
+                <span className="relative block">
+                  <input type={showCredentialKey ? "text" : "password"} value={credentialKey} onChange={(event) => setCredentialKey(event.target.value)}
+                    placeholder={`Paste your ${selected.shortLabel} API key`} autoComplete="off"
+                    className="w-full rounded-[10px] border border-[#DDE3EC] px-3.5 py-2.5 pr-11 text-sm text-[#0E1726] outline-none transition placeholder:text-[#A8B0C0] focus:border-[#6D28D9] focus:ring-2 focus:ring-[#F1ECFE]" />
+                  <button type="button" onClick={() => setShowCredentialKey((current) => !current)} aria-label={showCredentialKey ? "Hide provider API key" : "Show provider API key"}
+                    className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-[#6B7488] hover:text-[#0E1726]">
+                    {showCredentialKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </span>
+              </label>
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-bold text-[#0E1726]">Endpoint URL <span className="font-medium text-[#6B7488]">(optional)</span></span>
+                <input value={credentialEndpoint} onChange={(event) => setCredentialEndpoint(event.target.value)} placeholder={selected.defaultEndpoint}
+                  className="w-full rounded-[10px] border border-[#DDE3EC] px-3.5 py-2.5 text-sm text-[#0E1726] outline-none transition placeholder:text-[#A8B0C0] focus:border-[#6D28D9] focus:ring-2 focus:ring-[#F1ECFE]" />
+              </label>
+            </div>
+
+            <div aria-live="polite" className="mt-4 min-h-5 text-xs">
+              {credentialMessage && <p className="text-[#0F766E]">{credentialMessage}</p>}
+              {credentialError && <p className="text-red-700">{credentialError}</p>}
+            </div>
+            <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+              <button type="button" onClick={() => void saveCredential()} disabled={credentialSaving || credentialKey.length < 8}
+                className="inline-flex items-center justify-center gap-2 rounded-[10px] bg-[#6D28D9] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#7C3AED] disabled:cursor-not-allowed disabled:opacity-50">
+                <LockKeyhole className="h-4 w-4" />{credentialSaving ? "Saving credential..." : "Save credential"}
+              </button>
+              <button type="button" onClick={() => void runGatewayTest()} disabled={testBusy || !activeCredentialForProvider}
+                className="inline-flex items-center justify-center gap-2 rounded-[10px] border border-[#DDE3EC] px-4 py-2.5 text-sm font-semibold text-[#0E1726] hover:border-[#A78BFA] hover:bg-[#F8F5FF] disabled:cursor-not-allowed disabled:opacity-50">
+                <Play className="h-4 w-4 text-[#6D28D9]" />{testBusy ? "Testing connection..." : "Run connection test"}
+              </button>
+            </div>
+            {!activeCredentialForProvider && credentialsLoaded && <p className="mt-3 text-[11px] text-amber-700">Save a {selected.shortLabel} credential before testing the connection.</p>}
+            {testError && <div className="mt-4 rounded-[10px] border border-red-200 bg-red-50 p-3 text-xs text-red-700">{testError}</div>}
+            {testResult && (
+              <div className={`mt-4 rounded-[12px] border p-4 ${testResult.ok ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50"}`}>
+                <div className="flex flex-wrap items-center gap-2">
+                  {testResult.ok ? <CheckCircle2 className="h-5 w-5 text-[#0F766E]" /> : <AlertTriangle className="h-5 w-5 text-amber-700" />}
+                  <p className="text-sm font-bold text-[#0E1726]">{testResult.ok ? "Connection verified" : `Gateway returned ${testResult.status}`}</p>
+                  <span className="text-[11px] text-[#6B7488]">{testResult.duration_ms} ms</span>
+                </div>
+                <p className="mt-2 font-mono text-[10px] text-[#475069]">Request ID: {testResult.request_id}</p>
+                {testResult.checks && <div className="mt-3 grid gap-2 sm:grid-cols-2">{testResult.checks.map((check) => (
+                  <div key={check.label} className="flex gap-2 rounded-lg bg-white/80 p-2.5">
+                    {check.ok ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#0F766E]" /> : <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700" />}
+                    <div><p className="text-[11px] font-bold text-[#0E1726]">{check.label}</p><p className="mt-0.5 text-[10px] text-[#6B7488]">{check.detail}</p></div>
+                  </div>
+                ))}</div>}
+              </div>
+            )}
+
+            {selectedCredentials.length > 0 && (
+              <div className="mt-5 border-t border-[#E6E9F0] pt-4">
+                <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">Saved credentials</p>
+                <div className="space-y-2">{selectedCredentials.map((credential) => (
+                  <div key={credential.id} className="flex items-center gap-3 rounded-[10px] bg-[#F5F7FA] px-3 py-2.5">
+                    <KeyRound className="h-4 w-4 shrink-0 text-[#6D28D9]" />
+                    <div className="min-w-0 flex-1"><p className="truncate text-xs font-bold text-[#0E1726]">{credential.display_name}</p><p className="mt-0.5 text-[10px] text-[#6B7488]">{credential.status} · added {new Date(credential.created_at).toLocaleDateString()}</p></div>
+                    <button type="button" onClick={() => void revokeCredential(credential.id)} aria-label={`Revoke ${credential.display_name}`}
+                      className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-[11px] font-semibold text-red-700 hover:bg-red-50"><Trash2 className="h-3.5 w-3.5" />Revoke</button>
+                  </div>
+                ))}</div>
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <div className="grid gap-5 xl:grid-cols-[.8fr_1.35fr_.85fr]">
+        <section className="overflow-hidden rounded-[20px] border border-[#E6E9F0] bg-white shadow-[0_1px_2px_rgba(11,31,63,.05)]">
+          <div className="flex items-start justify-between border-b border-[#E6E9F0] px-5 py-4">
+            <div><h2 className="text-sm font-bold text-[#0E1726]">Integration health</h2><p className="mt-1 text-[11px] text-[#6B7488]">Gateway readiness checks</p></div>
+            <button type="button" onClick={() => void fetchHealth()} aria-label="Recheck integration health" className="rounded-lg p-2 text-[#6B7488] hover:bg-[#F5F7FA] hover:text-[#6D28D9]"><RefreshCw className="h-4 w-4" /></button>
+          </div>
+          <div className="p-3">
+            {healthError && <p className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{healthError}</p>}
+            {!healthError && healthItems.length === 0 && <p className="p-2 text-xs text-[#6B7488]">Health checks have not run yet.</p>}
+            <div className="divide-y divide-[#E6E9F0]">{healthItems.map((item) => (
+              <div key={item.key} className="flex items-start gap-3 px-2 py-3">
+                <span className={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${item.ok ? "bg-emerald-500" : "bg-amber-400"}`} />
+                <div><p className="text-xs font-bold text-[#0E1726]">{item.label}</p><p className="mt-1 text-[10px] leading-4 text-[#6B7488]">{item.detail}</p></div>
+              </div>
+            ))}</div>
           </div>
         </section>
 
-        <section className="rounded-[20px] bg-white border border-[#E6E9F0] p-5 shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-          <div className="flex items-center gap-2 mb-4">
-            <KeyRound className="w-4 h-4 text-amber-400" />
-            <h2 className="text-sm font-bold text-[#0E1726]">2. Send AuthClaw Key</h2>
+        <section className="overflow-hidden rounded-[20px] border border-[#E6E9F0] bg-white shadow-[0_1px_2px_rgba(11,31,63,.05)]">
+          <div className="border-b border-[#E6E9F0] px-5 pt-4">
+            <div className="flex items-start justify-between gap-3">
+              <div><h2 className="text-sm font-bold text-[#0E1726]">Developer quickstart</h2><p className="mt-1 text-[11px] text-[#6B7488]">Use the selected {selected.shortLabel} route</p></div>
+              <button type="button" onClick={() => copy(codeTab === "curl" ? "curl" : "python-sdk", codeTab === "curl" ? curlCommand : pythonSdkSnippet)}
+                className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold text-[#475069] hover:bg-[#F5F7FA] hover:text-[#6D28D9]">
+                {copied === (codeTab === "curl" ? "curl" : "python-sdk") ? <Check className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}{copied === (codeTab === "curl" ? "curl" : "python-sdk") ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <div className="mt-4 flex gap-5">{(["curl", "python"] as const).map((tab) => (
+              <button key={tab} type="button" onClick={() => setCodeTab(tab)} className={`border-b-2 pb-2 text-xs font-bold capitalize ${codeTab === tab ? "border-[#6D28D9] text-[#6D28D9]" : "border-transparent text-[#6B7488]"}`}>{tab}</button>
+            ))}</div>
           </div>
-          <p className="text-xs text-[#6B7488] mb-3">
-            Runtime traffic uses an AuthClaw gateway key, not the customer provider key.
-          </p>
-          <div className="rounded-[10px] border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2">
-            <code className="text-xs text-[#0E1726]">Authorization: Bearer {"<AUTHCLAW_GATEWAY_KEY>"}</code>
-          </div>
+          <div className="p-5"><pre className="max-h-64 overflow-auto rounded-[12px] border border-[#E6E9F0] bg-[#F8FAFC] p-4 text-[11px] leading-5 text-[#0E1726]"><code>{codeTab === "curl" ? curlCommand : pythonSdkSnippet}</code></pre></div>
         </section>
 
-        <section className="rounded-[20px] bg-white border border-[#E6E9F0] p-5 shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-          <div className="flex items-center gap-2 mb-4">
-            <Route className="w-4 h-4 text-sky-400" />
-            <h2 className="text-sm font-bold text-[#0E1726]">3. Select Provider Route</h2>
+        <section className="overflow-hidden rounded-[20px] border border-[#E6E9F0] bg-white shadow-[0_1px_2px_rgba(11,31,63,.05)]">
+          <div className="flex items-start justify-between border-b border-[#E6E9F0] px-5 py-4">
+            <div><h2 className="text-sm font-bold text-[#0E1726]">Pending approvals</h2><p className="mt-1 text-[11px] text-[#6B7488]">High-risk gateway requests</p></div>
+            {pendingApprovals.length > 0 && <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-bold text-amber-700">{pendingApprovals.length}</span>}
           </div>
-          <p className="text-xs text-[#6B7488] mb-3">AuthClaw uses the provider route to apply the right policy and adapter.</p>
-          <select
-            value={provider}
-            onChange={(event) => selectProvider(event.target.value as Provider)}
-            className="w-full px-3 py-2 rounded-[10px] bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-[#6D28D9]"
-          >
-            {Object.entries(providerCatalog).map(([id, item]) => (
-              <option key={id} value={id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
+          <div className="p-3">
+            {approvalError && <p className="rounded-lg bg-red-50 p-3 text-xs text-red-700">{approvalError}</p>}
+            {!approvalError && pendingApprovals.length === 0 && <div className="flex items-center gap-3 p-2"><CheckCircle2 className="h-5 w-5 text-[#0F766E]" /><p className="text-xs text-[#475069]">No requests need attention.</p></div>}
+            <div className="divide-y divide-[#E6E9F0]">{pendingApprovals.slice(0, 3).map((approval) => (
+              <div key={approval.id} className="px-2 py-3">
+                <p className="truncate text-xs font-bold text-[#0E1726]">{approval.action_payload.rule_name || "Custom policy match"}</p>
+                <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-[#6B7488]">{approval.action_payload.reason || approval.action_description}</p>
+                <div className="mt-2 flex gap-2">
+                  <button type="button" onClick={() => void decideApproval(approval.id, "reject")} disabled={approvalBusy === approval.id} className="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50">Reject</button>
+                  <button type="button" onClick={() => handleGatewayApproveClick(approval)} disabled={approvalBusy === approval.id} className="rounded-lg bg-[#0F766E] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-teal-700 disabled:opacity-50">Review & approve</button>
+                </div>
+              </div>
+            ))}</div>
+            {pendingApprovals.length > 3 && <a href="/approvals" className="mt-2 flex items-center gap-1.5 px-2 py-2 text-xs font-bold text-[#6D28D9] hover:underline">View all approvals <ArrowRight className="h-3.5 w-3.5" /></a>}
+          </div>
         </section>
       </div>
 
-      <section className="rounded-[20px] bg-white border border-[#E6E9F0] overflow-hidden shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-        <div className="px-5 py-4 border-b border-[#E6E9F0] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 text-[#0E1726] font-bold text-sm">
-              <ShieldCheck className={healthReady ? "w-4 h-4 text-emerald-400" : "w-4 h-4 text-amber-400"} />
-              Integration Health
-            </div>
-            <p className="text-xs text-[#6B7488] mt-1">
-              Checks whether the Lite gateway path is ready for a test request.
-            </p>
-          </div>
-          <button
-            onClick={() => void fetchHealth()}
-            className="px-3 py-2 rounded-[10px] bg-[#F5F7FA] hover:bg-[#F1ECFE] text-xs font-semibold text-[#475069] border border-[#E6E9F0]"
-          >
-            Recheck
-          </button>
-        </div>
-        {healthError && (
-          <div className="m-5 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-700">
-            {healthError}
-          </div>
-        )}
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3 p-5">
-          {healthItems.length === 0 ? (
-            <p className="text-xs text-[#6B7488] md:col-span-5">Health checks have not run yet.</p>
-          ) : (
-            healthItems.map((item) => (
-              <div key={item.key} className="rounded-[10px] border border-[#E6E9F0] bg-[#F5F7FA] p-3">
-                <div className="flex items-center gap-2">
-                  {item.ok ? (
-                    <Check className="w-4 h-4 text-emerald-400" />
-                  ) : (
-                    <AlertTriangle className="w-4 h-4 text-amber-400" />
-                  )}
-                  <span className="text-xs font-bold text-[#0E1726]">{item.label}</span>
-                </div>
-                <p className="text-[10px] text-[#6B7488] mt-2">{item.detail}</p>
-              </div>
-            ))
-          )}
-        </div>
+      <section className="flex flex-col gap-3 rounded-[16px] border border-[#E6E9F0] bg-white px-5 py-4 text-xs text-[#475069] sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3"><Code2 className="h-4 w-4 shrink-0 text-[#6D28D9]" /><span className="truncate font-mono">{gatewayUrl}</span></div>
+        <button type="button" onClick={() => copy("gateway", gatewayUrl)} className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-[#E6E9F0] px-3 py-2 font-semibold hover:border-[#A78BFA] hover:bg-[#F8F5FF]">
+          {copied === "gateway" ? <Check className="h-4 w-4 text-[#0F766E]" /> : <Clipboard className="h-4 w-4" />}{copied === "gateway" ? "Copied" : "Copy gateway URL"}
+        </button>
       </section>
 
-      <section className="rounded-[20px] bg-white border border-[#E6E9F0] overflow-hidden shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-        <div className="px-5 py-4 border-b border-[#E6E9F0]">
-          <div className="flex items-center gap-2 text-[#0E1726] font-bold text-sm">
-            <ShieldCheck className="w-4 h-4 text-emerald-400" />
-            Provider Production Readiness
-          </div>
-          <p className="text-xs text-[#6B7488] mt-1">
-            Payload and streaming contracts are pinned in gateway tests and checked in CI.
-          </p>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3 p-5">
-          {Object.entries(providerCatalog).map(([id, item]) => {
-            const active = credentials.some((credential) => credential.provider === id && credential.status === "active");
-            return (
-              <div key={id} className="rounded-[10px] border border-[#E6E9F0] bg-[#F5F7FA] p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="text-xs font-bold text-[#0E1726]">{item.shortLabel}</div>
-                    <div className="mt-1 text-[10px] text-[#6B7488]">{item.lastReviewed}</div>
-                  </div>
-                  <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-700">
-                    {item.readiness}
-                  </span>
-                </div>
-                <p className="mt-3 text-[10px] text-[#475069]">{item.payloadContract}</p>
-                <p className="mt-1 text-[10px] text-[#475069]">{item.streamingContract}</p>
-                <div className="mt-3 flex items-center gap-1 text-[10px] text-[#6B7488]">
-                  {active ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
-                  {active ? "Connected" : "Provider key needed"}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="rounded-[20px] bg-white border border-[#E6E9F0] overflow-hidden shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-        <div className="px-5 py-4 border-b border-[#E6E9F0]">
-          <div className="flex items-center gap-2 text-[#0E1726] font-bold text-sm">
-            <KeyRound className="w-4 h-4 text-amber-400" />
-            Provider Key Vault
-          </div>
-          <p className="text-xs text-[#6B7488] mt-1">
-            Store the customer model-provider key once. AuthClaw uses this upstream key after governance checks pass.
-          </p>
-        </div>
-
-        <div className="p-5 grid grid-cols-1 lg:grid-cols-4 gap-3">
-          <label className="block">
-            <span className="block text-[10px] uppercase tracking-wider font-bold text-[#6B7488] mb-1.5">Provider</span>
-            <select
-              value={credentialProvider}
-              onChange={(event) => selectProvider(event.target.value as Provider)}
-              className="w-full px-3 py-2 rounded-[10px] bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-[#6D28D9]"
-            >
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="cohere">Cohere</option>
-              <option value="azure_openai">Azure OpenAI</option>
-              <option value="gemini">Gemini</option>
-            </select>
-          </label>
-          <label className="block">
-            <span className="block text-[10px] uppercase tracking-wider font-bold text-[#6B7488] mb-1.5">Display Name</span>
-            <input
-              value={credentialName}
-              onChange={(event) => setCredentialName(event.target.value)}
-              className="w-full px-3 py-2 rounded-[10px] bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-[#6D28D9]"
-            />
-          </label>
-          <label className="block">
-            <span className="block text-[10px] uppercase tracking-wider font-bold text-[#6B7488] mb-1.5">Provider API Key</span>
-            <input
-              type="password"
-              value={credentialKey}
-              onChange={(event) => setCredentialKey(event.target.value)}
-              placeholder="Paste provider key"
-              className="w-full px-3 py-2 rounded-[10px] bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-[#6D28D9]"
-            />
-          </label>
-          <label className="block">
-            <span className="block text-[10px] uppercase tracking-wider font-bold text-[#6B7488] mb-1.5">Endpoint Override</span>
-            <input
-              value={credentialEndpoint}
-              onChange={(event) => setCredentialEndpoint(event.target.value)}
-              placeholder="Optional"
-              className="w-full px-3 py-2 rounded-[10px] bg-[#F5F7FA] border border-[#E6E9F0] text-[#0E1726] text-xs focus:outline-none focus:border-[#6D28D9]"
-            />
-          </label>
-        </div>
-
-        <div className="px-5 pb-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          <div className="text-xs">
-            {credentialMessage && <p className="text-emerald-700">{credentialMessage}</p>}
-            {credentialError && <p className="text-red-700">{credentialError}</p>}
-            {!credentialMessage && !credentialError && (
-              <p className="text-[#6B7488]">Raw provider keys are encrypted and never returned after save.</p>
-            )}
-          </div>
-          <button
-            onClick={() => void saveCredential()}
-            disabled={credentialSaving || credentialKey.length < 8}
-            className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-[10px] bg-[#6D28D9] hover:bg-[#7C3AED] text-xs font-semibold text-white disabled:opacity-50"
-          >
-            <Check className="w-4 h-4" />
-            {credentialSaving ? "Saving..." : "Save Provider Key"}
-          </button>
-        </div>
-
-        <div className="mx-5 mb-5 rounded-[10px] border border-[#E6E9F0] bg-[#F5F7FA] p-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <div className="flex items-center gap-2 text-sm font-bold text-[#0E1726]">
-                <Play className="h-4 w-4 text-emerald-400" />
-                Test Gateway Request
-              </div>
-              <p className="mt-1 text-xs text-[#6B7488]">
-                Sends a safe sample prompt through AuthClaw using the current tenant key and selected provider route.
-              </p>
-            </div>
-            <button
-              onClick={() => void runGatewayTest()}
-              disabled={testBusy || !activeCredentialForProvider}
-              className="inline-flex items-center justify-center gap-2 rounded-[10px] bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
-            >
-              <Play className="h-4 w-4" />
-              {testBusy ? "Testing..." : `Test ${providerCatalog[provider].shortLabel} key`}
-            </button>
-          </div>
-
-          {!credentialsLoaded && (
-            <p className="mt-3 text-xs text-[#6B7488]">Loading provider keys...</p>
-          )}
-          {credentialsLoaded && !activeCredentialForProvider && (
-            <p className="mt-3 text-xs text-amber-700">
-              Save an active {providerCatalog[provider].shortLabel} provider key first, then run the gateway test.
-              {provider === "openai" ? " You can leave OpenAI untested until you have an OpenAI API key." : ""}
-            </p>
-          )}
-          {testError && (
-            <div className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-700">
-              {testError}
-            </div>
-          )}
-          {testResult && (
-            <div
-              className={`mt-3 rounded-lg border p-3 text-xs ${
-                testResult.ok
-                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-800"
-                  : "border-amber-500/20 bg-amber-500/10 text-amber-800"
-              }`}
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                {testResult.ok ? <Check className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
-                <span className="font-bold">
-                  {testResult.ok ? "Gateway request succeeded" : `Gateway returned ${testResult.status}`}
-                </span>
-                <span className="text-[#475069]">Request ID: {testResult.request_id}</span>
-                <span className="text-[#475069]">{testResult.duration_ms}ms</span>
-                {testResult.content_type && <span className="text-[#475069]">{testResult.content_type}</span>}
-              </div>
-              {testResult.contract && (
-                <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
-                  <div className="rounded border border-[#E6E9F0] bg-white p-2">
-                    <div className="text-[10px] font-bold uppercase text-[#6B7488]">Payload</div>
-                    <div className="mt-1 text-[11px] text-[#0E1726]">{testResult.contract.payload}</div>
-                  </div>
-                  <div className="rounded border border-[#E6E9F0] bg-white p-2">
-                    <div className="text-[10px] font-bold uppercase text-[#6B7488]">Streaming</div>
-                    <div className="mt-1 text-[11px] text-[#0E1726]">{testResult.contract.streaming}</div>
-                  </div>
-                </div>
-              )}
-              {testResult.checks && (
-                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                  {testResult.checks.map((check) => (
-                    <div key={check.label} className="rounded border border-[#E6E9F0] bg-white p-2">
-                      <div className="flex items-center gap-1 text-[10px] font-bold text-[#0E1726]">
-                        {check.ok ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
-                        {check.label}
-                      </div>
-                      <div className="mt-1 text-[10px] text-[#6B7488]">{check.detail}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <pre className="mt-3 max-h-56 overflow-auto rounded border border-[#E6E9F0] bg-white p-3 text-[11px] text-[#0E1726]">
-                {JSON.stringify(testResult.response ?? testResult.raw ?? testResult.error ?? {}, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
-
-        <div className="border-t border-[#E6E9F0] divide-y divide-[#E6E9F0]">
-          {credentials.length === 0 ? (
-            <div className="p-5 text-xs text-[#6B7488]">No provider keys configured yet.</div>
-          ) : (
-            credentials.map((credential) => (
-              <div key={credential.id} className="p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-[#0E1726]">{credential.display_name}</span>
-                    <span className="px-2 py-0.5 rounded bg-[#F5F7FA] text-[10px] font-semibold uppercase text-[#475069] border border-[#E6E9F0]">
-                      {credential.provider}
-                    </span>
-                    <span className="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-[10px] font-semibold uppercase text-emerald-700">
-                      {credential.status}
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-[#6B7488] mt-1">
-                    Created {new Date(credential.created_at).toLocaleString()}
-                    {credential.endpoint ? ` / endpoint override configured` : ""}
-                  </p>
-                </div>
-                <button
-                  onClick={() => void revokeCredential(credential.id)}
-                  className="px-3 py-2 rounded-[10px] bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-xs font-semibold text-red-700"
-                >
-                  Revoke
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
-
-      <section className="rounded-[20px] bg-white border border-[#E6E9F0] overflow-hidden shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-        <div className="px-5 py-4 border-b border-[#E6E9F0] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 text-[#0E1726] font-bold text-sm">
-              <Code2 className="w-4 h-4 text-[#6D28D9]" />
-              Copyable curl Request
-            </div>
-            <p className="text-xs text-[#6B7488] mt-1">
-              macOS/Linux curl format. On Windows, use the PowerShell starter request from the Tenant Ready panel.
-            </p>
-          </div>
-          <button
-            onClick={() => copy("curl", curlCommand)}
-            className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-[10px] bg-[#6D28D9] hover:bg-[#7C3AED] text-xs font-semibold text-white"
-          >
-            {copied === "curl" ? <Check className="w-4 h-4" /> : <Clipboard className="w-4 h-4" />}
-            Copy curl
-          </button>
-        </div>
-        <pre className="p-5 overflow-x-auto text-xs text-[#0E1726] bg-[#F5F7FA]">
-          <code>{curlCommand}</code>
-        </pre>
-      </section>
-
-      <section className="rounded-[20px] bg-white border border-[#E6E9F0] overflow-hidden shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-        <div className="px-5 py-4 border-b border-[#E6E9F0] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 text-[#0E1726] font-bold text-sm">
-              <Code2 className="w-4 h-4 text-[#6D28D9]" />
-              Python SDK Request
-            </div>
-            <p className="text-xs text-[#6B7488] mt-1">
-              Install-free helper from <code>sdk/python/authclaw_lite.py</code>.
-            </p>
-          </div>
-          <button
-            onClick={() => copy("python-sdk", pythonSdkSnippet)}
-            className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-[10px] bg-[#6D28D9] hover:bg-[#7C3AED] text-xs font-semibold text-white"
-          >
-            {copied === "python-sdk" ? <Check className="w-4 h-4" /> : <Clipboard className="w-4 h-4" />}
-            Copy Python
-          </button>
-        </div>
-        <pre className="p-5 overflow-x-auto text-xs text-[#0E1726] bg-[#F5F7FA]">
-          <code>{pythonSdkSnippet}</code>
-        </pre>
-      </section>
-
-      <section className="rounded-[20px] bg-white border border-[#E6E9F0] overflow-hidden shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
-        <div className="px-5 py-4 border-b border-[#E6E9F0] flex items-center justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 text-[#0E1726] font-bold text-sm">
-              <AlertTriangle className="w-4 h-4 text-amber-400" />
-              HITL Approval Queue
-            </div>
-            <p className="text-xs text-[#6B7488] mt-1">
-              High-risk policy matches wait here. If no one approves within 30 minutes, the gateway blocks the request.
-            </p>
-          </div>
-          <button
-            onClick={() => void fetchApprovals()}
-            className="px-3 py-2 rounded-[10px] bg-[#F5F7FA] hover:bg-[#F1ECFE] text-xs font-semibold text-[#475069] border border-[#E6E9F0]"
-          >
-            Refresh
-          </button>
-        </div>
-
-        {approvalError && (
-          <div className="m-5 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-700">
-            {approvalError}
-          </div>
-        )}
-
-        {pendingApprovals.length === 0 ? (
-          <div className="p-5 text-xs text-[#6B7488]">No pending gateway approvals.</div>
-        ) : (
-          <div className="divide-y divide-[#E6E9F0]">
-            {pendingApprovals.map((approval) => (
-              <div key={approval.id} className="p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-bold text-[#0E1726]">
-                      {approval.action_payload.rule_name || "Custom policy match"}
-                    </span>
-                    <span className="px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-[10px] font-bold uppercase text-amber-300">
-                      {approval.action_payload.severity || "high"}
-                    </span>
-                    <span className="px-2 py-0.5 rounded bg-[#F5F7FA] text-[10px] font-semibold text-[#475069] border border-[#E6E9F0]">
-                      {approval.action_payload.provider || "provider"} / {approval.action_payload.model || "model"}
-                    </span>
-                  </div>
-                  <p className="text-xs text-[#475069] mt-2">
-                    {approval.action_payload.reason || approval.action_description}
-                  </p>
-                  <p className="text-[10px] text-[#6B7488] mt-1">
-                    Request {approval.action_payload.request_id || approval.action_id} expires {new Date(approval.expires_at).toLocaleTimeString()}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => void decideApproval(approval.id, "reject")}
-                    disabled={approvalBusy === approval.id}
-                    className="px-3 py-2 rounded-[10px] bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-xs font-semibold text-red-700 disabled:opacity-50"
-                  >
-                    Reject
-                  </button>
-                  <button
-                    onClick={() => handleGatewayApproveClick(approval)}
-                    disabled={approvalBusy === approval.id}
-                    className="px-3 py-2 rounded-[10px] bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white disabled:opacity-50"
-                  >
-                    Approve Passage
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section className="grid grid-cols-1 md:grid-cols-4 gap-3">
-        {[
-          "Tenant key validated",
-          "PII/PHI redaction applied",
-          "Policy allow/block decision recorded",
-          "Audit evidence emitted",
-        ].map((item) => (
-          <div key={item} className="flex items-center gap-2 rounded-lg border border-[#E6E9F0] bg-white px-4 py-3">
-            <Play className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="text-xs font-medium text-[#475069]">{item}</span>
-          </div>
-        ))}
-      </section>
-
-      {/* Gateway HITL MFA Challenge Modal */}
       {gatewayMfaTarget && (
-        <MfaChallengeModal
-          code={gatewayTotpCode}
-          setCode={setGatewayTotpCode}
-          busy={gatewayMfaBusy}
-          error={gatewayMfaError}
-          onClose={() => setGatewayMfaTarget(null)}
-          onSubmit={handleGatewayMfaSubmit}
-          accentClass="text-emerald-400"
+        <MfaChallengeModal code={gatewayTotpCode} setCode={setGatewayTotpCode} busy={gatewayMfaBusy} error={gatewayMfaError}
+          onClose={() => setGatewayMfaTarget(null)} onSubmit={handleGatewayMfaSubmit} accentClass="text-emerald-400"
           description="Confirm your administrator identity before allowing this gateway request to pass. Enter the 6-digit TOTP code from your authenticator app (or a backup recovery code)."
-          submitLabel="Authorize Passage"
-        />
+          submitLabel="Authorize Passage" />
       )}
     </div>
   );
