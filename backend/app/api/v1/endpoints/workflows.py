@@ -301,10 +301,10 @@ def _approval_requires_fresh_mfa(approval: PendingApproval) -> bool:
     return any(bool(item.get("destructive")) for item in plan if isinstance(item, dict))
 
 
-def _approval_has_fresh_mfa(approval: PendingApproval) -> bool:
-    if not approval.mfa_verified or not approval.mfa_timestamp:
+def _has_fresh_mfa(mfa_verified: bool, mfa_timestamp: Optional[datetime]) -> bool:
+    if not mfa_verified or not mfa_timestamp:
         return False
-    timestamp = approval.mfa_timestamp
+    timestamp = mfa_timestamp
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     return timestamp >= datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -602,7 +602,7 @@ def approve_workflow(
         required=requires_fresh_mfa,
         operation="destructive_remediation" if requires_fresh_mfa else "workflow_approval",
     )
-    if requires_fresh_mfa and not mfa_verified:
+    if requires_fresh_mfa and not _has_fresh_mfa(mfa_verified, mfa_timestamp):
         raise HTTPException(status_code=403, detail="Fresh MFA is required for destructive remediation")
 
     # Update PendingApproval (non-transferable, bound to current user)
@@ -635,9 +635,6 @@ def approve_workflow(
     )
     db.add(audit)
     db.commit()
-
-    if requires_fresh_mfa and not _approval_has_fresh_mfa(approval):
-        raise HTTPException(status_code=403, detail="Fresh MFA is required for destructive remediation")
 
     # Resume workflow execution
     try:
