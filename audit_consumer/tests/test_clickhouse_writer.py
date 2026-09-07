@@ -3,7 +3,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from clickhouse_writer import audit_event_exists, insert_audit_event
+import pytest
+
+import clickhouse_writer
+from clickhouse_writer import audit_event_exists, get_client, insert_audit_event
 
 
 class QueryResult:
@@ -21,6 +24,12 @@ class FakeClickHouse:
 
     def insert(self, **kwargs):
         self.insert_calls.append(kwargs)
+
+
+class FailingClickHouse(FakeClickHouse):
+    def insert(self, **kwargs):
+        self.insert_calls.append(kwargs)
+        raise TimeoutError("secret=must-not-be-logged")
 
 
 def _row():
@@ -68,3 +77,27 @@ def test_insert_audit_event_inserts_new_record():
     assert inserted is True
     assert len(client.insert_calls) == 1
     assert client.insert_calls[0]["table"] == "authclaw.audit_events"
+
+
+def test_clickhouse_client_has_explicit_bounded_timeouts(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(clickhouse_writer.clickhouse_connect, "get_client", lambda **kwargs: captured.update(kwargs) or object())
+    monkeypatch.setenv("CLICKHOUSE_CONNECT_TIMEOUT_SECONDS", "999")
+    monkeypatch.setenv("CLICKHOUSE_READ_TIMEOUT_SECONDS", "999")
+
+    get_client("clickhouse", 8123, "authclaw", "audit", "password")
+
+    assert captured["connect_timeout"] == 30.0
+    assert captured["send_receive_timeout"] == 60.0
+
+
+def test_clickhouse_retry_uses_capped_exponential_backoff(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(clickhouse_writer.time, "sleep", sleeps.append)
+    client = FailingClickHouse(exists=False)
+
+    with pytest.raises(TimeoutError):
+        insert_audit_event(client, _row(), max_retries=4, retry_delay=0.5, max_retry_delay=1.0)
+
+    assert len(client.insert_calls) == 4
+    assert sleeps == [0.5, 1.0, 1.0]

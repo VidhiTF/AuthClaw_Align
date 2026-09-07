@@ -55,10 +55,16 @@ from services.enterprise_identity import (
 )
 from services.tenant_context import get_current_tenant_id, tenant_context
 from services.control_plane_auth import verify_control_plane_request
+from startup.safe_logging import (
+    bind_request_context,
+    configure_safe_logging,
+    reset_request_context,
+    safe_correlation_id,
+    trace_id_from_headers,
+)
 
-# Set up basic logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("authclaw.gateway")
+configure_safe_logging()
+logger = logging.getLogger("authclaw.agent")
 
 API_KEY = os.getenv("AUTHCLAW_TEST_API_KEY", "")
 
@@ -88,8 +94,42 @@ async def lifespan(app: FastAPI):
         stop_background_monitoring()
     except Exception as ex:
         logger.error(f"Failed to stop background document monitoring: {ex}")
+    from database import engine, migration_engine
+    from services.redis_client import close_redis_client
+    close_redis_client()
+    engine.dispose()
+    migration_engine.dispose()
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def structured_request_logging(request: Request, call_next):
+    request_id = safe_correlation_id(request.headers.get("X-Request-ID")) or f"req-{uuid.uuid4().hex}"
+    trace_id = trace_id_from_headers(request.headers.get("traceparent"), request.headers.get("X-Trace-ID"))
+    tokens = bind_request_context(request_id, trace_id, f"{request.method.upper()} pending-route")
+    request.state.correlation_id = request_id
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        if trace_id:
+            response.headers["X-Trace-ID"] = trace_id
+        return response
+    finally:
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", "unmatched")
+        logger.info(
+            "request completed",
+            extra={
+                "operation": f"{request.method.upper()} {route_path}",
+                "status": status_code,
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            },
+        )
+        reset_request_context(tokens)
 
 
 @app.exception_handler(HTTPException)
@@ -258,9 +298,9 @@ def _consume_rate_limit_token(tenant_id: int, limit: int) -> Tuple[bool, int, st
     key = f"authclaw:rate:{tenant_id}:{window}"
     if redis_url:
         try:
-            import redis
+            from services.redis_client import get_redis_client
 
-            client = redis.Redis.from_url(redis_url)
+            client = get_redis_client()
             count = int(client.incr(key))
             if count == 1:
                 client.expire(key, 90)
@@ -598,7 +638,7 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
 
 @app.middleware("http")
 async def tenant_database_context_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request_id = getattr(request.state, "correlation_id", "") or safe_correlation_id(request.headers.get("X-Request-ID")) or f"req-{uuid.uuid4().hex}"
     tenant_id = None
 
     if not _is_public_or_auth_path(request.url.path):
@@ -1129,13 +1169,13 @@ def gateway_chat(
         )
         return service.format_chat_response(execution)
     except GatewayProviderConfigurationError as e:
-        logger.error(f"Provider configuration error: {e}", exc_info=True)
+        logger.error("Provider configuration error error_type=%s", type(e).__name__)
         return JSONResponse(
             status_code=500,
             content={"error": "provider_not_configured"}
         )
     except GatewayProviderUnavailableError as e:
-        logger.error(f"Provider invocation error: {e}", exc_info=True)
+        logger.error("Provider invocation error error_type=%s", type(e).__name__)
         return JSONResponse(
             status_code=503,
             content={
@@ -1166,13 +1206,13 @@ def chat(
         )
         return service.format_chat_response(execution)
     except GatewayProviderConfigurationError as e:
-        logger.error(f"Provider configuration error: {e}", exc_info=True)
+        logger.error("Provider configuration error error_type=%s", type(e).__name__)
         return JSONResponse(
             status_code=500,
             content={"error": "provider_not_configured"}
         )
     except GatewayProviderUnavailableError as e:
-        logger.error(f"Provider invocation error: {e}", exc_info=True)
+        logger.error("Provider invocation error error_type=%s", type(e).__name__)
         return JSONResponse(
             status_code=503,
             content={
@@ -1776,7 +1816,7 @@ async def execute_request(approval_id: str, request: Request):
             )
             result = execution.result
     except GatewayProviderConfigurationError as e:
-        logger.error(f"Provider configuration error in execute: {e}", exc_info=True)
+        logger.error("Provider configuration error in execute error_type=%s", type(e).__name__)
         record["status"] = "execution_failed"
         record["last_action_at"] = datetime.now(timezone.utc).isoformat()
         append_approval_audit(record, action="execution_failed", actor=approver, metadata={"error": "provider_not_configured"})
@@ -1785,7 +1825,7 @@ async def execute_request(approval_id: str, request: Request):
             content={"error": "provider_not_configured"}
         )
     except GatewayProviderUnavailableError as e:
-        logger.error(f"Provider invocation error in execute: {e}", exc_info=True)
+        logger.error("Provider invocation error in execute error_type=%s", type(e).__name__)
         record["status"] = "execution_failed"
         record["last_action_at"] = datetime.now(timezone.utc).isoformat()
         append_approval_audit(record, action="execution_failed", actor=approver, metadata={"error": "provider_unavailable", "request_id": e.request_id})
@@ -2055,7 +2095,7 @@ def chat_completions(
             model=request.model or "authclaw-gateway",
         )
     except GatewayProviderConfigurationError as e:
-        logger.error(f"Provider configuration error: {e}", exc_info=True)
+        logger.error("Provider configuration error error_type=%s", type(e).__name__)
         return JSONResponse(
             status_code=500,
             content={
@@ -2066,7 +2106,7 @@ def chat_completions(
             }
         )
     except GatewayProviderUnavailableError as e:
-        logger.error(f"Error executing graph pipeline: {e}", exc_info=True)
+        logger.error("Error executing graph pipeline error_type=%s", type(e).__name__)
         return JSONResponse(
             status_code=503,
             content={

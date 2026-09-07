@@ -45,6 +45,18 @@ output "primary" {
     vpc_endpoint_ids                   = module.primary.vpc_endpoint_ids
     application_task_role_arns         = module.primary.application_task_role_arns
     nat_dashboard_name                 = module.primary.nat_dashboard_name
+    availability_controls              = module.primary.availability_controls
+    observability                      = module.primary.observability
+  }
+
+  precondition {
+    condition = (
+      var.service_max_capacity["backend"] * var.db_connections_per_task["backend"] +
+      var.service_max_capacity["gateway"] * var.db_connections_per_task["gateway"] +
+      var.service_max_capacity["agent"] * var.db_connections_per_task["agent"] +
+      var.rds_connection_reserve <= var.rds_max_connections
+    )
+    error_message = "Maximum ECS database pools plus the operational reserve exceed rds_max_connections."
   }
 }
 
@@ -87,6 +99,8 @@ output "secondary" {
     vpc_endpoint_ids                   = module.secondary[0].vpc_endpoint_ids
     application_task_role_arns         = module.secondary[0].application_task_role_arns
     nat_dashboard_name                 = module.secondary[0].nat_dashboard_name
+    availability_controls              = module.secondary[0].availability_controls
+    observability                      = module.secondary[0].observability
   } : null
 }
 

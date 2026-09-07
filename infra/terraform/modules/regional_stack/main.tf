@@ -105,6 +105,23 @@ locals {
 
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
+    { name = "DB_CONNECT_TIMEOUT_SECONDS", value = "5" },
+    { name = "DB_POOL_TIMEOUT_SECONDS", value = "5" },
+    { name = "DB_POOL_RECYCLE_SECONDS", value = "300" },
+    { name = "BACKEND_DB_POOL_SIZE", value = tostring(var.db_connections_per_task.backend - 5) },
+    { name = "BACKEND_DB_MAX_OVERFLOW", value = "5" },
+    { name = "AGENT_DB_POOL_SIZE", value = tostring(var.db_connections_per_task.agent - 5) },
+    { name = "AGENT_DB_MAX_OVERFLOW", value = "5" },
+    { name = "GATEWAY_DB_MAX_OPEN_CONNS", value = tostring(var.db_connections_per_task.gateway) },
+    { name = "GATEWAY_DB_MAX_IDLE_CONNS", value = tostring(var.db_connections_per_task.gateway) },
+    { name = "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS", value = "45" },
+    { name = "REDIS_CONNECT_TIMEOUT_SECONDS", value = "2" },
+    { name = "REDIS_READ_TIMEOUT_SECONDS", value = "2" },
+    { name = "REDIS_WRITE_TIMEOUT_SECONDS", value = "2" },
+    { name = "REDIS_POOL_TIMEOUT_SECONDS", value = "3" },
+    { name = "AWS_CONNECT_TIMEOUT_SECONDS", value = "3" },
+    { name = "AWS_READ_TIMEOUT_SECONDS", value = "25" },
+    { name = "AWS_MAX_ATTEMPTS", value = "3" },
     { name = "AUTHCLAW_FORWARDED_HEADER_MODE", value = var.forwarded_header_mode },
     { name = "AUTHCLAW_FORWARDED_FOR_MAX_HOPS", value = "8" },
     { name = "AUTHCLAW_TRUSTED_PROXY_CIDRS", value = join(",", values(aws_subnet.public)[*].cidr_block) },
@@ -533,39 +550,53 @@ resource "aws_db_subnet_group" "main" {
 resource "aws_db_instance" "postgres_primary" {
   count = var.create_db_replica ? 0 : 1
 
-  identifier              = "${var.name}-postgres"
-  engine                  = "postgres"
-  engine_version          = var.db_engine_version
-  instance_class          = var.db_instance_class
-  allocated_storage       = var.db_allocated_storage
-  db_name                 = "authclaw"
-  username                = "authclaw"
-  password                = local.db_password
-  db_subnet_group_name    = aws_db_subnet_group.main.name
-  vpc_security_group_ids  = [aws_security_group.data.id]
-  storage_encrypted       = true
-  kms_key_id              = aws_kms_key.main.arn
-  multi_az                = var.is_primary
-  backup_retention_period = 14
-  deletion_protection     = var.is_primary
-  skip_final_snapshot     = !var.is_primary
-  tags                    = var.tags
+  identifier                            = "${var.name}-postgres"
+  engine                                = "postgres"
+  engine_version                        = var.db_engine_version
+  instance_class                        = var.db_instance_class
+  allocated_storage                     = var.db_allocated_storage
+  db_name                               = "authclaw"
+  username                              = "authclaw"
+  password                              = local.db_password
+  db_subnet_group_name                  = aws_db_subnet_group.main.name
+  vpc_security_group_ids                = [aws_security_group.data.id]
+  storage_encrypted                     = true
+  kms_key_id                            = aws_kms_key.main.arn
+  multi_az                              = var.is_primary
+  backup_retention_period               = 14
+  deletion_protection                   = var.is_primary
+  skip_final_snapshot                   = !var.is_primary
+  performance_insights_enabled          = true
+  performance_insights_kms_key_id       = aws_kms_key.main.arn
+  performance_insights_retention_period = 7
+  enabled_cloudwatch_logs_exports       = ["postgresql", "upgrade"]
+  monitoring_interval                   = 60
+  monitoring_role_arn                   = aws_iam_role.rds_enhanced_monitoring.arn
+  parameter_group_name                  = aws_db_parameter_group.postgres.name
+  tags                                  = var.tags
 }
 
 resource "aws_db_instance" "postgres_replica" {
   count = var.create_db_replica ? 1 : 0
 
-  identifier             = "${var.name}-postgres"
-  replicate_source_db    = var.replica_source_db_arn
-  instance_class         = var.db_instance_class
-  db_subnet_group_name   = aws_db_subnet_group.main.name
-  vpc_security_group_ids = [aws_security_group.data.id]
-  storage_encrypted      = true
-  kms_key_id             = aws_kms_key.main.arn
-  multi_az               = false
-  deletion_protection    = false
-  skip_final_snapshot    = true
-  tags                   = merge(var.tags, { Role = "cross-region-read-replica" })
+  identifier                            = "${var.name}-postgres"
+  replicate_source_db                   = var.replica_source_db_arn
+  instance_class                        = var.db_instance_class
+  db_subnet_group_name                  = aws_db_subnet_group.main.name
+  vpc_security_group_ids                = [aws_security_group.data.id]
+  storage_encrypted                     = true
+  kms_key_id                            = aws_kms_key.main.arn
+  multi_az                              = false
+  deletion_protection                   = false
+  skip_final_snapshot                   = true
+  performance_insights_enabled          = true
+  performance_insights_kms_key_id       = aws_kms_key.main.arn
+  performance_insights_retention_period = 7
+  enabled_cloudwatch_logs_exports       = ["postgresql", "upgrade"]
+  monitoring_interval                   = 60
+  monitoring_role_arn                   = aws_iam_role.rds_enhanced_monitoring.arn
+  parameter_group_name                  = aws_db_parameter_group.postgres.name
+  tags                                  = merge(var.tags, { Role = "cross-region-read-replica" })
 }
 
 resource "aws_elasticache_subnet_group" "main" {
@@ -581,6 +612,11 @@ resource "aws_elasticache_replication_group" "redis" {
   node_type                  = "cache.t4g.micro"
   num_cache_clusters         = var.is_primary ? 2 : 1
   automatic_failover_enabled = var.is_primary
+  multi_az_enabled           = var.is_primary
+  auto_minor_version_upgrade = true
+  snapshot_retention_limit   = var.is_primary ? 7 : 1
+  snapshot_window            = "03:00-04:00"
+  maintenance_window         = "sun:04:00-sun:05:00"
   subnet_group_name          = aws_elasticache_subnet_group.main.name
   security_group_ids         = [aws_security_group.data.id]
   at_rest_encryption_enabled = true
@@ -769,7 +805,7 @@ resource "aws_ecs_cluster" "main" {
 
   setting {
     name  = "containerInsights"
-    value = "enabled"
+    value = "enhanced"
   }
 
   tags = var.tags
@@ -808,7 +844,7 @@ resource "aws_service_discovery_service" "service" {
 resource "aws_cloudwatch_log_group" "service" {
   for_each          = toset(concat(keys(local.task_definition_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
   name              = "/authclaw/${var.name}/${each.key}"
-  retention_in_days = 30
+  retention_in_days = var.service_log_retention_days
   tags              = var.tags
 }
 
@@ -1466,6 +1502,8 @@ resource "aws_lb_target_group" "service" {
   vpc_id      = aws_vpc.main.id
   target_type = "ip"
 
+  deregistration_delay = var.alb_deregistration_delay_seconds
+
   health_check {
     path                = each.value.health_path
     matcher             = "200-399"
@@ -1647,15 +1685,25 @@ resource "aws_ecs_task_definition" "service" {
 
   container_definitions = jsonencode([
     merge({
-      name      = each.key
-      image     = each.value.image
-      essential = true
+      name        = each.key
+      image       = each.value.image
+      essential   = true
+      stopTimeout = 60
+      restartPolicy = {
+        enabled              = true
+        ignoredExitCodes     = [0]
+        restartAttemptPeriod = 60
+      }
       portMappings = [{
         containerPort = each.value.container_port
         protocol      = "tcp"
       }]
       environment = concat(
         local.common_environment,
+        [
+          { name = "AUTHCLAW_SERVICE", value = each.key },
+          { name = "AUTHCLAW_RELEASE", value = each.value.image }
+        ],
         each.key == "console" ? [
           { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_signing_enabled) },
           { name = "AUTHCLAW_OIDC_LOGIN_PAUSED", value = tostring(var.oidc_login_paused) },
@@ -1773,6 +1821,7 @@ resource "aws_ecs_task_definition" "gateway_with_sidecars" {
       name              = "gateway"
       image             = var.container_images.gateway
       essential         = true
+      stopTimeout       = 60
       cpu               = 768
       memory            = 1280
       memoryReservation = 1024
@@ -1781,6 +1830,8 @@ resource "aws_ecs_task_definition" "gateway_with_sidecars" {
         protocol      = "tcp"
       }]
       environment = concat(local.common_environment, [
+        { name = "AUTHCLAW_SERVICE", value = "gateway" },
+        { name = "AUTHCLAW_RELEASE", value = var.container_images.gateway },
         { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" },
         { name = "PRESIDIO_FAIL_CLOSED", value = "true" }
       ])
@@ -1821,6 +1872,7 @@ resource "aws_ecs_task_definition" "gateway_with_sidecars" {
       name              = "opa"
       image             = var.container_images.opa
       essential         = true
+      stopTimeout       = 60
       cpu               = 256
       memory            = 384
       memoryReservation = 256
@@ -1845,6 +1897,7 @@ resource "aws_ecs_task_definition" "gateway_with_sidecars" {
       name              = "presidio"
       image             = var.container_images.presidio
       essential         = true
+      stopTimeout       = 60
       cpu               = 768
       memory            = 2048
       memoryReservation = 1536
@@ -1895,6 +1948,7 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
       name              = "backend"
       image             = var.container_images.backend
       essential         = true
+      stopTimeout       = 60
       cpu               = 768
       memory            = 1536
       memoryReservation = 1024
@@ -1903,6 +1957,8 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
         protocol      = "tcp"
       }]
       environment = concat(local.common_environment, [
+        { name = "AUTHCLAW_SERVICE", value = "backend" },
+        { name = "AUTHCLAW_RELEASE", value = var.container_images.backend },
         { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_enabled) },
         { name = "WORKER_TOKEN_HMAC_ACTIVE_VERSION", value = "v1" },
         { name = "WORKER_TOKEN_ISSUANCE_PAUSED", value = tostring(var.worker_token_issuance_paused) },
@@ -1947,6 +2003,7 @@ resource "aws_ecs_task_definition" "backend_with_presidio" {
       name              = "presidio"
       image             = var.container_images.presidio
       essential         = true
+      stopTimeout       = 60
       cpu               = 1024
       memory            = 2048
       memoryReservation = 1536
@@ -1997,6 +2054,7 @@ resource "aws_ecs_task_definition" "agent_with_opa" {
       name              = "agent"
       image             = var.container_images.agent
       essential         = true
+      stopTimeout       = 60
       cpu               = 768
       memory            = 1536
       memoryReservation = 1024
@@ -2004,7 +2062,10 @@ resource "aws_ecs_task_definition" "agent_with_opa" {
         containerPort = 8001
         protocol      = "tcp"
       }]
-      environment = local.common_environment
+      environment = concat(local.common_environment, [
+        { name = "AUTHCLAW_SERVICE", value = "agent" },
+        { name = "AUTHCLAW_RELEASE", value = var.container_images.agent }
+      ])
       secrets = [
         { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn },
         { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn },
@@ -2035,6 +2096,7 @@ resource "aws_ecs_task_definition" "agent_with_opa" {
       name              = "opa"
       image             = var.container_images.opa
       essential         = true
+      stopTimeout       = 60
       cpu               = 256
       memory            = 384
       memoryReservation = 256
@@ -2070,11 +2132,16 @@ resource "aws_ecs_task_definition" "agent_with_opa" {
 resource "aws_ecs_service" "public" {
   for_each = local.public_services
 
-  name            = "${var.name}-${each.key}"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = each.key == "gateway" ? aws_ecs_task_definition.gateway_with_sidecars.arn : each.key == "backend" ? aws_ecs_task_definition.backend_with_presidio.arn : aws_ecs_task_definition.service[each.key].arn
-  desired_count   = var.desired_count
-  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  name                               = "${var.name}-${each.key}"
+  cluster                            = aws_ecs_cluster.main.id
+  task_definition                    = each.key == "gateway" ? aws_ecs_task_definition.gateway_with_sidecars.arn : each.key == "backend" ? aws_ecs_task_definition.backend_with_presidio.arn : aws_ecs_task_definition.service[each.key].arn
+  desired_count                      = max(var.desired_count, local.ha_environment ? var.service_min_capacity[each.key] : 1)
+  deployment_minimum_healthy_percent = var.deployment_minimum_healthy_percent
+  deployment_maximum_percent         = var.deployment_maximum_percent
+  health_check_grace_period_seconds  = var.health_check_grace_period_seconds
+  enable_ecs_managed_tags            = true
+  propagate_tags                     = "SERVICE"
+  launch_type                        = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
 
   dynamic "capacity_provider_strategy" {
     for_each = var.ecs_ec2_graviton.enabled ? [1] : []
@@ -2101,6 +2168,15 @@ resource "aws_ecs_service" "public" {
     registry_arn = aws_service_discovery_service.service[each.key].arn
   }
 
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+
   depends_on = [aws_lb_listener.service, aws_ecs_cluster_capacity_providers.main]
   tags       = var.tags
 }
@@ -2108,11 +2184,15 @@ resource "aws_ecs_service" "public" {
 resource "aws_ecs_service" "private" {
   for_each = local.private_services
 
-  name            = "${var.name}-${each.key}"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = each.key == "agent" ? aws_ecs_task_definition.agent_with_opa.arn : aws_ecs_task_definition.service[each.key].arn
-  desired_count   = var.desired_count
-  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  name                               = "${var.name}-${each.key}"
+  cluster                            = aws_ecs_cluster.main.id
+  task_definition                    = each.key == "agent" ? aws_ecs_task_definition.agent_with_opa.arn : aws_ecs_task_definition.service[each.key].arn
+  desired_count                      = max(var.desired_count, local.ha_environment ? var.service_min_capacity[each.key] : 1)
+  deployment_minimum_healthy_percent = var.deployment_minimum_healthy_percent
+  deployment_maximum_percent         = var.deployment_maximum_percent
+  enable_ecs_managed_tags            = true
+  propagate_tags                     = "SERVICE"
+  launch_type                        = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
 
   dynamic "capacity_provider_strategy" {
     for_each = var.ecs_ec2_graviton.enabled ? [1] : []
@@ -2131,6 +2211,15 @@ resource "aws_ecs_service" "private" {
 
   service_registries {
     registry_arn = aws_service_discovery_service.service[each.key].arn
+  }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count]
   }
 
   depends_on = [aws_ecs_cluster_capacity_providers.main]
@@ -2166,10 +2255,18 @@ resource "aws_ecs_task_definition" "audit_consumer" {
 
   container_definitions = jsonencode([
     {
-      name      = "audit_consumer"
-      image     = var.container_images.audit_consumer
-      essential = true
+      name        = "audit_consumer"
+      image       = var.container_images.audit_consumer
+      essential   = true
+      stopTimeout = 60
+      restartPolicy = {
+        enabled              = true
+        ignoredExitCodes     = [0]
+        restartAttemptPeriod = 60
+      }
       environment = concat(local.common_environment, local.audit_sqs_environment, local.audit_sqs_consumer_environment, [
+        { name = "AUTHCLAW_SERVICE", value = "audit_consumer" },
+        { name = "AUTHCLAW_RELEASE", value = var.container_images.audit_consumer },
         { name = "KAFKA_TOPICS", value = "gateway.traffic,audit.events" },
         { name = "KAFKA_DLQ_TOPIC", value = "audit.deadletter" },
         { name = "AUDIT_CONSUMER_METRICS_PORT", value = "9108" },
@@ -2177,7 +2274,12 @@ resource "aws_ecs_task_definition" "audit_consumer" {
         { name = "CLICKHOUSE_HOST", value = var.clickhouse_host },
         { name = "CLICKHOUSE_PORT", value = tostring(var.clickhouse_port) },
         { name = "CLICKHOUSE_DB", value = var.clickhouse_db },
-        { name = "CLICKHOUSE_USER", value = var.clickhouse_user }
+        { name = "CLICKHOUSE_USER", value = var.clickhouse_user },
+        { name = "CLICKHOUSE_CONNECT_TIMEOUT_SECONDS", value = "3" },
+        { name = "CLICKHOUSE_READ_TIMEOUT_SECONDS", value = "10" },
+        { name = "CLICKHOUSE_MAX_ATTEMPTS", value = "3" },
+        { name = "CLICKHOUSE_RETRY_BASE_SECONDS", value = "0.5" },
+        { name = "CLICKHOUSE_RETRY_MAX_SECONDS", value = "2" }
       ])
       portMappings = [
         {
@@ -2205,11 +2307,15 @@ resource "aws_ecs_task_definition" "audit_consumer" {
 resource "aws_ecs_service" "audit_consumer" {
   count = var.enable_audit_consumer ? 1 : 0
 
-  name            = "${var.name}-audit-consumer"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.audit_consumer[0].arn
-  desired_count   = 1
-  launch_type     = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  name                               = "${var.name}-audit-consumer"
+  cluster                            = aws_ecs_cluster.main.id
+  task_definition                    = aws_ecs_task_definition.audit_consumer[0].arn
+  desired_count                      = local.ha_environment ? var.service_min_capacity["audit_consumer"] : 1
+  deployment_minimum_healthy_percent = var.deployment_minimum_healthy_percent
+  deployment_maximum_percent         = var.deployment_maximum_percent
+  enable_ecs_managed_tags            = true
+  propagate_tags                     = "SERVICE"
+  launch_type                        = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
 
   dynamic "capacity_provider_strategy" {
     for_each = var.ecs_ec2_graviton.enabled ? [1] : []
@@ -2224,6 +2330,15 @@ resource "aws_ecs_service" "audit_consumer" {
     subnets          = values(aws_subnet.private)[*].id
     security_groups  = [aws_security_group.app.id]
     assign_public_ip = false
+  }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count]
   }
 
   depends_on = [aws_ecs_cluster_capacity_providers.main]
@@ -2266,6 +2381,8 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
   statistic           = "Average"
   threshold           = 85
   treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
+  ok_actions          = var.edge_alarm_action_arns
 
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
@@ -2437,6 +2554,8 @@ resource "aws_cloudwatch_metric_alarm" "nat_port_allocation" {
   statistic           = "Maximum"
   threshold           = 0
   treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
+  ok_actions          = var.edge_alarm_action_arns
 
   dimensions = {
     NatGatewayId = each.value.id
@@ -2455,6 +2574,8 @@ resource "aws_cloudwatch_metric_alarm" "nat_packet_drop" {
   datapoints_to_alarm = 2
   threshold           = 0.01
   treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
+  ok_actions          = var.edge_alarm_action_arns
 
   metric_query {
     id          = "drop_rate"
@@ -2521,6 +2642,8 @@ resource "aws_cloudwatch_metric_alarm" "nat_idle_timeout" {
   datapoints_to_alarm = 3
   threshold_metric_id = "idle_band"
   treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
+  ok_actions          = var.edge_alarm_action_arns
 
   metric_query {
     id          = "idle"

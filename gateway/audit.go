@@ -166,14 +166,26 @@ func EmitAuditEventAsync(ctx context.Context, event *AuditEvent) {
 	}()
 }
 
-// logToStdout emits a structured JSON audit log to stdout.
+// logToStdout emits only operational metadata. The durable audit transports
+// retain the complete event; application logs must never duplicate payloads.
 func logToStdout(event *AuditEvent) {
-	eventBytes, err := json.Marshal(event)
-	if err != nil {
-		log.Printf("Failed to marshal audit event: %v", err)
+	if event == nil {
+		log.Printf("[AUDIT] outcome=invalid error_type=nil_event")
 		return
 	}
-	log.Printf("[AUDIT] %s", string(eventBytes))
+	log.Print(auditLogSummary(event))
+}
+
+func auditLogSummary(event *AuditEvent) string {
+	return fmt.Sprintf(
+		"[AUDIT] record_id=%s request_id=%s action=%s provider=%s response_status=%d duration_ms=%d outcome=persisted",
+		event.ID,
+		event.RequestID,
+		event.Action,
+		event.Provider,
+		event.ResponseStatus,
+		event.DurationMs,
+	)
 }
 
 func persistAuditMetadata(parent context.Context, event *AuditEvent) error {

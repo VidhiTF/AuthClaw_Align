@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
-import os
+import logging
 from uuid import UUID
 
 from app.db.models import Policy
@@ -15,9 +15,11 @@ from app.schemas.models import (
     PolicyRollbackRequest,
 )
 from app.core.auth import get_tenant_db, require_roles, require_scopes
+from app.core.redis_client import get_redis_client
 from app.services.policy_engine import PolicyValidationError, validate_policy_yaml as validate_policy_document, simulate_policy
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _validation_http_error(exc: PolicyValidationError) -> HTTPException:
@@ -40,16 +42,11 @@ def validate_policy_yaml(yaml_str: str):
 
 
 def _publish_policy_invalidation(tenant_id):
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     try:
-        import redis
-
-        if redis_url and not redis_url.startswith("redis://") and not redis_url.startswith("rediss://"):
-            redis_url = f"redis://{redis_url}"
-        r_client = redis.from_url(redis_url)
+        r_client = get_redis_client()
         r_client.publish("policy_invalidation", str(tenant_id))
     except Exception as re_err:
-        print(f"[WARN] Failed to publish policy invalidation to Redis: {re_err}")
+        logger.warning("Policy invalidation publish failed error_type=%s", type(re_err).__name__)
 
 
 def _activate_policy(db: Session, tenant_id, policy: Policy) -> None:

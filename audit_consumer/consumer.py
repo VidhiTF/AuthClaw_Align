@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import threading
 import time
@@ -19,10 +20,53 @@ from transport import make_audit_consumer
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+_SENSITIVE_LOG_VALUE = re.compile(
+    r"(?i)(authorization|cookie|set-cookie|api[_-]?key|token|secret|password|credential|prompt|messages?|document|content)"
+    r"\s*[:=]\s*(?:bearer\s+)?([^\s,;]+)"
 )
+_EMAIL_IN_LOG = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_BEARER_IN_LOG = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_JWT_IN_LOG = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+_CREDENTIAL_URL_IN_LOG = re.compile(r"(?i)\b(https?://)[^/@\s:]+(?::[^/@\s]*)?@")
+_REQUEST_ID_IN_LOG = re.compile(r"\brequest_id=([A-Za-z0-9._:-]{1,128})\b")
+
+
+def _sanitize_log_message(message: str) -> str:
+    sanitized = _SENSITIVE_LOG_VALUE.sub(lambda match: f"{match.group(1)}=[REDACTED]", message)
+    sanitized = _BEARER_IN_LOG.sub("Bearer [REDACTED]", sanitized)
+    sanitized = _JWT_IN_LOG.sub("[REDACTED_JWT]", sanitized)
+    sanitized = _CREDENTIAL_URL_IN_LOG.sub(r"\1[REDACTED]@", sanitized)
+    return _EMAIL_IN_LOG.sub("[REDACTED_EMAIL]", sanitized)
+
+
+class _SafeJSONFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        args = record.args
+        if isinstance(args, tuple):
+            args = tuple(f"error_type={type(arg).__name__}" if isinstance(arg, BaseException) else arg for arg in args)
+        try:
+            message = str(record.msg) % args if args else str(record.msg)
+        except (TypeError, ValueError):
+            message = str(record.msg)
+        message = _sanitize_log_message(message)
+        request_id = _REQUEST_ID_IN_LOG.search(message)
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "environment": os.getenv("AUTHCLAW_ENV", "local").strip().lower(),
+            "service": "audit_consumer",
+            "release": os.getenv("AUTHCLAW_RELEASE", "unknown").strip()[:200],
+            "operation": record.name,
+            "message": message,
+            "request_id": request_id.group(1) if request_id else "",
+            "trace_id": str(getattr(record, "trace_id", ""))[:128],
+        }
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+
+
+_log_handler = logging.StreamHandler()
+_log_handler.setFormatter(_SafeJSONFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 logger = logging.getLogger("audit_consumer")
 
 METRICS_PORT = int(os.getenv("AUDIT_CONSUMER_METRICS_PORT", "9108"))
@@ -95,6 +139,22 @@ def _start_metrics_server() -> ThreadingHTTPServer | None:
     thread.start()
     logger.info("Audit consumer metrics listening on %s:%s/metrics", metrics_host, METRICS_PORT)
     return server
+
+
+def _start_emf_reporter(stop: threading.Event) -> threading.Thread:
+    interval = max(10, min(int(os.getenv("AUDIT_EMF_INTERVAL_SECONDS", "60")), 300))
+    environment = os.getenv("AUTHCLAW_ENV", "local").strip().lower()
+    release = os.getenv("AUTHCLAW_RELEASE", "unknown").strip()[:200]
+
+    def report() -> None:
+        while not stop.wait(interval):
+            # Raw JSON is intentional: CloudWatch Logs extracts EMF only when
+            # the log event itself is a valid JSON object.
+            print(metrics.render_cloudwatch_emf(environment=environment, release=release), flush=True)
+
+    thread = threading.Thread(target=report, name="audit-consumer-emf", daemon=True)
+    thread.start()
+    return thread
 
 
 _running = True
@@ -182,6 +242,8 @@ def main():
         consumer.group_id,
     )
     metrics_server = _start_metrics_server()
+    emf_stop = threading.Event()
+    emf_thread = _start_emf_reporter(emf_stop)
 
     logger.info(
         "Connecting to ClickHouse host=%s port=%s db=%s",
@@ -234,6 +296,8 @@ def main():
                     consumer.ack(message)
 
     logger.info("Audit consumer stopped")
+    emf_stop.set()
+    emf_thread.join(timeout=2)
     consumer.close()
     if metrics_server:
         metrics_server.shutdown()
@@ -310,9 +374,8 @@ def _process_message(ch_client, payload: dict) -> None:
         raise RetryableMirrorError(f"ClickHouse insert failed: {exc}") from exc
 
     logger.info(
-        "Audit event persisted: record_id=%s tenant=%s action=%s request_id=%s integrity=%s prior=%s",
+        "Audit event persisted: record_id=%s action=%s request_id=%s integrity=%s prior=%s",
         row["record_id"],
-        tenant_id,
         row["action"],
         row.get("request_id", ""),
         row["integrity_hash"],

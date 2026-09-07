@@ -15,6 +15,23 @@ EXPECTED_RUNTIME_DATABASE_ROLE = os.getenv("AUTHCLAW_RUNTIME_DB_ROLE", "").strip
 DATABASE_SCHEMA = os.getenv("AUTHCLAW_DATABASE_SCHEMA", "agent").strip()
 
 
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+DB_POOL_SIZE = _bounded_int("AGENT_DB_POOL_SIZE", 5, 1, 50)
+DB_MAX_OVERFLOW = _bounded_int("AGENT_DB_MAX_OVERFLOW", 5, 0, 50)
+DB_POOL_TIMEOUT_SECONDS = _bounded_int("DB_POOL_TIMEOUT_SECONDS", 5, 1, 60)
+DB_POOL_RECYCLE_SECONDS = _bounded_int("DB_POOL_RECYCLE_SECONDS", 300, 30, 3600)
+DB_CONNECT_TIMEOUT_SECONDS = _bounded_int("DB_CONNECT_TIMEOUT_SECONDS", 5, 1, 30)
+
+
 def _validate_identifier(value: str, variable: str) -> str:
     if not value or not value.replace("_", "").isalnum() or value[0].isdigit():
         raise RuntimeError(f"{variable} must be a simple PostgreSQL identifier.")
@@ -24,14 +41,33 @@ def _validate_identifier(value: str, variable: str) -> str:
 _validate_identifier(DATABASE_SCHEMA, "AUTHCLAW_DATABASE_SCHEMA")
 
 
-def _connect_args() -> dict[str, str]:
+def _connect_args() -> dict[str, str | int]:
     # Excluding public prevents an unqualified agent query from falling through
     # to an incompatible backend table in the consolidated database.
-    return {"options": f"-csearch_path={DATABASE_SCHEMA},pg_catalog"}
+    return {
+        "options": f"-csearch_path={DATABASE_SCHEMA},pg_catalog",
+        "connect_timeout": DB_CONNECT_TIMEOUT_SECONDS,
+    }
 
 
-engine = create_engine(DATABASE_URL, connect_args=_connect_args())
-migration_engine = create_engine(MIGRATION_DATABASE_URL, connect_args=_connect_args())
+engine = create_engine(
+    DATABASE_URL,
+    connect_args=_connect_args(),
+    pool_pre_ping=True,
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
+    pool_timeout=DB_POOL_TIMEOUT_SECONDS,
+    pool_recycle=DB_POOL_RECYCLE_SECONDS,
+)
+migration_engine = create_engine(
+    MIGRATION_DATABASE_URL,
+    connect_args=_connect_args(),
+    pool_pre_ping=True,
+    pool_size=1,
+    max_overflow=0,
+    pool_timeout=DB_POOL_TIMEOUT_SECONDS,
+    pool_recycle=DB_POOL_RECYCLE_SECONDS,
+)
 
 
 def _is_postgres() -> bool:

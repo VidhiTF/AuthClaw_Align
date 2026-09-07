@@ -1,6 +1,8 @@
 """AuthClaw Backend - FastAPI Application"""
 import logging
 import os
+import time
+import uuid
 from dotenv import load_dotenv
 
 # Load environment variables from .env.local
@@ -9,6 +11,16 @@ if os.path.exists(env_path):
     load_dotenv(env_path)
 else:
     load_dotenv()
+
+from app.core.safe_logging import (
+    bind_request_context,
+    configure_safe_logging,
+    reset_request_context,
+    safe_correlation_id,
+    trace_id_from_headers,
+)
+
+configure_safe_logging()
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
@@ -32,6 +44,35 @@ app = FastAPI(
     description="AI Governance & Compliance Platform Control Plane",
     version="0.1.0",
 )
+
+
+@app.middleware("http")
+async def structured_request_logging(request: Request, call_next):
+    request_id = safe_correlation_id(request.headers.get("X-Request-ID")) or f"req-{uuid.uuid4().hex}"
+    trace_id = trace_id_from_headers(request.headers.get("traceparent"), request.headers.get("X-Trace-ID"))
+    operation = f"{request.method.upper()} pending-route"
+    tokens = bind_request_context(request_id, trace_id, operation)
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        if trace_id:
+            response.headers["X-Trace-ID"] = trace_id
+        return response
+    finally:
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", "unmatched")
+        logger.info(
+            "request completed",
+            extra={
+                "operation": f"{request.method.upper()} {route_path}",
+                "status": status_code,
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            },
+        )
+        reset_request_context(tokens)
 
 
 @app.exception_handler(HTTPException)
@@ -181,7 +222,7 @@ async def startup_event():
     if os.getenv("WORKER_TOKEN_ISSUANCE_PAUSED", "true").lower() == "false":
         key_for(active_version())
     await worker_cleanup.start(app, engine)
-    print("AuthClaw Backend Starting Up...")
+    logger.info("backend startup completed", extra={"operation": "startup", "status": "ready"})
 
 
 @app.on_event("shutdown")
@@ -189,4 +230,7 @@ async def shutdown_event():
     """Cleanup on shutdown"""
     from app.services import worker_cleanup
     await worker_cleanup.shutdown(app)
-    print("AuthClaw Backend Shutting Down...")
+    from app.core.redis_client import close_redis_client
+    close_redis_client()
+    engine.dispose()
+    logger.info("backend shutdown completed", extra={"operation": "shutdown", "status": "stopped"})

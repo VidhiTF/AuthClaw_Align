@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
+from botocore.config import Config
+
 GATEWAY_TRAFFIC_TOPIC = "gateway.traffic"
 AUDIT_EVENTS_TOPIC = "audit.events"
 AUDIT_DLQ_TOPIC = "audit.deadletter"
@@ -196,7 +198,20 @@ class SQSFIFOAuditConsumer:
         configured_region = session.region_name
         if configured_region and configured_region != queue_region:
             raise RuntimeError("AWS configured region does not match SQS_AUDIT_QUEUE_URL")
-        self._client = session.client("sqs", region_name=queue_region, endpoint_url=self._endpoint_url or None)
+        self._client = session.client(
+            "sqs",
+            region_name=queue_region,
+            endpoint_url=self._endpoint_url or None,
+            config=Config(
+                connect_timeout=_bounded_int("AWS_CONNECT_TIMEOUT_SECONDS", 3, 1, 30),
+                read_timeout=_bounded_int("AWS_READ_TIMEOUT_SECONDS", 25, 2, 60),
+                max_pool_connections=_bounded_int("AWS_MAX_POOL_CONNECTIONS", 10, 1, 100),
+                retries={
+                    "mode": "standard",
+                    "total_max_attempts": _bounded_int("AWS_MAX_ATTEMPTS", 3, 1, 5),
+                },
+            ),
+        )
         self._long_poll = _bounded_int("SQS_LONG_POLL_SECONDS", 20, 1, 20)
         self._batch_size = _bounded_int("SQS_MAX_MESSAGES", 10, 1, 10)
         self._visibility = _bounded_int("SQS_VISIBILITY_TIMEOUT_SECONDS", 60, 10, 43200)

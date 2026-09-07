@@ -70,6 +70,16 @@ output "alarm_names" {
     aws_cloudwatch_metric_alarm.ecs_capacity_provider_reservation[*].alarm_name,
     aws_cloudwatch_metric_alarm.ecs_instance_health[*].alarm_name,
     aws_cloudwatch_metric_alarm.ecs_placement_failure[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_running_below_minimum)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.rds)[*].alarm_name,
+    aws_cloudwatch_metric_alarm.rds_replica_lag[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.redis)[*].alarm_name,
+    aws_cloudwatch_metric_alarm.redis_replication_lag[*].alarm_name,
+    aws_cloudwatch_metric_alarm.redis_evictions[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.operations_event)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.vpc_endpoint_packet_drop)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.audit_integrity)[*].alarm_name,
+    [aws_cloudwatch_metric_alarm.rds_slow_query.alarm_name],
   )
 }
 
@@ -156,6 +166,59 @@ output "application_task_role_arns" {
 
 output "nat_dashboard_name" {
   value = aws_cloudwatch_dashboard.nat.dashboard_name
+}
+
+output "availability_controls" {
+  value = {
+    availability_zones = local.azs
+    min_capacity       = { for service, target in aws_appautoscaling_target.ecs : service => target.min_capacity }
+    max_capacity       = { for service, target in aws_appautoscaling_target.ecs : service => target.max_capacity }
+    deployment = {
+      minimum_healthy_percent = var.deployment_minimum_healthy_percent
+      maximum_percent         = var.deployment_maximum_percent
+      circuit_breaker         = true
+      automatic_rollback      = true
+      drain_seconds           = var.alb_deregistration_delay_seconds
+      stop_timeout_seconds    = 60
+    }
+    connection_budget = {
+      backend             = var.service_max_capacity["backend"] * var.db_connections_per_task["backend"]
+      gateway             = var.service_max_capacity["gateway"] * var.db_connections_per_task["gateway"]
+      agent               = var.service_max_capacity["agent"] * var.db_connections_per_task["agent"]
+      runtime_total       = local.db_connection_budget_used
+      operational_reserve = var.rds_connection_reserve
+      rds_max_connections = var.rds_max_connections
+    }
+    rds_proxy_used = false
+  }
+}
+
+output "observability" {
+  value = {
+    dashboards = {
+      services = aws_cloudwatch_dashboard.services.dashboard_name
+      data     = aws_cloudwatch_dashboard.data.dashboard_name
+      network  = aws_cloudwatch_dashboard.network.dashboard_name
+      nat      = aws_cloudwatch_dashboard.nat.dashboard_name
+    }
+    critical_alarm_names = concat(
+      values(aws_cloudwatch_metric_alarm.ecs_running_below_minimum)[*].alarm_name,
+      values(aws_cloudwatch_metric_alarm.operations_event)[*].alarm_name,
+      values(aws_cloudwatch_metric_alarm.vpc_endpoint_packet_drop)[*].alarm_name,
+      values(aws_cloudwatch_metric_alarm.audit_integrity)[*].alarm_name,
+      aws_cloudwatch_metric_alarm.rds_replica_lag[*].alarm_name,
+      aws_cloudwatch_metric_alarm.redis_replication_lag[*].alarm_name,
+    )
+    alert_configuration = {
+      owner                       = var.alarm_owner
+      acknowledgement_minutes     = var.alarm_acknowledgement_minutes
+      escalation_path             = var.alarm_escalation_path
+      action_arns_configured      = length(var.edge_alarm_action_arns) > 0
+      sqs_action_arns_configured  = length(var.audit_sqs_alarm_action_arns) > 0
+      action_destination_variable = "edge_alarm_action_arns"
+      sqs_destination_variable    = "audit_sqs_alarm_action_arns"
+    }
+  }
 }
 
 output "rds_endpoint" {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -25,6 +26,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestHealthCheck(t *testing.T) {
+	gatewayShuttingDown.Store(false)
 	r := chi.NewRouter()
 	r.Get("/health", HealthHandler)
 
@@ -51,6 +53,24 @@ func TestHealthCheck(t *testing.T) {
 	}
 	if len(body) != 2 {
 		t.Fatalf("public health leaked internal fields: %#v", body)
+	}
+}
+
+func TestHealthCheckFailsWhileDraining(t *testing.T) {
+	gatewayShuttingDown.Store(true)
+	t.Cleanup(func() { gatewayShuttingDown.Store(false) })
+
+	recorder := httptest.NewRecorder()
+	HealthHandler(recorder, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("draining health status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestShutdownDurationIsBounded(t *testing.T) {
+	t.Setenv("GATEWAY_SHUTDOWN_TIMEOUT_SECONDS", "999")
+	if got := boundedDuration("GATEWAY_SHUTDOWN_TIMEOUT_SECONDS", 45, 5, 110); got != 110*time.Second {
+		t.Fatalf("bounded shutdown duration = %s, want 110s", got)
 	}
 }
 

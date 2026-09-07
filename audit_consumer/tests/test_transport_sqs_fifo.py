@@ -39,10 +39,11 @@ class FakeSession:
     def __init__(self, client):
         self._client = client
 
-    def client(self, service, region_name=None, endpoint_url=None):
+    def client(self, service, region_name=None, endpoint_url=None, config=None):
         del endpoint_url
         assert service == "sqs"
         assert region_name == "us-east-1"
+        self._client.sdk_config = config
         return self._client
 
 
@@ -103,6 +104,9 @@ def test_sqs_fifo_selection_receives_bounded_long_poll_batch(monkeypatch):
     assert "MessageGroupId" in client.receive_kwargs["MessageSystemAttributeNames"]
     assert "MessageDeduplicationId" in client.receive_kwargs["MessageSystemAttributeNames"]
     assert "ApproximateReceiveCount" in client.receive_kwargs["MessageSystemAttributeNames"]
+    assert client.sdk_config.connect_timeout == 3
+    assert client.sdk_config.read_timeout == 25
+    assert client.sdk_config.retries == {"mode": "standard", "total_max_attempts": 3}
 
 
 def test_kafka_multi_partition_failure_does_not_commit_unprocessed_offset(monkeypatch):

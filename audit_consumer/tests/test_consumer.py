@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import sys
 from unittest.mock import MagicMock
@@ -16,10 +17,53 @@ from consumer import (  # noqa: E402
     normalise_event,
 )
 import consumer  # noqa: E402
+from metrics import MetricsRegistry  # noqa: E402
 
 
 TENANT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 RECORD = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def test_cloudwatch_emf_contains_only_safe_dimensions():
+    registry = MetricsRegistry()
+    registry.increment("audit_consumer_retries_total")
+    payload = json.loads(registry.render_cloudwatch_emf(environment="staging", release="sha256:abc"))
+    assert payload["Environment"] == "staging"
+    assert payload["Service"] == "audit_consumer"
+    assert payload["audit_consumer_retries_total"] == 1
+    serialized = json.dumps(payload).lower()
+    for forbidden in ("authorization", "cookie", "password", "prompt", "document", "tenant_id"):
+        assert forbidden not in serialized
+
+
+def test_structured_formatter_redacts_sensitive_values(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_ENV", "staging")
+    monkeypatch.setenv("AUTHCLAW_RELEASE", "sha256:abc")
+    record = logging.LogRecord(
+        "audit.persist",
+        logging.INFO,
+        __file__,
+        1,
+        "request_id=req-safe Authorization=Bearer bad-token email=priya@example.com "
+        "document=clinical-note url=https://admin:password@example.invalid "
+        "jwt=eyJheader.payload.signature",
+        (),
+        None,
+    )
+
+    payload = json.loads(consumer._SafeJSONFormatter().format(record))
+
+    assert payload["environment"] == "staging"
+    assert payload["service"] == "audit_consumer"
+    assert payload["release"] == "sha256:abc"
+    assert payload["request_id"] == "req-safe"
+    assert payload["trace_id"] == ""
+    assert "bad-token" not in payload["message"]
+    assert "priya@example.com" not in payload["message"]
+    assert "clinical-note" not in payload["message"]
+    assert "admin:password" not in payload["message"]
+    assert "eyJheader" not in payload["message"]
+    assert payload["message"].count("[REDACTED]") >= 2
 
 
 def test_metrics_bind_to_loopback_by_default(monkeypatch):

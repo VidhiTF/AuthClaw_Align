@@ -92,12 +92,14 @@ func InitDB() {
 		log.Fatalf("Refusing startup: %v", err)
 	}
 
-	maxOpenConns := envInt("GATEWAY_DB_MAX_OPEN_CONNS", 25)
+	maxOpenConns := envInt("GATEWAY_DB_MAX_OPEN_CONNS", 10)
 	maxIdleConns := envInt("GATEWAY_DB_MAX_IDLE_CONNS", 10)
 	connMaxLifetimeSeconds := envInt("GATEWAY_DB_CONN_MAX_LIFETIME_SECONDS", 300)
+	connMaxIdleSeconds := envInt("GATEWAY_DB_CONN_MAX_IDLE_SECONDS", 60)
 	DB.SetMaxOpenConns(maxOpenConns)
 	DB.SetMaxIdleConns(maxIdleConns)
 	DB.SetConnMaxLifetime(time.Duration(connMaxLifetimeSeconds) * time.Second)
+	DB.SetConnMaxIdleTime(time.Duration(connMaxIdleSeconds) * time.Second)
 
-	log.Printf("Database connection established successfully. pool_max_open=%d pool_max_idle=%d conn_max_lifetime_seconds=%d", maxOpenConns, maxIdleConns, connMaxLifetimeSeconds)
+	log.Printf("Database connection established successfully. pool_max_open=%d pool_max_idle=%d conn_max_lifetime_seconds=%d conn_max_idle_seconds=%d", maxOpenConns, maxIdleConns, connMaxLifetimeSeconds, connMaxIdleSeconds)
 }
