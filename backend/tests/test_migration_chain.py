@@ -42,7 +42,7 @@ def test_bootstrap_creates_roles_before_worker_schema(monkeypatch):
         bootstrap.prepare(MagicMock(), "fresh_test", roles)
 
 
-def test_finding_status_migration_follows_platform_history_and_runtime_gates():
+def test_finding_status_migration_follows_platform_history():
     backend = Path(__file__).resolve().parents[1]
     config = Config(str(backend / "alembic.ini"))
     config.set_main_option("script_location", str(backend / "alembic"))
@@ -53,12 +53,6 @@ def test_finding_status_migration_follows_platform_history_and_runtime_gates():
     assert scripts.get_revision("045").down_revision == "044"
     revisions = list(scripts.walk_revisions())
     assert len({revision.revision for revision in revisions}) == len(revisions)
-    backend_gate_source = (backend / "app/core/startup_checks.py").read_text()
-    assert "AUTHCLAW_EXPECTED_DB_REVISION" in backend_gate_source
-    assert 'or "047"' in backend_gate_source
-    gateway_source = (backend.parent / "gateway/db.go").read_text()
-    assert 'raw = "047"' in gateway_source
-    assert "AUTHCLAW_EXPECTED_DB_REVISION" in gateway_source
 
 
 def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch):

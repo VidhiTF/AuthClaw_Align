@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Bell, CheckCheck, CircleAlert, CircleCheck, TriangleAlert } from "lucide-react";
+import { performNotificationMutation } from "@/lib/notification-mutation";
 import { formatDateTime } from "@/lib/ui-format";
 
 type Notification = {
@@ -65,8 +66,7 @@ export default function NotificationBell() {
     setMutationError(null);
     setMutating(true);
     try {
-      const response = await fetch(`/api/notifications/${id}/read`, { method: "POST" });
-      if (!response.ok) throw new Error("notification update failed");
+      await performNotificationMutation(`/api/notifications/${id}/read`);
       await load();
     } catch {
       setMutationError("Could not mark the notification as read. Please try again.");
@@ -79,8 +79,7 @@ export default function NotificationBell() {
     setMutationError(null);
     setMutating(true);
     try {
-      const response = await fetch("/api/notifications/read-all", { method: "POST" });
-      if (!response.ok) throw new Error("notification update failed");
+      await performNotificationMutation("/api/notifications/read-all");
       await load();
     } catch {
       setMutationError("Could not mark notifications as read. Please try again.");
