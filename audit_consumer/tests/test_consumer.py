@@ -49,26 +49,37 @@ def test_unknown_environment_is_rejected(monkeypatch):
 
 
 def event(*, sequence=1, tenant_id=TENANT, record_id=RECORD, prior_hash="GENESIS"):
+    canonical = {
+        "tenant_id": tenant_id,
+        "record_id": record_id,
+        "tenant_sequence": sequence,
+        "chain_version": 2,
+        "timestamp": "2026-07-20T10:00:00.000Z",
+        "actor_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "actor_type": "gateway",
+        "action": "allow",
+        "policy_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "provider": "openai",
+        "model": "gpt-test",
+        "reason": "policy allowed",
+        "prompt_count": 2,
+        "request_size": 128,
+        "response_status": 200,
+        "duration_ms": 37,
+        "frameworks_affected": ["SOC2", "HIPAA"],
+        "execution_trace": '["policy","provider"]',
+        "request_id": "req-verified",
+    }
     canonical_payload = json.dumps(
-        {
-            "tenant_id": tenant_id,
-            "record_id": record_id,
-            "tenant_sequence": sequence,
-            "chain_version": 2,
-            "action": "allow",
-        },
+        canonical,
         sort_keys=True,
         separators=(",", ":"),
     )
     return {
+        **canonical,
         "id": record_id,
-        "tenant_id": tenant_id,
-        "tenant_sequence": sequence,
         "idempotency_key": f"request:{record_id}",
-        "chain_version": 2,
         "canonical_payload": canonical_payload,
-        "timestamp": "2026-07-20T10:00:00.000Z",
-        "action": "allow",
         "prior_hash": prior_hash,
         "integrity_hash": hashlib.sha256(
             (canonical_payload + prior_hash).encode()
@@ -92,7 +103,47 @@ def test_normalise_preserves_postgres_proof_fields():
     assert row["tenant_sequence"] == 1
     assert row["chain_version"] == 2
     assert row["canonical_payload"]
-    assert row["idempotency_key"].startswith("request:")
+    assert row["idempotency_key"] == RECORD
+
+
+@pytest.mark.parametrize(
+    "field,tampered",
+    [
+        ("record_id", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+        ("tenant_id", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+        ("tenant_sequence", 2),
+        ("chain_version", 3),
+        ("timestamp", "2026-07-20T10:00:01.000Z"),
+        ("actor_id", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+        ("actor_type", "backend"),
+        ("action", "block"),
+        ("policy_id", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+        ("provider", "anthropic"),
+        ("model", "other-model"),
+        ("reason", "tampered"),
+        ("prompt_count", 3),
+        ("request_size", 129),
+        ("response_status", 403),
+        ("duration_ms", 38),
+        ("frameworks_affected", ["PCI-DSS"]),
+        ("execution_trace", '["tampered"]'),
+        ("request_id", "req-tampered"),
+    ],
+)
+def test_every_duplicate_canonical_field_mismatch_is_rejected(monkeypatch, field, tampered):
+    insert = configure(monkeypatch)
+    payload = event()
+    payload[field] = tampered
+    with pytest.raises(InvalidAuditEvent, match="envelope mismatch"):
+        _process_message(MagicMock(), payload)
+    insert.assert_not_called()
+
+
+def test_unverified_transport_idempotency_key_is_not_mirrored():
+    payload = event()
+    payload["idempotency_key"] = "attacker-controlled"
+    row = normalise_event(payload)
+    assert row["idempotency_key"] == RECORD
 
 
 def test_valid_postgres_event_is_mirrored_without_rehashing(monkeypatch):

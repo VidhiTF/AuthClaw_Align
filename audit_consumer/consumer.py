@@ -7,7 +7,6 @@ import os
 import signal
 import threading
 import time
-import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -115,27 +114,74 @@ def _parse_timestamp(raw) -> datetime:
         return datetime.fromtimestamp(raw, tz=timezone.utc)
     try:
         return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.now(tz=timezone.utc)
+    except (TypeError, ValueError) as exc:
+        raise InvalidAuditEvent("canonical timestamp is not valid ISO-8601") from exc
 
 
-def stable_record_id(payload: dict) -> str:
-    """Return the provided event id or a deterministic UUID for replayed payloads."""
-    record_id = payload.get("audit_record_id") or payload.get("record_id") or payload.get("id")
-    if record_id:
-        return str(record_id)
-    identity = {
-        "tenant_id": payload.get("tenant_id", ""),
-        "request_id": payload.get("request_id", ""),
-        "timestamp": payload.get("timestamp", ""),
-        "action": payload.get("action", ""),
-        "provider": payload.get("provider", ""),
-        "model": payload.get("model", ""),
-        "reason": payload.get("reason", ""),
-        "execution_trace": payload.get("execution_trace") or [],
-    }
-    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"authclaw:audit-event:{canonical}"))
+_CANONICAL_FIELDS = {
+    "record_id", "tenant_id", "tenant_sequence", "chain_version", "timestamp",
+    "actor_id", "actor_type", "action", "policy_id", "provider", "model",
+    "reason", "prompt_count", "request_size", "response_status", "duration_ms",
+    "frameworks_affected", "execution_trace", "request_id",
+}
+_INTEGER_FIELDS = {
+    "tenant_sequence", "chain_version", "prompt_count", "request_size",
+    "response_status", "duration_ms",
+}
+
+
+def _comparable(field: str, value):
+    if field in _INTEGER_FIELDS:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise InvalidAuditEvent(f"canonical {field} must be an integer")
+        return value
+    if field == "frameworks_affected":
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise InvalidAuditEvent("canonical frameworks_affected must be a string array")
+        return value
+    if not isinstance(value, str):
+        raise InvalidAuditEvent(f"canonical {field} must be a string")
+    return value
+
+
+def _verified_canonical(payload: dict) -> tuple[dict, str, str, str]:
+    canonical_payload = payload.get("canonical_payload")
+    prior_hash = payload.get("prior_hash")
+    integrity_hash = payload.get("integrity_hash")
+    if not isinstance(canonical_payload, str) or not canonical_payload or not prior_hash or not integrity_hash:
+        raise InvalidAuditEvent("canonical payload and PostgreSQL proof hashes are required")
+
+    expected = hashlib.sha256((canonical_payload + str(prior_hash)).encode("utf-8")).hexdigest()
+    if expected != str(integrity_hash):
+        metrics.increment("audit_consumer_verification_failures_total")
+        raise InvalidAuditEvent("PostgreSQL supplied an invalid audit integrity hash")
+
+    try:
+        canonical = json.loads(canonical_payload)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise InvalidAuditEvent("canonical_payload is not valid JSON") from exc
+    if not isinstance(canonical, dict):
+        raise InvalidAuditEvent("canonical_payload must be a JSON object")
+    missing = sorted(_CANONICAL_FIELDS - canonical.keys())
+    if missing:
+        raise InvalidAuditEvent(f"canonical_payload is missing fields: {', '.join(missing)}")
+
+    for field in _CANONICAL_FIELDS:
+        canonical[field] = _comparable(field, canonical[field])
+    if canonical["chain_version"] != 2 or canonical["tenant_sequence"] <= 0:
+        raise InvalidAuditEvent("chain_version=2 and a positive tenant_sequence are required")
+
+    aliases = {"id": "record_id", "record_id": "record_id", "audit_record_id": "record_id"}
+    aliases.update({field: field for field in _CANONICAL_FIELDS if field != "record_id"})
+    for envelope_field, canonical_field in aliases.items():
+        if envelope_field not in payload:
+            continue
+        envelope_value = _comparable(canonical_field, payload[envelope_field])
+        if envelope_value != canonical[canonical_field]:
+            raise InvalidAuditEvent(
+                f"canonical payload identity/envelope mismatch for {envelope_field}"
+            )
+    return canonical, canonical_payload, str(prior_hash), str(integrity_hash)
 
 
 def normalise_event(payload: dict) -> dict:
@@ -143,34 +189,33 @@ def normalise_event(payload: dict) -> dict:
     Map a raw audit-stream payload (AuditEvent from Go gateway) to the
     ClickHouse row schema, including request_id.
     """
+    canonical, canonical_payload, prior_hash, integrity_hash = _verified_canonical(payload)
     return {
-        "record_id": stable_record_id(payload),
-        "tenant_id": payload.get("tenant_id", ""),
-        "tenant_sequence": int(payload.get("tenant_sequence", 0)),
-        "idempotency_key": payload.get("idempotency_key", ""),
-        "chain_version": int(payload.get("chain_version", 0)),
-        "canonical_payload": payload.get("canonical_payload", ""),
-        "timestamp": _parse_timestamp(payload.get("timestamp")),
-        "actor_id": payload.get("actor_id", ""),
-        "actor_type": payload.get("actor_type", "gateway"),
-        "action": payload.get("action", ""),
-        "policy_id": payload.get("policy_id", ""),
-        "provider": payload.get("provider", ""),
-        "model": payload.get("model", ""),
-        "reason": payload.get("reason", ""),
-        "prompt_count": int(payload.get("prompt_count", 0)),
-        "request_size": int(payload.get("request_size", 0)),
-        "response_status": int(payload.get("response_status", 0)),
-        "duration_ms": int(payload.get("duration_ms", 0)),
-        "frameworks_affected": payload.get("frameworks_affected") or [],
-        "execution_trace": (
-            payload.get("execution_trace")
-            if isinstance(payload.get("execution_trace"), str)
-            else json.dumps(payload.get("execution_trace") or [])
-        ),
-        "request_id": payload.get("request_id", ""),
-        "prior_hash": payload.get("prior_hash", ""),
-        "integrity_hash": payload.get("integrity_hash", ""),
+        "record_id": canonical["record_id"],
+        "tenant_id": canonical["tenant_id"],
+        "tenant_sequence": canonical["tenant_sequence"],
+        # Canonical v2 does not bind the transport idempotency key. Use its
+        # immutable record identity for ClickHouse deduplication.
+        "idempotency_key": canonical["record_id"],
+        "chain_version": canonical["chain_version"],
+        "canonical_payload": canonical_payload,
+        "timestamp": _parse_timestamp(canonical["timestamp"]),
+        "actor_id": canonical["actor_id"],
+        "actor_type": canonical["actor_type"],
+        "action": canonical["action"],
+        "policy_id": canonical["policy_id"],
+        "provider": canonical["provider"],
+        "model": canonical["model"],
+        "reason": canonical["reason"],
+        "prompt_count": canonical["prompt_count"],
+        "request_size": canonical["request_size"],
+        "response_status": canonical["response_status"],
+        "duration_ms": canonical["duration_ms"],
+        "frameworks_affected": canonical["frameworks_affected"],
+        "execution_trace": canonical["execution_trace"],
+        "request_id": canonical["request_id"],
+        "prior_hash": prior_hash,
+        "integrity_hash": integrity_hash,
     }
 
 def main():
@@ -254,28 +299,6 @@ def _process_message(ch_client, payload: dict) -> None:
 
     if not tenant_id or not record_id:
         raise InvalidAuditEvent("tenant_id and record_id are required")
-    if row["chain_version"] != 2 or row["tenant_sequence"] <= 0:
-        raise InvalidAuditEvent("chain_version=2 and a positive tenant_sequence are required")
-    if not row["canonical_payload"] or not row["prior_hash"] or not row["integrity_hash"]:
-        raise InvalidAuditEvent("canonical payload and PostgreSQL proof hashes are required")
-
-    try:
-        canonical = json.loads(row["canonical_payload"])
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise InvalidAuditEvent("canonical_payload is not valid JSON") from exc
-    if (
-        canonical.get("tenant_id") != tenant_id
-        or canonical.get("record_id") != record_id
-        or int(canonical.get("tenant_sequence", 0)) != row["tenant_sequence"]
-    ):
-        raise InvalidAuditEvent("canonical payload identity does not match its envelope")
-    expected = hashlib.sha256(
-        (row["canonical_payload"] + row["prior_hash"]).encode("utf-8")
-    ).hexdigest()
-    if expected != row["integrity_hash"]:
-        metrics.increment("audit_consumer_verification_failures_total")
-        raise InvalidAuditEvent("PostgreSQL supplied an invalid audit integrity hash")
-
     try:
         exists = audit_event_exists(ch_client, record_id)
     except Exception as exc:
