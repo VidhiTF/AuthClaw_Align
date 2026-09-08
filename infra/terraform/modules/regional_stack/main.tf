@@ -3,27 +3,60 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+data "aws_ssm_parameter" "ecs_arm64_ami" {
+  count = var.ecs_ec2_graviton.enabled && var.ecs_ec2_graviton.image_id == "" ? 1 : 0
+  name  = "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id"
+}
+
 locals {
   discovered_azs = length(var.availability_zones) > 0 ? var.availability_zones : data.aws_availability_zones.available[0].names
   azs            = slice(local.discovered_azs, 0, var.az_count)
   az_map         = { for idx, az in local.azs : tostring(idx) => az }
+  runtime_architectures = var.ecs_ec2_graviton.enabled ? {
+    agent          = "ARM64"
+    backend        = "ARM64"
+    gateway        = "ARM64"
+    console        = "ARM64"
+    audit_consumer = "ARM64"
+    audit_producer = "ARM64"
+    opa            = "ARM64"
+    presidio       = "ARM64"
+    } : merge({
+      agent          = "X86_64"
+      backend        = "X86_64"
+      gateway        = "X86_64"
+      console        = "X86_64"
+      audit_consumer = "X86_64"
+      audit_producer = "X86_64"
+      opa            = "X86_64"
+      presidio       = "X86_64"
+      }, var.service_cpu_architectures, {
+      # The producer reuses the exact gateway image digest.
+      audit_producer = lookup(var.service_cpu_architectures, "gateway", "X86_64")
+  })
+  ecs_launch_compatibilities = var.ecs_ec2_graviton.enabled ? ["EC2"] : ["FARGATE"]
+  ec2_capacity_provider_name = "${var.name}-graviton"
+  ec2_ami_id                 = var.ecs_ec2_graviton.enabled ? (var.ecs_ec2_graviton.image_id != "" ? var.ecs_ec2_graviton.image_id : data.aws_ssm_parameter.ecs_arm64_ami[0].value) : ""
   interface_endpoint_services = merge({
     ecr_api        = "ecr.api"
     ecr_dkr        = "ecr.dkr"
     logs           = "logs"
     secretsmanager = "secretsmanager"
     kms            = "kms"
+    sts            = "sts"
   }, var.audit_stream_transport == "sqs_fifo" ? { sqs = "sqs" } : {})
-  namespace_name        = "${var.name}.local"
+  namespace_name        = var.internal_tls.enabled ? var.internal_tls.namespace : "${var.name}.local"
   listener_protocol     = "HTTPS"
   public_scheme         = "https"
-  public_host           = var.domain_name != "" ? var.domain_name : aws_lb.main.dns_name
-  api_base_url          = "${local.public_scheme}://${local.public_host}:8000"
-  gateway_base_url      = "${local.public_scheme}://${local.public_host}:8080"
-  internal_agent_url    = "http://agent.${local.namespace_name}:8001"
-  internal_opa_url      = "http://127.0.0.1:8181"
-  internal_presidio_url = "http://127.0.0.1:3000"
-  db_password           = var.db_password != "" ? var.db_password : random_password.db.result
+  console_host          = var.enable_public_edge ? var.public_domain_names.console : (var.domain_name != "" ? var.domain_name : aws_lb.service["console"].dns_name)
+  api_host              = var.enable_public_edge ? var.public_domain_names.api : (var.domain_name != "" ? var.domain_name : aws_lb.service["backend"].dns_name)
+  gateway_host          = var.enable_public_edge ? var.public_domain_names.gateway : (var.domain_name != "" ? var.domain_name : aws_lb.service["gateway"].dns_name)
+  console_base_url      = "${local.public_scheme}://${local.console_host}"
+  api_base_url          = "${local.public_scheme}://${local.api_host}${var.enable_public_edge ? "/api/v1" : ":8000"}"
+  gateway_base_url      = "${local.public_scheme}://${local.gateway_host}${var.enable_public_edge ? "" : ":8080"}"
+  internal_agent_url    = local.internal_urls.agent
+  internal_opa_url      = local.internal_urls.opa
+  internal_presidio_url = local.internal_urls.presidio
   db_address            = var.create_db_replica ? aws_db_instance.postgres_replica[0].address : aws_db_instance.postgres_primary[0].address
   db_arn                = var.create_db_replica ? aws_db_instance.postgres_replica[0].arn : aws_db_instance.postgres_primary[0].arn
   nat_subnets           = var.nat_gateway_mode == "per_az" ? aws_subnet.public : { "0" = aws_subnet.public["0"] }
@@ -32,33 +65,36 @@ locals {
     console = {
       image          = var.container_images.console
       container_port = 3001
-      listener_port  = 443
       health_path    = "/"
       command        = null
     }
     backend = {
       image          = var.container_images.backend
       container_port = 8000
-      listener_port  = 8000
       health_path    = "/health"
       command        = null
     }
     gateway = {
       image          = var.container_images.gateway
       container_port = 8080
-      listener_port  = 8080
       health_path    = "/health"
       command        = null
     }
   }
 
-  private_services = {
+  private_services = merge({
     agent = {
       image          = var.container_images.agent
       container_port = 8001
       command        = null
     }
-  }
+    }, var.audit_stream_transport == "sqs_fifo" ? {
+    audit_producer = {
+      image          = var.container_images.gateway
+      container_port = 8090
+      command        = ["--audit-producer"]
+    }
+  } : {})
 
   legacy_sidecar_services = {
     opa = {
@@ -73,8 +109,90 @@ locals {
     }
   }
 
-  service_configs         = merge(local.public_services, local.private_services)
-  task_definition_configs = merge(local.service_configs, local.legacy_sidecar_services)
+  policy_sidecars = var.enable_policy_sidecar_colocation ? {
+    agent          = []
+    audit_producer = []
+    backend        = []
+    console        = []
+    gateway        = ["opa", "presidio"]
+    opa            = []
+    presidio       = []
+  } : { for name in concat(keys(local.public_services), keys(local.private_services), keys(local.legacy_sidecar_services)) : name => [] }
+  policy_sidecar_configs = {
+    opa = {
+      image         = var.container_images.opa
+      cpu           = 256
+      memory        = 384
+      command       = ["run", "--server", "--addr=127.0.0.1:8181", "/policies"]
+      port_mappings = []
+    }
+    presidio = {
+      image         = var.container_images.presidio
+      cpu           = 768
+      memory        = 2048
+      command       = ["poetry", "run", "gunicorn", "-w", "1", "-b", "127.0.0.1:3000", "app:create_app()"]
+      port_mappings = []
+    }
+  }
+  policy_environment = [
+    { name = "OPA_URL", value = local.internal_opa_url },
+    { name = "PRESIDIO_URL", value = local.internal_presidio_url },
+    { name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" },
+  ]
+  service_policy_environment = var.enable_policy_sidecar_colocation ? {
+    agent          = local.policy_environment
+    audit_producer = []
+    backend        = local.policy_environment
+    console        = local.policy_environment
+    gateway = [
+      { name = "OPA_URL", value = "http://127.0.0.1:8181" },
+      { name = "PRESIDIO_URL", value = "http://127.0.0.1:3000" },
+      { name = "AUTHCLAW_OPA_POLICY_URL", value = "http://127.0.0.1:8181/v1/data/authclaw/policy/decision" },
+    ]
+    opa      = local.policy_environment
+    presidio = local.policy_environment
+  } : { for name in keys(local.service_configs) : name => local.policy_environment }
+  colocated_task_cpu = {
+    agent = var.agent_sidecar_task_cpu, backend = var.backend_sidecar_task_cpu, gateway = var.gateway_sidecar_task_cpu
+  }
+  colocated_task_memory = {
+    agent = var.agent_sidecar_task_memory, backend = var.backend_sidecar_task_memory, gateway = var.gateway_sidecar_task_memory
+  }
+  colocated_primary_cpu    = { agent = 768, backend = 768, gateway = 768 }
+  colocated_primary_memory = { agent = 1536, backend = 1536, gateway = 1280 }
+
+  service_configs = merge(
+    local.public_services,
+    local.private_services,
+    local.legacy_sidecar_services,
+  )
+  task_definition_configs = local.service_configs
+  ecs_alarm_services      = toset(concat(keys(local.service_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
+  ecs_service_desired_counts = merge(
+    { for name in keys(local.service_configs) : name => var.desired_count },
+    var.enable_audit_consumer ? { audit_consumer = 1 } : {},
+  )
+
+  service_writable_paths = {
+    agent          = ["/tmp", "/app/logs", "/app/watched_documents", "/app/scratch"]
+    audit_consumer = ["/tmp"]
+    audit_producer = ["/tmp"]
+    backend        = ["/tmp", "/app/.authclaw"]
+    console        = ["/tmp", "/app/.authclaw"]
+    gateway        = ["/tmp"]
+    opa            = ["/tmp"]
+    presidio       = ["/tmp"]
+  }
+  service_health_checks = {
+    agent          = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/agent/health/ready', timeout=3)\""]
+    audit_consumer = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9108/metrics', timeout=3)\""]
+    audit_producer = ["CMD", "/healthcheck", "http://127.0.0.1:8090/health"]
+    backend        = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
+    console        = ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+    gateway        = ["CMD", "/healthcheck", "http://127.0.0.1:8080/health"]
+    opa            = ["CMD", "/healthcheck"]
+    presidio       = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/health', timeout=3)\""]
+  }
 
   common_environment = [
     { name = "AUTHCLAW_ENV", value = var.authclaw_env },
@@ -93,16 +211,24 @@ locals {
     { name = "AUTHCLAW_JWT_KEY_VERSION", value = var.jwt_key_version },
     { name = "AUTHCLAW_SESSION_KEY_VERSION", value = var.session_key_version },
     { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379" },
-    { name = "OPA_URL", value = local.internal_opa_url },
-    { name = "PRESIDIO_URL", value = local.internal_presidio_url },
     { name = "AGENT_INTERNAL_URL", value = local.internal_agent_url },
-    { name = "AUTHCLAW_GO_GATEWAY_URL", value = "http://gateway.${local.namespace_name}:8080" },
-    { name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" },
+    { name = "AUTHCLAW_GO_GATEWAY_URL", value = local.internal_urls.gateway },
     { name = "AUTHCLAW_DISABLE_BACKGROUND_MONITOR", value = "true" },
+    { name = "AWS_STS_REGIONAL_ENDPOINTS", value = "regional" },
     { name = "PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
-    { name = "GATEWAY_INTERNAL_URL", value = "http://gateway.${local.namespace_name}:8080" },
+    { name = "GATEWAY_INTERNAL_URL", value = local.internal_urls.gateway },
     { name = "NEXT_PUBLIC_GATEWAY_URL", value = local.gateway_base_url },
     { name = "NEXT_PUBLIC_API_URL", value = local.api_base_url },
+    { name = "PUBLIC_API_URL", value = local.api_base_url },
+    { name = "NEXT_PUBLIC_CONSOLE_URL", value = local.console_base_url },
+    { name = "PUBLIC_CONSOLE_URL", value = local.console_base_url },
+    { name = "API_URL", value = local.internal_urls.backend },
+    { name = "GATEWAY_URL", value = local.internal_urls.gateway },
+    { name = "ALLOWED_ORIGINS", value = jsonencode([local.console_base_url]) },
+    { name = "OIDC_REDIRECT_URI", value = "${local.console_base_url}/api/auth/oidc/callback" },
+    { name = "AUTHCLAW_COOKIE_SECURE", value = "true" },
+    { name = "AUTHCLAW_SESSION_COOKIE_NAME", value = var.enable_public_edge ? (var.public_url_environment == "production" ? "authclaw_session_prod" : "authclaw_session_stg") : "authclaw_session" },
+    { name = "AUTHCLAW_OIDC_STATE_COOKIE_NAME", value = var.enable_public_edge ? (var.public_url_environment == "production" ? "authclaw_oidc_state_prod" : "authclaw_oidc_state_stg") : "authclaw_oidc_state" },
     { name = "DEMO_OTP_VISIBLE", value = "false" },
     { name = "SMTP_HOST", value = var.smtp_host },
     { name = "SMTP_FROM", value = var.smtp_from },
@@ -261,27 +387,32 @@ resource "aws_vpc_endpoint" "gateway" {
   service_name      = "com.amazonaws.${var.region}.${each.value}"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = values(aws_route_table.private)[*].id
+  policy            = local.gateway_endpoint_policies[each.key]
 
   tags = merge(var.tags, { Name = "${var.name}-${each.value}-endpoint" })
 }
 
+data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
+  count = var.enable_public_edge ? 1 : 0
+  name  = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
+data "aws_partition" "current" {}
+
 resource "aws_security_group" "alb" {
   name        = "${var.name}-alb"
-  description = "Public ALB ingress"
+  description = "CloudFront-only private origin ingress"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    from_port   = 8000
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  dynamic "ingress" {
+    for_each = var.enable_public_edge ? [1] : []
+    content {
+      description     = "HTTPS from CloudFront origin-facing network only"
+      from_port       = 443
+      to_port         = 443
+      protocol        = "tcp"
+      prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront_origin[0].id]
+    }
   }
 
   egress {
@@ -301,7 +432,7 @@ resource "aws_security_group" "app" {
   vpc_id      = aws_vpc.main.id
 
   dynamic "ingress" {
-    for_each = toset([8000, 8001, 8080])
+    for_each = var.internal_tls.enabled ? toset([8443]) : toset([8000, 8001, 8080])
     content {
       description     = "Console outbound API and health-check calls"
       from_port       = ingress.value
@@ -314,18 +445,18 @@ resource "aws_security_group" "app" {
   dynamic "ingress" {
     for_each = local.public_services
     content {
-      from_port       = ingress.value.container_port
-      to_port         = ingress.value.container_port
+      from_port       = local.service_ports[ingress.key]
+      to_port         = local.service_ports[ingress.key]
       protocol        = "tcp"
       security_groups = [aws_security_group.alb.id]
     }
   }
 
   dynamic "ingress" {
-    for_each = local.service_configs
+    for_each = toset(values(local.service_ports))
     content {
-      from_port = ingress.value.container_port
-      to_port   = ingress.value.container_port
+      from_port = ingress.value
+      to_port   = ingress.value
       protocol  = "tcp"
       self      = true
     }
@@ -379,6 +510,7 @@ resource "aws_vpc_endpoint" "interface" {
   subnet_ids          = values(aws_subnet.private)[*].id
   security_group_ids  = [aws_security_group.vpc_endpoints[0].id]
   private_dns_enabled = true
+  policy              = local.interface_endpoint_policies[each.key]
 
   tags = merge(var.tags, { Name = "${var.name}-${replace(each.value, ".", "-")}-endpoint" })
 }
@@ -413,72 +545,101 @@ resource "aws_security_group" "data" {
   tags = var.tags
 }
 
-resource "random_password" "db" {
-  length  = 32
-  special = false
+removed {
+  from = random_password.db
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_password" "backend_migrator_db" {
-  length  = 32
-  special = false
+removed {
+  from = random_password.backend_migrator_db
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_password" "backend_app_db" {
-  length  = 32
-  special = false
+removed {
+  from = random_password.backend_app_db
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_password" "agent_migrator_db" {
-  length  = 32
-  special = false
+removed {
+  from = random_password.agent_migrator_db
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_password" "agent_runtime_db" {
-  length  = 32
-  special = false
+removed {
+  from = random_password.agent_runtime_db
+  lifecycle {
+    destroy = false
+  }
 }
-resource "random_password" "jwt" {
-  length  = 48
-  special = false
-}
-
-resource "random_password" "jwt_v2" {
-  length  = 48
-  special = false
-}
-
-resource "random_password" "session" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.jwt
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_password" "session_v2" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.jwt_v2
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_password" "envelope" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.session
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_password" "envelope_v2" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.session_v2
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_password" "internal_service" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.envelope
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_id" "agent_encryption" {
-  byte_length = 32
+removed {
+  from = random_password.envelope_v2
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "random_password" "agent_redaction" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.internal_service
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = random_id.agent_encryption
+  lifecycle {
+    destroy = false
+  }
+}
+
+removed {
+  from = random_password.agent_redaction
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_db_subnet_group" "main" {
@@ -490,23 +651,24 @@ resource "aws_db_subnet_group" "main" {
 resource "aws_db_instance" "postgres_primary" {
   count = var.create_db_replica ? 0 : 1
 
-  identifier              = "${var.name}-postgres"
-  engine                  = "postgres"
-  engine_version          = var.db_engine_version
-  instance_class          = var.db_instance_class
-  allocated_storage       = var.db_allocated_storage
-  db_name                 = "authclaw"
-  username                = "authclaw"
-  password                = local.db_password
-  db_subnet_group_name    = aws_db_subnet_group.main.name
-  vpc_security_group_ids  = [aws_security_group.data.id]
-  storage_encrypted       = true
-  kms_key_id              = aws_kms_key.main.arn
-  multi_az                = var.is_primary
-  backup_retention_period = 14
-  deletion_protection     = var.is_primary
-  skip_final_snapshot     = !var.is_primary
-  tags                    = var.tags
+  identifier                    = "${var.name}-postgres"
+  engine                        = "postgres"
+  engine_version                = var.db_engine_version
+  instance_class                = var.db_instance_class
+  allocated_storage             = var.db_allocated_storage
+  db_name                       = "authclaw"
+  username                      = "authclaw"
+  manage_master_user_password   = true
+  master_user_secret_kms_key_id = aws_kms_key.main.arn
+  db_subnet_group_name          = aws_db_subnet_group.main.name
+  vpc_security_group_ids        = [aws_security_group.data.id]
+  storage_encrypted             = true
+  kms_key_id                    = aws_kms_key.main.arn
+  multi_az                      = var.is_primary
+  backup_retention_period       = 14
+  deletion_protection           = var.is_primary
+  skip_final_snapshot           = !var.is_primary
+  tags                          = var.tags
 }
 
 resource "aws_db_instance" "postgres_replica" {
@@ -551,9 +713,11 @@ resource "aws_secretsmanager_secret" "jwt" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "jwt" {
-  secret_id     = aws_secretsmanager_secret.jwt.id
-  secret_string = random_password.jwt.result
+removed {
+  from = aws_secretsmanager_secret_version.jwt
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "jwt_v2" {
@@ -562,9 +726,11 @@ resource "aws_secretsmanager_secret" "jwt_v2" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "jwt_v2" {
-  secret_id     = aws_secretsmanager_secret.jwt_v2.id
-  secret_string = random_password.jwt_v2.result
+removed {
+  from = aws_secretsmanager_secret_version.jwt_v2
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "session" {
@@ -573,9 +739,11 @@ resource "aws_secretsmanager_secret" "session" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "session" {
-  secret_id     = aws_secretsmanager_secret.session.id
-  secret_string = random_password.session.result
+removed {
+  from = aws_secretsmanager_secret_version.session
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "session_v2" {
@@ -584,9 +752,11 @@ resource "aws_secretsmanager_secret" "session_v2" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "session_v2" {
-  secret_id     = aws_secretsmanager_secret.session_v2.id
-  secret_string = random_password.session_v2.result
+removed {
+  from = aws_secretsmanager_secret_version.session_v2
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "envelope" {
@@ -595,9 +765,11 @@ resource "aws_secretsmanager_secret" "envelope" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "envelope" {
-  secret_id     = aws_secretsmanager_secret.envelope.id
-  secret_string = random_password.envelope.result
+removed {
+  from = aws_secretsmanager_secret_version.envelope
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "envelope_v2" {
@@ -606,9 +778,11 @@ resource "aws_secretsmanager_secret" "envelope_v2" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "envelope_v2" {
-  secret_id     = aws_secretsmanager_secret.envelope_v2.id
-  secret_string = random_password.envelope_v2.result
+removed {
+  from = aws_secretsmanager_secret_version.envelope_v2
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "bootstrap_database_url" {
@@ -617,9 +791,11 @@ resource "aws_secretsmanager_secret" "bootstrap_database_url" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "bootstrap_database_url" {
-  secret_id     = aws_secretsmanager_secret.bootstrap_database_url.id
-  secret_string = "postgresql+psycopg://authclaw:${local.db_password}@${local.db_address}:5432/authclaw?sslmode=require"
+removed {
+  from = aws_secretsmanager_secret_version.bootstrap_database_url
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "backend_migration_database_url" {
@@ -628,9 +804,11 @@ resource "aws_secretsmanager_secret" "backend_migration_database_url" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "backend_migration_database_url" {
-  secret_id     = aws_secretsmanager_secret.backend_migration_database_url.id
-  secret_string = "postgresql+psycopg://authclaw_migrator:${random_password.backend_migrator_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
+removed {
+  from = aws_secretsmanager_secret_version.backend_migration_database_url
+  lifecycle {
+    destroy = false
+  }
 }
 resource "aws_secretsmanager_secret" "backend_database_url" {
   name       = "${var.name}/backend-database-url"
@@ -638,9 +816,11 @@ resource "aws_secretsmanager_secret" "backend_database_url" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "backend_database_url" {
-  secret_id     = aws_secretsmanager_secret.backend_database_url.id
-  secret_string = "postgresql+psycopg://authclaw_app:${random_password.backend_app_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
+removed {
+  from = aws_secretsmanager_secret_version.backend_database_url
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "app_database_url" {
@@ -649,9 +829,11 @@ resource "aws_secretsmanager_secret" "app_database_url" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "app_database_url" {
-  secret_id     = aws_secretsmanager_secret.app_database_url.id
-  secret_string = "postgresql://authclaw_app:${random_password.backend_app_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
+removed {
+  from = aws_secretsmanager_secret_version.app_database_url
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "agent_migration_database_url" {
@@ -660,9 +842,11 @@ resource "aws_secretsmanager_secret" "agent_migration_database_url" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "agent_migration_database_url" {
-  secret_id     = aws_secretsmanager_secret.agent_migration_database_url.id
-  secret_string = "postgresql://authclaw_agent_migrator:${random_password.agent_migrator_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
+removed {
+  from = aws_secretsmanager_secret_version.agent_migration_database_url
+  lifecycle {
+    destroy = false
+  }
 }
 resource "aws_secretsmanager_secret" "agent_database_url" {
   name       = "${var.name}/agent-database-url"
@@ -670,9 +854,11 @@ resource "aws_secretsmanager_secret" "agent_database_url" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "agent_database_url" {
-  secret_id     = aws_secretsmanager_secret.agent_database_url.id
-  secret_string = "postgresql://authclaw_agent_runtime:${random_password.agent_runtime_db.result}@${local.db_address}:5432/authclaw?sslmode=require"
+removed {
+  from = aws_secretsmanager_secret_version.agent_database_url
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "internal_service" {
@@ -681,9 +867,19 @@ resource "aws_secretsmanager_secret" "internal_service" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "internal_service" {
-  secret_id     = aws_secretsmanager_secret.internal_service.id
-  secret_string = random_password.internal_service.result
+removed {
+  from = aws_secretsmanager_secret_version.internal_service
+  lifecycle {
+    destroy = false
+  }
+}
+
+# Shared only by the credential-free gateway container and the isolated SQS
+# producer. Other services cannot authenticate arbitrary producer requests.
+resource "aws_secretsmanager_secret" "audit_producer" {
+  name       = "${var.name}/audit-producer-secret"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
 }
 
 resource "aws_secretsmanager_secret" "agent_encryption" {
@@ -692,9 +888,11 @@ resource "aws_secretsmanager_secret" "agent_encryption" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "agent_encryption" {
-  secret_id     = aws_secretsmanager_secret.agent_encryption.id
-  secret_string = replace(replace(random_id.agent_encryption.b64_std, "+", "-"), "/", "_")
+removed {
+  from = aws_secretsmanager_secret_version.agent_encryption
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "agent_redaction" {
@@ -703,22 +901,25 @@ resource "aws_secretsmanager_secret" "agent_redaction" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "agent_redaction" {
-  secret_id     = aws_secretsmanager_secret.agent_redaction.id
-  secret_string = random_password.agent_redaction.result
+removed {
+  from = aws_secretsmanager_secret_version.agent_redaction
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "clickhouse_password" {
-  count      = var.clickhouse_password != "" ? 1 : 0
+  count      = var.clickhouse_host != "" ? 1 : 0
   name       = "${var.name}/clickhouse-password"
   kms_key_id = aws_kms_key.main.arn
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "clickhouse_password" {
-  count         = var.clickhouse_password != "" ? 1 : 0
-  secret_id     = aws_secretsmanager_secret.clickhouse_password[0].id
-  secret_string = var.clickhouse_password
+removed {
+  from = aws_secretsmanager_secret_version.clickhouse_password
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_ecs_cluster" "main" {
@@ -763,92 +964,529 @@ resource "aws_service_discovery_service" "service" {
 }
 
 resource "aws_cloudwatch_log_group" "service" {
-  for_each          = toset(concat(keys(local.task_definition_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
+  for_each          = toset(concat(keys(local.task_definition_configs), ["opa", "presidio"], var.enable_audit_consumer ? ["audit_consumer"] : []))
   name              = "/authclaw/${var.name}/${each.key}"
   retention_in_days = 30
   tags              = var.tags
 }
 
-resource "aws_iam_role" "task_execution" {
-  name = "${var.name}-ecs-execution"
+locals {
+  application_task_role_arns = { for service, role in aws_iam_role.runtime : service => role.arn if service != "database_crypto_preflight" }
+  effective_task_role_arns = {
+    for name in keys(local.task_definition_configs) : name => (
+      name != "gateway" && length(local.policy_sidecars[name]) == 0 ? lookup(local.application_task_role_arns, name, null) : null
+    )
+  }
+  ecs_secret_arns = concat([
+    aws_secretsmanager_secret.jwt.arn,
+    aws_secretsmanager_secret.jwt_v2.arn,
+    aws_secretsmanager_secret.session.arn,
+    aws_secretsmanager_secret.session_v2.arn,
+    aws_secretsmanager_secret.envelope.arn,
+    aws_secretsmanager_secret.envelope_v2.arn,
+    aws_secretsmanager_secret.bootstrap_database_url.arn,
+    aws_secretsmanager_secret.backend_migration_database_url.arn,
+    aws_secretsmanager_secret.backend_database_url.arn,
+    aws_secretsmanager_secret.app_database_url.arn,
+    aws_secretsmanager_secret.agent_migration_database_url.arn,
+    aws_secretsmanager_secret.agent_database_url.arn,
+    aws_secretsmanager_secret.internal_service.arn,
+    aws_secretsmanager_secret.audit_producer.arn,
+    aws_secretsmanager_secret.bff_client_ip.arn,
+    aws_secretsmanager_secret.oidc_bff_exchange.arn,
+    aws_secretsmanager_secret.worker_token_hmac.arn,
+    aws_secretsmanager_secret.agent_encryption.arn,
+    aws_secretsmanager_secret.agent_redaction.arn,
+  ], var.clickhouse_host != "" ? [aws_secretsmanager_secret.clickhouse_password[0].arn] : [])
+
+  runtime_s3_bucket_arns   = sort(distinct(flatten([for arns in values(var.runtime_s3_bucket_arns) : tolist(arns)])))
+  runtime_kms_key_arns     = sort(distinct(flatten([for arns in values(var.runtime_kms_key_arns) : tolist(arns)])))
+  runtime_secret_arns      = sort(distinct(flatten([for arns in values(var.runtime_secrets_manager_secret_arns) : tolist(arns)])))
+  runtime_principal_arns   = distinct(concat([aws_iam_role.runtime["backend"].arn, aws_iam_role.runtime["agent"].arn], sort(tolist(var.vpc_endpoint_external_principal_arns))))
+  execution_principal_arns = values(aws_iam_role.task_execution)[*].arn
+
+  deny_insecure_transport_statement = {
+    Sid       = "DenyInsecureTransport"
+    Effect    = "Deny"
+    Principal = "*"
+    Action    = "*"
+    Resource  = "*"
+    Condition = { Bool = { "aws:SecureTransport" = "false" } }
+  }
+
+  gateway_endpoint_policies = {
+    s3 = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowECRImageLayers"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arns }
+          Action    = "s3:GetObject"
+          Resource  = "arn:${data.aws_partition.current.partition}:s3:::prod-${var.region}-starport-layer-bucket/*"
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeBucketActions"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action = [
+              "s3:ListBucket",
+              "s3:GetBucketLocation",
+              "s3:GetBucketPublicAccessBlock",
+              "s3:GetEncryptionConfiguration",
+              "s3:GetBucketVersioning",
+              "s3:GetBucketLogging",
+              "s3:GetBucketPolicyStatus",
+              "s3:PutBucketPublicAccessBlock",
+              "s3:GetObject",
+              "s3:PutObject",
+            ]
+            Resource = concat(local.runtime_s3_bucket_arns, [for arn in local.runtime_s3_bucket_arns : "${arn}/*"])
+          },
+          {
+            Sid       = "AllowApprovedRuntimeBucketDiscovery"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action    = "s3:ListAllMyBuckets"
+            Resource  = "*"
+          }
+      ] : statement if length(local.runtime_s3_bucket_arns) > 0])
+    })
+  }
+
+  interface_endpoint_policies = {
+    ecr_api = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskECRToken"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arns }
+          Action    = "ecr:GetAuthorizationToken"
+          Resource  = "*"
+        },
+        {
+          Sid       = "AllowTaskImagePull"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arns }
+          Action    = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+          Resource  = sort(tolist(var.ecr_repository_arns))
+        }
+      ]
+    })
+    ecr_dkr = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskRegistryPull"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arns }
+          Action    = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+          Resource  = sort(tolist(var.ecr_repository_arns))
+        }
+      ]
+    })
+    logs = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskLogDelivery"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arns }
+          Action    = ["logs:CreateLogStream", "logs:PutLogEvents"]
+          Resource  = concat([for group in values(aws_cloudwatch_log_group.service) : "${group.arn}:*"], [for group in values(aws_cloudwatch_log_group.database_job) : "${group.arn}:*"])
+        }
+      ]
+    })
+    secretsmanager = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskSecretInjection"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arns }
+          Action    = "secretsmanager:GetSecretValue"
+          Resource  = local.ecs_secret_arns
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeSecrets"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action    = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:CreateSecret", "secretsmanager:DeleteSecret"]
+            Resource  = local.runtime_secret_arns
+          }
+      ] : statement if length(local.runtime_secret_arns) > 0])
+    })
+    kms = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowTaskSecretDecryption"
+          Effect    = "Allow"
+          Principal = { AWS = local.execution_principal_arns }
+          Action    = "kms:Decrypt"
+          Resource  = aws_kms_key.main.arn
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeCryptography"
+            Effect    = "Allow"
+            Principal = { AWS = local.runtime_principal_arns }
+            Action    = ["kms:Decrypt", "kms:GenerateDataKey"]
+            Resource  = local.runtime_kms_key_arns
+          }
+      ] : statement if length(local.runtime_kms_key_arns) > 0])
+    })
+    sts = jsonencode({
+      Version = "2012-10-17"
+      Statement = concat([
+        local.deny_insecure_transport_statement,
+        {
+          Sid       = "AllowRuntimeIdentityCheck"
+          Effect    = "Allow"
+          Principal = { AWS = distinct(concat(values(local.application_task_role_arns), sort(tolist(var.vpc_endpoint_external_principal_arns)))) }
+          Action    = "sts:GetCallerIdentity"
+          Resource  = "*"
+        }
+        ], [for statement in [
+          {
+            Sid       = "AllowApprovedRuntimeRoleAssumption"
+            Effect    = "Allow"
+            Principal = { AWS = aws_iam_role.runtime["agent"].arn }
+            Action    = "sts:AssumeRole"
+            Resource  = sort(tolist(var.runtime_sts_assume_role_arns))
+          }
+      ] : statement if length(var.runtime_sts_assume_role_arns) > 0])
+    })
+    sqs = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        local.deny_insecure_transport_statement,
+        {
+          Sid    = "AllowAuditTransport"
+          Effect = "Allow"
+          Principal = { AWS = compact([
+            aws_iam_role.runtime["backend"].arn,
+            try(aws_iam_role.runtime["audit_producer"].arn, ""),
+            try(aws_iam_role.runtime["audit_consumer"].arn, "")
+          ]) }
+          Action   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"]
+          Resource = try(aws_sqs_queue.audit[0].arn, "*")
+        }
+      ]
+    })
+  }
+}
+
+resource "aws_iam_role" "ecs_instance" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name = "${var.name}-ecs-instance"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Action = "sts:AssumeRole"
       Effect = "Allow"
       Principal = {
-        Service = "ecs-tasks.amazonaws.com"
+        Service = "ec2.amazonaws.com"
       }
     }]
   })
   tags = var.tags
 }
 
-resource "aws_iam_role_policy_attachment" "task_execution" {
-  role       = aws_iam_role.task_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+resource "aws_iam_role_policy_attachment" "ecs_instance" {
+  for_each = var.ecs_ec2_graviton.enabled ? toset([
+    "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role",
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+  ]) : toset([])
+
+  role       = aws_iam_role.ecs_instance[0].name
+  policy_arn = each.value
 }
 
-resource "aws_iam_role_policy" "task_secrets" {
-  name = "${var.name}-ecs-secrets"
-  role = aws_iam_role.task_execution.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:GetSecretValue",
-          "kms:Decrypt"
-        ]
-        Resource = concat([
-          aws_secretsmanager_secret.jwt.arn,
-          aws_secretsmanager_secret.jwt_v2.arn,
-          aws_secretsmanager_secret.session.arn,
-          aws_secretsmanager_secret.session_v2.arn,
-          aws_secretsmanager_secret.envelope.arn,
-          aws_secretsmanager_secret.envelope_v2.arn,
-          aws_secretsmanager_secret.bootstrap_database_url.arn,
-          aws_secretsmanager_secret.backend_migration_database_url.arn, aws_secretsmanager_secret.backend_database_url.arn,
-          aws_secretsmanager_secret.app_database_url.arn,
-          aws_secretsmanager_secret.agent_migration_database_url.arn,
-          aws_secretsmanager_secret.agent_database_url.arn,
-          aws_secretsmanager_secret.internal_service.arn,
-          aws_secretsmanager_secret.bff_client_ip.arn,
-          aws_secretsmanager_secret.oidc_bff_exchange.arn,
-          aws_secretsmanager_secret.worker_token_hmac.arn,
-          aws_secretsmanager_secret.agent_encryption.arn,
-          aws_secretsmanager_secret.agent_redaction.arn,
-          aws_kms_key.main.arn
-        ], var.clickhouse_password != "" ? [aws_secretsmanager_secret.clickhouse_password[0].arn] : [])
+resource "aws_iam_instance_profile" "ecs_instance" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name = "${var.name}-ecs-instance"
+  role = aws_iam_role.ecs_instance[0].name
+  tags = var.tags
+}
+
+resource "aws_launch_template" "ecs_graviton" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name_prefix   = "${var.name}-ecs-graviton-"
+  image_id      = local.ec2_ami_id
+  instance_type = var.ecs_ec2_graviton.instance_type
+  user_data = base64encode(join("\n", [
+    "#!/bin/bash",
+    "set -euo pipefail",
+    "cat >/etc/ecs/ecs.config <<'EOF'",
+    "ECS_CLUSTER=${aws_ecs_cluster.main.name}",
+    "ECS_ENABLE_SPOT_INSTANCE_DRAINING=true",
+    "ECS_CONTAINER_INSTANCE_PROPAGATE_TAGS_FROM=ec2_instance",
+    "ECS_AWSVPC_BLOCK_IMDS=true",
+    "EOF",
+  ]))
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      encrypted             = true
+      kms_key_id            = aws_kms_key.main.arn
+      volume_size           = var.ecs_ec2_graviton.root_volume_size
+      volume_type           = "gp3"
+      delete_on_termination = true
+    }
+  }
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ecs_instance[0].name
+  }
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  monitoring {
+    enabled = true
+  }
+
+  network_interfaces {
+    associate_public_ip_address = false
+    delete_on_termination       = true
+    security_groups             = [aws_security_group.app.id]
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = merge(var.tags, { Name = "${var.name}-ecs-graviton" })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = merge(var.tags, { Name = "${var.name}-ecs-graviton-root" })
+  }
+
+  update_default_version = true
+  tags                   = var.tags
+}
+
+resource "aws_autoscaling_group" "ecs_graviton" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name                      = "${var.name}-ecs-graviton"
+  min_size                  = var.ecs_ec2_graviton.min_size
+  desired_capacity          = var.ecs_ec2_graviton.desired_size
+  max_size                  = var.ecs_ec2_graviton.max_size
+  vpc_zone_identifier       = values(aws_subnet.private)[*].id
+  health_check_type         = "EC2"
+  health_check_grace_period = 300
+  protect_from_scale_in     = true
+  termination_policies      = ["OldestLaunchTemplate", "OldestInstance"]
+  enabled_metrics           = ["GroupDesiredCapacity", "GroupInServiceInstances", "GroupPendingInstances", "GroupStandbyInstances", "GroupTerminatingInstances", "GroupTotalInstances"]
+
+  launch_template {
+    id      = aws_launch_template.ecs_graviton[0].id
+    version = "$Latest"
+  }
+
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 100
+      instance_warmup        = 300
+    }
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${var.name}-ecs-graviton"
+    propagate_at_launch = true
+  }
+
+  dynamic "tag" {
+    for_each = var.tags
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+}
+
+resource "aws_ecs_capacity_provider" "graviton" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name = local.ec2_capacity_provider_name
+
+  auto_scaling_group_provider {
+    auto_scaling_group_arn         = aws_autoscaling_group.ecs_graviton[0].arn
+    managed_draining               = "ENABLED"
+    managed_termination_protection = "ENABLED"
+
+    managed_scaling {
+      status                    = "ENABLED"
+      target_capacity           = 80
+      minimum_scaling_step_size = 1
+      maximum_scaling_step_size = max(1, var.ecs_ec2_graviton.max_size - var.ecs_ec2_graviton.min_size)
+      instance_warmup_period    = 300
+    }
+  }
+
+  tags = var.tags
+}
+
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = [aws_ecs_capacity_provider.graviton[0].name]
+
+  default_capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+    weight            = 1
+    base              = 0
+  }
+}
+
+resource "random_id" "alb_log_bucket" {
+  byte_length = 4
+}
+
+resource "aws_s3_bucket" "alb_logs" {
+  bucket        = substr(lower("${var.name}-${var.region}-alb-logs-${random_id.alb_log_bucket.hex}"), 0, 63)
+  force_destroy = false
+  tags          = merge(var.tags, { DataClass = "security-telemetry" })
+}
+
+resource "aws_s3_bucket_public_access_block" "alb_logs" {
+  bucket                  = aws_s3_bucket.alb_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+#trivy:ignore:AVD-AWS-0132 ALB access-log delivery supports SSE-S3, not customer-managed SSE-KMS keys.
+resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  rule {
+    id     = "retention"
+    status = "Enabled"
+    filter {}
+    expiration { days = var.alb_access_log_retention_days }
+  }
+}
+
+data "aws_iam_policy_document" "alb_logs" {
+  statement {
+    sid       = "AllowALBLogDelivery"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.alb_logs.arn}/AWSLogs/${var.aws_account_id != "" ? var.aws_account_id : "*"}/*"]
+    principals {
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+    }
+    dynamic "condition" {
+      for_each = var.aws_account_id != "" ? [1] : []
+      content {
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [var.aws_account_id]
       }
-    ]
-  })
+    }
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:${data.aws_partition.current.partition}:elasticloadbalancing:${var.region}:${var.aws_account_id != "" ? var.aws_account_id : "*"}:loadbalancer/*"]
+    }
+  }
+
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.alb_logs.arn, "${aws_s3_bucket.alb_logs.arn}/*"]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
 }
 
-resource "aws_lb" "main" {
-  name = substr(replace("${var.name}-alb", "_", "-"), 0, 32)
-  #trivy:ignore:AVD-AWS-0053 This ALB is the intentional public ingress for console/API/gateway traffic; private services are not attached.
-  internal                   = false
+resource "aws_s3_bucket_policy" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+  policy = data.aws_iam_policy_document.alb_logs.json
+}
+
+moved {
+  from = aws_lb.main
+  to   = aws_lb.service["console"]
+}
+
+resource "aws_lb" "service" {
+  for_each = local.public_services
+
+  name                       = trim(substr(replace("${substr(var.name, 0, 20)}-${each.key}-alb", "_", "-"), 0, 32), "-")
+  internal                   = true
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
-  subnets                    = values(aws_subnet.public)[*].id
+  subnets                    = values(aws_subnet.private)[*].id
   drop_invalid_header_fields = true
   xff_header_processing_mode = "append"
   enable_xff_client_port     = false
   tags                       = var.tags
+
+  access_logs {
+    bucket  = aws_s3_bucket.alb_logs.id
+    prefix  = each.key
+    enabled = true
+  }
+
+  depends_on = [aws_s3_bucket_policy.alb_logs]
 }
 
 resource "aws_lb_target_group" "service" {
   for_each = local.public_services
 
-  name        = substr(replace("${var.name}-${each.key}", "_", "-"), 0, 32)
-  port        = each.value.container_port
-  protocol    = "HTTP"
+  name_prefix = "${substr(each.key, 0, 5)}-"
+  port        = local.service_ports[each.key]
+  protocol    = contains(local.tls_services, each.key) ? "HTTPS" : "HTTP"
   vpc_id      = aws_vpc.main.id
   target_type = "ip"
 
+  lifecycle {
+    create_before_destroy = true
+  }
+
   health_check {
+    protocol            = contains(local.tls_services, each.key) ? "HTTPS" : "HTTP"
     path                = each.value.health_path
     matcher             = "200-399"
     healthy_threshold   = 2
@@ -863,8 +1501,8 @@ resource "aws_lb_target_group" "service" {
 resource "aws_lb_listener" "service" {
   for_each = local.public_services
 
-  load_balancer_arn = aws_lb.main.arn
-  port              = each.value.listener_port
+  load_balancer_arn = aws_lb.service[each.key].arn
+  port              = 443
   protocol          = local.listener_protocol
   certificate_arn   = var.certificate_arn
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
@@ -979,26 +1617,40 @@ resource "aws_cloudwatch_log_group" "database_job" {
 }
 
 resource "aws_ecs_task_definition" "database_job" {
+  depends_on               = [aws_iam_role_policy.task_execution, aws_iam_role_policy.runtime]
   for_each                 = local.database_jobs
   family                   = "${var.name}-database-${replace(each.key, "_", "-")}"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.service_cpu
   memory                   = var.service_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
+  execution_role_arn       = aws_iam_role.task_execution["database_${each.key}"].arn
+  task_role_arn            = try(aws_iam_role.runtime["database_${each.key}"].arn, null)
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, each.key == "agent_migrations" ? "agent" : "backend", "X86_64")
+    cpu_architecture        = local.runtime_architectures[each.key == "agent_migrations" ? "agent" : "backend"]
   }
 
+  volume { name = "tmp" }
+
   container_definitions = jsonencode([{
-    name        = each.key
-    image       = each.value.image
-    essential   = true
-    command     = each.value.command
-    environment = each.value.environment
-    secrets     = each.value.secrets
+    name                   = each.key
+    image                  = each.value.image
+    essential              = true
+    cpu                    = var.service_cpu
+    memory                 = var.service_memory
+    command                = each.value.command
+    environment            = each.value.environment
+    secrets                = each.value.secrets
+    readonlyRootFilesystem = true
+    privileged             = false
+    stopTimeout            = 30
+    mountPoints            = [{ sourceVolume = "tmp", containerPath = "/tmp", readOnly = false }]
+    linuxParameters = {
+      initProcessEnabled = true
+      capabilities       = { drop = ["ALL"] }
+    }
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -1015,29 +1667,49 @@ resource "aws_ecs_task_definition" "service" {
   for_each = local.task_definition_configs
 
   family                   = "${var.name}-${each.key}"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
-  cpu                      = var.service_cpu
-  memory                   = var.service_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = lookup(local.audit_sqs_task_role_arns, each.key, null)
+  cpu                      = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_task_cpu), each.key) ? local.colocated_task_cpu[each.key] : var.service_cpu
+  memory                   = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_task_memory), each.key) ? local.colocated_task_memory[each.key] : var.service_memory
+  execution_role_arn       = aws_iam_role.task_execution[each.key].arn
+  # ECS task credentials are visible to every container in a task. Colocated
+  # OPA/Presidio tasks therefore never receive an application task role.
+  task_role_arn = local.effective_task_role_arns[each.key]
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, each.key, "X86_64")
+    cpu_architecture        = local.runtime_architectures[each.key]
   }
 
-  container_definitions = jsonencode([
+  dynamic "volume" {
+    for_each = local.service_writable_paths[each.key]
+    content { name = "writable-${volume.key}" }
+  }
+
+  dynamic "volume" {
+    for_each = contains(local.tls_services, each.key) ? ["tmp"] : []
+    content { name = "tls-${volume.value}" }
+  }
+
+  dynamic "volume" {
+    for_each = toset(local.policy_sidecars[each.key])
+    content { name = "sidecar-${volume.value}-tmp" }
+  }
+
+  container_definitions = jsonencode(concat([
     merge({
       name      = each.key
       image     = each.value.image
       essential = true
+      cpu       = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_primary_cpu), each.key) ? local.colocated_primary_cpu[each.key] : var.service_cpu
+      memory    = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_primary_memory), each.key) ? local.colocated_primary_memory[each.key] : (contains(local.tls_services, each.key) ? var.service_memory - 128 : var.service_memory)
       portMappings = [{
         containerPort = each.value.container_port
         protocol      = "tcp"
       }]
       environment = concat(
         local.common_environment,
+        local.service_policy_environment[each.key],
         each.key == "console" ? [
           { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_signing_enabled) },
           { name = "AUTHCLAW_OIDC_LOGIN_PAUSED", value = tostring(var.oidc_login_paused) },
@@ -1045,6 +1717,9 @@ resource "aws_ecs_task_definition" "service" {
           { name = "AUTHCLAW_CONSOLE_ALB_INGRESS_ONLY", value = "true" }
         ] : [],
         contains(tolist(local.audit_sqs_producer_services), each.key) ? local.audit_sqs_producer_environment : [],
+        each.key == "gateway" && local.audit_sqs_enabled ? [
+          { name = "AUDIT_PRODUCER_URL", value = "${local.internal_urls.audit_producer}/v1/audit" }
+        ] : [],
         each.key == "gateway" ? [
           { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
         ] : [],
@@ -1060,41 +1735,30 @@ resource "aws_ecs_task_definition" "service" {
           { name = "AUTHCLAW_RUNTIME_DB_ROLE", value = "authclaw_agent_runtime" }
         ] : []
       )
-      secrets = concat(
-        each.key == "backend" ? [
-          { name = "WORKER_TOKEN_HMAC_KEY_V1", valueFrom = aws_secretsmanager_secret.worker_token_hmac.arn }
-        ] : [],
-        contains(["console", "backend"], each.key) ? [
-          { name = "BFF_CLIENT_IP_SECRET", valueFrom = aws_secretsmanager_secret.bff_client_ip.arn },
-          { name = "OIDC_BFF_EXCHANGE_SECRET", valueFrom = aws_secretsmanager_secret.oidc_bff_exchange.arn }
-        ] : [],
-        contains(["backend", "gateway", "console"], each.key) ? [
-          { name = "DATABASE_URL", valueFrom = each.key == "backend" ? aws_secretsmanager_secret.backend_database_url.arn : aws_secretsmanager_secret.app_database_url.arn },
-          { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
-          { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
-          { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
-          { name = "SESSION_SECRET", valueFrom = var.session_key_version == "v2" ? aws_secretsmanager_secret.session_v2.arn : aws_secretsmanager_secret.session.arn },
-          { name = "SESSION_SECRET_V1", valueFrom = aws_secretsmanager_secret.session.arn },
-          { name = "SESSION_SECRET_V2", valueFrom = aws_secretsmanager_secret.session_v2.arn },
-          { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
-          { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
-          { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn }
-        ] : [],
-        contains(["console", "agent"], each.key) ? [
-          { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn }
-        ] : [],
-        each.key == "gateway" ? [
-          { name = "REDACTION_HASH_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
-        ] : [],
-        each.key == "agent" ? [
-          { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn },
-          { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
-          { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
-          { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
-          { name = "AUTHCLAW_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.agent_encryption.arn },
-          { name = "AUTHCLAW_REDACTION_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
-        ] : []
-      )
+      secrets                = local.service_secrets[each.key]
+      readonlyRootFilesystem = true
+      privileged             = false
+      stopTimeout            = 30
+      mountPoints = [for index, path in local.service_writable_paths[each.key] : {
+        sourceVolume  = "writable-${index}"
+        containerPath = path
+        readOnly      = false
+      }]
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities       = { drop = ["ALL"] }
+      }
+      healthCheck = {
+        command     = local.service_health_checks[each.key]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 30
+      }
+      dependsOn = [for sidecar in local.policy_sidecars[each.key] : {
+        containerName = sidecar
+        condition     = "HEALTHY"
+      }]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -1104,18 +1768,42 @@ resource "aws_ecs_task_definition" "service" {
         }
       }
       },
-      each.value.command == null ? {} : { command = each.value.command },
-      each.key == "agent" ? {
-        healthCheck = {
-          command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/agent/health/ready', timeout=3)\""]
-          interval    = 30
-          timeout     = 5
-          retries     = 3
-          startPeriod = 30
+      each.value.command == null ? {} : { command = each.value.command }
+    )],
+    [for sidecar in local.policy_sidecars[each.key] : {
+      name                   = sidecar
+      image                  = local.policy_sidecar_configs[sidecar].image
+      essential              = true
+      cpu                    = local.policy_sidecar_configs[sidecar].cpu
+      memory                 = local.policy_sidecar_configs[sidecar].memory
+      command                = local.policy_sidecar_configs[sidecar].command
+      portMappings           = local.policy_sidecar_configs[sidecar].port_mappings
+      readonlyRootFilesystem = true
+      privileged             = false
+      stopTimeout            = 30
+      mountPoints            = [{ sourceVolume = "sidecar-${sidecar}-tmp", containerPath = "/tmp", readOnly = false }]
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities       = { drop = ["ALL"] }
+      }
+      healthCheck = {
+        command     = local.service_health_checks[sidecar]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = sidecar == "presidio" ? 60 : 10
+      }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service[sidecar].name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "${each.key}-${sidecar}"
         }
-      } : {}
-    )
-  ])
+      }
+    }],
+    contains(local.tls_services, each.key) ? [local.tls_containers[each.key]] : [],
+  ))
 
   lifecycle {
     precondition {
@@ -1123,323 +1811,13 @@ resource "aws_ecs_task_definition" "service" {
       error_message = "Enable backend client-identity verification before console signing."
     }
     precondition {
-      condition = var.authclaw_env != "production" || alltrue([
+      condition = !contains(["production", "prod"], var.authclaw_env) || alltrue([
         startswith(local.internal_agent_url, "https://"),
-        local.internal_opa_url == "http://127.0.0.1:8181",
-        local.internal_presidio_url == "http://127.0.0.1:3000",
-        startswith("http://gateway.${local.namespace_name}:8080", "https://")
+        startswith(local.internal_opa_url, "https://") || local.internal_opa_url == "http://127.0.0.1:8181",
+        startswith(local.internal_presidio_url, "https://") || local.internal_presidio_url == "http://127.0.0.1:3000",
+        startswith(local.internal_urls.gateway, "https://")
       ])
-      error_message = "Production requires HTTPS for remote agent/gateway calls and exact task-local loopback HTTP endpoints for OPA and Presidio."
-    }
-  }
-
-  tags = var.tags
-}
-
-resource "aws_ecs_task_definition" "gateway_with_sidecars" {
-  family                   = "${var.name}-gateway-sidecars"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = var.gateway_sidecar_task_cpu
-  memory                   = var.gateway_sidecar_task_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-
-  runtime_platform {
-    operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "gateway", "X86_64")
-  }
-
-  container_definitions = jsonencode([
-    {
-      name              = "gateway"
-      image             = var.container_images.gateway
-      essential         = true
-      cpu               = 768
-      memory            = 1280
-      memoryReservation = 1024
-      portMappings = [{
-        containerPort = 8080
-        protocol      = "tcp"
-      }]
-      environment = concat(local.common_environment, [
-        { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" },
-        { name = "PRESIDIO_FAIL_CLOSED", value = "true" }
-      ])
-      secrets = [
-        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.app_database_url.arn },
-        { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
-        { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
-        { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
-        { name = "SESSION_SECRET", valueFrom = var.session_key_version == "v2" ? aws_secretsmanager_secret.session_v2.arn : aws_secretsmanager_secret.session.arn },
-        { name = "SESSION_SECRET_V1", valueFrom = aws_secretsmanager_secret.session.arn },
-        { name = "SESSION_SECRET_V2", valueFrom = aws_secretsmanager_secret.session_v2.arn },
-        { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
-        { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
-        { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn },
-        { name = "REDACTION_HASH_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
-      ]
-      dependsOn = [
-        { containerName = "opa", condition = "HEALTHY" },
-        { containerName = "presidio", condition = "HEALTHY" }
-      ]
-      healthCheck = {
-        command     = ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health >/dev/null || exit 1"]
-        interval    = 30
-        timeout     = 5
-        retries     = 3
-        startPeriod = 30
-      }
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.service["gateway"].name
-          awslogs-region        = var.region
-          awslogs-stream-prefix = "gateway"
-        }
-      }
-    },
-    {
-      name              = "opa"
-      image             = var.container_images.opa
-      essential         = true
-      cpu               = 256
-      memory            = 384
-      memoryReservation = 256
-      command           = ["run", "--server", "--addr=127.0.0.1:8181", "/policies"]
-      healthCheck = {
-        command     = ["CMD", "/healthcheck"]
-        interval    = 30
-        timeout     = 5
-        retries     = 3
-        startPeriod = 10
-      }
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.service["opa"].name
-          awslogs-region        = var.region
-          awslogs-stream-prefix = "gateway-opa"
-        }
-      }
-    },
-    {
-      name              = "presidio"
-      image             = var.container_images.presidio
-      essential         = true
-      cpu               = 768
-      memory            = 2048
-      memoryReservation = 1536
-      healthCheck = {
-        command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/health >/dev/null || exit 1"]
-        interval    = 30
-        timeout     = 5
-        retries     = 3
-        startPeriod = 60
-      }
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.service["presidio"].name
-          awslogs-region        = var.region
-          awslogs-stream-prefix = "gateway-presidio"
-        }
-      }
-    }
-  ])
-
-  lifecycle {
-    precondition {
-      condition     = local.internal_opa_url == "http://127.0.0.1:8181" && local.internal_presidio_url == "http://127.0.0.1:3000"
-      error_message = "Gateway sidecars must use the exact task-local OPA and Presidio loopback endpoints."
-    }
-  }
-
-  tags = var.tags
-}
-
-resource "aws_ecs_task_definition" "backend_with_presidio" {
-  family                   = "${var.name}-backend-presidio"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = var.backend_sidecar_task_cpu
-  memory                   = var.backend_sidecar_task_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-
-  runtime_platform {
-    operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "backend", "X86_64")
-  }
-
-  container_definitions = jsonencode([
-    {
-      name              = "backend"
-      image             = var.container_images.backend
-      essential         = true
-      cpu               = 768
-      memory            = 1536
-      memoryReservation = 1024
-      portMappings = [{
-        containerPort = 8000
-        protocol      = "tcp"
-      }]
-      environment = concat(local.common_environment, [
-        { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_enabled) },
-        { name = "WORKER_TOKEN_HMAC_ACTIVE_VERSION", value = "v1" },
-        { name = "WORKER_TOKEN_ISSUANCE_PAUSED", value = tostring(var.worker_token_issuance_paused) },
-        { name = "WORKER_CLEANUP_ENABLED", value = "true" },
-        { name = "AGENT_AUDIT_STREAM_TRANSPORT", value = "kafka" }
-      ])
-      secrets = concat([
-        { name = "BFF_CLIENT_IP_SECRET", valueFrom = aws_secretsmanager_secret.bff_client_ip.arn },
-        { name = "WORKER_TOKEN_HMAC_KEY_V1", valueFrom = aws_secretsmanager_secret.worker_token_hmac.arn },
-        { name = "OIDC_BFF_EXCHANGE_SECRET", valueFrom = aws_secretsmanager_secret.oidc_bff_exchange.arn },
-        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.backend_database_url.arn },
-        { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
-        { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
-        { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
-        { name = "SESSION_SECRET", valueFrom = var.session_key_version == "v2" ? aws_secretsmanager_secret.session_v2.arn : aws_secretsmanager_secret.session.arn },
-        { name = "SESSION_SECRET_V1", valueFrom = aws_secretsmanager_secret.session.arn },
-        { name = "SESSION_SECRET_V2", valueFrom = aws_secretsmanager_secret.session_v2.arn },
-        { name = "ENVELOPE_KEY", valueFrom = aws_secretsmanager_secret.envelope.arn },
-        { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
-        { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn }
-        ], var.clickhouse_password != "" ? [
-        { name = "CLICKHOUSE_PASSWORD", valueFrom = aws_secretsmanager_secret.clickhouse_password[0].arn }
-      ] : [])
-      dependsOn = [{ containerName = "presidio", condition = "HEALTHY" }]
-      healthCheck = {
-        command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
-        interval    = 30
-        timeout     = 5
-        retries     = 3
-        startPeriod = 30
-      }
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.service["backend"].name
-          awslogs-region        = var.region
-          awslogs-stream-prefix = "backend"
-        }
-      }
-    },
-    {
-      name              = "presidio"
-      image             = var.container_images.presidio
-      essential         = true
-      cpu               = 1024
-      memory            = 2048
-      memoryReservation = 1536
-      healthCheck = {
-        command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/health >/dev/null || exit 1"]
-        interval    = 30
-        timeout     = 5
-        retries     = 3
-        startPeriod = 60
-      }
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.service["presidio"].name
-          awslogs-region        = var.region
-          awslogs-stream-prefix = "backend-presidio"
-        }
-      }
-    }
-  ])
-
-  lifecycle {
-    precondition {
-      condition     = local.internal_presidio_url == "http://127.0.0.1:3000"
-      error_message = "Backend must use its task-local Presidio loopback endpoint."
-    }
-  }
-
-  tags = var.tags
-}
-
-resource "aws_ecs_task_definition" "agent_with_opa" {
-  family                   = "${var.name}-agent-opa"
-  requires_compatibilities = ["FARGATE"]
-  network_mode             = "awsvpc"
-  cpu                      = var.agent_sidecar_task_cpu
-  memory                   = var.agent_sidecar_task_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-
-  runtime_platform {
-    operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "agent", "X86_64")
-  }
-
-  container_definitions = jsonencode([
-    {
-      name              = "agent"
-      image             = var.container_images.agent
-      essential         = true
-      cpu               = 768
-      memory            = 1536
-      memoryReservation = 1024
-      portMappings = [{
-        containerPort = 8001
-        protocol      = "tcp"
-      }]
-      environment = local.common_environment
-      secrets = [
-        { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn },
-        { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.agent_database_url.arn },
-        { name = "JWT_SECRET", valueFrom = var.jwt_key_version == "v2" ? aws_secretsmanager_secret.jwt_v2.arn : aws_secretsmanager_secret.jwt.arn },
-        { name = "JWT_SECRET_V1", valueFrom = aws_secretsmanager_secret.jwt.arn },
-        { name = "JWT_SECRET_V2", valueFrom = aws_secretsmanager_secret.jwt_v2.arn },
-        { name = "AUTHCLAW_ENCRYPTION_KEY", valueFrom = aws_secretsmanager_secret.agent_encryption.arn },
-        { name = "AUTHCLAW_REDACTION_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
-      ]
-      dependsOn = [{ containerName = "opa", condition = "HEALTHY" }]
-      healthCheck = {
-        command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/agent/health/ready', timeout=3)\""]
-        interval    = 30
-        timeout     = 5
-        retries     = 3
-        startPeriod = 30
-      }
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.service["agent"].name
-          awslogs-region        = var.region
-          awslogs-stream-prefix = "agent"
-        }
-      }
-    },
-    {
-      name              = "opa"
-      image             = var.container_images.opa
-      essential         = true
-      cpu               = 256
-      memory            = 384
-      memoryReservation = 256
-      command           = ["run", "--server", "--addr=127.0.0.1:8181", "/policies"]
-      healthCheck = {
-        command     = ["CMD", "/healthcheck"]
-        interval    = 30
-        timeout     = 5
-        retries     = 3
-        startPeriod = 10
-      }
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.service["opa"].name
-          awslogs-region        = var.region
-          awslogs-stream-prefix = "agent-opa"
-        }
-      }
-    }
-  ])
-
-  lifecycle {
-    precondition {
-      condition     = local.internal_opa_url == "http://127.0.0.1:8181"
-      error_message = "Agent must use its task-local OPA loopback endpoint."
+      error_message = "Production is blocked until agent, gateway, OPA, and Presidio use authenticated TLS or exact task-local loopback policy endpoints."
     }
   }
 
@@ -1449,11 +1827,26 @@ resource "aws_ecs_task_definition" "agent_with_opa" {
 resource "aws_ecs_service" "public" {
   for_each = local.public_services
 
-  name            = "${var.name}-${each.key}"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = each.key == "gateway" ? aws_ecs_task_definition.gateway_with_sidecars.arn : each.key == "backend" ? aws_ecs_task_definition.backend_with_presidio.arn : aws_ecs_task_definition.service[each.key].arn
-  desired_count   = var.desired_count
-  launch_type     = "FARGATE"
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  name                   = "${var.name}-${each.key}"
+  cluster                = aws_ecs_cluster.main.id
+  task_definition        = aws_ecs_task_definition.service[each.key].arn
+  desired_count          = var.desired_count
+  launch_type            = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  enable_execute_command = false
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.ecs_ec2_graviton.enabled ? [1] : []
+    content {
+      capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+      weight            = 1
+      base              = 0
+    }
+  }
 
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
@@ -1463,26 +1856,41 @@ resource "aws_ecs_service" "public" {
 
   load_balancer {
     target_group_arn = aws_lb_target_group.service[each.key].arn
-    container_name   = each.key
-    container_port   = each.value.container_port
+    container_name   = contains(local.tls_services, each.key) ? "tls" : each.key
+    container_port   = local.service_ports[each.key]
   }
 
   service_registries {
     registry_arn = aws_service_discovery_service.service[each.key].arn
   }
 
-  depends_on = [aws_lb_listener.service]
+  depends_on = [aws_lb_listener.service, aws_ecs_cluster_capacity_providers.main]
   tags       = var.tags
 }
 
 resource "aws_ecs_service" "private" {
-  for_each = local.private_services
+  for_each = merge(local.private_services, local.legacy_sidecar_services)
 
-  name            = "${var.name}-${each.key}"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = each.key == "agent" ? aws_ecs_task_definition.agent_with_opa.arn : aws_ecs_task_definition.service[each.key].arn
-  desired_count   = var.desired_count
-  launch_type     = "FARGATE"
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  name                   = "${var.name}-${each.key}"
+  cluster                = aws_ecs_cluster.main.id
+  task_definition        = aws_ecs_task_definition.service[each.key].arn
+  desired_count          = var.desired_count
+  launch_type            = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  enable_execute_command = false
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.ecs_ec2_graviton.enabled ? [1] : []
+    content {
+      capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+      weight            = 1
+      base              = 0
+    }
+  }
 
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
@@ -1494,41 +1902,42 @@ resource "aws_ecs_service" "private" {
     registry_arn = aws_service_discovery_service.service[each.key].arn
   }
 
-  tags = var.tags
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
+  tags       = var.tags
 }
 
 resource "aws_ecs_task_definition" "audit_consumer" {
   count = var.enable_audit_consumer ? 1 : 0
 
   family                   = "${var.name}-audit-consumer"
-  requires_compatibilities = ["FARGATE"]
+  requires_compatibilities = local.ecs_launch_compatibilities
   network_mode             = "awsvpc"
   cpu                      = var.service_cpu
   memory                   = var.service_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = lookup(local.audit_sqs_task_role_arns, "audit_consumer", null)
+  execution_role_arn       = aws_iam_role.task_execution["audit_consumer"].arn
+  task_role_arn            = aws_iam_role.runtime["audit_consumer"].arn
 
   lifecycle {
     precondition {
-      condition = (
-        trimspace(var.clickhouse_password) != "" &&
-        lower(var.clickhouse_password) != "authclaw" &&
-        !strcontains(lower(var.clickhouse_password), "change-me")
-      )
-      error_message = "clickhouse_password must be a non-default secret when enable_audit_consumer is true."
+      condition     = trimspace(var.clickhouse_host) != ""
+      error_message = "Audit consumer requires a ClickHouse host and externally provisioned password secret."
     }
   }
 
   runtime_platform {
     operating_system_family = "LINUX"
-    cpu_architecture        = lookup(var.service_cpu_architectures, "audit_consumer", "X86_64")
+    cpu_architecture        = local.runtime_architectures.audit_consumer
   }
+
+  volume { name = "tmp" }
 
   container_definitions = jsonencode([
     {
       name      = "audit_consumer"
       image     = var.container_images.audit_consumer
       essential = true
+      cpu       = var.service_cpu
+      memory    = var.service_memory
       environment = concat(local.common_environment, local.audit_sqs_environment, local.audit_sqs_consumer_environment, [
         { name = "KAFKA_TOPICS", value = "gateway.traffic,audit.events" },
         { name = "KAFKA_DLQ_TOPIC", value = "audit.deadletter" },
@@ -1545,9 +1954,24 @@ resource "aws_ecs_task_definition" "audit_consumer" {
           protocol      = "tcp"
         }
       ]
-      secrets = var.clickhouse_password != "" ? [
+      secrets = var.clickhouse_host != "" ? [
         { name = "CLICKHOUSE_PASSWORD", valueFrom = aws_secretsmanager_secret.clickhouse_password[0].arn }
       ] : []
+      readonlyRootFilesystem = true
+      privileged             = false
+      stopTimeout            = 30
+      mountPoints            = [{ sourceVolume = "tmp", containerPath = "/tmp", readOnly = false }]
+      linuxParameters = {
+        initProcessEnabled = true
+        capabilities       = { drop = ["ALL"] }
+      }
+      healthCheck = {
+        command     = local.service_health_checks.audit_consumer
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 30
+      }
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -1565,11 +1989,26 @@ resource "aws_ecs_task_definition" "audit_consumer" {
 resource "aws_ecs_service" "audit_consumer" {
   count = var.enable_audit_consumer ? 1 : 0
 
-  name            = "${var.name}-audit-consumer"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.audit_consumer[0].arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  name                   = "${var.name}-audit-consumer"
+  cluster                = aws_ecs_cluster.main.id
+  task_definition        = aws_ecs_task_definition.audit_consumer[0].arn
+  desired_count          = 1
+  launch_type            = var.ecs_ec2_graviton.enabled ? null : "FARGATE"
+  enable_execute_command = false
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.ecs_ec2_graviton.enabled ? [1] : []
+    content {
+      capacity_provider = aws_ecs_capacity_provider.graviton[0].name
+      weight            = 1
+      base              = 0
+    }
+  }
 
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
@@ -1577,7 +2016,8 @@ resource "aws_ecs_service" "audit_consumer" {
     assign_public_ip = false
   }
 
-  tags = var.tags
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
+  tags       = var.tags
 }
 
 resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
@@ -1593,9 +2033,10 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
   statistic           = "Maximum"
   threshold           = 0
   treat_missing_data  = "breaching"
+  alarm_actions       = var.edge_alarm_action_arns
 
   dimensions = {
-    LoadBalancer = aws_lb.main.arn_suffix
+    LoadBalancer = aws_lb.service[each.key].arn_suffix
     TargetGroup  = aws_lb_target_group.service[each.key].arn_suffix
   }
 
@@ -1603,7 +2044,7 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_hosts" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
-  for_each = local.service_configs
+  for_each = local.ecs_alarm_services
 
   alarm_name          = "${var.name}-${each.key}-high-cpu"
   alarm_description   = "AuthClaw ${each.key} ECS CPU is above 85 percent"
@@ -1615,11 +2056,272 @@ resource "aws_cloudwatch_metric_alarm" "ecs_cpu" {
   statistic           = "Average"
   threshold           = 85
   treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
 
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
-    ServiceName = "${var.name}-${each.key}"
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
   }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_memory" {
+  for_each = local.ecs_alarm_services
+
+  alarm_name          = "${var.name}-${replace(each.key, "_", "-")}-high-memory"
+  alarm_description   = "AuthClaw ${each.key} ECS memory is above 85 percent"
+  namespace           = "AWS/ECS"
+  metric_name         = "MemoryUtilization"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  period              = 60
+  statistic           = "Average"
+  threshold           = 85
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_running_tasks" {
+  for_each = local.ecs_service_desired_counts
+
+  alarm_name          = "${var.name}-${replace(each.key, "_", "-")}-running-tasks-low"
+  alarm_description   = "AuthClaw ${each.key} has fewer running ECS tasks than its desired count"
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "RunningTaskCount"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Minimum"
+  threshold           = each.value
+  treat_missing_data  = "breaching"
+  alarm_actions       = var.edge_alarm_action_arns
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_capacity_provider_reservation" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  alarm_name          = "${var.name}-ecs-graviton-capacity-reservation"
+  alarm_description   = "ECS Graviton capacity provider reservation is above 90 percent"
+  namespace           = "AWS/ECS/ManagedScaling"
+  metric_name         = "CapacityProviderReservation"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  period              = 60
+  statistic           = "Average"
+  threshold           = 90
+  treat_missing_data  = "breaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  dimensions = {
+    CapacityProviderName = aws_ecs_capacity_provider.graviton[0].name
+    ClusterName          = aws_ecs_cluster.main.name
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_pending_tasks" {
+  for_each = local.ecs_alarm_services
+
+  alarm_name          = "${var.name}-${each.key}-pending-tasks"
+  alarm_description   = "AuthClaw ${each.key} has pending ECS tasks"
+  namespace           = "ECS/ContainerInsights"
+  metric_name         = "PendingTaskCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = distinct(concat(var.edge_alarm_action_arns, var.ecs_ec2_graviton.alarm_action_arns))
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = "${var.name}-${replace(each.key, "_", "-")}"
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_instance_health" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  alarm_name          = "${var.name}-ecs-graviton-instance-health"
+  alarm_description   = "At least one ECS Graviton container instance has failed EC2 status checks"
+  namespace           = "AWS/EC2"
+  metric_name         = "StatusCheckFailed"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.ecs_graviton[0].name
+  }
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_event_rule" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name        = "${var.name}-ecs-placement-failure"
+  description = "Captures ECS placement failures for AuthClaw services"
+  event_pattern = jsonencode({
+    source        = ["aws.ecs"]
+    "detail-type" = ["ECS Service Action"]
+    detail = {
+      clusterArn = [aws_ecs_cluster.main.arn]
+      eventName  = ["SERVICE_TASK_PLACEMENT_FAILURE"]
+    }
+  })
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_log_group" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name              = "/authclaw/${var.name}/ecs-placement-failure"
+  retention_in_days = 30
+  tags              = var.tags
+}
+
+resource "aws_cloudwatch_log_resource_policy" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  policy_name = "${var.name}-ecs-placement-failure"
+  policy_document = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "events.amazonaws.com"
+      }
+      Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+      Resource = "${aws_cloudwatch_log_group.ecs_placement_failure[0].arn}:*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_event_target" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  rule = aws_cloudwatch_event_rule.ecs_placement_failure[0].name
+  arn  = aws_cloudwatch_log_group.ecs_placement_failure[0].arn
+}
+
+resource "aws_cloudwatch_log_metric_filter" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  name           = "${var.name}-ecs-placement-failure"
+  log_group_name = aws_cloudwatch_log_group.ecs_placement_failure[0].name
+  pattern        = "{ $.detail.eventName = \"SERVICE_TASK_PLACEMENT_FAILURE\" }"
+
+  metric_transformation {
+    name      = "PlacementFailureCount"
+    namespace = "AuthClaw/ECS"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_placement_failure" {
+  count = var.ecs_ec2_graviton.enabled ? 1 : 0
+
+  alarm_name          = "${var.name}-ecs-placement-failure"
+  alarm_description   = "ECS reported at least one AuthClaw task placement failure"
+  namespace           = "AuthClaw/ECS"
+  metric_name         = "PlacementFailureCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.ecs_ec2_graviton.alarm_action_arns
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_event_rule" "ecs_deployment_failure" {
+  name        = "${var.name}-ecs-deployment-failure"
+  description = "Captures failed ECS circuit-breaker deployments"
+  event_pattern = jsonencode({
+    source        = ["aws.ecs"]
+    "detail-type" = ["ECS Deployment State Change"]
+    detail = {
+      clusterArn = [aws_ecs_cluster.main.arn]
+      eventName  = ["SERVICE_DEPLOYMENT_FAILED"]
+    }
+  })
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_log_group" "ecs_deployment_failure" {
+  name              = "/authclaw/${var.name}/ecs-deployment-failure"
+  retention_in_days = 30
+  tags              = var.tags
+}
+
+resource "aws_cloudwatch_log_resource_policy" "ecs_deployment_failure" {
+  policy_name = "${var.name}-ecs-deployment-failure"
+  policy_document = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "events.amazonaws.com" }
+      Action    = ["logs:CreateLogStream", "logs:PutLogEvents"]
+      Resource  = "${aws_cloudwatch_log_group.ecs_deployment_failure.arn}:*"
+    }]
+  })
+}
+
+resource "aws_cloudwatch_event_target" "ecs_deployment_failure" {
+  rule = aws_cloudwatch_event_rule.ecs_deployment_failure.name
+  arn  = aws_cloudwatch_log_group.ecs_deployment_failure.arn
+}
+
+resource "aws_cloudwatch_log_metric_filter" "ecs_deployment_failure" {
+  name           = "${var.name}-ecs-deployment-failure"
+  log_group_name = aws_cloudwatch_log_group.ecs_deployment_failure.name
+  pattern        = "{ $.detail.eventName = \"SERVICE_DEPLOYMENT_FAILED\" }"
+
+  metric_transformation {
+    name      = "DeploymentFailureCount"
+    namespace = "AuthClaw/ECS"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ecs_deployment_failure" {
+  alarm_name          = "${var.name}-ecs-deployment-failure"
+  alarm_description   = "ECS reported a failed AuthClaw deployment and circuit-breaker rollback"
+  namespace           = "AuthClaw/ECS"
+  metric_name         = "DeploymentFailureCount"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 0
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = var.edge_alarm_action_arns
 
   tags = var.tags
 }

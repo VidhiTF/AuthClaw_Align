@@ -38,6 +38,11 @@ test("OIDC state remains valid across a session-key rotation", () => {
   process.env.AUTHCLAW_SESSION_KEY_VERSION = "v2";
   process.env.SESSION_SECRET_V2 = "new-oidc-state-test-secret";
   assert.deepEqual(openOidcState(sealed), state);
+  const rotated = sealOidcState(state);
+  process.env.AUTHCLAW_SESSION_KEY_VERSION = "v1";
+  assert.deepEqual(openOidcState(rotated), state);
+  delete process.env.SESSION_SECRET_V2;
+  assert.throws(() => openOidcState(rotated), /Invalid OIDC state/);
 });
 
 test("OIDC service credentials are endpoint scoped and bind the outgoing body", () => {

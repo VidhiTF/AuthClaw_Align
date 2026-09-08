@@ -16,6 +16,17 @@ variable "primary_region" {
   default     = "us-east-1"
 }
 
+variable "aws_account_id" {
+  description = "AWS account ID used to scope service log-delivery policies; required for production."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.aws_account_id == "" || can(regex("^[0-9]{12}$", var.aws_account_id))
+    error_message = "aws_account_id must be empty or exactly 12 digits."
+  }
+}
+
 variable "secondary_region" {
   description = "Secondary AWS region for standby/failover."
   type        = string
@@ -51,9 +62,54 @@ variable "secondary_availability_zones" {
 }
 
 variable "enable_private_aws_endpoints" {
-  description = "Create private S3, ECR, CloudWatch Logs, Secrets Manager, and KMS VPC endpoints in each regional stack."
+  description = "Create private S3, ECR, CloudWatch Logs, Secrets Manager, KMS, and STS VPC endpoints in each regional stack, plus SQS when selected."
   type        = bool
   default     = true
+}
+
+variable "runtime_s3_bucket_arns" {
+  description = "Approved S3 bucket ARNs by runtime service (backend or agent). Empty entries fail closed."
+  type        = map(set(string))
+  default     = {}
+
+  validation {
+    condition     = alltrue([for service in keys(var.runtime_s3_bucket_arns) : contains(["backend", "agent"], service)])
+    error_message = "runtime_s3_bucket_arns keys must be backend or agent."
+  }
+}
+
+variable "runtime_kms_key_arns" {
+  description = "Approved KMS key ARNs by runtime service (backend or agent). Empty entries fail closed."
+  type        = map(set(string))
+  default     = {}
+
+  validation {
+    condition     = alltrue([for service in keys(var.runtime_kms_key_arns) : contains(["backend", "agent"], service)])
+    error_message = "runtime_kms_key_arns keys must be backend or agent."
+  }
+}
+
+variable "runtime_secrets_manager_secret_arns" {
+  description = "Approved Secrets Manager secret ARNs for the agent runtime. Empty entries fail closed."
+  type        = map(set(string))
+  default     = {}
+
+  validation {
+    condition     = alltrue([for service in keys(var.runtime_secrets_manager_secret_arns) : service == "agent"])
+    error_message = "runtime_secrets_manager_secret_arns only supports the confirmed agent caller."
+  }
+}
+
+variable "runtime_sts_assume_role_arns" {
+  description = "Exact customer role ARNs the agent runtime may assume. Empty disables runtime role assumption."
+  type        = set(string)
+  default     = []
+}
+
+variable "vpc_endpoint_external_principal_arns" {
+  description = "Explicit external IAM principal ARNs allowed to use runtime AWS-service endpoints."
+  type        = set(string)
+  default     = []
 }
 
 variable "nat_gateway_mode" {
@@ -86,13 +142,39 @@ variable "service_cpu_architectures" {
   default     = {}
 
   validation {
-    condition     = length(setsubtract(keys(var.service_cpu_architectures), ["agent", "backend", "gateway", "console", "audit_consumer"])) == 0
-    error_message = "service_cpu_architectures supports only agent, backend, gateway, console, and audit_consumer."
+    condition     = length(setsubtract(keys(var.service_cpu_architectures), ["agent", "backend", "gateway", "console", "audit_consumer", "opa", "presidio"])) == 0
+    error_message = "service_cpu_architectures contains an unknown runtime service."
   }
 
   validation {
     condition     = alltrue([for architecture in values(var.service_cpu_architectures) : contains(["ARM64", "X86_64"], architecture)])
     error_message = "service_cpu_architectures values must be ARM64 or X86_64."
+  }
+}
+
+variable "ecs_ec2_graviton" {
+  description = "Optional ECS on EC2 Graviton capacity provider for P0-05. Keep disabled until ownership and failure rehearsal gates are approved."
+  type = object({
+    enabled              = optional(bool, false)
+    instance_type        = optional(string, "m7g.2xlarge")
+    min_size             = optional(number, 2)
+    desired_size         = optional(number, 2)
+    max_size             = optional(number, 4)
+    image_id             = optional(string, "")
+    root_volume_size     = optional(number, 50)
+    alarm_action_arns    = optional(list(string), [])
+    x86_provider_enabled = optional(bool, false)
+  })
+  default = {}
+
+  validation {
+    condition     = var.ecs_ec2_graviton.min_size >= 0 && var.ecs_ec2_graviton.desired_size >= var.ecs_ec2_graviton.min_size && var.ecs_ec2_graviton.max_size >= var.ecs_ec2_graviton.desired_size
+    error_message = "ecs_ec2_graviton capacity must satisfy min_size <= desired_size <= max_size."
+  }
+
+  validation {
+    condition     = can(regex("^[a-z][0-9]+g\\.", var.ecs_ec2_graviton.instance_type))
+    error_message = "ecs_ec2_graviton.instance_type must be an ARM64 Graviton instance family such as m7g.large."
   }
 }
 
@@ -106,6 +188,13 @@ variable "require_immutable_images" {
       for image in values(var.container_images) : can(regex("@sha256:[0-9a-f]{64}$", image))
     ])
     error_message = "Controlled-beta container_images must all end in @sha256:<64 lowercase hex characters>."
+  }
+}
+
+check "controlled_environments_require_immutable_images" {
+  assert {
+    condition     = !contains(["controlled-beta", "staging", "stage", "production", "prod"], var.authclaw_env) || var.require_immutable_images
+    error_message = "Staging and production deployments must enable require_immutable_images."
   }
 }
 
@@ -179,6 +268,12 @@ variable "gateway_sidecar_task_cpu" {
   default = 2048
 }
 
+variable "enable_policy_sidecar_colocation" {
+  description = "Enable the separately reviewed gateway/OPA/Presidio co-location release."
+  type        = bool
+  default     = false
+}
+
 variable "gateway_sidecar_task_memory" {
   type    = number
   default = 4096
@@ -234,6 +329,57 @@ variable "certificate_arn" {
   default     = ""
 }
 
+variable "enable_public_edge" {
+  description = "Create the approved Route53, CloudFront, WAF, and private-ALB public entry model."
+  type        = bool
+  default     = false
+}
+
+variable "public_url_environment" {
+  description = "Approved ADR-0002 public URL boundary to provision independently of runtime hardening gates."
+  type        = string
+  default     = "staging"
+
+  validation {
+    condition     = contains(["staging", "production"], var.public_url_environment)
+    error_message = "public_url_environment must be staging or production."
+  }
+}
+
+variable "edge_certificate_arn" {
+  description = "ACM certificate ARN in us-east-1 covering the approved environment domains."
+  type        = string
+  default     = ""
+}
+
+variable "edge_log_retention_days" {
+  description = "CloudFront, WAF, and ALB access-log retention."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.edge_log_retention_days >= 30
+    error_message = "edge_log_retention_days must be at least 30 days."
+  }
+}
+
+variable "waf_rate_limit" {
+  description = "Maximum requests per five-minute WAF evaluation window for one source IP."
+  type        = number
+  default     = 2000
+
+  validation {
+    condition     = var.waf_rate_limit >= 100
+    error_message = "waf_rate_limit must be at least 100."
+  }
+}
+
+variable "edge_alarm_action_arns" {
+  description = "Approved SNS or incident-action ARNs for edge, origin-health, and ECS service alarms."
+  type        = list(string)
+  default     = []
+}
+
 variable "primary_certificate_arn" {
   description = "Optional ACM certificate ARN in the primary AWS region. Required for primary production HTTPS."
   type        = string
@@ -272,6 +418,10 @@ variable "audit_stream_transport" {
   validation {
     condition     = contains(["kafka", "sqs_fifo"], var.audit_stream_transport)
     error_message = "audit_stream_transport must be kafka or sqs_fifo."
+  }
+  validation {
+    condition     = var.audit_stream_transport != "sqs_fifo" || var.internal_tls.enabled
+    error_message = "SQS audit transport requires internal_tls.enabled=true so gateway-to-producer authentication is encrypted."
   }
 }
 
@@ -394,10 +544,14 @@ variable "clickhouse_user" {
 }
 
 variable "clickhouse_password" {
-  description = "ClickHouse account password, required when the shared audit consumer is enabled. Pass via a secured tfvars source."
+  description = "Deprecated: provision the secret externally; values must not enter Terraform."
   type        = string
   default     = ""
   sensitive   = true
+  validation {
+    condition     = var.clickhouse_password == null || var.clickhouse_password == ""
+    error_message = "Secret values must be supplied by the external provisioner, not Terraform variables."
+  }
 }
 
 variable "enable_audit_consumer" {
@@ -408,5 +562,56 @@ variable "enable_audit_consumer" {
 
 variable "tags" {
   type    = map(string)
+  default = {}
+}
+variable "iam_permissions_boundary_arn" {
+  type        = string
+  default     = null
+  description = "Optional organization-approved ECS execution-role boundary ARN."
+}
+variable "agent_customer_role_arns" {
+  type    = set(string)
+  default = []
+}
+variable "kms_break_glass_role_arns" {
+  type    = set(string)
+  default = []
+}
+variable "internal_tls" {
+  type = object({
+    enabled     = optional(bool, false)
+    namespace   = optional(string, "")
+    proxy_image = optional(string, "nginxinc/nginx-unprivileged@sha256:9b87ad3dd9f431c733f19dfb278c7eb3dba9dca381942c79818bb42f1a566a83")
+  })
+  default = {}
+}
+variable "direct_aws" {
+  type = object({
+    backend_kms_versions    = optional(map(string), {})
+    agent_kms_key           = optional(string, "")
+    agent_previous_kms_keys = optional(set(string), [])
+    agent_secrets           = optional(map(string), {})
+    agent_secret_kms_keys   = optional(set(string), [])
+    agent_s3_buckets        = optional(set(string), [])
+    agent_s3_objects        = optional(set(string), [])
+    document_role_arn       = optional(string, "")
+    document_external_id    = optional(string, "")
+  })
+  default = {}
+}
+
+variable "secondary_direct_aws" {
+  description = "Secondary-region exact resources; never inherit primary-region KMS or secrets."
+  type = object({
+    backend_kms_versions    = optional(map(string), {})
+    agent_kms_key           = optional(string, "")
+    agent_previous_kms_keys = optional(set(string), [])
+    agent_secrets           = optional(map(string), {})
+    agent_secret_kms_keys   = optional(set(string), [])
+    agent_s3_buckets        = optional(set(string), [])
+    agent_s3_objects        = optional(set(string), [])
+    document_role_arn       = optional(string, "")
+    document_external_id    = optional(string, "")
+  })
   default = {}
 }

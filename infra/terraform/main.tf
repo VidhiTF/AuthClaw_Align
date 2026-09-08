@@ -1,5 +1,19 @@
 locals {
-  name = "${var.project}-${var.environment}"
+  name          = "${var.project}-${var.environment}"
+  is_production = contains(["prod", "production"], lower(trimspace(var.environment))) || contains(["prod", "production"], lower(trimspace(var.authclaw_env))) || var.public_url_environment == "production"
+  approved_public_domains = var.public_url_environment == "production" ? {
+    marketing = "authclaw.ai"
+    www       = "www.authclaw.ai"
+    console   = "app.authclaw.ai"
+    api       = "api.authclaw.ai"
+    gateway   = "gateway.authclaw.ai"
+    } : {
+    marketing = "dev.authclaw.ai"
+    www       = ""
+    console   = "dev.authclaw.ai"
+    api       = "api.dev.authclaw.ai"
+    gateway   = "gateway.dev.authclaw.ai"
+  }
   tags = merge(var.tags, {
     Project     = var.project
     Environment = var.environment
@@ -9,9 +23,13 @@ locals {
 }
 
 module "primary" {
+  direct_aws                   = var.direct_aws
+  internal_tls                 = var.internal_tls
+  iam_account_id               = var.ci_skip_aws_validation ? "123456789012" : null
+  kms_break_glass_role_arns    = var.kms_break_glass_role_arns
+  agent_customer_role_arns     = var.agent_customer_role_arns
+  iam_permissions_boundary_arn = var.iam_permissions_boundary_arn
   source                       = "./modules/regional_stack"
-  oidc_bff_exchange_secret     = random_password.oidc_bff_exchange.result
-  worker_token_hmac_secret     = random_password.worker_token_hmac.result
   worker_token_issuance_paused = var.worker_token_issuance_paused
   oidc_login_paused            = var.oidc_login_paused
 
@@ -22,15 +40,24 @@ module "primary" {
   name                                 = "${local.name}-primary"
   environment                          = var.environment
   region                               = var.primary_region
+  aws_account_id                       = var.aws_account_id
   vpc_cidr                             = var.primary_vpc_cidr
   availability_zones                   = var.primary_availability_zones
   nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
+  runtime_s3_bucket_arns               = var.runtime_s3_bucket_arns
+  runtime_kms_key_arns                 = var.runtime_kms_key_arns
+  runtime_secrets_manager_secret_arns  = var.runtime_secrets_manager_secret_arns
+  runtime_sts_assume_role_arns         = var.runtime_sts_assume_role_arns
+  vpc_endpoint_external_principal_arns = var.vpc_endpoint_external_principal_arns
   container_images                     = var.container_images
+  ecr_repository_arns                  = toset(values(aws_ecr_repository.service)[*].arn)
   service_cpu_architectures            = var.service_cpu_architectures
+  ecs_ec2_graviton                     = var.ecs_ec2_graviton
   desired_count                        = var.desired_count_primary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
+  enable_policy_sidecar_colocation     = var.enable_policy_sidecar_colocation
   backend_sidecar_task_cpu             = var.backend_sidecar_task_cpu
   backend_sidecar_task_memory          = var.backend_sidecar_task_memory
   agent_sidecar_task_cpu               = var.agent_sidecar_task_cpu
@@ -42,12 +69,20 @@ module "primary" {
   forwarded_header_mode                = var.forwarded_header_mode
   bff_client_ip_enabled                = var.bff_client_ip_enabled
   bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled
-  bff_client_ip_secret                 = random_password.bff_client_ip.result
   secret_key_version                   = var.secret_key_version
   jwt_key_version                      = var.jwt_key_version
   session_key_version                  = var.session_key_version
   certificate_arn                      = var.primary_certificate_arn != "" ? var.primary_certificate_arn : var.certificate_arn
   domain_name                          = var.domain_name
+  enable_public_edge                   = var.enable_public_edge
+  public_domain_names = {
+    console = local.approved_public_domains.console
+    api     = local.approved_public_domains.api
+    gateway = local.approved_public_domains.gateway
+  }
+  public_url_environment               = var.public_url_environment
+  alb_access_log_retention_days        = var.edge_log_retention_days
+  edge_alarm_action_arns               = var.edge_alarm_action_arns
   smtp_host                            = var.smtp_host
   smtp_from                            = var.smtp_from
   kafka_brokers                        = var.kafka_brokers
@@ -68,17 +103,20 @@ module "primary" {
   clickhouse_port                      = var.clickhouse_port
   clickhouse_db                        = var.clickhouse_db
   clickhouse_user                      = var.clickhouse_user
-  clickhouse_password                  = var.clickhouse_password
   enable_audit_consumer                = var.enable_audit_consumer
   replica_source_db_arn                = ""
   tags                                 = local.tags
 }
 
 module "secondary" {
+  direct_aws                   = var.secondary_direct_aws
+  internal_tls                 = var.internal_tls
+  iam_account_id               = var.ci_skip_aws_validation ? "123456789012" : null
+  kms_break_glass_role_arns    = var.kms_break_glass_role_arns
+  agent_customer_role_arns     = var.agent_customer_role_arns
+  iam_permissions_boundary_arn = var.iam_permissions_boundary_arn
   count                        = var.enable_secondary ? 1 : 0
   source                       = "./modules/regional_stack"
-  oidc_bff_exchange_secret     = random_password.oidc_bff_exchange.result
-  worker_token_hmac_secret     = random_password.worker_token_hmac.result
   worker_token_issuance_paused = var.worker_token_issuance_paused
   oidc_login_paused            = var.oidc_login_paused
 
@@ -89,15 +127,24 @@ module "secondary" {
   name                                 = "${local.name}-secondary"
   environment                          = var.environment
   region                               = var.secondary_region
+  aws_account_id                       = var.aws_account_id
   vpc_cidr                             = var.secondary_vpc_cidr
   availability_zones                   = var.secondary_availability_zones
   nat_gateway_mode                     = var.nat_gateway_mode
   enable_private_aws_endpoints         = var.enable_private_aws_endpoints
+  runtime_s3_bucket_arns               = var.runtime_s3_bucket_arns
+  runtime_kms_key_arns                 = var.runtime_kms_key_arns
+  runtime_secrets_manager_secret_arns  = var.runtime_secrets_manager_secret_arns
+  runtime_sts_assume_role_arns         = var.runtime_sts_assume_role_arns
+  vpc_endpoint_external_principal_arns = var.vpc_endpoint_external_principal_arns
   container_images                     = var.container_images
+  ecr_repository_arns                  = toset(values(aws_ecr_repository.service)[*].arn)
   service_cpu_architectures            = var.service_cpu_architectures
+  ecs_ec2_graviton                     = var.ecs_ec2_graviton
   desired_count                        = var.desired_count_secondary
   gateway_sidecar_task_cpu             = var.gateway_sidecar_task_cpu
   gateway_sidecar_task_memory          = var.gateway_sidecar_task_memory
+  enable_policy_sidecar_colocation     = var.enable_policy_sidecar_colocation
   backend_sidecar_task_cpu             = var.backend_sidecar_task_cpu
   backend_sidecar_task_memory          = var.backend_sidecar_task_memory
   agent_sidecar_task_cpu               = var.agent_sidecar_task_cpu
@@ -109,12 +156,20 @@ module "secondary" {
   forwarded_header_mode                = var.forwarded_header_mode
   bff_client_ip_enabled                = var.bff_client_ip_enabled
   bff_client_ip_signing_enabled        = var.bff_client_ip_signing_enabled
-  bff_client_ip_secret                 = random_password.bff_client_ip.result
   secret_key_version                   = var.secret_key_version
   jwt_key_version                      = var.jwt_key_version
   session_key_version                  = var.session_key_version
   certificate_arn                      = var.secondary_certificate_arn != "" ? var.secondary_certificate_arn : var.certificate_arn
   domain_name                          = var.domain_name
+  enable_public_edge                   = var.enable_public_edge
+  public_domain_names = {
+    console = local.approved_public_domains.console
+    api     = local.approved_public_domains.api
+    gateway = local.approved_public_domains.gateway
+  }
+  public_url_environment               = var.public_url_environment
+  alb_access_log_retention_days        = var.edge_log_retention_days
+  edge_alarm_action_arns               = var.edge_alarm_action_arns
   smtp_host                            = var.smtp_host
   smtp_from                            = var.smtp_from
   kafka_brokers                        = var.kafka_brokers
@@ -135,49 +190,7 @@ module "secondary" {
   clickhouse_port                      = var.clickhouse_port
   clickhouse_db                        = var.clickhouse_db
   clickhouse_user                      = var.clickhouse_user
-  clickhouse_password                  = var.clickhouse_password
   enable_audit_consumer                = var.enable_audit_consumer
   replica_source_db_arn                = var.enable_cross_region_db_replica ? module.primary.rds_instance_arn : ""
-  db_password                          = var.enable_cross_region_db_replica ? module.primary.db_password : ""
   tags                                 = local.tags
-}
-
-resource "aws_route53_record" "console_primary" {
-  provider = aws.primary
-  count    = var.hosted_zone_id != "" && var.domain_name != "" ? 1 : 0
-
-  zone_id = var.hosted_zone_id
-  name    = var.domain_name
-  type    = "A"
-
-  set_identifier = "primary"
-  failover_routing_policy {
-    type = "PRIMARY"
-  }
-
-  alias {
-    name                   = module.primary.alb_dns_name
-    zone_id                = module.primary.alb_zone_id
-    evaluate_target_health = true
-  }
-}
-
-resource "aws_route53_record" "console_secondary" {
-  provider = aws.primary
-  count    = var.enable_secondary && var.hosted_zone_id != "" && var.domain_name != "" ? 1 : 0
-
-  zone_id = var.hosted_zone_id
-  name    = var.domain_name
-  type    = "A"
-
-  set_identifier = "secondary"
-  failover_routing_policy {
-    type = "SECONDARY"
-  }
-
-  alias {
-    name                   = module.secondary[0].alb_dns_name
-    zone_id                = module.secondary[0].alb_zone_id
-    evaluate_target_health = true
-  }
 }

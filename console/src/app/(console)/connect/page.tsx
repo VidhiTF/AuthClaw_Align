@@ -20,6 +20,7 @@ import {
   Trash2,
 } from "lucide-react";
 import MfaChallengeModal from "@/components/mfa-challenge-modal";
+import { useRuntimeConfig } from "@/lib/runtime-config";
 import { fetchJson } from "@/lib/client-fetch";
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
@@ -102,6 +103,7 @@ interface OnboardingConnectResult {
 }
 
 export default function ConnectPage() {
+  const runtimeConfig = useRuntimeConfig();
   const [provider, setProvider] = useState<Provider>("gemini");
   const [copied, setCopied] = useState<string | null>(null);
   const [codeTab, setCodeTab] = useState<"curl" | "python">("curl");
@@ -130,7 +132,7 @@ export default function ConnectPage() {
   const [testResult, setTestResult] = useState<GatewayTestResult | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [onboardingResult, setOnboardingResult] = useState<OnboardingConnectResult | null>(null);
-  const gatewayUrl = onboardingResult?.gateway_url || process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:18080";
+  const gatewayUrl = onboardingResult?.gateway_url || runtimeConfig?.gateway_url || "";
   const selected = providerCatalog[provider];
 
   const selectProvider = (nextProvider: Provider) => {
@@ -495,7 +497,6 @@ print(response)`;
               Credentials are encrypted and never returned after save.
             </div>
           </div>
-
           <div className="p-5 sm:p-6">
             <div className="flex flex-col gap-3 border-b border-[#E6E9F0] pb-5 sm:flex-row sm:justify-between">
               <div>

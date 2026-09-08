@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "exceptions": [],
+  "platform_constraints": [
+    {
+      "control": "no-new-privileges",
+      "scope": "ECS Fargate Linux tasks",
+      "reason": "ECS task definitions do not expose the OCI noNewPrivileges flag.",
+      "compensating_controls": ["non-root image users", "all Linux capabilities dropped", "privileged=false", "read-only root filesystem", "explicit writable mounts"],
+      "owner": "platform-security",
+      "review_by": "2026-12-06"
+    }
+  ]
+}

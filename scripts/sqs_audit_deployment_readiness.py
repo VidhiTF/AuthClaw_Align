@@ -142,12 +142,15 @@ def ecs_checks(cluster: str, services: dict[str, str], queue_url: str, role_arns
         secrets = [item.get("name") for container in task.get("containerDefinitions", []) for item in container.get("secrets", [])]
         expected_role = consumer_role if service_key == "audit_consumer" else role_arns.get(service_key)
         static_creds = any(name in env or name in secrets for name in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"])
-        if service_key in {"backend", "gateway", "audit_consumer"}:
+        if service_key in {"backend", "audit_producer", "audit_consumer"}:
             checks.append(check(f"ECS {service_key} task role", PASS if expected_role and task.get("taskRoleArn") == expected_role else (PENDING if not task else FAIL), task_reason or reason or "taskRoleArn must match Terraform audit SQS role", task.get("taskRoleArn")))
-        if service_key in {"backend", "gateway", "audit_consumer"}:
+        if service_key in {"backend", "gateway", "audit_producer", "audit_consumer"}:
             checks.append(check(f"ECS {service_key} transport env", PASS if env.get("AUDIT_STREAM_TRANSPORT") in {"kafka", "sqs_fifo"} else (PENDING if not task else FAIL), "AUDIT_STREAM_TRANSPORT must be present and valid", env))
-        if service_key in {"backend", "gateway"}:
+        if service_key in {"backend", "audit_producer"}:
             checks.append(check(f"ECS {service_key} queue URL env", PASS if env.get("AUDIT_STREAM_TRANSPORT") == "kafka" or env.get("SQS_AUDIT_QUEUE_URL") == queue_url else (PENDING if not task else FAIL), "SQS_AUDIT_QUEUE_URL required only in SQS mode", env))
+        if service_key == "gateway":
+            isolated = task.get("taskRoleArn") is None and env.get("SQS_AUDIT_QUEUE_URL") is None and str(env.get("AUDIT_PRODUCER_URL", "")).startswith("https://")
+            checks.append(check("ECS gateway SQS credentials isolated", PASS if isolated else (PENDING if not task else FAIL), "gateway must use the HTTPS producer without a task role or queue URL", {"taskRoleArn": task.get("taskRoleArn"), "environment": env}))
         if service_key == "agent":
             checks.append(check("ECS agent legacy audit remains Kafka", PASS if env.get("AGENT_AUDIT_STREAM_TRANSPORT", "kafka") == "kafka" and "SQS_AUDIT_QUEUE_URL" not in env else (PENDING if not task else FAIL), "legacy agent audit must not be directed to canonical SQS", env))
         checks.append(check(f"ECS {service_key} no static AWS credentials", PASS if task and not static_creds else (PENDING if not task else FAIL), "task definition must not expose static AWS credential env/secrets", {"environment": env, "secrets": secrets}))
@@ -216,7 +219,7 @@ def main() -> int:
             "aws cloudwatch describe-alarms --alarm-names <audit_sqs.alarm_names>",
             "aws iam simulate-principal-policy for producer/consumer task roles",
             "aws ec2 describe-vpc-endpoints --vpc-endpoint-ids <network_path.interface_endpoint_ids.sqs>",
-            "aws ecs describe-services and describe-task-definition for backend/gateway/agent/audit_consumer",
+            "aws ecs describe-services and describe-task-definition for backend/gateway/agent/audit_producer/audit_consumer",
         ],
         "checks": checks,
         "collection_errors": redact({

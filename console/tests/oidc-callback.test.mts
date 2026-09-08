@@ -21,19 +21,19 @@ test("OIDC callback sends only opaque state to authenticated exchange and clears
   const binding = source.indexOf("state !== expected");
   const exchange = source.indexOf("await fetch(`${BACKEND_URL}/v1/auth/oidc/callback`");
   const failure = source.indexOf("if (!backendResponse.ok)");
-  const session = source.indexOf('response.cookies.set("authclaw_session"');
+  const session = source.indexOf("response.cookies.set(sessionCookieName()");
 
   assert.ok(binding >= 0 && binding < exchange);
   assert.match(source, /oidcServiceHeaders\("\/v1\/auth\/oidc\/callback", body\)/);
   assert.match(source, /JSON.stringify\(\{ code, transaction_id: expected \}\)/);
   assert.doesNotMatch(source, /nonce:|tenant_name:|redirect_uri:/);
   assert.ok(failure > exchange && failure < session);
-  assert.match(source, /const fail = \(message: string\) => \{[\s\S]*response\.cookies\.delete\("authclaw_oidc_state"\)/);
+  assert.match(source, /const fail = \(message: string\) => \{[\s\S]*response\.cookies\.delete\(oidcStateCookieName\(\)\)/);
 });
 
 test("OIDC callback stores the backend opaque session and redirects", () => {
   assert.match(source, /data\.session_token/);
   assert.doesNotMatch(source, /sessionStore|data\.api_key/);
-  assert.match(source, /response\.cookies\.set\("authclaw_session"/);
+  assert.match(source, /response\.cookies\.set\(sessionCookieName\(\)/);
   assert.match(source, /NextResponse\.redirect\(`\$\{url\.origin\}\/overview`\)/);
 });

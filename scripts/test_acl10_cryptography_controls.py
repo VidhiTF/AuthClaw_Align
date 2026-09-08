@@ -11,10 +11,11 @@ class ACL10CryptographyControlTests(unittest.TestCase):
     def test_managed_key_rotation_and_encrypted_storage_are_declared(self):
         self.assertIn("enable_key_rotation     = true", REGIONAL_STACK)
         self.assertGreaterEqual(REGIONAL_STACK.count("kms_key_id = aws_kms_key.main.arn"), 6)
-        self.assertIn("storage_encrypted       = true", REGIONAL_STACK)
+        self.assertRegex(REGIONAL_STACK, r"storage_encrypted\s*=\s*true")
         self.assertIn("at_rest_encryption_enabled = true", REGIONAL_STACK)
         self.assertIn("transit_encryption_enabled = true", REGIONAL_STACK)
-        self.assertIn("sslmode=require", REGIONAL_STACK)
+        self.assertIn("manage_master_user_password", REGIONAL_STACK)
+        self.assertNotIn('resource "aws_secretsmanager_secret_version"', REGIONAL_STACK)
 
     def test_external_tls_uses_managed_certificate_and_modern_policy(self):
         self.assertIn('listener_protocol     = "HTTPS"', REGIONAL_STACK)
@@ -23,7 +24,7 @@ class ACL10CryptographyControlTests(unittest.TestCase):
 
     def test_production_refuses_the_current_plaintext_service_topology(self):
         self.assertIn('name = "AUTHCLAW_REQUIRE_SERVICE_TLS"', REGIONAL_STACK)
-        self.assertIn('var.authclaw_env != "production" || alltrue([', REGIONAL_STACK)
+        self.assertIn('!contains(["production", "prod"], var.authclaw_env) || alltrue([', REGIONAL_STACK)
         self.assertIn("Production is blocked until agent, gateway, OPA, and Presidio", REGIONAL_STACK)
 
     def test_envelope_rotation_keeps_current_and_previous_keys_available(self):

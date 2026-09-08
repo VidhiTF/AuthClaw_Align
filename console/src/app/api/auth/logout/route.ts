@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { sessionCookieName } from "@/lib/cookie-options";
 import { sessionCookieOptions } from "@/lib/cookie-options";
 
 export async function POST() {
   const cookieStore = await cookies();
-  const sessionToken = cookieStore.get("authclaw_session")?.value;
+  const sessionToken = cookieStore.get(sessionCookieName())?.value;
 
   if (sessionToken) {
     try {
@@ -21,7 +22,7 @@ export async function POST() {
   const response = NextResponse.json({ success: true });
 
   // Delete the session cookie
-  response.cookies.set("authclaw_session", "", {
+  response.cookies.set(sessionCookieName(), "", {
     ...sessionCookieOptions(),
     expires: new Date(0),
   });

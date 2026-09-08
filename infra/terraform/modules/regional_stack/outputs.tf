@@ -1,9 +1,41 @@
 output "alb_dns_name" {
-  value = aws_lb.main.dns_name
+  value = aws_lb.service["console"].dns_name
 }
 
 output "alb_zone_id" {
-  value = aws_lb.main.zone_id
+  value = aws_lb.service["console"].zone_id
+}
+
+output "origin_load_balancers" {
+  value = {
+    for service, load_balancer in aws_lb.service : service => {
+      arn      = load_balancer.arn
+      dns_name = load_balancer.dns_name
+      zone_id  = load_balancer.zone_id
+      internal = load_balancer.internal
+    }
+  }
+}
+
+output "origin_ingress_boundary" {
+  value = {
+    public_cidr_rule_count = length(flatten([for rule in aws_security_group.alb.ingress : coalesce(rule.cidr_blocks, [])]))
+    prefix_list_rule_count = length(flatten([for rule in aws_security_group.alb.ingress : coalesce(rule.prefix_list_ids, [])]))
+    listener_ports         = distinct(values(aws_lb_listener.service)[*].port)
+    access_log_bucket      = aws_s3_bucket.alb_logs.id
+  }
+}
+
+output "runtime_url_boundary" {
+  value = {
+    console_url       = local.console_base_url
+    api_url           = local.api_base_url
+    gateway_url       = local.gateway_base_url
+    cors_origins      = [local.console_base_url]
+    oidc_redirect_uri = "${local.console_base_url}/api/auth/oidc/callback"
+    cookie_secure     = true
+    cookie_domain     = null
+  }
 }
 
 output "ecs_cluster_name" {
@@ -20,8 +52,8 @@ output "ecs_service_names" {
 
 output "public_endpoints" {
   value = {
-    console = "${local.public_scheme}://${local.public_host}"
-    backend = "${local.api_base_url}/health"
+    console = local.console_base_url
+    backend = "${local.public_scheme}://${local.api_host}${var.enable_public_edge ? "" : ":8000"}/health"
     gateway = "${local.gateway_base_url}/health"
   }
 }
@@ -30,11 +62,33 @@ output "alarm_names" {
   value = concat(
     values(aws_cloudwatch_metric_alarm.unhealthy_hosts)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.ecs_cpu)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_memory)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_running_tasks)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_pending_tasks)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.nat_port_allocation)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.nat_packet_drop)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.nat_idle_timeout)[*].alarm_name,
+    aws_cloudwatch_metric_alarm.ecs_capacity_provider_reservation[*].alarm_name,
+    aws_cloudwatch_metric_alarm.ecs_instance_health[*].alarm_name,
+    aws_cloudwatch_metric_alarm.ecs_placement_failure[*].alarm_name,
+    [aws_cloudwatch_metric_alarm.ecs_deployment_failure.alarm_name],
   )
+}
+
+output "ecs_launch_model" {
+  value = {
+    mode                   = var.ecs_ec2_graviton.enabled ? "EC2_GRAVITON" : "FARGATE"
+    task_compatibilities   = local.ecs_launch_compatibilities
+    runtime_architectures  = local.runtime_architectures
+    capacity_provider_name = try(aws_ecs_capacity_provider.graviton[0].name, null)
+    asg_name               = try(aws_autoscaling_group.ecs_graviton[0].name, null)
+    asg_min_size           = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.min_size : null
+    asg_desired_size       = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.desired_size : null
+    asg_max_size           = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.max_size : null
+    x86_provider_enabled   = var.ecs_ec2_graviton.x86_provider_enabled
+    awsvpc_block_imds      = var.ecs_ec2_graviton.enabled ? strcontains(base64decode(aws_launch_template.ecs_graviton[0].user_data), "ECS_AWSVPC_BLOCK_IMDS=true") : null
+  }
 }
 
 output "nat_gateway_mode" {
@@ -73,8 +127,26 @@ output "interface_endpoint_private_dns_enabled" {
   value = { for service, endpoint in aws_vpc_endpoint.interface : service => endpoint.private_dns_enabled }
 }
 
+output "gateway_endpoint_policies" {
+  value = { for service in keys(aws_vpc_endpoint.gateway) : service => true }
+}
+
+output "interface_endpoint_policies" {
+  value = { for service in keys(aws_vpc_endpoint.interface) : service => true }
+}
+
 output "endpoint_client_security_group_id" {
   value = aws_security_group.app.id
+}
+
+output "runtime_ingress_ports" {
+  value = {
+    console_to_app = var.internal_tls.enabled ? [8443] : [8000, 8001, 8080]
+    alb_to_public = {
+      for service in keys(local.public_services) : service => local.service_ports[service]
+    }
+    service_to_service = distinct([for port in values(local.service_ports) : tonumber(port)])
+  }
 }
 
 output "endpoint_ingress_source_count" {
@@ -90,6 +162,10 @@ output "vpc_endpoint_ids" {
     { for service, endpoint in aws_vpc_endpoint.gateway : service => endpoint.id },
     { for service, endpoint in aws_vpc_endpoint.interface : service => endpoint.id },
   )
+}
+
+output "application_task_role_arns" {
+  value = local.application_task_role_arns
 }
 
 output "nat_dashboard_name" {
@@ -112,11 +188,6 @@ output "replica_source_db_arn" {
   value = var.replica_source_db_arn
 }
 
-output "db_password" {
-  value     = local.db_password
-  sensitive = true
-}
-
 output "redis_endpoint" {
   value = aws_elasticache_replication_group.redis.primary_endpoint_address
 }
@@ -136,6 +207,7 @@ output "secret_arns" {
     agent_encryption               = aws_secretsmanager_secret.agent_encryption.arn
     agent_redaction                = aws_secretsmanager_secret.agent_redaction.arn
     internal_service               = aws_secretsmanager_secret.internal_service.arn
+    audit_producer                 = aws_secretsmanager_secret.audit_producer.arn
     jwt                            = aws_secretsmanager_secret.jwt.arn
     jwt_v2                         = aws_secretsmanager_secret.jwt_v2.arn
     session                        = aws_secretsmanager_secret.session.arn
@@ -163,8 +235,8 @@ output "audit_sqs" {
     queue_arn          = try(aws_sqs_queue.audit[0].arn, null)
     dlq_url            = try(aws_sqs_queue.audit_dlq[0].url, null)
     dlq_arn            = try(aws_sqs_queue.audit_dlq[0].arn, null)
-    producer_role_arns = { for service, role in aws_iam_role.audit_sqs_producer : service => role.arn }
-    consumer_role_arn  = try(aws_iam_role.audit_sqs_consumer[0].arn, null)
+    producer_role_arns = local.audit_sqs_enabled ? { for service in local.audit_sqs_producer_services : service => aws_iam_role.runtime[service].arn } : {}
+    consumer_role_arn  = try(aws_iam_role.runtime["audit_consumer"].arn, null)
     alarm_names        = values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name
   }
 }

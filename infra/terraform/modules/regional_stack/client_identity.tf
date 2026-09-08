@@ -1,8 +1,12 @@
 variable "bff_client_ip_secret" {
-  description = "Shared verifier key across regional consoles/backends; generated locally for standalone modules."
+  description = "Deprecated: provision the secret externally; values must not enter Terraform."
   type        = string
-  sensitive   = true
   default     = null
+  sensitive   = true
+  validation {
+    condition     = var.bff_client_ip_secret == null || var.bff_client_ip_secret == ""
+    error_message = "Secret values must be supplied by the external provisioner, not Terraform variables."
+  }
 }
 
 variable "forwarded_header_mode" {
@@ -27,9 +31,11 @@ variable "bff_client_ip_signing_enabled" {
   default     = false
 }
 
-resource "random_password" "bff_client_ip" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.bff_client_ip
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_secretsmanager_secret" "bff_client_ip" {
@@ -38,9 +44,11 @@ resource "aws_secretsmanager_secret" "bff_client_ip" {
   tags       = var.tags
 }
 
-resource "aws_secretsmanager_secret_version" "bff_client_ip" {
-  secret_id     = aws_secretsmanager_secret.bff_client_ip.id
-  secret_string = coalesce(var.bff_client_ip_secret, random_password.bff_client_ip.result)
+removed {
+  from = aws_secretsmanager_secret_version.bff_client_ip
+  lifecycle {
+    destroy = false
+  }
 }
 
 # Only ALB nodes can reach the console. This is the prerequisite for trusting
@@ -51,8 +59,8 @@ resource "aws_security_group" "console_ingress" {
   vpc_id      = aws_vpc.main.id
   ingress {
     description     = "ALB console listener"
-    from_port       = 3001
-    to_port         = 3001
+    from_port       = local.service_ports.console
+    to_port         = local.service_ports.console
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }

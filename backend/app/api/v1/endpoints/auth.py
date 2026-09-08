@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.dependencies import get_db
+from app.db.session import PlatformSessionLocal
 from app.api.v1.endpoints.onboarding import (
     OTP_MAX_ATTEMPTS,
     OTP_TTL_MINUTES,
@@ -454,28 +455,30 @@ def password_login(payload: PasswordLoginRequest, request: Request):
         if payload.tenant_name is None:
             platform_identity = _active_platform_admin_for_email(db, email)
             if platform_identity and verify_password(payload.password, platform_identity.password_hash):
+                if PlatformSessionLocal is None:
+                    raise HTTPException(status_code=503, detail="Platform login is unavailable")
                 session_token = _generate_session_token()
                 now = datetime.now(timezone.utc)
-                db.execute(
-                    text(
-                        """
-                        SELECT authn.create_platform_session(
-                            :token_hash, :platform_admin_id, 'password',
-                            :expires_at, CAST(:metadata AS jsonb)
-                        )
-                        """
-                    ),
-                    {
-                        "token_hash": _api_key_hash(session_token),
-                        "platform_admin_id": str(platform_identity.platform_admin_id),
-                        "expires_at": now + timedelta(hours=24),
-                        "metadata": json.dumps({
-                            "ip": request.client.host if request.client else "",
-                            "user_agent": request.headers.get("user-agent", "")[:512],
-                        }),
-                    },
-                )
-                db.commit()
+                with PlatformSessionLocal.begin() as issuer:
+                    issuer.execute(
+                        text(
+                            """
+                            SELECT authn.create_platform_session(
+                                :token_hash, :platform_admin_id, 'password',
+                                :expires_at, CAST(:metadata AS jsonb)
+                            )
+                            """
+                        ),
+                        {
+                            "token_hash": _api_key_hash(session_token),
+                            "platform_admin_id": str(platform_identity.platform_admin_id),
+                            "expires_at": now + timedelta(hours=24),
+                            "metadata": json.dumps({
+                                "ip": request.client.host if request.client else "",
+                                "user_agent": request.headers.get("user-agent", "")[:512],
+                            }),
+                        },
+                    )
                 return PasswordLoginResponse(
                     user_id=platform_identity.platform_admin_id,
                     tenant_id=None,

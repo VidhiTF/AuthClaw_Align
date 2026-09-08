@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "rulePriority": 1,
+      "description": "Expire failed or superseded candidate images after 30 retained builds",
+      "selection": {"tagStatus": "tagged", "tagPrefixList": ["candidate-"], "countType": "imageCountMoreThan", "countNumber": 30},
+      "action": {"type": "expire"}
+    },
+    {
+      "rulePriority": 2,
+      "description": "Expire untagged images separately after 14 days",
+      "selection": {"tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 14},
+      "action": {"type": "expire"}
+    }
+  ]
+}

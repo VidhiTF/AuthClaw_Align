@@ -1,11 +1,12 @@
 import React from "react";
 import { cookies } from "next/headers";
+import { sessionCookieName } from "@/lib/cookie-options";
 import { redirect } from "next/navigation";
 import ConsoleShell from "@/components/console-shell";
 
 export default async function ConsoleLayout({ children }: { children: React.ReactNode }) {
   const cookieStore = await cookies();
-  const sessionToken = cookieStore.get("authclaw_session")?.value;
+  const sessionToken = cookieStore.get(sessionCookieName())?.value;
   if (!sessionToken) redirect("/login");
   const response = await fetch(
     `${process.env.API_URL || "http://localhost:8000"}/v1/auth/me`,

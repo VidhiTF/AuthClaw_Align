@@ -23,6 +23,7 @@ import ModalShell from "@/components/modal-shell";
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
 import { jsonRequest, responseJson, responseJsonOr, toggleValue } from "@/lib/client-fetch";
+import { useRuntimeConfig } from "@/lib/runtime-config";
 
 interface UserItem {
   id: string;
@@ -250,8 +251,9 @@ function SettingsModal({
 }
 
 export default function SettingsPage() {
+  const runtimeConfig = useRuntimeConfig();
   const [activeTab, setActiveTab] = useState<"users" | "security" | "keys" | "cloud" | "workers" | "limits" | "tenant">("users");
-  const controlPlaneHost = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const controlPlaneHost = runtimeConfig?.api_url || "";
 
   // List States
   const [users, setUsers] = useState<UserItem[]>([]);
@@ -1960,7 +1962,7 @@ export default function SettingsPage() {
 
               <div>
                 <p className="text-[#6B7488] text-[10px] font-bold uppercase tracking-wider">Control Plane Host</p>
-                <p className="text-[#475069] mt-1 font-mono">{controlPlaneHost}/v1</p>
+                <p className="text-[#475069] mt-1 font-mono">{controlPlaneHost || "Loading runtime configuration…"}</p>
               </div>
             </div>
 

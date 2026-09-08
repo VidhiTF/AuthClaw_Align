@@ -1,5 +1,4 @@
-ARG GO_VERSION=1.26.5
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -12,15 +11,20 @@ COPY . .
 RUN test "$TARGETPLATFORM" = "$TARGETOS/$TARGETARCH" \
     && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -trimpath -ldflags="-s -w -X main.buildTarget=$TARGETOS/$TARGETARCH" \
-    -o /out/authclaw-gateway .
+    -o /out/authclaw-gateway . \
+    && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
+    -trimpath -ldflags="-s -w" -o /out/healthcheck ./cmd/healthcheck
 
-FROM alpine:3.24
+FROM scratch
 WORKDIR /app
-RUN addgroup -S authclaw && adduser -S -G authclaw authclaw && mkdir -p /var/lib/authclaw-gateway && chown -R authclaw:authclaw /var/lib/authclaw-gateway
-COPY --from=build --chown=authclaw:authclaw /out/authclaw-gateway /app/authclaw-gateway
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build --chown=65532:65532 /out/authclaw-gateway /app/authclaw-gateway
+COPY --from=build --chown=65532:65532 /out/healthcheck /healthcheck
 
 EXPOSE 8080
 
-USER authclaw
+USER 65532:65532
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["/healthcheck", "http://127.0.0.1:8080/health"]
 
 CMD ["/app/authclaw-gateway"]

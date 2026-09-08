@@ -46,16 +46,5 @@ resource "aws_ecr_lifecycle_policy" "service" {
   provider   = aws.primary
   for_each   = aws_ecr_repository.service
   repository = each.value.name
-  policy = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "Keep the latest 30 controlled-beta builds"
-      selection = {
-        tagStatus   = "any"
-        countType   = "imageCountMoreThan"
-        countNumber = 30
-      }
-      action = { type = "expire" }
-    }]
-  })
+  policy     = file("${path.module}/../ecr-lifecycle-policy.json")
 }

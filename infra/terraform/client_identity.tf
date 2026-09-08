@@ -1,6 +1,8 @@
-resource "random_password" "bff_client_ip" {
-  length  = 48
-  special = false
+removed {
+  from = random_password.bff_client_ip
+  lifecycle {
+    destroy = false
+  }
 }
 
 variable "forwarded_header_mode" {

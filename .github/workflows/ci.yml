@@ -77,7 +77,7 @@ jobs:
           fetch-depth: 2
       - run: |
           git diff --check HEAD^
-          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test
+          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test scripts.test_iam_release_evidence scripts.test_verify_p007_edge_evidence scripts.test_p008_private_paths_evidence scripts.test_container_vulnerability_policy scripts.test_ecr_release_control scripts.test_release_evidence scripts.test_ecs_database_job scripts.test_verify_ecs_colocation
 
   smoke:
     name: Master Smoke and Contract Integration
@@ -122,12 +122,21 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
-          scanners: vuln,secret,config
+          scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
-          ignore-unfixed: true
+          ignore-unfixed: false
           exit-code: "1"
-          format: table
+          format: json
+          output: trivy-filesystem.json
           skip-dirs: ".git,.terraform,node_modules,console/node_modules,backend/.venv,audit_consumer/.venv,backend/.pytest_cache,audit_consumer/.pytest_cache"
+      - name: Preserve filesystem scan evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: filesystem-scan-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: trivy-filesystem.json
+          if-no-files-found: error
+          retention-days: 14
 
   backend:
     name: Backend Unit Tests
@@ -354,7 +363,7 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
         run: >-
           go test ./... -count=1
-          -run '^(TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
+          -run '^(TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
 
   console:
     name: Console Tests and Build
@@ -417,6 +426,8 @@ jobs:
           terraform -chdir=infra/terraform validate
           cat > infra/terraform/ci.auto.tfvars.json <<'JSON'
           {
+            "environment": "ci",
+            "authclaw_env": "ci",
             "ci_skip_aws_validation": true,
             "enable_secondary": false,
             "enable_cross_region_db_replica": false,
@@ -445,6 +456,16 @@ jobs:
           terraform -chdir=infra/terraform plan -input=false -lock=false -out=sqs-prod.tfplan -var=audit_stream_transport=sqs_fifo -var=audit_sqs_require_alarm_actions=true -var='audit_sqs_alarm_action_arns=["arn:aws:sns:us-east-1:123456789012:authclaw-audit-alerts"]'
           python scripts/sqs_audit_deployment_readiness.py --output-json infra/security/sqs-audit-ci-pending.json --output-md infra/security/sqs-audit-ci-pending.md
           terraform -chdir=infra/terraform test
+      - name: Internal TLS and SMTP certificate checks
+        run: >-
+          docker run --rm --user 0 --mount type=bind,source=${{ github.workspace }},target=/repo,readonly
+          --entrypoint sh nginxinc/nginx-unprivileged@sha256:9b87ad3dd9f431c733f19dfb278c7eb3dba9dca381942c79818bb42f1a566a83
+          -c 'apk add --no-cache python3 py3-cryptography && su nginx -s /bin/sh -c "python3 /repo/scripts/test_internal_tls.py && python3 /repo/scripts/test_direct_aws.py"'
+      - name: Application-container TLS rotation rehearsal
+        run: |
+          docker build -f backend/Dockerfile.demo -t authclaw-security-backend:local backend
+          docker build -t authclaw-security-opa:local infra/opa
+          python3 scripts/test_internal_tls_containers.py
 
   arm64-images:
     name: ARM64 Runtime Images
@@ -481,6 +502,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -504,15 +526,18 @@ jobs:
           image: tonistiigi/binfmt:qemu-v9.2.2@sha256:1b804311fe87047a4c96d38b4b3ef6f62fca8cd125265917a9e3dc3c996c39e6
           platforms: arm64
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
       - name: Compute lowercase image name
         id: image
         shell: bash
         run: |
           repo="${GITHUB_REPOSITORY,,}"
           repository="ghcr.io/$repo/${{ matrix.service }}"
-          echo "repository=$repository" >> "$GITHUB_OUTPUT"
-          echo "name=$repository:ci-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          echo "quarantine=$repository:quarantine-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "repository=$repository"
+            echo "name=$repository:ci-${GITHUB_SHA}"
+            echo "quarantine=$repository:quarantine-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          } >> "$GITHUB_OUTPUT"
       - name: Initialize immutable digest evidence
         shell: bash
         run: >-
@@ -527,7 +552,13 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: ${{ steps.image.outputs.quarantine }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=ci-${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=min,scope=${{ matrix.service }}
           build-args: |
@@ -548,25 +579,38 @@ jobs:
           amd64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0] // empty' <<<"$manifest")"
           arm64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest][0] // empty' <<<"$manifest")"
           [[ "$amd64" =~ ^sha256:[0-9a-f]{64}$ && "$arm64" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "index=$INDEX_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "amd64=$amd64" >> "$GITHUB_OUTPUT"
-          echo "arm64=$arm64" >> "$GITHUB_OUTPUT"
+          {
+            echo "index=$INDEX_DIGEST"
+            echo "amd64=$amd64"
+            echo "arm64=$arm64"
+          } >> "$GITHUB_OUTPUT"
+      - name: Validate vulnerability policy
+        shell: bash
+        run: >-
+          python3 scripts/container_vulnerability_policy.py
+          --service '${{ matrix.service }}' --output .trivyignore.generated
       - name: Scan quarantined AMD64 child
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ steps.image.outputs.repository }}@${{ steps.quarantine.outputs.amd64 }}
+          scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
-          ignore-unfixed: true
+          ignore-unfixed: false
+          trivyignores: .trivyignore.generated
           exit-code: "1"
-          format: table
+          format: json
+          output: trivy-amd64.json
       - name: Scan quarantined ARM64 child
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ steps.image.outputs.repository }}@${{ steps.quarantine.outputs.arm64 }}
+          scanners: vuln,secret,misconfig
           severity: HIGH,CRITICAL
-          ignore-unfixed: true
+          ignore-unfixed: false
+          trivyignores: .trivyignore.generated
           exit-code: "1"
-          format: table
+          format: json
+          output: trivy-arm64.json
       - name: Promote and verify release manifest
         shell: bash
         env:
@@ -585,13 +629,41 @@ jobs:
           amd64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0] // empty' <<<"$manifest")"
           arm64="$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest][0] // empty' <<<"$manifest")"
           [[ "$amd64" == "$AMD64" && "$arm64" == "$ARM64" ]]
-          jq -n --arg service '${{ matrix.service }}' --arg image "$IMAGE" --arg tag "ci-${GITHUB_SHA}" --arg index "$index" --arg amd64 "$amd64" --arg arm64 "$arm64" --arg commit "$GITHUB_SHA" --arg timestamp "$(date -u +%FT%TZ)" '{service:$service,image_reference:$image,release_tag:$tag,manifest_list_digest:$index,linux_amd64_digest:$amd64,linux_arm64_digest:$arm64,source_commit_sha:$commit,timestamp:$timestamp,status:"PASS"}' > release-manifest-evidence.json
+          amd64_size="$(docker buildx imagetools inspect "$IMAGE@$amd64" --raw | jq '[.layers[].size] | add')"
+          arm64_size="$(docker buildx imagetools inspect "$IMAGE@$arm64" --raw | jq '[.layers[].size] | add')"
+          baseline_index="$(docker buildx imagetools inspect "${{ steps.image.outputs.repository }}:size-baseline" --format '{{json .Manifest}}' 2>/dev/null | jq -r '.digest // empty' || true)"
+          baseline_amd64_size=0
+          baseline_arm64_size=0
+          has_baseline=false
+          if [[ "$baseline_index" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            baseline_manifest="$(docker buildx imagetools inspect "${{ steps.image.outputs.repository }}@$baseline_index" --raw)"
+            baseline_amd64="$(jq -r '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest][0] // empty' <<<"$baseline_manifest")"
+            baseline_arm64="$(jq -r '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest][0] // empty' <<<"$baseline_manifest")"
+            if [[ -n "$baseline_amd64" && -n "$baseline_arm64" ]]; then
+              baseline_amd64_size="$(docker buildx imagetools inspect "${{ steps.image.outputs.repository }}@$baseline_amd64" --raw | jq '[.layers[].size] | add')"
+              baseline_arm64_size="$(docker buildx imagetools inspect "${{ steps.image.outputs.repository }}@$baseline_arm64" --raw | jq '[.layers[].size] | add')"
+              has_baseline=true
+            fi
+          fi
+          jq -n --arg service '${{ matrix.service }}' --arg image "$IMAGE" --arg tag "ci-${GITHUB_SHA}" --arg index "$index" --arg amd64 "$amd64" --arg arm64 "$arm64" --arg commit "$GITHUB_SHA" --arg timestamp "$(date -u +%FT%TZ)" --arg baseline "$baseline_index" --argjson amd64_size "$amd64_size" --argjson arm64_size "$arm64_size" --argjson baseline_amd64_size "$baseline_amd64_size" --argjson baseline_arm64_size "$baseline_arm64_size" --argjson has_baseline "$has_baseline" '{service:$service,image_reference:$image,release_tag:$tag,manifest_list_digest:$index,linux_amd64_digest:$amd64,linux_arm64_digest:$arm64,source_commit_sha:$commit,timestamp:$timestamp,sizes:{linux_amd64_bytes:$amd64_size,linux_arm64_bytes:$arm64_size,baseline_digest:(if $baseline == "" then null else $baseline end),linux_amd64_change_bytes:(if $has_baseline then $amd64_size-$baseline_amd64_size else null end),linux_arm64_change_bytes:(if $has_baseline then $arm64_size-$baseline_arm64_size else null end)},status:"PASS"}' > release-manifest-evidence.json
+          docker buildx imagetools inspect "$IMAGE@$index" --format '{{json .SBOM}}' > sbom.json
+          docker buildx imagetools inspect "$IMAGE@$index" --format '{{json .Provenance}}' > provenance.json
+          jq -e 'type == "object"' sbom.json provenance.json >/dev/null
+          cosign sign --yes "$IMAGE@$index"
+          cosign verify --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml@refs/heads/master" --certificate-oidc-issuer "https://token.actions.githubusercontent.com" "$IMAGE@$index" > signature-verification.json
+          docker buildx imagetools create --tag "${{ steps.image.outputs.repository }}:size-baseline" "$IMAGE@$index"
       - name: Preserve immutable digest evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: release-manifest-evidence-${{ github.sha }}-${{ matrix.service }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release-manifest-evidence.json
+          path: |
+            release-manifest-evidence.json
+            trivy-amd64.json
+            trivy-arm64.json
+            sbom.json
+            provenance.json
+            signature-verification.json
           if-no-files-found: error
           retention-days: 14
   release-status:

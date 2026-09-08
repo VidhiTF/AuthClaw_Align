@@ -39,6 +39,7 @@ def test_populated_pre040_upgrade_through_head_and_recovery(monkeypatch, interru
         "DATABASE_URL": database_url,
         "OWNER_DATABASE_URL": database_url,
         "BOOTSTRAP_DATABASE_URL": database_url,
+        "POSTGRES_DB": name,
     }
 
     def migrate(revision):

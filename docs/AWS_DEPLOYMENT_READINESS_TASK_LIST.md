@@ -309,7 +309,7 @@ The regional Terraform uses one shared task execution role and its inline policy
 **What needs to be done**
 
 - Keep the execution role limited to image pull, log delivery, and only the secrets injected for that task.
-- Create separate task roles for backend, agent, gateway, audit consumer, and any other AWS-calling workload.
+- Create separate task roles for backend, agent, the isolated audit producer, audit consumer, and any other AWS-calling workload. Keep the co-located gateway/OPA/Presidio task role-free and route gateway SQS publication through the authenticated internal producer endpoint.
 - Scope secret ARNs and KMS decrypt permissions per service.
 - Scope S3, SQS/Kinesis, ClickHouse connectivity, STS, and customer-cloud operations to the minimum actions/resources.
 - Add permission boundaries and explicit denies where the organization requires them.

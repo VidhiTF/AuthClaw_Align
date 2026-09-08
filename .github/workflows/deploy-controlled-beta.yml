@@ -62,6 +62,10 @@ jobs:
       BETA_CERTIFICATE_ARN: ${{ vars.BETA_CERTIFICATE_ARN }}
       BETA_DOMAIN_NAME: ${{ vars.BETA_DOMAIN_NAME }}
       SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      ROLLBACK_PROTECTED_UNTIL: ${{ vars.ROLLBACK_PROTECTED_UNTIL }}
+      DATABASE_COMPATIBLE_UNTIL: ${{ vars.DATABASE_COMPATIBLE_UNTIL }}
+      DEEP_ROLLBACK_INVENTORY_JSON: ${{ vars.DEEP_ROLLBACK_INVENTORY_JSON }}
+      ROLLBACK_TFVARS_JSON: ${{ vars.ROLLBACK_TFVARS_JSON }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
       TF_STATE_KMS_KEY_ID: ${{ vars.TF_STATE_KMS_KEY_ID }}
@@ -69,6 +73,14 @@ jobs:
       TF_VAR_domain_name: ${{ vars.BETA_DOMAIN_NAME }}
       TF_VAR_primary_certificate_arn: ${{ vars.BETA_CERTIFICATE_ARN }}
       TF_VAR_primary_region: ${{ vars.AWS_REGION }}
+      TF_VAR_enable_policy_sidecar_colocation: ${{ vars.ENABLE_POLICY_SIDECAR_COLOCATION || 'false' }}
+      TF_VAR_internal_tls: ${{ vars.INTERNAL_TLS_JSON || '{}' }}
+      TF_VAR_service_cpu_architectures: ${{ vars.SERVICE_CPU_ARCHITECTURES_JSON || '{}' }}
+      TF_VAR_audit_stream_transport: ${{ vars.AUDIT_STREAM_TRANSPORT || 'kafka' }}
+      TF_VAR_enable_audit_consumer: ${{ vars.ENABLE_AUDIT_CONSUMER || 'false' }}
+      TF_VAR_clickhouse_host: ${{ vars.CLICKHOUSE_HOST }}
+      TF_VAR_audit_sqs_alarm_action_arns: ${{ vars.AUDIT_SQS_ALARM_ACTION_ARNS_JSON || '[]' }}
+      TF_VAR_edge_alarm_action_arns: ${{ vars.EDGE_ALARM_ACTION_ARNS_JSON || '[]' }}
     steps:
       - name: Check out the tested revision
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -79,9 +91,61 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in AWS_REGION AWS_ROLE_ARN BETA_CERTIFICATE_ARN BETA_DOMAIN_NAME TF_STATE_BUCKET TF_STATE_KMS_KEY_ID; do
+          for name in AWS_REGION AWS_ROLE_ARN BETA_CERTIFICATE_ARN BETA_DOMAIN_NAME TF_STATE_BUCKET TF_STATE_KMS_KEY_ID ROLLBACK_PROTECTED_UNTIL DATABASE_COMPATIBLE_UNTIL DEEP_ROLLBACK_INVENTORY_JSON ROLLBACK_TFVARS_JSON; do
             [[ -n "${!name}" ]] || { echo "::error::Missing controlled-beta variable ${name}"; exit 1; }
           done
+          date -d "$ROLLBACK_PROTECTED_UNTIL" >/dev/null
+          date -d "$DATABASE_COMPATIBLE_UNTIL" >/dev/null
+          jq -e '.services | type == "array"' <<<"$DEEP_ROLLBACK_INVENTORY_JSON" >/dev/null
+          [[ "$TF_VAR_enable_policy_sidecar_colocation" == true || "$TF_VAR_enable_policy_sidecar_colocation" == false ]] ||
+            { echo '::error::ENABLE_POLICY_SIDECAR_COLOCATION must be true or false'; exit 1; }
+          jq -e 'type == "object" and all(.[]; . == "ARM64" or . == "X86_64")' <<<"$TF_VAR_service_cpu_architectures" >/dev/null ||
+            { echo '::error::SERVICE_CPU_ARCHITECTURES_JSON must map services to ARM64 or X86_64'; exit 1; }
+          jq -e 'type == "object" and ((.enabled // false) | type == "boolean")' <<<"$TF_VAR_internal_tls" >/dev/null ||
+            { echo '::error::INTERNAL_TLS_JSON must be a Terraform internal_tls object'; exit 1; }
+          [[ "$TF_VAR_audit_stream_transport" == kafka || "$TF_VAR_audit_stream_transport" == sqs_fifo ]] ||
+            { echo '::error::AUDIT_STREAM_TRANSPORT must be kafka or sqs_fifo'; exit 1; }
+          [[ "$TF_VAR_audit_stream_transport" != sqs_fifo ]] ||
+            jq -e '.enabled == true and (.namespace | type == "string" and length > 0) and (.proxy_image | type == "string" and test("@sha256:[0-9a-f]{64}$"))' <<<"$TF_VAR_internal_tls" >/dev/null ||
+            { echo '::error::SQS audit transport requires enabled internal TLS with a namespace and immutable proxy image'; exit 1; }
+          [[ "$TF_VAR_enable_audit_consumer" == true || "$TF_VAR_enable_audit_consumer" == false ]] ||
+            { echo '::error::ENABLE_AUDIT_CONSUMER must be true or false'; exit 1; }
+          jq -e 'type == "array" and all(.[]; type == "string")' <<<"$TF_VAR_audit_sqs_alarm_action_arns" >/dev/null ||
+            { echo '::error::AUDIT_SQS_ALARM_ACTION_ARNS_JSON must be a JSON string array'; exit 1; }
+          jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and startswith("arn:"))' <<<"$TF_VAR_edge_alarm_action_arns" >/dev/null ||
+            { echo '::error::EDGE_ALARM_ACTION_ARNS_JSON must contain at least one alarm destination ARN'; exit 1; }
+          [[ "$TF_VAR_enable_audit_consumer" != true || -n "$TF_VAR_clickhouse_host" ]] ||
+            { echo '::error::CLICKHOUSE_HOST is required when the audit consumer is enabled'; exit 1; }
+          jq -e '
+            (keys | sort) == ([
+              "audit_sqs_alarm_action_arns", "audit_stream_transport", "clickhouse_host",
+              "container_images", "edge_alarm_action_arns", "enable_audit_consumer",
+              "enable_policy_sidecar_colocation", "internal_tls", "service_cpu_architectures"
+            ] | sort) and
+            (.enable_policy_sidecar_colocation | type == "boolean") and
+            (.enable_audit_consumer | type == "boolean") and
+            (.audit_stream_transport == "kafka" or .audit_stream_transport == "sqs_fifo") and
+            (.clickhouse_host | type == "string") and
+            (.enable_audit_consumer == false or (.clickhouse_host | length > 0)) and
+            (.service_cpu_architectures | type == "object") and
+            ((.service_cpu_architectures | keys) - ["agent", "audit_consumer", "backend", "console", "gateway", "opa", "presidio"] | length == 0) and
+            all(.service_cpu_architectures[]; . == "ARM64" or . == "X86_64") and
+            (.internal_tls | type == "object") and
+            ((.internal_tls | keys | sort) == (["enabled", "namespace", "proxy_image"] | sort)) and
+            (.internal_tls.enabled | type == "boolean") and
+            (.internal_tls.namespace | type == "string") and
+            (.internal_tls.proxy_image | type == "string" and test("@sha256:[0-9a-f]{64}$")) and
+            (.audit_stream_transport != "sqs_fifo" or .internal_tls.enabled == true) and
+            (.audit_sqs_alarm_action_arns | type == "array") and
+            all(.audit_sqs_alarm_action_arns[]; type == "string") and
+            (.edge_alarm_action_arns | type == "array" and length > 0) and
+            all(.edge_alarm_action_arns[]; type == "string" and startswith("arn:")) and
+            (.container_images | type == "object") and
+            (.container_images | keys | sort) == (["agent", "audit_consumer", "backend", "console", "gateway", "opa", "presidio"] | sort) and
+            all(.container_images[]; type == "string" and test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$"))
+          ' <<<"$ROLLBACK_TFVARS_JSON" > rollback.tfvars.json ||
+            { echo '::error::ROLLBACK_TFVARS_JSON must be the exact reviewed, immutable previous runtime configuration'; exit 1; }
+          chmod 600 rollback.tfvars.json
 
       - name: Configure short-lived AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -95,6 +159,9 @@ jobs:
         with:
           terraform_version: 1.15.7
           terraform_wrapper: false
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Initialize KMS-encrypted remote state
         shell: bash
@@ -113,6 +180,7 @@ jobs:
         run: |
           jq -n '{
             environment: "controlled-beta",
+            authclaw_env: "ci",
             enable_secondary: false,
             require_immutable_images: false,
             container_images: {
@@ -147,19 +215,27 @@ jobs:
           repo="${GITHUB_REPOSITORY,,}"
 
           promote() {
-            local key="$1" source="$2" destination repository digest
+            local key="$1" source="$2" destination repository source_digest digest source_manifest manifest
             destination="$(jq -r --arg key "$key" '.[$key]' <<<"$repositories")"
             repository="${destination#*/}"
+            source_digest="$(docker buildx imagetools inspect "$source" --format '{{json .Manifest}}' | jq -er '.digest')"
+            cosign verify \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci.yml@refs/heads/master" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${source%:*}@$source_digest" >/dev/null
+            source_manifest="$(docker buildx imagetools inspect "${source%:*}@$source_digest" --raw)"
             digest="$(aws ecr describe-images --repository-name "$repository" \
-              --image-ids imageTag="$SOURCE_SHA" --query 'imageDetails[0].imageDigest' \
+              --image-ids imageTag="candidate-$SOURCE_SHA" --query 'imageDetails[0].imageDigest' \
               --output text 2>/dev/null || true)"
             if [[ -z "$digest" || "$digest" == "None" ]]; then
-              docker pull "$source"
-              docker tag "$source" "$destination:$SOURCE_SHA"
-              docker push "$destination:$SOURCE_SHA"
+              docker buildx imagetools create --tag "$destination:candidate-$SOURCE_SHA" "${source%:*}@$source_digest"
               digest="$(aws ecr describe-images --repository-name "$repository" \
-                --image-ids imageTag="$SOURCE_SHA" --query 'imageDetails[0].imageDigest' --output text)"
+                --image-ids imageTag="candidate-$SOURCE_SHA" --query 'imageDetails[0].imageDigest' --output text)"
             fi
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            manifest="$(docker buildx imagetools inspect "$destination@$digest" --raw)"
+            jq -e '([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length) == 1 and ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length) == 1' <<<"$manifest" >/dev/null
+            [[ "$(jq -c '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | [.platform.architecture,.digest]] | sort' <<<"$manifest")" == "$(jq -c '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | [.platform.architecture,.digest]] | sort' <<<"$source_manifest")" ]]
             printf '%s@%s' "$destination" "$digest"
           }
 
@@ -189,7 +265,7 @@ jobs:
                 opa: $opa,
                 presidio: $presidio
               },
-              tags: {Environment: "controlled-beta", Jira: "ACL-14"}
+              tags: {Environment: "controlled-beta", Jira: "ACL-14", Release: $ENV.SOURCE_SHA}
             }' > infra/terraform/beta.auto.tfvars.json
 
       - name: Capture rollback task definitions
@@ -209,12 +285,56 @@ jobs:
                   --query 'services[0].taskDefinition' --output text)"
                 printf '%s\t%s\n' "$service" "$task_definition" >> previous-task-definitions.tsv
               done
+            python3 scripts/ecr_release_control.py inventory --cluster "$cluster" --output deployed-image-inventory.json
+          else
+            jq -n '{captured_at:(now|todate),services:[]}' > deployed-image-inventory.json
           fi
+          printf '%s' "$DEEP_ROLLBACK_INVENTORY_JSON" > deeper-rollback-inventory.json
 
-      - name: Gate runtime rollout on complete ciphertext and key inventory
+      - name: Sign, scan, and verify promoted image digests
         shell: bash
         run: |
           set -euo pipefail
+          while read -r image; do cosign sign --yes "$image"; done < <(jq -r '.container_images[]' infra/terraform/beta.auto.tfvars.json)
+          python3 scripts/ecr_release_control.py verify \
+            --tfvars infra/terraform/beta.auto.tfvars.json \
+            --identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/deploy-controlled-beta.yml@refs/heads/master" \
+            --output promoted-image-verification.json
+
+      - name: Protect release and rollback digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ecr_release_control.py protect \
+            --tfvars infra/terraform/beta.auto.tfvars.json \
+            --inventory deployed-image-inventory.json \
+            --additional-inventory deeper-rollback-inventory.json \
+            --release-id "$SOURCE_SHA" \
+            --rollback-until "$ROLLBACK_PROTECTED_UNTIL" \
+            --database-compatible-until "$DATABASE_COMPATIBLE_UNTIL" \
+            --output promotion-record.json
+
+      - name: Preview rollback-safe lifecycle policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform -chdir=infra/terraform output -json ecr_repository_urls > ecr-repositories.json
+          python3 scripts/ecr_release_control.py preview \
+            --repositories ecr-repositories.json \
+            --policy infra/ecr-lifecycle-policy.json \
+            --inventory deployed-image-inventory.json \
+            --output lifecycle-preview.json
+
+      - name: Gate runtime rollout on complete ciphertext and key inventory
+        shell: bash
+        env:
+          IAM_SECRETS_MIGRATION_APPROVED: ${{ vars.IAM_SECRETS_MIGRATION_APPROVED }}
+          BOOTSTRAP_DATABASE_APPROVED: ${{ vars.BOOTSTRAP_DATABASE_APPROVED }}
+          DATABASE_EXPAND_COMPATIBILITY_APPROVED: ${{ vars.DATABASE_EXPAND_COMPATIBILITY_APPROVED }}
+        run: |
+          set -euo pipefail
+          [[ "$IAM_SECRETS_MIGRATION_APPROVED" == true ]] ||
+            { echo '::error::Approve the secret/RDS/IAM migration and rollback runbook before deployment'; exit 1; }
           # Provision database jobs and their dependencies, never runtime services.
           # Only an empty installation may bootstrap automatically. Existing
           # databases must already satisfy the retirement preconditions.
@@ -224,8 +344,14 @@ jobs:
             [[ ! -s previous-task-definitions.tsv ]] || { echo '::error::Runtime exists without managed database state'; exit 1; }
             fresh=true
           fi
+          if [[ ! -s previous-task-definitions.tsv && "$BOOTSTRAP_DATABASE_APPROVED" == true ]]; then
+            fresh=true
+          fi
           terraform -chdir=infra/terraform apply -input=false -auto-approve \
             -target=module.primary.aws_ecs_cluster.main \
+            -target=module.primary.aws_ecs_cluster_capacity_providers.main \
+            -target=module.primary.aws_db_instance.postgres_primary \
+            -target=module.primary.aws_kms_key_policy.main \
             -target=module.primary.aws_ecs_task_definition.database_job \
             -target=module.primary.aws_subnet.private \
             -target=module.primary.aws_security_group.app \
@@ -233,35 +359,28 @@ jobs:
             -target=module.primary.aws_route.private_nat \
             -target=module.primary.aws_route_table_association.public \
             -target=module.primary.aws_route_table_association.private \
-            -target=module.primary.aws_secretsmanager_secret_version.bootstrap_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.backend_migration_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.backend_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.agent_migration_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.agent_database_url \
-            -target=module.primary.aws_secretsmanager_secret_version.envelope \
-            -target=module.primary.aws_secretsmanager_secret_version.envelope_v2 \
-            -target=module.primary.aws_secretsmanager_secret_version.session \
-            -target=module.primary.aws_secretsmanager_secret_version.worker_token_hmac \
-            -target=module.primary.aws_iam_role_policy.task_secrets \
-            -target=module.primary.aws_iam_role_policy_attachment.task_execution
+            -target=module.primary.aws_iam_role_policy.task_execution
+          mapfile -t secrets < <(terraform -chdir=infra/terraform output -json required_secret_arns | jq -er '.[]')
+          [[ ${#secrets[@]} -gt 0 ]] || { echo '::error::Secret inventory is unavailable'; exit 1; }
+          for secret in "${secrets[@]}"; do
+            aws secretsmanager describe-secret --secret-id "$secret" --output json |
+              jq -e '[.VersionIdsToStages[]? | select(index("AWSCURRENT"))] | length == 1' >/dev/null ||
+              { echo '::error::External secret provisioning is incomplete; runtime rollout stopped'; exit 1; }
+          done
           gate="$(terraform -chdir=infra/terraform output -json crypto_preflight)"
-          cluster="$(jq -er '.cluster' <<<"$gate")"
-          network="$(jq -c '.network_configuration' <<<"$gate")"
+          printf '%s' "$gate" > database-gate.json
           run_job() {
-            local job="$1" definition started task
-            definition="$(jq -er --arg job "$job" '.task_definitions[$job]' <<<"$gate")"
-            started="$(aws ecs run-task --cluster "$cluster" --task-definition "$definition" \
-              --launch-type FARGATE --network-configuration "$network")"
-            jq -e '(.failures | length) == 0 and (.tasks | length) == 1' <<<"$started" >/dev/null
-            task="$(jq -er '.tasks[0].taskArn' <<<"$started")"
-            aws ecs wait tasks-stopped --cluster "$cluster" --tasks "$task"
-            aws ecs describe-tasks --cluster "$cluster" --tasks "$task" > "database-${job}-task.json"
-            jq -e --arg job "$job" '(.failures | length) == 0 and (.tasks | length) == 1 and
-              ([.tasks[0].containers[] | select(.name == $job)] | length) == 1 and
-              all(.tasks[0].containers[]; .exitCode == 0)' "database-${job}-task.json" >/dev/null
+            python3 scripts/ecs_database_job.py database-gate.json "$1" --output "database-${1}-task.json"
           }
           if [[ "$fresh" == true ]]; then
             for job in bootstrap_prepare backend_migrations agent_migrations bootstrap_finalize database_security_check; do
+              run_job "$job"
+            done
+          else
+            # Expand-only changes must preserve the retained application digest.
+            [[ "$DATABASE_EXPAND_COMPATIBILITY_APPROVED" == true ]] ||
+              { echo '::error::Previous digest/schema compatibility must be verified before migration'; exit 1; }
+            for job in backend_migrations agent_migrations database_security_check; do
               run_job "$job"
             done
           fi
@@ -271,7 +390,14 @@ jobs:
       - name: Apply controlled-beta infrastructure and immutable release
         id: runtime_release
         shell: bash
-        run: terraform -chdir=infra/terraform apply -input=false -auto-approve
+        run: |
+          set -euo pipefail
+          trap 'rm -f infra/terraform/runtime.tfplan' EXIT
+          terraform -chdir=infra/terraform plan -input=false -out=runtime.tfplan >/dev/null
+          terraform -chdir=infra/terraform show -json runtime.tfplan |
+            python scripts/iam_release_evidence.py --access-analyzer > iam-review.json
+          echo 'apply_started=true' >> "$GITHUB_OUTPUT"
+          terraform -chdir=infra/terraform apply -input=false runtime.tfplan
 
       - name: Wait for services and verify public health
         shell: bash
@@ -281,6 +407,18 @@ jobs:
           cluster="$(jq -r '.ecs_cluster_name' <<<"$primary")"
           mapfile -t services < <(jq -r '.ecs_service_names[]' <<<"$primary")
           aws ecs wait services-stable --cluster "$cluster" --services "${services[@]}"
+          # Stability can mean the circuit breaker restored the previous release.
+          terraform -chdir=infra/terraform show -json | jq -r '
+            .values.root_module | .. | objects | select(.type? == "aws_ecs_service") |
+            .values | [.name, .task_definition] | @tsv' > target-task-definitions.tsv
+          [[ -s target-task-definitions.tsv ]]
+          while IFS=$'\t' read -r service definition; do
+            aws ecs describe-services --cluster "$cluster" --services "$service" |
+              jq -e --arg definition "$definition" '(.failures | length) == 0 and
+                (.services | length) == 1 and .services[0].taskDefinition == $definition and
+                any(.services[0].deployments[]; .status == "PRIMARY" and
+                  .taskDefinition == $definition and .rolloutState == "COMPLETED")' >/dev/null
+          done < target-task-definitions.tsv
           while read -r endpoint; do
             curl --fail --silent --show-error --retry 5 --retry-all-errors "$endpoint" >/dev/null
           done < <(jq -r '.public_endpoints[]' <<<"$primary")
@@ -289,16 +427,70 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t alarms < <(terraform -chdir=infra/terraform output -json primary | jq -r '.alarm_names[]')
-          active="$(aws cloudwatch describe-alarms --alarm-names "${alarms[@]}" \
-            --query "MetricAlarms[?StateValue=='ALARM'].AlarmName" --output text)"
-          [[ -z "$active" ]] || { echo "::error::Active alarms: $active"; exit 1; }
+          terraform -chdir=infra/terraform output -json primary |
+            jq -e '.alarm_names | select(type == "array" and length > 0)' \
+              > expected-alarm-names.json
+          mapfile -t alarms < <(jq -r '.[]' expected-alarm-names.json)
+          deadline=$((SECONDS + 600))
+          while true; do
+            aws cloudwatch describe-alarms --alarm-names "${alarms[@]}" > deployment-alarms.json
+            jq -e 'all((.MetricAlarms // [])[]; .StateValue != "ALARM") and
+              all((.CompositeAlarms // [])[]; .StateValue != "ALARM")' deployment-alarms.json >/dev/null || {
+              echo '::error::A deployment alarm entered ALARM state'
+              jq '{MetricAlarms: [.MetricAlarms[]? | {AlarmName, StateValue}], CompositeAlarms: [.CompositeAlarms[]? | {AlarmName, StateValue}]}' deployment-alarms.json
+              exit 1
+            }
+            if jq -e --slurpfile expected expected-alarm-names.json '
+              ((.CompositeAlarms // []) | length) == 0 and
+              (((.MetricAlarms // []) | map(.AlarmName) | sort) == ($expected[0] | sort)) and
+              all((.MetricAlarms // [])[]; .StateValue == "OK")
+            ' deployment-alarms.json >/dev/null; then
+              break
+            fi
+            if (( SECONDS >= deadline )); then
+              echo '::error::Expected deployment alarms did not all reach OK within 600 seconds'
+              jq '{MetricAlarms: [.MetricAlarms[]? | {AlarmName, StateValue}], CompositeAlarms: [.CompositeAlarms[]? | {AlarmName, StateValue}]}' deployment-alarms.json
+              exit 1
+            fi
+            echo 'Waiting for new or updated deployment alarms to leave INSUFFICIENT_DATA'
+            sleep 15
+          done
+
+      - name: Capture and verify deployed policy topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          cluster="$(terraform -chdir=infra/terraform output -json primary | jq -er '.ecs_cluster_name')"
+          aws ecs list-services --cluster "$cluster" > ecs-services.json
+          if [[ "$TF_VAR_enable_policy_sidecar_colocation" == true ]]; then
+            for component in gateway; do
+              definition=""
+              while IFS=$'\t' read -r service candidate; do
+                if [[ "$service" == *-"$component" ]]; then
+                  [[ -z "$definition" ]] || { echo "::error::Multiple $component services found"; exit 1; }
+                  definition="$candidate"
+                fi
+              done < target-task-definitions.tsv
+              [[ -n "$definition" ]] || { echo "::error::Missing $component task definition"; exit 1; }
+              aws ecs describe-task-definition --task-definition "$definition" > "$component-task-definition.json"
+            done
+            python3 scripts/verify_ecs_colocation.py \
+              --gateway gateway-task-definition.json \
+              --services ecs-services.json \
+              --architecture-map "$TF_VAR_service_cpu_architectures" \
+              > colocation-verification.json
+          else
+            jq -n '{status:"NOT_APPLICABLE",reason:"policy sidecar co-location is disabled for this release"}' \
+              > colocation-verification.json
+          fi
 
       - name: Record deployment evidence
         if: always()
         shell: bash
         run: |
           if terraform -chdir=infra/terraform output -json primary > primary-output.json 2>/dev/null; then
+            python3 scripts/ecr_release_control.py inventory \
+              --cluster "$(jq -er '.ecs_cluster_name' primary-output.json)" --output target-image-inventory.json
             jq --arg sha "$SOURCE_SHA" '{
               source_sha: $sha,
               region,
@@ -311,24 +503,52 @@ jobs:
             }' primary-output.json > deployment-evidence.json
           fi
 
-      - name: Roll back to previous task definitions
+      - name: Restore previous topology and runtime configuration
         # Do not restart services after a failed preflight, or restore a
         # CBC-capable image after retirement. The operator must approve the
-        # retained rollback image as strict AES-GCM-only before enabling this.
+        # retained rollback configuration as strict AES-GCM-only and schema
+        # compatible before enabling this.
         if: >-
           failure() &&
+          steps.runtime_release.outputs.apply_started == 'true' &&
           (steps.runtime_release.outcome == 'success' || steps.runtime_release.outcome == 'failure') &&
           vars.CRYPTO_STRICT_ROLLBACK_APPROVED == 'true'
         shell: bash
         run: |
+          set -euo pipefail
           [[ -s previous-task-definitions.tsv ]] || exit 0
-          cluster="authclaw-controlled-beta-primary-cluster"
-          while IFS=$'\t' read -r service task_definition; do
-            aws ecs update-service --cluster "$cluster" --service "$service" \
-              --task-definition "$task_definition" --force-new-deployment >/dev/null
-          done < previous-task-definitions.tsv
-          mapfile -t services < <(cut -f1 previous-task-definitions.tsv)
+          trap 'rm -f infra/terraform/rollback.tfplan' EXIT
+          terraform -chdir=infra/terraform plan -input=false \
+            -var-file="$GITHUB_WORKSPACE/rollback.tfvars.json" -out=rollback.tfplan
+          terraform -chdir=infra/terraform show -json rollback.tfplan > rollback-plan.json
+          terraform -chdir=infra/terraform apply -input=false rollback.tfplan
+
+          primary="$(terraform -chdir=infra/terraform output -json primary)"
+          cluster="$(jq -er '.ecs_cluster_name' <<<"$primary")"
+          mapfile -t services < <(jq -r '.ecs_service_names[]' <<<"$primary")
+          [[ ${#services[@]} -gt 0 ]] || { echo '::error::Rollback produced no ECS services'; exit 1; }
           aws ecs wait services-stable --cluster "$cluster" --services "${services[@]}"
+          terraform -chdir=infra/terraform show -json | jq -r '
+            .values.root_module | .. | objects | select(.type? == "aws_ecs_service") |
+            .values | [.name, .task_definition] | @tsv' > rollback-target-task-definitions.tsv
+          [[ -s rollback-target-task-definitions.tsv ]]
+          while IFS=$'\t' read -r service definition; do
+            aws ecs describe-services --cluster "$cluster" --services "$service" |
+              jq -e --arg definition "$definition" '(.failures | length) == 0 and
+                (.services | length) == 1 and .services[0].taskDefinition == $definition and
+                any(.services[0].deployments[]; .status == "PRIMARY" and
+                  .taskDefinition == $definition and .rolloutState == "COMPLETED")' >/dev/null
+          done < rollback-target-task-definitions.tsv
+          python3 scripts/ecr_release_control.py inventory --cluster "$cluster" --output rollback-image-inventory.json
+          jq -e --slurpfile config rollback.tfvars.json '
+            ([.services[].images[].image] | unique | sort) ==
+            ([$config[0].container_images.agent, $config[0].container_images.backend,
+              $config[0].container_images.gateway, $config[0].container_images.console,
+              $config[0].container_images.opa, $config[0].container_images.presidio] +
+              (if $config[0].enable_audit_consumer then [$config[0].container_images.audit_consumer] else [] end) |
+              unique | sort)
+          ' rollback-image-inventory.json >/dev/null ||
+            { echo '::error::Deployed rollback images do not match the reviewed rollback configuration'; exit 1; }
 
       - name: Upload deployment and rollback evidence
         if: always()
@@ -337,7 +557,24 @@ jobs:
           name: acl-14-controlled-beta-${{ github.event.workflow_run.head_sha }}
           path: |
             deployment-evidence.json
+            iam-review.json
             previous-task-definitions.tsv
+            target-task-definitions.tsv
+            ecs-services.json
+            *-task-definition.json
+            colocation-verification.json
             database-*-task.json
+            deployed-image-inventory.json
+            target-image-inventory.json
+            rollback-image-inventory.json
+            rollback.tfvars.json
+            rollback-plan.json
+            rollback-target-task-definitions.tsv
+            expected-alarm-names.json
+            deployment-alarms.json
+            deeper-rollback-inventory.json
+            promoted-image-verification.json
+            promotion-record.json
+            lifecycle-preview.json
           if-no-files-found: warn
           retention-days: 30
