@@ -246,32 +246,127 @@ if data integrity is uncertain. Announce incident and rollback start time. The
 on-call/incident commander chooses the last compatible checkpoint with the database
 owner; do not run schema downgrade automatically.
 
-For the application/configuration drill, use the **real retained** inventory saved
-before deployment. Reverify its ECR images/protected tags and signatures using the
-container runbook. Restore version-pinned secret bindings first if changed.
+For the application/configuration drill, use the **real retained** inventory and
+approved previous tfvars saved before deployment. Reverify ECR protection and
+signatures using the container runbook. Restore version-pinned secret bindings first
+if changed. `ROLLBACK_TFVARS` and its checksum come from that checkpoint. Review the
+generated reverse plan and record the named approver before applying it; this plan
+restores services, discovery, IAM, networking, transport and task configuration.
 
 ```bash
 set -euo pipefail
+trap 'rm -f infra/terraform/rollback.tfplan' EXIT
 date -u +%FT%TZ > release-evidence/rollback-start.txt
-jq -er '.services[] | [.service,.task_definition] | @tsv' \
-  release-evidence/current-inventory.json > release-evidence/previous-task-definitions.tsv
-test -s release-evidence/previous-task-definitions.tsv
-while IFS=$'\t' read -r service definition; do
-  aws ecs update-service --cluster "$CLUSTER" --service "$service" \
-    --task-definition "$definition" --force-new-deployment > "release-evidence/rollback-${service}.json"
-done < release-evidence/previous-task-definitions.tsv
-mapfile -t services < <(cut -f1 release-evidence/previous-task-definitions.tsv)
+: "${ROLLBACK_TFVARS:?checkpoint tfvars path required}"
+: "${ROLLBACK_TFVARS_SHA256:?checkpoint tfvars checksum required}"
+test "$(sha256sum "$ROLLBACK_TFVARS" | cut -d' ' -f1)" = "$ROLLBACK_TFVARS_SHA256"
+terraform -chdir=infra/terraform plan -input=false \
+  -var-file="$ROLLBACK_TFVARS" -out=rollback.tfplan
+terraform -chdir=infra/terraform show -json rollback.tfplan \
+  > release-evidence/rollback-plan.json
+python3 scripts/iam_release_evidence.py --access-analyzer \
+  < release-evidence/rollback-plan.json > release-evidence/rollback-iam-review.json
+: "${ROLLBACK_PLAN_APPROVED_BY:?named reverse-plan approver required}"
+printf '%s\n' "$ROLLBACK_PLAN_APPROVED_BY" > release-evidence/rollback-plan-approver.txt
+terraform -chdir=infra/terraform apply -input=false rollback.tfplan
+
+primary="$(terraform -chdir=infra/terraform output -json primary)"
+test "$(jq -er '.ecs_cluster_name' <<<"$primary")" = "$CLUSTER"
+mapfile -t services < <(jq -r '.ecs_service_names[]' <<<"$primary")
+test "${#services[@]}" -gt 0
 aws ecs wait services-stable --cluster "$CLUSTER" --services "${services[@]}"
+terraform -chdir=infra/terraform show -json | jq -r '
+  .values.root_module.child_modules[] | select(.address == "module.primary") |
+  .. | objects | select(.type? == "aws_ecs_service") |
+  .values | [.name, .task_definition] | @tsv' \
+  > release-evidence/rollback-task-definitions.tsv
+test -s release-evidence/rollback-task-definitions.tsv
+while IFS=$'\t' read -r service definition; do
+  aws ecs describe-services --cluster "$CLUSTER" --services "$service" |
+    jq -e --arg definition "$definition" '(.failures | length) == 0 and
+      (.services | length) == 1 and .services[0].taskDefinition == $definition and
+      any(.services[0].deployments[]; .status == "PRIMARY" and
+        .taskDefinition == $definition and .rolloutState == "COMPLETED")' >/dev/null
+done < release-evidence/rollback-task-definitions.tsv
 python3 scripts/ecr_release_control.py inventory --cluster "$CLUSTER" \
   --output release-evidence/rollback-inventory.json
+jq -e --slurpfile config "$ROLLBACK_TFVARS" '
+  ([.services[].images[].image] | unique | sort) ==
+  ((($config[0].container_images | [.agent, .backend, .gateway, .console, .opa, .presidio]) +
+    (if ($config[0].enable_audit_consumer // false) then [$config[0].container_images.audit_consumer] else [] end) +
+    (if ($config[0].internal_tls.enabled // false) then [$config[0].internal_tls.proxy_image] else [] end)) |
+    unique | sort)' release-evidence/rollback-inventory.json >/dev/null
+jq -e '.alarm_names | select(type == "array" and length > 0)' <<<"$primary" \
+  > release-evidence/rollback-expected-alarms.json
+mapfile -t alarms < <(jq -r '.[]' release-evidence/rollback-expected-alarms.json)
+aws cloudwatch describe-alarms --alarm-names "${alarms[@]}" \
+  > release-evidence/rollback-alarms.json
+jq -e --slurpfile expected release-evidence/rollback-expected-alarms.json '
+  ((.MetricAlarms | map(.AlarmName) | sort) == ($expected[0] | sort)) and
+  all(.MetricAlarms[]; .StateValue == "OK")' \
+  release-evidence/rollback-alarms.json >/dev/null
 ```
 
-Verify actual revisions/images against the checkpoint; then run the five functional
-checks and record finish time. Require completion ≤300 seconds, no active alarms,
-no missing/duplicate audit IDs and identical tenant sequence/chain heads in Postgres
-and ClickHouse. If exceeded, record FAIL and escalate; do not relabel the run. Restore
-the matching approved Terraform configuration and review a fresh plan to reconcile
-the manual ECS rollback before re-enabling CI (never apply a stale forward plan).
+The checkpoint must materialize the internal TLS proxy digest when TLS is enabled.
+Load the short-lived tenant access token and gateway key from the approved credential
+source into the variables below without echoing them. `GATEWAY_CANARY_BODY_FILE` is
+a reviewed, non-sensitive request whose exact expected status is recorded there.
+
+```bash
+set -euo pipefail
+set +x
+: "${CONSOLE_URL:?required}" "${BACKEND_HEALTH_URL:?required}"
+: "${BACKEND_API_BASE:?required}" "${GATEWAY_URL:?required}"
+: "${BACKEND_ACCESS_TOKEN:?required}" "${GATEWAY_API_KEY:?required}"
+: "${EXPECTED_TENANT_ID:?required}" "${EXPECTED_GATEWAY_STATUS:?required}"
+: "${GATEWAY_CANARY_BODY_FILE:?required}"
+test -s "$GATEWAY_CANARY_BODY_FILE"
+CANARY_REQUEST_ID="rollback-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM"
+backend_curl="$(mktemp)"; gateway_curl="$(mktemp)"
+trap 'rm -f "$backend_curl" "$gateway_curl"' EXIT
+chmod 600 "$backend_curl" "$gateway_curl"
+printf 'header = "Authorization: Bearer %s"\n' "$BACKEND_ACCESS_TOKEN" > "$backend_curl"
+printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\nheader = "X-Request-ID: %s"\n' \
+  "$GATEWAY_API_KEY" "$CANARY_REQUEST_ID" > "$gateway_curl"
+
+curl -fsS "${CONSOLE_URL%/}/" > release-evidence/rollback-console-health.html
+curl -fsS "$BACKEND_HEALTH_URL" > release-evidence/rollback-backend-health.json
+curl -fsS "${GATEWAY_URL%/}/health" > release-evidence/rollback-gateway-health.json
+curl -fsS --config "$backend_curl" "${BACKEND_API_BASE%/}/auth/me" \
+  > release-evidence/rollback-authentication.json
+jq -e --arg tenant "$EXPECTED_TENANT_ID" \
+  '.tenant_id == $tenant and .is_active == true' \
+  release-evidence/rollback-authentication.json >/dev/null
+
+gateway_status="$(curl -sS --config "$gateway_curl" -o release-evidence/rollback-gateway-canary.json \
+  -w '%{http_code}' --data-binary "@$GATEWAY_CANARY_BODY_FILE" "${GATEWAY_URL%/}/v1/chat/completions")"
+test "$gateway_status" = "$EXPECTED_GATEWAY_STATUS"
+for attempt in {1..30}; do
+  curl -fsS --config "$backend_curl" \
+    "${BACKEND_API_BASE%/}/audit-logs?limit=1000&integrity_check=true" \
+    > release-evidence/rollback-audit-canary.json
+  jq -e --arg request "$CANARY_REQUEST_ID" '
+    .source == "clickhouse" and .integrity_checked == true and
+    any(.records[]; .request_id == $request and .chain_valid == true)' \
+    release-evidence/rollback-audit-canary.json >/dev/null && break
+  sleep 2
+done
+jq -e --arg request "$CANARY_REQUEST_ID" '
+  any(.records[]; .request_id == $request and .chain_valid == true)' \
+  release-evidence/rollback-audit-canary.json >/dev/null
+curl -fsS --config "$backend_curl" "${BACKEND_API_BASE%/}/audit-logs/store/consistency" \
+  > release-evidence/rollback-clickhouse-consistency.json
+jq -e '.consistent == true and .postgres_chain_valid == true and .clickhouse_chain_valid == true' \
+  release-evidence/rollback-clickhouse-consistency.json >/dev/null
+date -u +%FT%TZ > release-evidence/rollback-finish.txt
+rollback_seconds="$(( $(date -u +%s) - $(date -u -d "$(cat release-evidence/rollback-start.txt)" +%s) ))"
+printf '%s\n' "$rollback_seconds" > release-evidence/rollback-duration-seconds.txt
+test "$rollback_seconds" -le 300
+```
+
+Require completion ≤300 seconds and no active alarms. If exceeded, record FAIL and
+escalate; do not relabel the run. The reverse Terraform apply leaves state aligned
+with the restored topology, so never reapply the stale forward plan.
 
 | Surface | Recovery procedure |
 | --- | --- |

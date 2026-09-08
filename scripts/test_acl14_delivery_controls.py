@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CI = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 DEPLOY = (ROOT / ".github/workflows/deploy-controlled-beta.yml").read_text(encoding="utf-8")
+RUNBOOK = (ROOT / "docs/runbooks/PRODUCTION_RELEASE.md").read_text(encoding="utf-8")
 WORKFLOWS = tuple((ROOT / ".github/workflows").glob("*.yml")) + tuple(
     (ROOT / ".github/workflows").glob("*.yaml")
 )
@@ -176,6 +177,23 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("rollback-target-task-definitions.tsv", rollback)
         self.assertIn("rollback-image-inventory.json", rollback)
         self.assertNotIn("aws ecs update-service", rollback)
+
+    def test_manual_rollback_restores_topology_before_verification(self):
+        rollback = RUNBOOK.split("## Stop conditions and rollback execution", 1)[1].split(
+            "| Surface | Recovery procedure |", 1
+        )[0]
+        self.assertIn("rollback.tfplan", rollback)
+        self.assertIn('-var-file="$ROLLBACK_TFVARS"', rollback)
+        self.assertIn("terraform -chdir=infra/terraform apply", rollback)
+        self.assertIn('select(.address == "module.primary")', rollback)
+        self.assertNotIn("aws ecs update-service", rollback)
+
+    def test_rollback_drill_has_executable_functional_checks(self):
+        for value in (
+            "/health", "/auth/me", "/v1/chat/completions", "X-Request-ID",
+            "/audit-logs?", "/audit-logs/store/consistency", ".consistent == true",
+        ):
+            self.assertIn(value, RUNBOOK)
 
     def test_colocation_is_an_explicit_reversible_release_switch(self):
         self.assertIn('variable "enable_policy_sidecar_colocation"', VARIABLES)
