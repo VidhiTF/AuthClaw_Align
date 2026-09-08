@@ -15,9 +15,20 @@ REGISTRY = (ROOT / "infra/terraform/registry.tf").read_text(encoding="utf-8")
 VARIABLES = (ROOT / "infra/terraform/variables.tf").read_text(encoding="utf-8")
 REGIONAL_STACK = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "infra/terraform/modules/regional_stack").glob("*.tf"))
 RUNTIME_IAM = (ROOT / "infra/terraform/modules/regional_stack/runtime_iam.tf").read_text(encoding="utf-8")
+IAM_INVENTORY = (ROOT / "docs/security/P0_10_11_LOCAL_INVENTORY.md").read_text(encoding="utf-8")
+AWS_SERVICE_INVENTORY = (ROOT / "docs/compliance/P0_08_RUNTIME_AWS_SERVICE_INVENTORY.md").read_text(encoding="utf-8")
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
+    def test_sqs_inventories_match_isolated_producer_boundary(self):
+        for inventory in (IAM_INVENTORY, AWS_SERVICE_INVENTORY):
+            self.assertIn("isolated", inventory)
+            self.assertIn("audit_producer", inventory)
+            self.assertIn("no task role", inventory)
+            self.assertIn("no task role or direct SQS permission", inventory)
+        self.assertNotIn("SQS producer policies attach only to backend/gateway", IAM_INVENTORY)
+        self.assertNotIn("SQS — backend and gateway publishers", AWS_SERVICE_INVENTORY)
+
     def test_internal_tls_security_group_routes_only_to_tls_ports(self):
         self.assertIn(
             "for_each = var.internal_tls.enabled ? toset([8443]) : toset([8000, 8001, 8080])",

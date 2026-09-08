@@ -8,14 +8,15 @@ No AWS apply, secret replacement, state mutation or real Access Analyzer run was
 - Execution roles are per task, including database jobs. Injection and GetSecretValue grants share one map. ECR grants use configured repositories; logs use task log groups; KMS decrypt requires Secrets Manager plus exact SecretARN context.
 - Backend, agent, the isolated SQS audit producer, and enabled audit consumer have independent runtime roles. A co-located gateway/OPA/Presidio task has no task role; backend and agent retain separate policy services so policy containers never inherit their AWS permissions.
 - Runtime roles explicitly deny reading task-injected secrets. Execution-role credentials are not application credentials.
-- SQS producer policies attach only to backend/gateway; consumer permissions attach only to the enabled consumer. All target the selected queue and KMS key. Kafka has no SQS grants.
+- SQS producer policies attach only to the backend and isolated `audit_producer`; consumer permissions attach only to the enabled consumer. The gateway has no task role and publishes to the isolated producer over authenticated internal HTTPS. All SQS grants target the selected queue and KMS key. Kafka has no SQS grants.
 - Agent customer operations use only explicitly approved exact role ARNs. Configure customer-side trust (including ExternalId where supported) and customer-side least privilege separately. No wildcard STS, S3, Kinesis or customer-account permissions are granted.
 - Optional organization boundary applies to execution/runtime roles. Organization SCPs and additional denies require the actual organization policy, not invented defaults.
 
 | Workload | Runtime call sites | Permission rationale |
 | --- | --- | --- |
 | Backend | app/services/audit_transport.py | SQS send/queue lookup |
-| Gateway | gateway/kafka.go | SQS send/queue lookup when selected |
+| Isolated audit producer | gateway/audit_producer.go; gateway/sqs_fifo.go | Authenticated internal HTTPS ingestion followed by SQS send/queue lookup |
+| Gateway | gateway/audit_producer.go | Authenticated HTTPS to the isolated producer; no task role or direct SQS permission |
 | Consumer | audit_consumer/transport.py | SQS receive/delete/visibility/queue lookup |
 | Agent | services/agent/document_processing/connectors.py; services/remediation_runtime.py | STS assumption of approved customer roles |
 | Backend connectors | app/services/cloud_connectors.py; app/api/v1/endpoints/aws.py | Tenant-supplied credentials; no ambient platform grant |
