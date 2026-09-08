@@ -156,3 +156,36 @@ def test_exact_duplicate_replay_is_skipped(monkeypatch):
     insert = configure(monkeypatch, exists=True)
     _process_message(MagicMock(), event())
     insert.assert_not_called()
+
+
+@pytest.mark.parametrize("dlq_fails", [False, True])
+def test_failed_message_is_acknowledged_only_after_durable_dlq_publish(monkeypatch, dlq_fails):
+    from transport import AuditMessage
+
+    first = AuditMessage(value=event(), offset=10, _position="partition-0")
+    later = AuditMessage(value=event(sequence=2), offset=11, _position="partition-0")
+    transport = MagicMock(redrive_failures=False)
+    transport.poll.return_value = [[first, later]]
+    if dlq_fails:
+        transport.publish_dlq.side_effect = OSError("DLQ unavailable")
+    monkeypatch.setattr(consumer, "_running", True)
+    monkeypatch.setattr(consumer, "validate_runtime_environment", lambda: None)
+    monkeypatch.setattr(consumer, "make_audit_consumer", lambda _observe: transport)
+    monkeypatch.setattr(consumer, "_start_metrics_server", lambda: None)
+    monkeypatch.setattr(consumer, "get_client", MagicMock())
+
+    def reject(_client, _payload):
+        consumer._running = False
+        raise InvalidAuditEvent("invalid proof")
+
+    process = MagicMock(side_effect=reject)
+    monkeypatch.setattr(consumer, "_process_message", process)
+    consumer.main()
+
+    if dlq_fails:
+        transport.ack.assert_not_called()
+        transport.retry.assert_called_once_with(first)
+        assert process.call_count == 1  # Do not commit a later partition offset.
+    else:
+        assert transport.ack.call_count == 2
+        transport.retry.assert_not_called()

@@ -32,7 +32,12 @@ def risk_node(state: AuthState):
 
     security_findings = state.get("security_findings") or []
     finding_actions = {str(finding.get("action", "")).lower() for finding in security_findings}
-    if "block" in finding_actions or "require_approval" in finding_actions:
+    if (
+        "block" in finding_actions
+        or "require_approval" in finding_actions
+        or state.get("approval_status") == "PENDING_APPROVAL"
+        or state.get("policy_decision") == "REQUIRE_APPROVAL"
+    ):
         risk_level = "HIGH"
     elif security_findings and risk_level == "LOW":
         risk_level = "MEDIUM"

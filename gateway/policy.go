@@ -131,8 +131,8 @@ func policyDecisionCacheTTL() time.Duration {
 	return time.Duration(envInt("GATEWAY_POLICY_DECISION_CACHE_TTL_MS", 0)) * time.Millisecond
 }
 
-func policyDecisionCacheKey(tenantID, model, route string, prompts []string, topics []string) string {
-	payload, _ := json.Marshal([]interface{}{tenantID, model, route, prompts, topics})
+func policyDecisionCacheKey(tenantID, model, route string, prompts []string, topics []string, policyID string, config *PolicyConfig) string {
+	payload, _ := json.Marshal([]interface{}{tenantID, model, route, prompts, topics, policyID, config})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
 }
@@ -491,7 +491,7 @@ func EvaluatePolicy(ctx context.Context, tenantID, model, route string, prompts 
 	}
 	decisionCacheKey := ""
 	if config == nil || config.RateLimits.RequestsPerMinute <= 0 {
-		decisionCacheKey = policyDecisionCacheKey(tenantID, model, route, prompts, topics)
+		decisionCacheKey = policyDecisionCacheKey(tenantID, model, route, prompts, topics, policyID, config)
 		if cached, ok := getCachedPolicyDecision(decisionCacheKey); ok {
 			return cached.Allow, cached.Reason, cached.PolicyID, nil
 		}

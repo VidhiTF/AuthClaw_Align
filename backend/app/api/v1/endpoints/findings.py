@@ -65,6 +65,11 @@ class StatusUpdateRequest(BaseModel):
 class AssignOwnerRequest(BaseModel):
     owner_user_id: Optional[str]
 
+    @field_validator("owner_user_id")
+    @classmethod
+    def validate_owner_id(cls, value):
+        return str(UUID(value)) if value is not None else None
+
 
 @router.get("", response_model=FindingListResponse, dependencies=[require_scopes(["read"])])
 def list_findings(
@@ -185,9 +190,12 @@ def assign_owner(
     tenant_id: str = Depends(get_current_tenant),
 ):
     """Assign an owner to a finding."""
-    finding = findings_service.assign_owner(
-        db, tenant_id=tenant_id, finding_id=finding_id, owner_user_id=req.owner_user_id
-    )
+    try:
+        finding = findings_service.assign_owner(
+            db, tenant_id=tenant_id, finding_id=finding_id, owner_user_id=req.owner_user_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid or unavailable owner") from exc
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
     return finding

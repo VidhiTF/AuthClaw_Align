@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session, joinedload
 
-from app.db.models import Finding, FindingStatus, EvidenceRecord
+from app.db.models import Finding, FindingStatus, EvidenceRecord, User
 from app.services import event_backbone
 
 logger = logging.getLogger("services.findings")
@@ -270,7 +270,20 @@ def assign_owner(
     if not finding:
         return None
 
-    finding.owner_user_id = uuid.UUID(owner_user_id) if owner_user_id else None
+    owner_id = None
+    if owner_user_id is not None:
+        try:
+            owner_id = uuid.UUID(owner_user_id)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("Invalid or unavailable owner") from exc
+        owner = db.query(User).filter(
+            User.id == owner_id,
+            User.tenant_id == uuid.UUID(tenant_id),
+            User.is_active.is_(True),
+        ).first()
+        if owner is None:
+            raise ValueError("Invalid or unavailable owner")
+    finding.owner_user_id = owner_id
     finding.updated_at = datetime.now(tz=timezone.utc)
     db.commit()
     db.refresh(finding)

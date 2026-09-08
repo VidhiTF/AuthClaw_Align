@@ -176,6 +176,8 @@ class DocumentScanner:
         object_key = target.get("object_key") or plan_item.get("finding_control", "")
         if target.get("type") != "s3_object":
             raise RuntimeError(f"Unsupported remediation target: {target.get('type') or 'unknown'}")
+        if not target.get("bucket") or target["bucket"] != self.bucket:
+            raise RuntimeError("Configured S3 bucket does not match the approved target bucket")
 
         before_bytes, before_text, metadata = self._read_text_object(object_key)
         after_text, redaction = redact_sensitive_text(before_text)
@@ -199,22 +201,32 @@ class DocumentScanner:
             Metadata={"authclaw-remediated": "true", "workflow-id": workflow_id, "action-id": action_id},
         )
 
-        verified_bytes, verified_text, after_metadata = self._read_text_object(object_key)
         before_verification = verification_summary(before_text)
-        after_verification = verification_summary(verified_text)
-        verified = _sha256(verified_bytes) == _sha256(after_bytes) and after_verification["total"] == 0
+        verification_error = ""
+        after_metadata = {}
+        after_sha256 = ""
+        try:
+            verified_bytes, verified_text, after_metadata = self._read_text_object(object_key)
+            after_verification = verification_summary(verified_text)
+            after_sha256 = _sha256(verified_bytes)
+            verified = after_sha256 == _sha256(after_bytes) and after_verification["total"] == 0
+        except Exception as exc:
+            # The write already succeeded: retain its backup even if the verification read fails.
+            verified = False
+            verification_error = f"Post-mutation verification failed: {exc}"
+            after_verification = {"error": verification_error}
 
         return {
             "connector": "aws_s3",
             "control": object_key,
             "target": target,
             "status": "success" if verified else "failed",
-            "details": f"Redacted {redaction['total']} sensitive value(s) in s3://{self.bucket}/{object_key}",
+            "details": verification_error or f"Redacted {redaction['total']} sensitive value(s) in s3://{self.bucket}/{object_key}",
             "mutation_id": put_result.get("VersionId") or put_result.get("ETag", "").strip('"'),
             "before_verification": before_verification,
             "after_verification": after_verification,
             "before_sha256": _sha256(before_bytes),
-            "after_sha256": _sha256(verified_bytes),
+            "after_sha256": after_sha256,
             "cli_diff": plan_item.get("diff", {}),
             "rollback_ref": {
                 "bucket": self.bucket,
@@ -232,6 +244,8 @@ class DocumentScanner:
             raise RuntimeError("AWS S3 rollback requires AWS_ENABLED=true, AWS_S3_BUCKET, and AWS credentials")
 
         rollback_ref = rollback_plan.get("rollback_ref") or {}
+        if not rollback_ref.get("bucket") or rollback_ref["bucket"] != self.bucket:
+            raise RuntimeError("Configured S3 bucket does not match the rollback bucket")
         backup_key = rollback_ref.get("backup_key")
         target_key = rollback_ref.get("target_key")
         if not backup_key or not target_key:

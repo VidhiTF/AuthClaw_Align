@@ -22,6 +22,10 @@ class AuthState(TypedDict, total=False):
     allowed: bool
     block_reason: str
     block_category: str
+    security_approved: bool
+    security_findings: List[Dict]
+    security_policy_action: str
+    policy_decision: str
 
     # LLM Response
     response: str

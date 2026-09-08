@@ -29,6 +29,7 @@ from app.api.v1.endpoints.onboarding import (
     _scopes_for_role,
 )
 from app.core.passwords import hash_password, validate_password, verify_password
+from app.core.crypto import get_session_key_ring
 from app.core.bff_client_ip import authenticate_bff_client_ip
 from app.core.auth import get_tenant_db, hash_key as _api_key_hash, require_roles, require_scopes
 from app.db.models import APIKey, OnboardingEmailOTP, Tenant, TenantOIDCConfig, User

@@ -1479,6 +1479,7 @@ type StreamOutboundRedactor struct {
 	runtimeConfig RedactionRuntimeConfig
 	buffer        string
 	tailRunes     int
+	err           error
 }
 
 func NewStreamOutboundRedactor(tenantID string, customRules []RegexRule, runtimeConfig RedactionRuntimeConfig) *StreamOutboundRedactor {
@@ -1499,7 +1500,7 @@ func splitSafeRunePrefix(text string, tailRunes int) (string, string) {
 }
 
 func (sr *StreamOutboundRedactor) ProcessChunk(ctx context.Context, chunk string) string {
-	if chunk == "" {
+	if chunk == "" || sr.err != nil {
 		return ""
 	}
 	sr.buffer += chunk
@@ -1511,15 +1512,16 @@ func (sr *StreamOutboundRedactor) ProcessChunk(ctx context.Context, chunk string
 	redacted, _, err := redactOutboundText(ctx, sr.tenantID, safe, sr.customRules, sr.runtimeConfig)
 	if err != nil {
 		log.Printf("[REDACTION] outbound_stream status=redact_failed err=%v", err)
-		sr.buffer = tail
-		return safe
+		sr.err = err
+		sr.buffer = ""
+		return ""
 	}
 	sr.buffer = tail
 	return redacted
 }
 
 func (sr *StreamOutboundRedactor) Flush(ctx context.Context) string {
-	if sr.buffer == "" {
+	if sr.buffer == "" || sr.err != nil {
 		return ""
 	}
 	buffer := sr.buffer
@@ -1527,7 +1529,8 @@ func (sr *StreamOutboundRedactor) Flush(ctx context.Context) string {
 	redacted, _, err := redactOutboundText(ctx, sr.tenantID, buffer, sr.customRules, sr.runtimeConfig)
 	if err != nil {
 		log.Printf("[REDACTION] outbound_stream status=flush_failed err=%v", err)
-		return buffer
+		sr.err = err
+		return ""
 	}
 	return redacted
 }
@@ -1615,6 +1618,9 @@ func NewStreamingProtectionReader(ctx context.Context, originalBody io.ReadClose
 }
 
 func (s *StreamingReversalReader) Read(p []byte) (int, error) {
+	if s.outbound != nil && s.outbound.err != nil {
+		return 0, s.outbound.err
+	}
 	if s.outBuffer.Len() > 0 {
 		return s.outBuffer.Read(p)
 	}
@@ -1624,7 +1630,11 @@ func (s *StreamingReversalReader) Read(p []byte) (int, error) {
 
 	if s.scanner.Scan() {
 		line := s.scanner.Text()
-		for _, modifiedLine := range s.processLine(line) {
+		lines := s.processLine(line)
+		if s.outbound != nil && s.outbound.err != nil {
+			return 0, s.outbound.err
+		}
+		for _, modifiedLine := range lines {
 			s.outBuffer.WriteString(modifiedLine + "\n")
 		}
 		return s.outBuffer.Read(p)
@@ -1635,7 +1645,11 @@ func (s *StreamingReversalReader) Read(p []byte) (int, error) {
 	}
 
 	s.eof = true
-	for _, line := range s.flushPendingLines() {
+	lines := s.flushPendingLines()
+	if s.outbound != nil && s.outbound.err != nil {
+		return 0, s.outbound.err
+	}
+	for _, line := range lines {
 		s.outBuffer.WriteString(line + "\n")
 	}
 	if s.outBuffer.Len() > 0 {

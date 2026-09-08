@@ -26,7 +26,7 @@ type AnthropicRequest struct {
 	Messages []Message `json:"messages"`
 }
 
-func normalizeAnthropicRequest(normalized *NormalizedRequest, req *AnthropicRequest) func([]string) ([]byte, error) {
+func normalizeAnthropicRequest(normalized *NormalizedRequest, req *AnthropicRequest, original []byte) func([]string) ([]byte, error) {
 	normalized.Model = req.Model
 	if req.System != "" {
 		normalized.Prompts = append(normalized.Prompts, req.System)
@@ -46,7 +46,7 @@ func normalizeAnthropicRequest(normalized *NormalizedRequest, req *AnthropicRequ
 				idx++
 			}
 		}
-		return json.Marshal(req)
+		return marshalRebuiltProviderRequest(original, req)
 	}
 }
 
@@ -124,7 +124,7 @@ func ExtractAndNormalize(r *http.Request, provider string) (*NormalizedRequest, 
 					openAIReq.Messages[i].Content = p
 				}
 			}
-			return json.Marshal(openAIReq)
+			return marshalRebuiltProviderRequest(bodyBytes, openAIReq)
 		}
 		return normalized, rebuilder, nil
 
@@ -133,7 +133,7 @@ func ExtractAndNormalize(r *http.Request, provider string) (*NormalizedRequest, 
 		if err := json.Unmarshal(bodyBytes, &anthropicReq); err != nil {
 			return nil, nil, err
 		}
-		return normalized, normalizeAnthropicRequest(normalized, &anthropicReq), nil
+		return normalized, normalizeAnthropicRequest(normalized, &anthropicReq, bodyBytes), nil
 
 	case "cohere":
 		var cohereReq map[string]interface{}
@@ -242,7 +242,7 @@ func ExtractAndNormalize(r *http.Request, provider string) (*NormalizedRequest, 
 					}
 				}
 			}
-			return json.Marshal(geminiReq)
+			return marshalRebuiltProviderRequest(bodyBytes, geminiReq)
 		}
 		return normalized, rebuilder, nil
 	// and the Amazon Titan format for Titan models. We normalize both to NormalizedRequest.
@@ -250,7 +250,7 @@ func ExtractAndNormalize(r *http.Request, provider string) (*NormalizedRequest, 
 		// Try Anthropic Messages API format first (Claude via Bedrock)
 		var anthropicReq AnthropicRequest
 		if err := json.Unmarshal(bodyBytes, &anthropicReq); err == nil && anthropicReq.Model != "" {
-			return normalized, normalizeAnthropicRequest(normalized, &anthropicReq), nil
+			return normalized, normalizeAnthropicRequest(normalized, &anthropicReq, bodyBytes), nil
 		}
 		// Fallback: extract model from URL path (Bedrock model ID is in the path)
 		normalized.Model = ExtractBedrockModel("")

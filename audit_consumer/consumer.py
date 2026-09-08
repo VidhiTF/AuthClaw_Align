@@ -231,6 +231,9 @@ def main():
                     except Exception as dlq_exc:  # noqa: BLE001
                         logger.error("DLQ publish failed: %s", dlq_exc)
                         metrics.increment("audit_consumer_dlq_publish_failures_total")
+                        consumer.retry(message)
+                        metrics.increment("audit_consumer_retries_total")
+                        break
                     consumer.ack(message)
 
     logger.info("Audit consumer stopped")

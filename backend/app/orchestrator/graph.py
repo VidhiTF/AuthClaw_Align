@@ -509,6 +509,7 @@ def _summarize_remediation_actions(actions: list[dict], remediation_state: str) 
         "actions_failed": len(failed),
         "rollback_required": any(
             action.get("status") == RemediationActionStatus.SUCCEEDED.value
+            or bool((action.get("rollback_plan") or {}).get("rollback_ref"))
             for action in actions
         ) and bool(failed),
         "details": [
@@ -622,11 +623,19 @@ def execute_remediation(state: ComplianceState) -> ComplianceState:
             "running",
         )
 
+        res = None
         try:
             if not scanner:
                 raise RuntimeError("Scanner not initialized")
 
             res = scanner.execute_remediation(state["workflow_id"], action["id"], plan_item)
+            if res.get("rollback_ref"):
+                action["rollback_plan"] = {
+                    "mode": "aws_s3_restore_backup",
+                    "control": control,
+                    "action": "Restore original S3 object from AuthClaw rollback copy",
+                    "rollback_ref": res["rollback_ref"],
+                }
             status = str(res.get("status", "")).lower()
             if status not in ("success", "succeeded", "completed"):
                 raise RuntimeError(res.get("details") or f"Remediation returned status {status}")
@@ -660,7 +669,7 @@ def execute_remediation(state: ComplianceState) -> ComplianceState:
             action.update({
                 "status": RemediationActionStatus.FAILED.value,
                 "last_error": str(e),
-                "result": {
+                "result": res or {
                     "connector": plan_item.get("connector", "aws_s3"),
                     "control": control,
                     "target": plan_item.get("target"),
@@ -716,9 +725,15 @@ def verify_results(state: ComplianceState) -> ComplianceState:
     failed = result.get("actions_failed", 0)
     
     if failed > 0:
+        actions = _get_remediation_actions(state)
+        mutated_failure = any(
+            action.get("status") == RemediationActionStatus.FAILED.value
+            and bool((action.get("rollback_plan") or {}).get("rollback_ref"))
+            for action in actions
+        )
         # Retry logic
         retry_count = state.get("retry_count", 0)
-        if retry_count < 3:
+        if retry_count < 3 and not mutated_failure:
             emit = state.get("_emit_audit")
             if emit:
                 emit(state["workflow_id"], state["tenant_id"], state.get("request_id", ""),
@@ -738,6 +753,7 @@ def verify_results(state: ComplianceState) -> ComplianceState:
         actions = _get_remediation_actions(state)
         has_rollback_candidates = any(
             action.get("status") == RemediationActionStatus.SUCCEEDED.value
+            or bool((action.get("rollback_plan") or {}).get("rollback_ref"))
             for action in actions
         )
         if has_rollback_candidates:
@@ -750,7 +766,11 @@ def verify_results(state: ComplianceState) -> ComplianceState:
                 **state,
                 "current_state": WorkflowState.ROLLBACK_REMEDIATION.value,
                 "remediation_state": RemediationState.ROLLING_BACK.value,
-                "error_message": "Max retries exceeded during verification; rollback required",
+                "error_message": (
+                    "Post-mutation verification failed; rollback required"
+                    if mutated_failure
+                    else "Max retries exceeded during verification; rollback required"
+                ),
                 "updated_at": _now_iso(),
             }
             if persist:
@@ -813,7 +833,10 @@ def rollback_remediation(state: ComplianceState) -> ComplianceState:
             rollback_details.append(action.get("rollback_result") or {})
             continue
 
-        if action.get("status") != RemediationActionStatus.SUCCEEDED.value:
+        if action.get("status") != RemediationActionStatus.SUCCEEDED.value and not (
+            action.get("status") == RemediationActionStatus.FAILED.value
+            and (action.get("rollback_plan") or {}).get("rollback_ref")
+        ):
             continue
 
         _emit_remediation_action_audit(
