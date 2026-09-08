@@ -1,10 +1,12 @@
 {
-  "contract_version": "2026-07-07",
+  "contract_version": "2026-09-08",
   "providers": {
     "openai": {
       "status": "production-ready",
       "last_reviewed": "2026-07-07",
       "endpoint": "/v1/chat/completions",
+      "gateway_method": "*",
+      "gateway_pattern": "/v1/*",
       "payload_shape": "OpenAI chat.completions messages[]",
       "stream_shape": "SSE data choices[].delta.content with [DONE]"
     },
@@ -12,6 +14,8 @@
       "status": "production-ready",
       "last_reviewed": "2026-07-07",
       "endpoint": "/v1/messages",
+      "gateway_method": "*",
+      "gateway_pattern": "/v1/*",
       "payload_shape": "Anthropic messages with max_tokens and messages[]",
       "stream_shape": "SSE content_block_delta delta.text events"
     },
@@ -19,6 +23,8 @@
       "status": "production-ready",
       "last_reviewed": "2026-07-07",
       "endpoint": "/v2/chat",
+      "gateway_method": "POST",
+      "gateway_pattern": "/v2/chat",
       "payload_shape": "Cohere v2 chat messages[]",
       "stream_shape": "SSE content-delta delta.message.content.text events"
     },
@@ -26,8 +32,28 @@
       "status": "production-ready",
       "last_reviewed": "2026-07-07",
       "endpoint": "/openai/deployments/{deployment}/chat/completions?api-version=2024-10-21",
+      "gateway_method": "POST",
+      "gateway_pattern": "/openai/deployments/*",
       "payload_shape": "Azure OpenAI deployment chat.completions messages[]",
       "stream_shape": "SSE data choices[].delta.content with [DONE]"
+    },
+    "gemini": {
+      "status": "validated",
+      "last_reviewed": "2026-07-07",
+      "endpoint": "/v1/models/{model}:generateContent",
+      "gateway_method": "*",
+      "gateway_pattern": "/v1/*",
+      "payload_shape": "Gemini generateContent contents[].parts[]",
+      "stream_shape": "JSON or SSE candidates[].content.parts[].text"
+    },
+    "bedrock": {
+      "status": "feature-gated",
+      "last_reviewed": "2026-09-08",
+      "endpoint": "/bedrock/model/{model}/invoke",
+      "gateway_method": "POST",
+      "gateway_pattern": "/bedrock/model/*",
+      "payload_shape": "AWS Bedrock model invoke payload",
+      "stream_shape": "Provider model response; streaming invoke is not advertised"
     }
   }
 }

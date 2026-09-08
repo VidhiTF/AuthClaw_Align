@@ -32,10 +32,13 @@ order and rollback decision.
 | Cohere | `/v2/chat` | `Authorization: Bearer <provider key>` | Cohere `content-delta` events |
 | Azure OpenAI | `/v1/chat/completions` with `X-Provider: azure_openai`, backed by a deployment-scoped endpoint, or direct `/openai/deployments/.../chat/completions` | `api-key` plus `api-version` query | OpenAI-compatible chat deltas |
 | Gemini | `/v1/models/{model}:generateContent` | `x-goog-api-key` | Gemini candidate part deltas |
+| AWS Bedrock (feature-gated) | `/bedrock/model/{model}/invoke` | AWS SigV4 | Model-specific invoke response |
 
 For Azure OpenAI, save the provider credential endpoint as the deployment-scoped URL, for example
 `https://YOUR_RESOURCE.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT/chat/completions`.
 Set `AZURE_OPENAI_API_VERSION` to override the default `2024-10-21` query parameter.
+Bedrock uses only the `/bedrock/model/.../invoke` public form and remains disabled unless
+the Bedrock feature flags and AWS runtime credentials are configured.
 
 ---
 
