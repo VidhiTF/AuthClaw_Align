@@ -253,6 +253,7 @@ jobs:
           tests/test_access_requests.py
           tests/test_secret_retirement_postgres.py
           tests/test_worker_lifecycle_postgres.py
+          tests/test_workflow_advisory_lock_postgres.py
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

@@ -34,6 +34,7 @@ from app.services.remediation_approval import (
     compute_action_hash,
     evaluate_approval,
 )
+from app.orchestrator.workflow_lock import workflow_advisory_lock
 
 logger = logging.getLogger("orchestrator.runner")
 
@@ -461,16 +462,7 @@ class ComplianceWorkflowRunner:
     ) -> dict:
         """Resume a paused workflow (e.g., after approval)."""
         lock_key = int(uuid.UUID(workflow_id).int & 0x7fffffffffffffff)
-        lock_acquired = self.db.execute(
-            text("SELECT pg_try_advisory_lock(:key)"),
-            {"key": lock_key}
-        ).scalar()
-
-        if not lock_acquired:
-            logger.warning("Workflow %s recovery/resume lock could not be acquired", workflow_id)
-            raise ValueError(f"Workflow {workflow_id} is currently being processed by another worker")
-
-        try:
+        with workflow_advisory_lock(self.db, lock_key, workflow_id):
             wf = self.db.query(ComplianceWorkflow).filter(
                 ComplianceWorkflow.workflow_id == workflow_id,
                 ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
@@ -537,16 +529,7 @@ class ComplianceWorkflowRunner:
                 wf.updated_at = datetime.now(tz=timezone.utc)
                 self.db.commit()
                 raise
-
             return {k: v for k, v in state.items() if not k.startswith("_")}
-        finally:
-            try:
-                self.db.execute(
-                    text("SELECT pg_advisory_unlock(:key)"),
-                    {"key": lock_key}
-                )
-            except Exception as unlock_exc:
-                logger.warning("Failed to release advisory lock for workflow %s: %s", workflow_id, unlock_exc)
 
     def get_status(self, workflow_id: str, tenant_id: str) -> Optional[dict]:
         """Get the current status of a workflow."""
