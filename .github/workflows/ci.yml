@@ -168,7 +168,8 @@ jobs:
             tests/test_migration_chain.py tests/test_migration_044.py tests/test_auth_session_binding_migration.py tests/test_platform_admin_seed.py \
             tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
             tests/test_compliance_scoring.py tests/test_migration_038.py tests/test_migration_040.py \
-            tests/test_secret_crypto.py tests/test_secret_retirement.py tests/test_audit_transport_contract.py
+            tests/test_secret_crypto.py tests/test_secret_retirement.py tests/test_audit_transport_contract.py \
+            tests/test_s3_remediation_protocol.py
 
   backend-integration:
     name: Backend PostgreSQL Integration
