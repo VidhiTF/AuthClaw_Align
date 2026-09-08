@@ -20,6 +20,7 @@ from app.schemas.models import AccessRequestCreate
 from app.services import access_requests
 from app.services import event_backbone, privacy_lifecycle
 from app.services.access_requests import (
+    create_access_request_invitation,
     create_access_request,
     deliver_access_request_emails,
     transition_access_request,
@@ -468,6 +469,40 @@ def test_email_retry_recovers_without_failure_record(monkeypatch):
     assert db.commits == 0
 
 
+@pytest.mark.parametrize("otp_visible", [True, False])
+def test_failed_invitation_delivery_exposes_otp_only_when_enabled(
+    monkeypatch, otp_visible
+):
+    tenant = SimpleNamespace(id=uuid4(), name="Analytical Engines")
+    invite = SimpleNamespace(
+        invite_id=uuid4(),
+        tenant_name=tenant.name,
+        resend_count=0,
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = tenant
+    db.execute.return_value.one.return_value = invite
+    monkeypatch.setattr(access_requests, "_generate_otp", lambda: "123456")
+    monkeypatch.setattr(access_requests, "demo_otp_visible", lambda: otp_visible)
+    monkeypatch.setattr(
+        access_requests,
+        "send_otp_email",
+        MagicMock(side_effect=EmailDeliveryError("SMTP unavailable")),
+    )
+
+    metadata = create_access_request_invitation(
+        db,
+        AccessRequest(
+            business_email="owner@example.com",
+            company=tenant.name,
+        ),
+        actor_id=uuid4(),
+    )
+
+    assert metadata["delivery"] == "failed"
+    assert metadata.get("dev_otp") == ("123456" if otp_visible else None)
+
+
 @pytest.mark.parametrize("new_status", ["APPROVED", "REJECTED", "INVITED"])
 def test_status_transition_records_history_and_rejects_invalid(monkeypatch, new_status):
     request = AccessRequest(
@@ -508,6 +543,40 @@ def test_status_transition_records_history_and_rejects_invalid(monkeypatch, new_
             new_status="REJECTED",
             actor_id=uuid4(),
         )
+
+
+def test_approved_request_can_retry_invitation(monkeypatch):
+    request = AccessRequest(
+        id=uuid4(),
+        reference="AR-RETRY-INVITE",
+        status="APPROVED",
+    )
+    db = MagicMock()
+    query = db.query.return_value
+    query.filter.return_value = query
+    query.with_for_update.return_value = query
+    query.one_or_none.return_value = request
+    monkeypatch.setattr(
+        access_requests,
+        "create_access_request_invitation",
+        lambda *_args, **_kwargs: {"delivery": "failed", "dev_otp": "123456"},
+    )
+
+    transition_access_request(
+        db,
+        reference=request.reference,
+        new_status="INVITED",
+        actor_id=uuid4(),
+        create_invitation=True,
+    )
+
+    assert request.status == "INVITED"
+    assert any(
+        isinstance(entry, AccessRequestHistory)
+        and entry.event_type == "INVITATION_DELIVERY_FAILED"
+        and entry.event_metadata["dev_otp"] == "123456"
+        for entry in (call.args[0] for call in db.add.call_args_list)
+    )
 
 
 def test_retention_deletes_selected_records_and_preserves_history(monkeypatch):
