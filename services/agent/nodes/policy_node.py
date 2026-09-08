@@ -37,6 +37,8 @@ def policy_node(state):
         return state
 
     result = PolicyAgent().evaluate(message, username=username, tenant_id=tenant_id)
+    if result.policy_versions:
+        state["policy_versions"] = result.policy_versions
     
     log_agent_event(
         tenant_id=tenant_id,
@@ -75,8 +77,6 @@ def policy_node(state):
     if result.policy_decision == "REDACT" and result.redacted_text:
         state["message"] = result.redacted_text
         state["risk_level"] = result.risk_level
-    if result.policy_versions:
-        state["policy_versions"] = result.policy_versions
     print(
         f"POLICY NODE: allowed={allowed} triggered_policy_count={len(state['triggered_policies'])}",
         flush=True,

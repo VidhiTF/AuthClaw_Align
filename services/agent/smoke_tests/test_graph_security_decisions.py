@@ -36,7 +36,8 @@ class GraphSecurityDecisionTests(unittest.TestCase):
             evaluate=lambda *_, **__: types.SimpleNamespace(
                 approved=policy_action == "ALLOW", policy_decision=policy_action,
                 category="sensitive_data" if policy_action != "ALLOW" else "",
-                reason="Tenant policy", violated_policies=[], policy_versions=[],
+                reason="Tenant policy", violated_policies=[],
+                policy_versions=[{"policy": "tenant-policy", "version": 3}],
             ),
         ))
         dependencies = {
@@ -70,6 +71,10 @@ class GraphSecurityDecisionTests(unittest.TestCase):
         result = self.run_graph(policy_action="REQUIRE_APPROVAL")
         self.assertEqual(result["approval_status"], "PENDING_APPROVAL")
         self.assertEqual(result["approval_id"], "test-approval")
+        self.assertEqual(
+            [{"policy": "tenant-policy", "version": 3}],
+            result["policy_versions"],
+        )
 
     def test_allowed_request_still_auto_approves(self):
         self.assertEqual(self.run_graph()["approval_status"], "APPROVED")

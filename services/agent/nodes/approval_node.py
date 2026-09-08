@@ -7,8 +7,6 @@ import concurrent.futures
 from contextvars import copy_context
 
 def _approval_reason(state: AuthState) -> str:
-    if state.get("unknown_provider_risk"):
-        return "unknown_provider_risk"
     if state.get("security_policy_action") == "require_approval" or state.get("block_category") in {"pii", "secrets", "sensitive_data"}:
         return "sensitive_data"
     if state.get("policy_decision") in {"REQUIRE_APPROVAL", "BLOCK"} or state.get("block_reason") == "policy_violation":

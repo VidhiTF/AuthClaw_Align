@@ -310,7 +310,7 @@ class GatewayService:
                 "trace": execution.trace,
             }
 
-        return {
+        response = {
             "request_id": execution.request_id,
             "response": result.get("response", "No response generated"),
             "risk_level": risk_level,
@@ -320,6 +320,11 @@ class GatewayService:
             "decision": execution.decision,
             "trace": execution.trace,
         }
+        if result.get("provider_status"):
+            response["provider_status"] = result["provider_status"]
+        if result.get("provider_error"):
+            response["provider_error"] = result["provider_error"]
+        return response
 
     def get_trace(self, *, request_id: str, session_id: str, tenant_id: int) -> list:
         try:

@@ -6,7 +6,15 @@ import time
 import concurrent.futures
 
 
-def _offline_provider_fallback(error_message: str) -> str:
+def _provider_error_metadata(exc: Exception):
+    if isinstance(exc, TimeoutError):
+        return {"code": "provider_timeout", "detail": "The provider request timed out."}
+    if isinstance(exc, ConnectionError):
+        return {"code": "provider_unavailable", "detail": "The provider could not be reached."}
+    return {"code": "provider_failure", "detail": "The provider request failed."}
+
+
+def _offline_provider_fallback() -> str:
     return (
         "[Offline Fallback] The configured model provider is currently unavailable. "
         "AuthClaw completed the gateway security, policy, and audit checks, but the "
@@ -98,9 +106,9 @@ def stream_llm_node(state):
         )
         token_stream = _provider_token_stream(provider, prompt)
     except Exception as exc:
-        token_stream = iter([_offline_provider_fallback(str(exc))])
+        token_stream = iter([_offline_provider_fallback()])
         state["provider_status"] = "offline_fallback"
-        state["provider_error"] = str(exc)
+        state["provider_error"] = _provider_error_metadata(exc)
 
     for chunk in stream_redact_sensitive_tokens(token_stream, username=username, tenant_id=tenant_id):
         yield chunk
@@ -164,6 +172,8 @@ def llm_node(state):
             event_type="PROVIDER_RESPONSE_RECEIVED",
             details="Received response successfully from upstream provider."
         )
+        state["provider_status"] = "ok"
+        state.pop("provider_error", None)
         
     except Exception as e:
         duration = time.perf_counter() - start_time
@@ -179,9 +189,9 @@ def llm_node(state):
             event_type="PROVIDER_FAILOVER",
             details="Primary model connection failed. Falling back to offline provider response."
         )
-        final_response = _offline_provider_fallback(str(e))
+        final_response = _offline_provider_fallback()
         state["provider_status"] = "offline_fallback"
-        state["provider_error"] = str(e)
+        state["provider_error"] = _provider_error_metadata(e)
 
     return {
         **state,
