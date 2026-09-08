@@ -169,7 +169,8 @@ jobs:
             tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
             tests/test_compliance_scoring.py tests/test_migration_038.py tests/test_migration_040.py \
             tests/test_secret_crypto.py tests/test_secret_retirement.py tests/test_audit_transport_contract.py \
-            tests/test_s3_remediation_protocol.py
+            tests/test_s3_remediation_protocol.py tests/test_s3_remediation_recovery.py \
+            tests/test_remediation_connector.py tests/test_connector_target_binding.py tests/test_remediation_failure_rollback.py
 
   backend-integration:
     name: Backend PostgreSQL Integration

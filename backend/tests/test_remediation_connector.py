@@ -20,18 +20,37 @@ class FakeS3:
             "Body": io.BytesIO(obj["Body"]),
             "ContentType": obj.get("ContentType", "text/plain"),
             "VersionId": obj.get("VersionId"),
-            "ETag": f"etag-{obj.get('VersionId', '0')}",
+            "ETag": f'"etag-{obj.get("VersionId", "0")}"',
+            "Metadata": obj.get("Metadata", {}),
         }
 
-    def put_object(self, Bucket, Key, Body, ContentType="text/plain", Metadata=None):
+    def put_object(
+        self,
+        Bucket,
+        Key,
+        Body,
+        ContentType="text/plain",
+        Metadata=None,
+        IfMatch=None,
+        IfNoneMatch=None,
+        ChecksumSHA256=None,
+    ):
+        if IfNoneMatch == "*" and Key in self.objects:
+            raise RuntimeError("PreconditionFailed: object already exists")
+        if IfMatch is not None:
+            if Key not in self.objects:
+                raise RuntimeError("PreconditionFailed: target is missing")
+            current_etag = f'etag-{self.objects[Key].get("VersionId", "0")}'
+            if IfMatch.strip('"') != current_etag:
+                raise RuntimeError("PreconditionFailed: ETag changed")
         self.version += 1
         self.objects[Key] = {
-            "Body": Body,
+            "Body": bytes(Body),
             "ContentType": ContentType,
             "VersionId": f"v{self.version}",
             "Metadata": Metadata or {},
         }
-        return {"VersionId": f"v{self.version}", "ETag": f"etag-v{self.version}"}
+        return {"VersionId": f"v{self.version}", "ETag": f'"etag-v{self.version}"'}
 
 
 def test_s3_remediation_applies_verifies_and_rolls_back():

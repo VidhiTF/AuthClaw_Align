@@ -482,6 +482,7 @@ def _build_remediation_actions(plan: list[dict], previous_actions: list[dict] | 
             "result": existing.get("result"),
             "rollback_plan": existing.get("rollback_plan"),
             "rollback_result": existing.get("rollback_result"),
+            "mutation_state": existing.get("mutation_state"),
         })
 
     return actions
@@ -530,6 +531,19 @@ def _get_remediation_actions(state: ComplianceState) -> list[dict]:
         return state.get("remediation_actions", [])
     result = state.get("execution_result") or {}
     return result.get("actions", [])
+
+
+def _persist_remediation_progress(state: ComplianceState, actions: list[dict]) -> None:
+    persist = state.get("_persist_state")
+    if not persist:
+        return
+    persist({
+        **state,
+        "remediation_state": RemediationState.EXECUTING.value,
+        "remediation_actions": actions,
+        "current_state": WorkflowState.EXECUTE_REMEDIATION.value,
+        "updated_at": _now_iso(),
+    })
 
 
 def _trace_value(value: Any, limit: int = 180) -> str:
@@ -628,7 +642,30 @@ def execute_remediation(state: ComplianceState) -> ComplianceState:
             if not scanner:
                 raise RuntimeError("Scanner not initialized")
 
-            res = scanner.execute_remediation(state["workflow_id"], action["id"], plan_item)
+            durable_s3_protocol = (
+                getattr(scanner, "s3_client", None) is not None
+                and (plan_item.get("target") or {}).get("type") == "s3_object"
+                and hasattr(scanner, "prepare_remediation")
+                and hasattr(scanner, "apply_prepared_remediation")
+            )
+            if durable_s3_protocol:
+                prepared = scanner.prepare_remediation(
+                    state["workflow_id"],
+                    action["id"],
+                    plan_item,
+                    action.get("mutation_state"),
+                )
+                action["mutation_state"] = prepared
+                _persist_remediation_progress(state, actions)
+                if prepared.get("phase") in {"CONFLICTED", "ROLLBACK_CONFLICTED", "UNKNOWN"}:
+                    raise RuntimeError(prepared.get("conflict") or "Remediation state requires operator reconciliation")
+                prepared["phase"] = "APPLYING"
+                _persist_remediation_progress(state, actions)
+                res = scanner.apply_prepared_remediation(prepared, plan_item)
+            else:
+                res = scanner.execute_remediation(state["workflow_id"], action["id"], plan_item)
+            if res.get("mutation_state"):
+                action["mutation_state"] = res["mutation_state"]
             if res.get("rollback_ref"):
                 action["rollback_plan"] = {
                     "mode": "aws_s3_restore_backup",
@@ -666,6 +703,15 @@ def execute_remediation(state: ComplianceState) -> ComplianceState:
                 ],
             )
         except Exception as e:
+            mutation_state = action.get("mutation_state") or {}
+            mutation = mutation_state.get("mutation") or {}
+            if mutation.get("etag") and hasattr(scanner, "rollback_ref_from_state"):
+                action["rollback_plan"] = {
+                    "mode": "aws_s3_restore_backup",
+                    "control": control,
+                    "action": "Restore original S3 object from AuthClaw rollback copy",
+                    "rollback_ref": scanner.rollback_ref_from_state(mutation_state),
+                }
             action.update({
                 "status": RemediationActionStatus.FAILED.value,
                 "last_error": str(e),
