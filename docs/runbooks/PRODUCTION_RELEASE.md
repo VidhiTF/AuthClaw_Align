@@ -55,6 +55,13 @@ configuration checksum and must change only in their numbered release. Transport
 selection still requires the step-6 reconciliation evidence; a variable change is
 not proof of a successful cutover.
 
+Set protected `ROLLBACK_TFVARS_JSON` to the reviewed previous values for co-location,
+service CPU architectures, transport, audit consumer/ClickHouse, alarm destinations,
+and all seven immutable container image digests. The workflow accepts only those
+runtime keys, applies them as a reverse Terraform plan after a failed runtime rollout,
+then requires every restored service revision and deployed digest to match Terraform
+state and that retained configuration. Update this value at each rollback checkpoint.
+
 For step 7, retain `ecs list-services` JSON and the active gateway, backend and agent
 `ecs describe-task-definition` JSON, then run the offline check below. Its output is
 the raw `colocation` check; retain its referenced inputs beside it.

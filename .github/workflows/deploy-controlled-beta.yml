@@ -65,6 +65,7 @@ jobs:
       ROLLBACK_PROTECTED_UNTIL: ${{ vars.ROLLBACK_PROTECTED_UNTIL }}
       DATABASE_COMPATIBLE_UNTIL: ${{ vars.DATABASE_COMPATIBLE_UNTIL }}
       DEEP_ROLLBACK_INVENTORY_JSON: ${{ vars.DEEP_ROLLBACK_INVENTORY_JSON }}
+      ROLLBACK_TFVARS_JSON: ${{ vars.ROLLBACK_TFVARS_JSON }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
       TF_STATE_KMS_KEY_ID: ${{ vars.TF_STATE_KMS_KEY_ID }}
@@ -89,7 +90,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in AWS_REGION AWS_ROLE_ARN BETA_CERTIFICATE_ARN BETA_DOMAIN_NAME TF_STATE_BUCKET TF_STATE_KMS_KEY_ID ROLLBACK_PROTECTED_UNTIL DATABASE_COMPATIBLE_UNTIL DEEP_ROLLBACK_INVENTORY_JSON; do
+          for name in AWS_REGION AWS_ROLE_ARN BETA_CERTIFICATE_ARN BETA_DOMAIN_NAME TF_STATE_BUCKET TF_STATE_KMS_KEY_ID ROLLBACK_PROTECTED_UNTIL DATABASE_COMPATIBLE_UNTIL DEEP_ROLLBACK_INVENTORY_JSON ROLLBACK_TFVARS_JSON; do
             [[ -n "${!name}" ]] || { echo "::error::Missing controlled-beta variable ${name}"; exit 1; }
           done
           date -d "$ROLLBACK_PROTECTED_UNTIL" >/dev/null
@@ -109,6 +110,30 @@ jobs:
             { echo '::error::EDGE_ALARM_ACTION_ARNS_JSON must contain at least one alarm destination ARN'; exit 1; }
           [[ "$TF_VAR_enable_audit_consumer" != true || -n "$TF_VAR_clickhouse_host" ]] ||
             { echo '::error::CLICKHOUSE_HOST is required when the audit consumer is enabled'; exit 1; }
+          jq -e '
+            (keys | sort) == ([
+              "audit_sqs_alarm_action_arns", "audit_stream_transport", "clickhouse_host",
+              "container_images", "edge_alarm_action_arns", "enable_audit_consumer",
+              "enable_policy_sidecar_colocation", "service_cpu_architectures"
+            ] | sort) and
+            (.enable_policy_sidecar_colocation | type == "boolean") and
+            (.enable_audit_consumer | type == "boolean") and
+            (.audit_stream_transport == "kafka" or .audit_stream_transport == "sqs_fifo") and
+            (.clickhouse_host | type == "string") and
+            (.enable_audit_consumer == false or (.clickhouse_host | length > 0)) and
+            (.service_cpu_architectures | type == "object") and
+            ((.service_cpu_architectures | keys) - ["agent", "audit_consumer", "backend", "console", "gateway", "opa", "presidio"] | length == 0) and
+            all(.service_cpu_architectures[]; . == "ARM64" or . == "X86_64") and
+            (.audit_sqs_alarm_action_arns | type == "array") and
+            all(.audit_sqs_alarm_action_arns[]; type == "string") and
+            (.edge_alarm_action_arns | type == "array" and length > 0) and
+            all(.edge_alarm_action_arns[]; type == "string" and startswith("arn:")) and
+            (.container_images | type == "object") and
+            (.container_images | keys | sort) == (["agent", "audit_consumer", "backend", "console", "gateway", "opa", "presidio"] | sort) and
+            all(.container_images[]; type == "string" and test("^[^[:space:]@]+@sha256:[0-9a-f]{64}$"))
+          ' <<<"$ROLLBACK_TFVARS_JSON" > rollback.tfvars.json ||
+            { echo '::error::ROLLBACK_TFVARS_JSON must be the exact reviewed, immutable previous runtime configuration'; exit 1; }
+          chmod 600 rollback.tfvars.json
 
       - name: Configure short-lived AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -390,10 +415,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t alarms < <(terraform -chdir=infra/terraform output -json primary | jq -r '.alarm_names[]')
-          active="$(aws cloudwatch describe-alarms --alarm-names "${alarms[@]}" \
-            --query "MetricAlarms[?StateValue=='ALARM'].AlarmName" --output text)"
-          [[ -z "$active" ]] || { echo "::error::Active alarms: $active"; exit 1; }
+          terraform -chdir=infra/terraform output -json primary |
+            jq -e '.alarm_names | select(type == "array" and length > 0)' \
+              > expected-alarm-names.json
+          mapfile -t alarms < <(jq -r '.[]' expected-alarm-names.json)
+          aws cloudwatch describe-alarms --alarm-names "${alarms[@]}" > deployment-alarms.json
+          jq -e --slurpfile expected expected-alarm-names.json '
+            ((.CompositeAlarms // []) | length) == 0 and
+            ((.MetricAlarms | map(.AlarmName) | sort) == ($expected[0] | sort)) and
+            all(.MetricAlarms[]; .StateValue == "OK")
+          ' deployment-alarms.json >/dev/null || {
+            echo '::error::Every expected deployment alarm must exist and be in OK state'
+            jq '{MetricAlarms: [.MetricAlarms[]? | {AlarmName, StateValue}], CompositeAlarms: [.CompositeAlarms[]? | {AlarmName, StateValue}]}' deployment-alarms.json
+            exit 1
+          }
 
       - name: Capture and verify deployed policy topology
         shell: bash
@@ -444,10 +479,11 @@ jobs:
             }' primary-output.json > deployment-evidence.json
           fi
 
-      - name: Roll back to previous task definitions
+      - name: Restore previous topology and runtime configuration
         # Do not restart services after a failed preflight, or restore a
         # CBC-capable image after retirement. The operator must approve the
-        # retained rollback image as strict AES-GCM-only before enabling this.
+        # retained rollback configuration as strict AES-GCM-only and schema
+        # compatible before enabling this.
         if: >-
           failure() &&
           steps.runtime_release.outputs.apply_started == 'true' &&
@@ -455,15 +491,40 @@ jobs:
           vars.CRYPTO_STRICT_ROLLBACK_APPROVED == 'true'
         shell: bash
         run: |
+          set -euo pipefail
           [[ -s previous-task-definitions.tsv ]] || exit 0
-          cluster="authclaw-controlled-beta-primary-cluster"
-          while IFS=$'\t' read -r service task_definition; do
-            aws ecs update-service --cluster "$cluster" --service "$service" \
-              --task-definition "$task_definition" --force-new-deployment >/dev/null
-          done < previous-task-definitions.tsv
-          mapfile -t services < <(cut -f1 previous-task-definitions.tsv)
+          trap 'rm -f infra/terraform/rollback.tfplan' EXIT
+          terraform -chdir=infra/terraform plan -input=false \
+            -var-file="$GITHUB_WORKSPACE/rollback.tfvars.json" -out=rollback.tfplan
+          terraform -chdir=infra/terraform show -json rollback.tfplan > rollback-plan.json
+          terraform -chdir=infra/terraform apply -input=false rollback.tfplan
+
+          primary="$(terraform -chdir=infra/terraform output -json primary)"
+          cluster="$(jq -er '.ecs_cluster_name' <<<"$primary")"
+          mapfile -t services < <(jq -r '.ecs_service_names[]' <<<"$primary")
+          [[ ${#services[@]} -gt 0 ]] || { echo '::error::Rollback produced no ECS services'; exit 1; }
           aws ecs wait services-stable --cluster "$cluster" --services "${services[@]}"
+          terraform -chdir=infra/terraform show -json | jq -r '
+            .values.root_module | .. | objects | select(.type? == "aws_ecs_service") |
+            .values | [.name, .task_definition] | @tsv' > rollback-target-task-definitions.tsv
+          [[ -s rollback-target-task-definitions.tsv ]]
+          while IFS=$'\t' read -r service definition; do
+            aws ecs describe-services --cluster "$cluster" --services "$service" |
+              jq -e --arg definition "$definition" '(.failures | length) == 0 and
+                (.services | length) == 1 and .services[0].taskDefinition == $definition and
+                any(.services[0].deployments[]; .status == "PRIMARY" and
+                  .taskDefinition == $definition and .rolloutState == "COMPLETED")' >/dev/null
+          done < rollback-target-task-definitions.tsv
           python3 scripts/ecr_release_control.py inventory --cluster "$cluster" --output rollback-image-inventory.json
+          jq -e --slurpfile config rollback.tfvars.json '
+            ([.services[].images[].image] | unique | sort) ==
+            ([$config[0].container_images.agent, $config[0].container_images.backend,
+              $config[0].container_images.gateway, $config[0].container_images.console,
+              $config[0].container_images.opa, $config[0].container_images.presidio] +
+              (if $config[0].enable_audit_consumer then [$config[0].container_images.audit_consumer] else [] end) |
+              unique | sort)
+          ' rollback-image-inventory.json >/dev/null ||
+            { echo '::error::Deployed rollback images do not match the reviewed rollback configuration'; exit 1; }
 
       - name: Upload deployment and rollback evidence
         if: always()
@@ -482,6 +543,11 @@ jobs:
             deployed-image-inventory.json
             target-image-inventory.json
             rollback-image-inventory.json
+            rollback.tfvars.json
+            rollback-plan.json
+            rollback-target-task-definitions.tsv
+            expected-alarm-names.json
+            deployment-alarms.json
             deeper-rollback-inventory.json
             promoted-image-verification.json
             promotion-record.json

@@ -152,8 +152,30 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn('agent = {', REGIONAL_STACK)
         self.assertIn('/api/v1/agent/health/ready', REGIONAL_STACK)
         self.assertIn('AUTHCLAW_INTERNAL_SERVICE_SECRET', REGIONAL_STACK)
-        self.assertIn("Roll back to previous task definitions", DEPLOY)
+        self.assertIn("Restore previous topology and runtime configuration", DEPLOY)
         self.assertIn("Reject active deployment alarms", DEPLOY)
+
+    def test_alarm_gate_requires_the_exact_inventory_to_be_ok(self):
+        gate = DEPLOY.split("- name: Reject active deployment alarms", 1)[1].split(
+            "- name: Capture and verify deployed policy topology", 1
+        )[0]
+        self.assertIn("deployment-alarms.json", gate)
+        self.assertIn("expected-alarm-names.json", gate)
+        self.assertIn(".StateValue == \"OK\"", gate)
+        self.assertIn("map(.AlarmName) | sort", gate)
+        self.assertNotIn("MetricAlarms[?StateValue=='ALARM']", gate)
+
+    def test_automatic_rollback_restores_reviewed_topology(self):
+        rollback = DEPLOY.split("- name: Restore previous topology and runtime configuration", 1)[1].split(
+            "- name: Upload deployment and rollback evidence", 1
+        )[0]
+        self.assertIn("ROLLBACK_TFVARS_JSON", DEPLOY)
+        self.assertIn('rollback.tfvars.json', rollback)
+        self.assertIn('-var-file="$GITHUB_WORKSPACE/rollback.tfvars.json"', rollback)
+        self.assertIn("rollback.tfplan", rollback)
+        self.assertIn("rollback-target-task-definitions.tsv", rollback)
+        self.assertIn("rollback-image-inventory.json", rollback)
+        self.assertNotIn("aws ecs update-service", rollback)
 
     def test_colocation_is_an_explicit_reversible_release_switch(self):
         self.assertIn('variable "enable_policy_sidecar_colocation"', VARIABLES)
