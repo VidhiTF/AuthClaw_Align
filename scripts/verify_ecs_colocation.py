@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 
-EXPECTED = {"gateway": ("opa", "presidio"), "backend": ("presidio",), "agent": ("opa",)}
+EXPECTED = {"gateway": ("opa", "presidio")}
 DIGEST = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}$")
 
 
@@ -33,7 +33,7 @@ def verify(tasks, service_arns, architecture="X86_64", launch_type="FARGATE"):
         if task.get("networkMode") != "awsvpc": errors.append(f"{service}: networkMode must be awsvpc")
         if launch_type not in task.get("requiresCompatibilities", []): errors.append(f"{service}: launch type must include {launch_type}")
         if task.get("runtimePlatform", {}).get("cpuArchitecture") != expected_architecture: errors.append(f"{service}: architecture must be {expected_architecture}")
-        if not task.get("taskRoleArn"): errors.append(f"{service}: task role is missing")
+        if task.get("taskRoleArn"): errors.append(f"{service}: colocated policy task must not receive a task role")
         for name, item in containers.items():
             if not DIGEST.fullmatch(item.get("image", "")): errors.append(f"{service}/{name}: image is not an immutable digest")
         dependencies = {(item.get("containerName"), item.get("condition")) for item in primary.get("dependsOn", [])}
@@ -50,18 +50,13 @@ def verify(tasks, service_arns, architecture="X86_64", launch_type="FARGATE"):
             caps = item.get("linuxParameters", {}).get("capabilities", {}).get("drop", [])
             if item.get("readonlyRootFilesystem") is not True or item.get("privileged") is not False or "ALL" not in caps:
                 errors.append(f"{service}/{sidecar}: container hardening is incomplete")
-        expected_urls = ({"OPA_URL": "http://127.0.0.1:8181", "PRESIDIO_URL": "http://127.0.0.1:3000"}
-                         if service == "gateway" else
-                         {"PRESIDIO_URL": "http://127.0.0.1:3000"} if service == "backend" else
-                         {"AUTHCLAW_OPA_POLICY_URL": "http://127.0.0.1:8181/v1/data/authclaw/policy/decision"})
+        expected_urls = {"OPA_URL": "http://127.0.0.1:8181", "PRESIDIO_URL": "http://127.0.0.1:3000"}
         if any(env.get(name) != value for name, value in expected_urls.items()): errors.append(f"{service}: task-local policy URL mismatch")
-        forbidden = {"backend": ("OPA_URL", "AUTHCLAW_OPA_POLICY_URL"),
-                     "agent": ("OPA_URL", "PRESIDIO_URL"), "gateway": ()}[service]
-        if any(name in env for name in forbidden): errors.append(f"{service}: unowned policy URL is configured")
     for arn in service_arns:
         name = arn.rsplit("/", 1)[-1]
         if re.search(r"(?:^|[-_])(opa|presidio)$", name): evidence["standalone_policy_services"].append(arn)
-    if evidence["standalone_policy_services"]: errors.append("standalone OPA/Presidio ECS services remain")
+    standalone_names = {re.split(r"[-_]", arn.rsplit("/", 1)[-1])[-1] for arn in evidence["standalone_policy_services"]}
+    if standalone_names != {"opa", "presidio"}: errors.append("independent OPA and Presidio services are required for privileged callers")
     evidence.update(status="FAIL" if errors else "PASS", errors=errors,
                     architectures={service: architectures.get(service, "X86_64") for service in EXPECTED},
                     launch_type=launch_type)
@@ -81,10 +76,9 @@ def main():
     services = json.loads(args.services.read_text(encoding="utf-8")).get("serviceArns", [])
     architecture_map = json.loads(args.architecture_map)
     if not isinstance(architecture_map, dict) or any(
-        service not in EXPECTED or value not in {"X86_64", "ARM64"}
-        for service, value in architecture_map.items()
+        value not in {"X86_64", "ARM64"} for value in architecture_map.values()
     ):
-        parser.error("--architecture-map must map gateway/backend/agent to X86_64 or ARM64")
+        parser.error("--architecture-map values must be X86_64 or ARM64")
     architectures = {service: architecture_map.get(service, args.architecture) for service in EXPECTED}
     result = verify(tasks, services, architectures, args.launch_type)
     print(json.dumps(result, indent=2, sort_keys=True))

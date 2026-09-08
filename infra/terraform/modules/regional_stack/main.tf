@@ -18,6 +18,7 @@ locals {
     gateway        = "ARM64"
     console        = "ARM64"
     audit_consumer = "ARM64"
+    audit_producer = "ARM64"
     opa            = "ARM64"
     presidio       = "ARM64"
     } : merge({
@@ -26,9 +27,13 @@ locals {
       gateway        = "X86_64"
       console        = "X86_64"
       audit_consumer = "X86_64"
+      audit_producer = "X86_64"
       opa            = "X86_64"
       presidio       = "X86_64"
-  }, var.service_cpu_architectures)
+      }, var.service_cpu_architectures, {
+      # The producer reuses the exact gateway image digest.
+      audit_producer = lookup(var.service_cpu_architectures, "gateway", "X86_64")
+  })
   ecs_launch_compatibilities = var.ecs_ec2_graviton.enabled ? ["EC2"] : ["FARGATE"]
   ec2_capacity_provider_name = "${var.name}-graviton"
   ec2_ami_id                 = var.ecs_ec2_graviton.enabled ? (var.ecs_ec2_graviton.image_id != "" ? var.ecs_ec2_graviton.image_id : data.aws_ssm_parameter.ecs_arm64_ami[0].value) : ""
@@ -50,8 +55,8 @@ locals {
   api_base_url          = "${local.public_scheme}://${local.api_host}${var.enable_public_edge ? "/api/v1" : ":8000"}"
   gateway_base_url      = "${local.public_scheme}://${local.gateway_host}${var.enable_public_edge ? "" : ":8080"}"
   internal_agent_url    = local.internal_urls.agent
-  internal_opa_url      = var.enable_policy_sidecar_colocation ? "http://127.0.0.1:8181" : local.internal_urls.opa
-  internal_presidio_url = var.enable_policy_sidecar_colocation ? "http://127.0.0.1:3000" : local.internal_urls.presidio
+  internal_opa_url      = local.internal_urls.opa
+  internal_presidio_url = local.internal_urls.presidio
   db_address            = var.create_db_replica ? aws_db_instance.postgres_replica[0].address : aws_db_instance.postgres_primary[0].address
   db_arn                = var.create_db_replica ? aws_db_instance.postgres_replica[0].arn : aws_db_instance.postgres_primary[0].arn
   nat_subnets           = var.nat_gateway_mode == "per_az" ? aws_subnet.public : { "0" = aws_subnet.public["0"] }
@@ -77,13 +82,19 @@ locals {
     }
   }
 
-  private_services = {
+  private_services = merge({
     agent = {
       image          = var.container_images.agent
       container_port = 8001
       command        = null
     }
-  }
+    }, var.audit_stream_transport == "sqs_fifo" ? {
+    audit_producer = {
+      image          = var.container_images.gateway
+      container_port = 8090
+      command        = ["--audit-producer"]
+    }
+  } : {})
 
   legacy_sidecar_services = {
     opa = {
@@ -99,10 +110,13 @@ locals {
   }
 
   policy_sidecars = var.enable_policy_sidecar_colocation ? {
-    agent   = ["opa"]
-    backend = ["presidio"]
-    console = []
-    gateway = ["opa", "presidio"]
+    agent          = []
+    audit_producer = []
+    backend        = []
+    console        = []
+    gateway        = ["opa", "presidio"]
+    opa            = []
+    presidio       = []
   } : { for name in concat(keys(local.public_services), keys(local.private_services), keys(local.legacy_sidecar_services)) : name => [] }
   policy_sidecar_configs = {
     opa = {
@@ -126,10 +140,17 @@ locals {
     { name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" },
   ]
   service_policy_environment = var.enable_policy_sidecar_colocation ? {
-    agent   = [{ name = "AUTHCLAW_OPA_POLICY_URL", value = "${local.internal_opa_url}/v1/data/authclaw/policy/decision" }]
-    backend = [{ name = "PRESIDIO_URL", value = local.internal_presidio_url }]
-    console = []
-    gateway = local.policy_environment
+    agent          = local.policy_environment
+    audit_producer = []
+    backend        = local.policy_environment
+    console        = local.policy_environment
+    gateway = [
+      { name = "OPA_URL", value = "http://127.0.0.1:8181" },
+      { name = "PRESIDIO_URL", value = "http://127.0.0.1:3000" },
+      { name = "AUTHCLAW_OPA_POLICY_URL", value = "http://127.0.0.1:8181/v1/data/authclaw/policy/decision" },
+    ]
+    opa      = local.policy_environment
+    presidio = local.policy_environment
   } : { for name in keys(local.service_configs) : name => local.policy_environment }
   colocated_task_cpu = {
     agent = var.agent_sidecar_task_cpu, backend = var.backend_sidecar_task_cpu, gateway = var.gateway_sidecar_task_cpu
@@ -143,7 +164,7 @@ locals {
   service_configs = merge(
     local.public_services,
     local.private_services,
-    var.enable_policy_sidecar_colocation ? {} : local.legacy_sidecar_services,
+    local.legacy_sidecar_services,
   )
   task_definition_configs = local.service_configs
   ecs_alarm_services      = toset(concat(keys(local.service_configs), var.enable_audit_consumer ? ["audit_consumer"] : []))
@@ -155,6 +176,7 @@ locals {
   service_writable_paths = {
     agent          = ["/tmp", "/app/logs", "/app/watched_documents", "/app/scratch"]
     audit_consumer = ["/tmp"]
+    audit_producer = ["/tmp"]
     backend        = ["/tmp", "/app/.authclaw"]
     console        = ["/tmp", "/app/.authclaw"]
     gateway        = ["/tmp"]
@@ -164,6 +186,7 @@ locals {
   service_health_checks = {
     agent          = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/agent/health/ready', timeout=3)\""]
     audit_consumer = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9108/metrics', timeout=3)\""]
+    audit_producer = ["CMD", "/healthcheck", "http://127.0.0.1:8090/health"]
     backend        = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
     console        = ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
     gateway        = ["CMD", "/healthcheck", "http://127.0.0.1:8080/health"]
@@ -850,6 +873,14 @@ removed {
   }
 }
 
+# Shared only by the credential-free gateway container and the isolated SQS
+# producer. Other services cannot authenticate arbitrary producer requests.
+resource "aws_secretsmanager_secret" "audit_producer" {
+  name       = "${var.name}/audit-producer-secret"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
 resource "aws_secretsmanager_secret" "agent_encryption" {
   name       = "${var.name}/agent-encryption-key"
   kms_key_id = aws_kms_key.main.arn
@@ -940,6 +971,11 @@ resource "aws_cloudwatch_log_group" "service" {
 
 locals {
   application_task_role_arns = { for service, role in aws_iam_role.runtime : service => role.arn if service != "database_crypto_preflight" }
+  effective_task_role_arns = {
+    for name in keys(local.task_definition_configs) : name => (
+      name != "gateway" && length(local.policy_sidecars[name]) == 0 ? lookup(local.application_task_role_arns, name, null) : null
+    )
+  }
   ecs_secret_arns = concat([
     aws_secretsmanager_secret.jwt.arn,
     aws_secretsmanager_secret.jwt_v2.arn,
@@ -954,6 +990,7 @@ locals {
     aws_secretsmanager_secret.agent_migration_database_url.arn,
     aws_secretsmanager_secret.agent_database_url.arn,
     aws_secretsmanager_secret.internal_service.arn,
+    aws_secretsmanager_secret.audit_producer.arn,
     aws_secretsmanager_secret.bff_client_ip.arn,
     aws_secretsmanager_secret.oidc_bff_exchange.arn,
     aws_secretsmanager_secret.worker_token_hmac.arn,
@@ -1137,7 +1174,7 @@ locals {
           Effect = "Allow"
           Principal = { AWS = compact([
             aws_iam_role.runtime["backend"].arn,
-            aws_iam_role.runtime["gateway"].arn,
+            try(aws_iam_role.runtime["audit_producer"].arn, ""),
             try(aws_iam_role.runtime["audit_consumer"].arn, "")
           ]) }
           Action   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"]
@@ -1633,7 +1670,9 @@ resource "aws_ecs_task_definition" "service" {
   cpu                      = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_task_cpu), each.key) ? local.colocated_task_cpu[each.key] : var.service_cpu
   memory                   = var.enable_policy_sidecar_colocation && contains(keys(local.colocated_task_memory), each.key) ? local.colocated_task_memory[each.key] : var.service_memory
   execution_role_arn       = aws_iam_role.task_execution[each.key].arn
-  task_role_arn            = lookup(local.application_task_role_arns, each.key, null)
+  # ECS task credentials are visible to every container in a task. Colocated
+  # OPA/Presidio tasks therefore never receive an application task role.
+  task_role_arn = local.effective_task_role_arns[each.key]
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -1676,6 +1715,9 @@ resource "aws_ecs_task_definition" "service" {
           { name = "AUTHCLAW_CONSOLE_ALB_INGRESS_ONLY", value = "true" }
         ] : [],
         contains(tolist(local.audit_sqs_producer_services), each.key) ? local.audit_sqs_producer_environment : [],
+        each.key == "gateway" && local.audit_sqs_enabled ? [
+          { name = "AUDIT_PRODUCER_URL", value = "${local.internal_urls.audit_producer}/v1/audit" }
+        ] : [],
         each.key == "gateway" ? [
           { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
         ] : [],
@@ -1825,7 +1867,7 @@ resource "aws_ecs_service" "public" {
 }
 
 resource "aws_ecs_service" "private" {
-  for_each = merge(local.private_services, var.enable_policy_sidecar_colocation ? {} : local.legacy_sidecar_services)
+  for_each = merge(local.private_services, local.legacy_sidecar_services)
 
   deployment_circuit_breaker {
     enable   = true

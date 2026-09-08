@@ -114,7 +114,7 @@ when SQS FIFO is selected. No Kinesis endpoint is a valid outcome in either plan
 | Conditional audit endpoint | SQS is added only for `sqs_fifo` | Correct and consistent with proposed ADR-0011 and Kafka rollback |
 | Endpoint policies | Explicit policies cover S3 and every interface endpoint | Implemented with TLS denial, execution/application principal separation, scoped stack resources, and fail-closed optional allowlists; AWS denial exercises pending |
 | ECS execution IAM | Managed execution policy plus an inline secret/KMS policy | Kept for image pull, logs, and task secret injection; application permissions are not added to it |
-| ECS application IAM | Backend, gateway, agent, and audit consumer have separate task roles; optional permissions require exact ARN inputs | Implemented in Terraform; state migration and live allowed/denied calls pending |
+| ECS application IAM | Backend, agent, isolated SQS producer, and audit consumer have separate task roles; the co-located gateway policy task has none; optional permissions require exact ARN inputs | Implemented in Terraform; state migration and live allowed/denied calls pending |
 | Runtime secret selection | Terraform sets `AUTHCLAW_SECRET_PROVIDER=env`; ECS injects values from Secrets Manager | Direct backend KMS and agent secret-backend calls are supported code paths, not the currently selected deployment mode; endpoint stays required, task grants must follow the approved feature matrix |
 
 The existing SQS task-role actions and queue/KMS resource scopes in

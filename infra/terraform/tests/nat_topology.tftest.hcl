@@ -146,7 +146,7 @@ run "sqs_transport_adds_only_sqs_endpoint" {
   }
 
   assert {
-    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "backend", "console", "gateway", "opa", "presidio"])
+    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "audit_producer", "backend", "console", "gateway", "opa", "presidio"])
     error_message = "Every application service must have a separated task role."
   }
 }

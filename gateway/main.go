@@ -46,6 +46,12 @@ func main() {
 
 	// Try to load .env.local from parent directory
 	_ = godotenv.Load("../.env.local")
+	if len(os.Args) == 2 && os.Args[1] == "--audit-producer" {
+		if err := runAuditProducer(); err != nil {
+			log.Fatalf("Audit producer failed: %v", err)
+		}
+		return
+	}
 
 	if err := ValidateEnvelopeKeyConfig(); err != nil {
 		log.Fatalf("Invalid secret management configuration: %v", err)

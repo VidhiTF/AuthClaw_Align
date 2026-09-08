@@ -6,7 +6,7 @@ No AWS apply, secret replacement, state mutation or real Access Analyzer run was
 ## IAM contract
 
 - Execution roles are per task, including database jobs. Injection and GetSecretValue grants share one map. ECR grants use configured repositories; logs use task log groups; KMS decrypt requires Secrets Manager plus exact SecretARN context.
-- Backend, gateway, agent and enabled audit consumer have independent runtime roles. Console, OPA and Presidio have none. OPA/Presidio run in their existing standalone task definitions, not inside AWS-calling tasks.
+- Backend, agent, the isolated SQS audit producer, and enabled audit consumer have independent runtime roles. A co-located gateway/OPA/Presidio task has no task role; backend and agent retain separate policy services so policy containers never inherit their AWS permissions.
 - Runtime roles explicitly deny reading task-injected secrets. Execution-role credentials are not application credentials.
 - SQS producer policies attach only to backend/gateway; consumer permissions attach only to the enabled consumer. All target the selected queue and KMS key. Kafka has no SQS grants.
 - Agent customer operations use only explicitly approved exact role ARNs. Configure customer-side trust (including ExternalId where supported) and customer-side least privilege separately. No wildcard STS, S3, Kinesis or customer-account permissions are granted.

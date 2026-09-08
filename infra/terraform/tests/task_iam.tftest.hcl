@@ -155,14 +155,15 @@ run "fargate_service_alarms_cover_memory_and_task_health" {
 run "sqs_runtime_roles_remain_separate" {
   command = plan
   variables {
-    audit_stream_transport   = "sqs_fifo"
-    enable_audit_consumer    = true
-    clickhouse_host          = "clickhouse.test.invalid"
-    agent_customer_role_arns = ["arn:aws:iam::210987654321:role/authclaw-customer"]
+    audit_stream_transport           = "sqs_fifo"
+    enable_policy_sidecar_colocation = true
+    enable_audit_consumer            = true
+    clickhouse_host                  = "clickhouse.test.invalid"
+    agent_customer_role_arns         = ["arn:aws:iam::210987654321:role/authclaw-customer"]
   }
   assert {
-    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "opa", "presidio", "audit_consumer"])
-    error_message = "SQS transport must retain independent runtime identities for every service."
+    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "opa", "presidio", "audit_consumer", "audit_producer"])
+    error_message = "SQS transport must use an independent audit producer identity."
   }
   assert {
     condition     = toset(output.execution_iam_review.audit_consumer.secret_names) == toset(["CLICKHOUSE_PASSWORD"])
@@ -171,6 +172,14 @@ run "sqs_runtime_roles_remain_separate" {
   assert {
     condition     = length(output.runtime_iam_review.customer_roles) == 1
     error_message = "Only the configured customer role may be assumed."
+  }
+  assert {
+    condition = (
+      output.runtime_iam_review.task_role_arns.gateway == null &&
+      contains(output.runtime_iam_review.roles, "audit_producer") &&
+      toset(output.execution_iam_review.audit_producer.secret_names) == toset(["AUDIT_PRODUCER_SECRET"])
+    )
+    error_message = "The co-located gateway must be credential-free and use a minimally secret-bearing producer task."
   }
 }
 
@@ -181,35 +190,36 @@ run "policy_sidecars_are_task_local_when_enabled" {
   }
   assert {
     condition     = output.runtime_iam_review.policy_sidecars_colocated && output.runtime_iam_review.sidecars_isolated
-    error_message = "The step-7 switch must use loopback endpoints and remove standalone policy services."
+    error_message = "The step-7 switch must use loopback endpoints while retaining policy services for privileged callers."
   }
   assert {
-    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "audit_consumer"])
-    error_message = "Co-located policy containers must share only the caller task role and have no standalone runtime roles."
+    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "opa", "presidio", "audit_consumer"])
+    error_message = "Independent policy services must retain their own runtime identities."
   }
   assert {
     condition = (
       toset(output.runtime_iam_review.task_containers.gateway) == toset(["gateway", "opa", "presidio"]) &&
-      toset(output.runtime_iam_review.task_containers.backend) == toset(["backend", "presidio"]) &&
-      toset(output.runtime_iam_review.task_containers.agent) == toset(["agent", "opa"])
+      toset(output.runtime_iam_review.task_containers.backend) == toset(["backend"]) &&
+      toset(output.runtime_iam_review.task_containers.agent) == toset(["agent"])
     )
     error_message = "Every OPA/Presidio caller must receive its required local sidecar."
   }
   assert {
     condition = (
-      !contains(keys(output.execution_iam_review), "opa") &&
-      !contains(keys(output.execution_iam_review), "presidio") &&
-      output.runtime_iam_review.sidecars_have_no_port_mappings
+      contains(keys(output.execution_iam_review), "opa") &&
+      contains(keys(output.execution_iam_review), "presidio") &&
+      output.runtime_iam_review.sidecars_have_no_port_mappings &&
+      output.runtime_iam_review.colocated_sidecars_have_no_task_role &&
+      output.runtime_iam_review.task_role_arns.gateway == null
     )
-    error_message = "Co-location must remove standalone policy identities and expose no sidecar ENI ports."
+    error_message = "Co-located policy containers must expose no ENI ports or application task credentials."
   }
   assert {
     condition = (
       { for item in output.runtime_iam_review.task_policy_environment.gateway : item.name => item.value }["OPA_URL"] == "http://127.0.0.1:8181" &&
       { for item in output.runtime_iam_review.task_policy_environment.gateway : item.name => item.value }["PRESIDIO_URL"] == "http://127.0.0.1:3000" &&
-      !contains([for item in output.runtime_iam_review.task_policy_environment.backend : item.name], "OPA_URL") &&
-      !contains([for item in output.runtime_iam_review.task_policy_environment.agent : item.name], "PRESIDIO_URL") &&
-      length(output.runtime_iam_review.task_policy_environment.console) == 0
+      startswith({ for item in output.runtime_iam_review.task_policy_environment.backend : item.name => item.value }["PRESIDIO_URL"], "http") &&
+      startswith({ for item in output.runtime_iam_review.task_policy_environment.agent : item.name => item.value }["AUTHCLAW_OPA_POLICY_URL"], "http")
     )
     error_message = "Task-local policy URLs must only be injected into tasks that own the corresponding sidecar."
   }

@@ -196,6 +196,7 @@ output "secret_arns" {
     agent_encryption               = aws_secretsmanager_secret.agent_encryption.arn
     agent_redaction                = aws_secretsmanager_secret.agent_redaction.arn
     internal_service               = aws_secretsmanager_secret.internal_service.arn
+    audit_producer                 = aws_secretsmanager_secret.audit_producer.arn
     jwt                            = aws_secretsmanager_secret.jwt.arn
     jwt_v2                         = aws_secretsmanager_secret.jwt_v2.arn
     session                        = aws_secretsmanager_secret.session.arn
@@ -223,7 +224,7 @@ output "audit_sqs" {
     queue_arn          = try(aws_sqs_queue.audit[0].arn, null)
     dlq_url            = try(aws_sqs_queue.audit_dlq[0].url, null)
     dlq_arn            = try(aws_sqs_queue.audit_dlq[0].arn, null)
-    producer_role_arns = { for service in local.audit_sqs_producer_services : service => aws_iam_role.runtime[service].arn }
+    producer_role_arns = local.audit_sqs_enabled ? { for service in local.audit_sqs_producer_services : service => aws_iam_role.runtime[service].arn } : {}
     consumer_role_arn  = try(aws_iam_role.runtime["audit_consumer"].arn, null)
     alarm_names        = values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name
   }

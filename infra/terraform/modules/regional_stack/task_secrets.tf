@@ -24,6 +24,9 @@ locals {
     contains(["console", "backend", "agent"], service) ? [
       { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn }
     ] : [],
+    local.audit_sqs_enabled && contains(["gateway", "audit_producer"], service) ? [
+      { name = "AUDIT_PRODUCER_SECRET", valueFrom = aws_secretsmanager_secret.audit_producer.arn }
+    ] : [],
     service == "backend" ? local.backend_kms_secrets : [],
     service == "backend" ? [
       { name = "WORKER_TOKEN_HMAC_KEY_V1", valueFrom = aws_secretsmanager_secret.worker_token_hmac.arn },

@@ -14,6 +14,7 @@ WORKFLOWS = tuple((ROOT / ".github/workflows").glob("*.yml")) + tuple(
 REGISTRY = (ROOT / "infra/terraform/registry.tf").read_text(encoding="utf-8")
 VARIABLES = (ROOT / "infra/terraform/variables.tf").read_text(encoding="utf-8")
 REGIONAL_STACK = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "infra/terraform/modules/regional_stack").glob("*.tf"))
+RUNTIME_IAM = (ROOT / "infra/terraform/modules/regional_stack/runtime_iam.tf").read_text(encoding="utf-8")
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
@@ -203,6 +204,15 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn('port_mappings = []', REGIONAL_STACK)
         self.assertIn('http://127.0.0.1:8181', REGIONAL_STACK)
         self.assertIn('http://127.0.0.1:3000', REGIONAL_STACK)
+        self.assertIn("colocated_sidecars_have_no_task_role", RUNTIME_IAM)
+        self.assertIn("AUDIT_PRODUCER_URL", REGIONAL_STACK)
+
+    def test_alarm_gate_polls_initializing_alarms_and_fails_closed(self):
+        alarm_gate = DEPLOY.split("- name: Reject active deployment alarms", 1)[1].split("- name:", 1)[0]
+        self.assertIn("deadline=$((SECONDS + 600))", alarm_gate)
+        self.assertIn('.StateValue != "ALARM"', alarm_gate)
+        self.assertIn("sleep 15", alarm_gate)
+        self.assertIn("did not all reach OK within 600 seconds", alarm_gate)
 
     def test_deployment_captures_and_verifies_policy_topology(self):
         self.assertIn("Capture and verify deployed policy topology", DEPLOY)

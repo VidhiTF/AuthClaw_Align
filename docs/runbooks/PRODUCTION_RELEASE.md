@@ -25,7 +25,7 @@ Never capture secret values. Unavailable evidence blocks advancement.
 | 4 | Existing architecture runs on staging at immutable digests. | Baseline task revisions/configuration from row 1. |
 | 5 | Transport abstraction deployed with the existing transport unchanged. | Previous application digests; unchanged broker and offsets. |
 | 6 | Kafka to selected transport cutover, drain and reconciliation approved. | Kafka/task/configuration checkpoint; preserve both queues and replay safely. |
-| 7 | Gateway/OPA/Presidio co-location on the current launch type; review shared task IAM and health dependencies. | Separate task definitions, discovery and networking restored. |
+| 7 | Gateway/OPA/Presidio co-location on the current launch type; verify the gateway task has no task role and SQS uses the isolated producer. | Disable gateway sidecars; retain independent policy services and producer until Terraform restores the prior topology. |
 | 8 | Publish ARM64 images; startup, health and canary on Fargate. | Retained X86_64 task revisions and matching image indexes. |
 | 9 | PostgreSQL consolidation only in staging; migration, pools/RLS, isolation, restore and rollback proven. | Original databases/endpoints preserved; stop writers before reversal/reconciliation. |
 | 10 | EC2 Graviton only if the frozen compute ADR requires it. Otherwise attach an approved NOT_APPLICABLE decision. | Fargate capacity and previous revisions retained. |
@@ -35,9 +35,12 @@ Never capture secret values. Unavailable evidence blocks advancement.
 The current Terraform supports Fargate, a gated Graviton capacity provider, and a
 default-off `enable_policy_sidecar_colocation` switch. The default keeps independently
 isolated OPA/Presidio services as the step-4 rollback topology. Step 7 alone sets the
-switch to `true`: gateway gets OPA and Presidio, backend gets Presidio, and agent gets
-OPA; callers use loopback, policy containers expose no ENI ports, and standalone
-policy services, discovery, and roles are removed. In controlled beta, set the
+switch to `true`: gateway gets task-local OPA and Presidio with no task role or ENI
+ports. Backend and agent continue using the independent OPA/Presidio services so
+their AWS roles are never exposed to policy containers. With SQS selected, gateway
+publishes through the separate HMAC-authenticated `audit_producer` task; only that
+task receives the narrow SQS producer role, and only those two containers receive
+the dedicated producer secret. In controlled beta, set the
 protected environment variable `ENABLE_POLICY_SIDECAR_COLOCATION=true`; set it back
 to `false` in a reviewed reverse Terraform plan to restore the checkpoint. Do not
 rely on task-definition-only rollback for this topology change. ADR-0013 currently
