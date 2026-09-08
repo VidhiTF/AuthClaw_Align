@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
+from services.role_contract import normalize_role
+
 
 MAX_CLOCK_SKEW_SECONDS = 60
 
@@ -60,4 +62,7 @@ def verify_control_plane_request(
     expected = sign_control_plane_request(secret, timestamp, method, path, tenant_id, user_id, role)
     if not hmac.compare_digest(signature, expected):
         return None
-    return ControlPlanePrincipal(tenant_id=tenant_id, user_id=user_id, role=role.lower())
+    canonical_role = normalize_role(role)
+    if not canonical_role:
+        return None
+    return ControlPlanePrincipal(tenant_id=tenant_id, user_id=user_id, role=canonical_role)

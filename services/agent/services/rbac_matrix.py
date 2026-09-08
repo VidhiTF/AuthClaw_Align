@@ -7,28 +7,40 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-
-ROLE_PLATFORM_ADMIN = "Platform Admin"
-ROLE_SUPER_ADMIN = "Super Admin"
-ROLE_SECURITY_ADMIN = "Security Admin"
-ROLE_COMPLIANCE_OFFICER = "Compliance Officer"
-ROLE_AUDITOR = "Auditor"
-ROLE_DEVELOPER = "Developer"
-ROLE_VIEWER = "Viewer"
+from services.role_contract import (
+    ROLE_ADMIN,
+    ROLE_AUDITOR,
+    ROLE_COMPLIANCE_OFFICER,
+    ROLE_DEVELOPER,
+    ROLE_OPERATOR,
+    ROLE_OWNER,
+    ROLE_PLATFORM_ADMIN,
+    ROLE_VIEWER,
+    normalize_role,
+)
 
 ALL_ROLES = [
     ROLE_PLATFORM_ADMIN,
-    ROLE_SUPER_ADMIN,
-    ROLE_SECURITY_ADMIN,
+    ROLE_OWNER,
+    ROLE_ADMIN,
     ROLE_COMPLIANCE_OFFICER,
     ROLE_AUDITOR,
     ROLE_DEVELOPER,
+    ROLE_OPERATOR,
     ROLE_VIEWER,
 ]
 
-TENANT_ADMIN_ROLES = [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN]
-TENANT_READ_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR, ROLE_VIEWER]
+TENANT_ADMIN_ROLES = [ROLE_OWNER, ROLE_ADMIN]
+TENANT_READ_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR, ROLE_OPERATOR, ROLE_VIEWER]
 GATEWAY_USER_ROLES = TENANT_READ_ROLES + [ROLE_DEVELOPER]
+RAG_EXECUTION_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER]
+REMEDIATION_PLAN_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER]
+
+AGENT_OPERATION_ROLES = {
+    "chat": frozenset(GATEWAY_USER_ROLES),
+    "rag": frozenset(RAG_EXECUTION_ROLES),
+    "remediation_plan": frozenset(REMEDIATION_PLAN_ROLES),
+}
 
 PUBLIC_PATHS = [
     "GET /",
@@ -91,27 +103,28 @@ ENDPOINT_RULES: List[EndpointRule] = [
     EndpointRule("POST", "/approve/*", TENANT_ADMIN_ROLES, "approvals:approve", True, True, "HITL approval."),
     EndpointRule("POST", "/reject/*", TENANT_ADMIN_ROLES, "approvals:reject", True, True, "HITL rejection."),
     EndpointRule("POST", "/execute/*", TENANT_ADMIN_ROLES, "approvals:execute", True, True, "HITL execution."),
-    EndpointRule("POST", "/test/*", [ROLE_SUPER_ADMIN], "testing:local", True, True, "Local test utilities."),
-    EndpointRule("GET", "/audit*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "audit:read", True, True, "Audit and signed export read."),
+    EndpointRule("POST", "/test/*", [ROLE_OWNER], "testing:local", True, True, "Local test utilities."),
+    EndpointRule("GET", "/audit*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "audit:read", True, True, "Audit and signed export read."),
     EndpointRule("POST", "/audit/export/verify", ALL_ROLES, "audit:verify", False, False, "Public export verification."),
-    EndpointRule("*", "/policies*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER], "policies:manage", True, True, "Policy lifecycle."),
-    EndpointRule("*", "/policy/bundles*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER], "policy-bundles:manage", True, True, "OPA policy bundle lifecycle."),
+    EndpointRule("*", "/policies*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER], "policies:manage", True, True, "Policy lifecycle."),
+    EndpointRule("*", "/policy/bundles*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER], "policy-bundles:manage", True, True, "OPA policy bundle lifecycle."),
     EndpointRule("POST", "/internal/policy/evaluate", GATEWAY_USER_ROLES, "policy:evaluate", True, True, "Gateway policy preflight."),
-    EndpointRule("*", "/rag*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER], "rag:manage", True, True, "Regulatory RAG corpus."),
-    EndpointRule("*", "/documents*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER], "documents:manage", True, True, "Document intelligence."),
-    EndpointRule("*", "/compliance*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "compliance:read", True, True, "Framework scoring and controls."),
-    EndpointRule("*", "/evidence*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "evidence:read", True, True, "Evidence vault."),
-    EndpointRule("*", "/auditor/*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "audit:export", True, True, "Auditor packages."),
-    EndpointRule("*", "/access-control/*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN], "rbac:manage", True, True, "Tenant RBAC user administration."),
+    EndpointRule("*", "/rag*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER], "rag:manage", True, True, "Regulatory RAG corpus."),
+    EndpointRule("*", "/documents*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER], "documents:manage", True, True, "Document intelligence."),
+    EndpointRule("*", "/compliance*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "compliance:read", True, True, "Framework scoring and controls."),
+    EndpointRule("*", "/evidence*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "evidence:read", True, True, "Evidence vault."),
+    EndpointRule("*", "/auditor/*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "audit:export", True, True, "Auditor packages."),
+    EndpointRule("*", "/access-control/*", [ROLE_OWNER, ROLE_ADMIN], "rbac:manage", True, True, "Tenant RBAC user administration."),
     EndpointRule("*", "/tenant/plan*", TENANT_ADMIN_ROLES, "tenant-plan:manage", True, True, "Tenant plan and quota management."),
-    EndpointRule("*", "/reports/*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "reports:read", True, True, "Governance reports."),
+    EndpointRule("*", "/reports/*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "reports:read", True, True, "Governance reports."),
     EndpointRule("*", "/cloud/connectors/*", TENANT_ADMIN_ROLES, "connectors:manage", True, True, "Cloud connector sync/status."),
     EndpointRule("*", "/analytics/*", TENANT_READ_ROLES, "analytics:read", True, True, "Governance analytics."),
     EndpointRule("*", "/remediation/*", TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER], "remediation:manage", True, True, "Remediation runtime."),
-    EndpointRule("*", "/redteam/*", [ROLE_SUPER_ADMIN, ROLE_SECURITY_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "redteam:read", True, True, "Red-team probe history and reports."),
+    EndpointRule("*", "/redteam/*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "redteam:read", True, True, "Red-team probe history and reports."),
     EndpointRule("GET", "/metrics", TENANT_READ_ROLES + [ROLE_DEVELOPER], "metrics:read", True, True, "Tenant metrics and observability."),
     EndpointRule("POST", "/observability/*", TENANT_ADMIN_ROLES, "observability:operate", True, True, "Event pipeline operations."),
     EndpointRule("GET", "/trust/public", ALL_ROLES, "trust:public", False, False, "Public signed Trust Center state."),
+    EndpointRule("POST", "/api/v1/agent/executions", GATEWAY_USER_ROLES, "agent:execute", True, True, "Canonical agent execution with operation-level authorization."),
     EndpointRule("GET", "/health*", ALL_ROLES, "health:read", False, False, "Health checks."),
     EndpointRule("GET", "/", ALL_ROLES, "health:read", False, False, "Root liveness."),
 ]
@@ -143,9 +156,17 @@ def role_allowed(role: Optional[str], method: str, path: str) -> bool:
     rule = resolve_rule(method, path)
     if not rule:
         return False
-    if role == ROLE_PLATFORM_ADMIN:
+    canonical_role = normalize_role(role)
+    if canonical_role == ROLE_PLATFORM_ADMIN:
         return True
-    return (role or "") in set(rule.roles)
+    return (canonical_role or "") in set(rule.roles)
+
+
+def agent_operation_allowed(role: Optional[str], operation: str) -> bool:
+    canonical_role = normalize_role(role)
+    if canonical_role == ROLE_PLATFORM_ADMIN:
+        return True
+    return (canonical_role or "") in AGENT_OPERATION_ROLES.get((operation or "").strip().lower(), frozenset())
 
 
 def endpoint_inventory(app: Any) -> List[Dict[str, Any]]:
@@ -208,7 +229,7 @@ def enforce_request_access(method: str, path: str, payload: Dict[str, Any]) -> N
 
         raise HTTPException(status_code=403, detail="Role is not authorized for this endpoint.")
     rule = resolve_rule(method, path)
-    if rule and rule.tenant_required and not payload.get("tenant_id"):
+    if rule and rule.tenant_required and not (payload.get("tenant_id") or payload.get("external_tenant_id")):
         from fastapi import HTTPException
 
         raise HTTPException(status_code=401, detail="Session token is missing tenant scope.")
