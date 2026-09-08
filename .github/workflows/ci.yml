@@ -77,7 +77,7 @@ jobs:
           fetch-depth: 2
       - run: |
           git diff --check HEAD^
-          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test scripts.test_iam_release_evidence scripts.test_verify_p007_edge_evidence scripts.test_p008_private_paths_evidence scripts.test_container_vulnerability_policy scripts.test_ecr_release_control
+          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test scripts.test_iam_release_evidence scripts.test_verify_p007_edge_evidence scripts.test_p008_private_paths_evidence scripts.test_container_vulnerability_policy scripts.test_ecr_release_control scripts.test_release_evidence scripts.test_ecs_database_job scripts.test_verify_ecs_colocation
 
   smoke:
     name: Master Smoke and Contract Integration
@@ -355,7 +355,7 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
         run: >-
           go test ./... -count=1
-          -run '^(TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream)'
+          -run '^(TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer)'
 
   console:
     name: Console Tests and Build

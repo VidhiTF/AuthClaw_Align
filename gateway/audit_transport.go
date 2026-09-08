@@ -41,6 +41,14 @@ func InitAuditTransport() error {
 		transport = "kafka"
 	}
 	if transport == "sqs_fifo" {
+		if strings.TrimSpace(os.Getenv("AUDIT_PRODUCER_URL")) != "" {
+			adapter, err := newAuditProducerClient()
+			if err != nil {
+				return err
+			}
+			activeAuditStream = adapter
+			return nil
+		}
 		adapter, err := newSQSFIFOAuditStream()
 		if err != nil {
 			return err

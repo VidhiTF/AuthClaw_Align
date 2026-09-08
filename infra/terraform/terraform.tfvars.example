@@ -40,6 +40,7 @@ require_immutable_images = true
 authclaw_env = "staging"
 
 # Initial Fargate sizing for task-local OPA/Presidio sidecars. Confirm with staging measurements.
+enable_policy_sidecar_colocation = false # Step 7 only; flip in its own reviewed release.
 gateway_sidecar_task_cpu    = 2048
 gateway_sidecar_task_memory = 4096
 backend_sidecar_task_cpu    = 2048

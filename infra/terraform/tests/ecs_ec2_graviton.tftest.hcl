@@ -50,6 +50,11 @@ run "fargate_remains_default" {
     condition     = output.primary.ecs_launch_model.capacity_provider_name == null
     error_message = "Default plans must not create the EC2 capacity provider."
   }
+
+  assert {
+    condition     = output.crypto_preflight.launch_model.mode == "FARGATE"
+    error_message = "Database one-off tasks must inherit the default Fargate launch model."
+  }
 }
 
 run "ec2_graviton_capacity_provider" {
@@ -94,8 +99,18 @@ run "ec2_graviton_capacity_provider" {
   }
 
   assert {
+    condition     = output.crypto_preflight.launch_model.capacity_provider_name == output.primary.ecs_launch_model.capacity_provider_name
+    error_message = "Database one-off tasks must use the selected Graviton capacity provider."
+  }
+
+  assert {
     condition     = !output.primary.ecs_launch_model.x86_provider_enabled
     error_message = "The P0-05 x86 capacity-provider decision must default to false."
+  }
+
+  assert {
+    condition     = output.primary.ecs_launch_model.awsvpc_block_imds
+    error_message = "EC2-backed awsvpc tasks must be blocked from instance metadata credentials."
   }
 
   assert {

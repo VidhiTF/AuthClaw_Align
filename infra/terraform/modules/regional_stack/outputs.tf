@@ -62,6 +62,8 @@ output "alarm_names" {
   value = concat(
     values(aws_cloudwatch_metric_alarm.unhealthy_hosts)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.ecs_cpu)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_memory)[*].alarm_name,
+    values(aws_cloudwatch_metric_alarm.ecs_running_tasks)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.ecs_pending_tasks)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name,
     values(aws_cloudwatch_metric_alarm.nat_port_allocation)[*].alarm_name,
@@ -70,6 +72,7 @@ output "alarm_names" {
     aws_cloudwatch_metric_alarm.ecs_capacity_provider_reservation[*].alarm_name,
     aws_cloudwatch_metric_alarm.ecs_instance_health[*].alarm_name,
     aws_cloudwatch_metric_alarm.ecs_placement_failure[*].alarm_name,
+    [aws_cloudwatch_metric_alarm.ecs_deployment_failure.alarm_name],
   )
 }
 
@@ -84,6 +87,7 @@ output "ecs_launch_model" {
     asg_desired_size       = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.desired_size : null
     asg_max_size           = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.max_size : null
     x86_provider_enabled   = var.ecs_ec2_graviton.x86_provider_enabled
+    awsvpc_block_imds      = var.ecs_ec2_graviton.enabled ? strcontains(base64decode(aws_launch_template.ecs_graviton[0].user_data), "ECS_AWSVPC_BLOCK_IMDS=true") : null
   }
 }
 
@@ -133,6 +137,16 @@ output "interface_endpoint_policies" {
 
 output "endpoint_client_security_group_id" {
   value = aws_security_group.app.id
+}
+
+output "runtime_ingress_ports" {
+  value = {
+    console_to_app = var.internal_tls.enabled ? [8443] : [8000, 8001, 8080]
+    alb_to_public = {
+      for service in keys(local.public_services) : service => local.service_ports[service]
+    }
+    service_to_service = distinct([for port in values(local.service_ports) : tonumber(port)])
+  }
 }
 
 output "endpoint_ingress_source_count" {
@@ -193,6 +207,7 @@ output "secret_arns" {
     agent_encryption               = aws_secretsmanager_secret.agent_encryption.arn
     agent_redaction                = aws_secretsmanager_secret.agent_redaction.arn
     internal_service               = aws_secretsmanager_secret.internal_service.arn
+    audit_producer                 = aws_secretsmanager_secret.audit_producer.arn
     jwt                            = aws_secretsmanager_secret.jwt.arn
     jwt_v2                         = aws_secretsmanager_secret.jwt_v2.arn
     session                        = aws_secretsmanager_secret.session.arn
@@ -220,7 +235,7 @@ output "audit_sqs" {
     queue_arn          = try(aws_sqs_queue.audit[0].arn, null)
     dlq_url            = try(aws_sqs_queue.audit_dlq[0].url, null)
     dlq_arn            = try(aws_sqs_queue.audit_dlq[0].arn, null)
-    producer_role_arns = { for service in local.audit_sqs_producer_services : service => aws_iam_role.runtime[service].arn }
+    producer_role_arns = local.audit_sqs_enabled ? { for service in local.audit_sqs_producer_services : service => aws_iam_role.runtime[service].arn } : {}
     consumer_role_arn  = try(aws_iam_role.runtime["audit_consumer"].arn, null)
     alarm_names        = values(aws_cloudwatch_metric_alarm.audit_sqs)[*].alarm_name
   }

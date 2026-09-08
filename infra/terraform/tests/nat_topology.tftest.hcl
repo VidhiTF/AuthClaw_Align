@@ -120,6 +120,7 @@ run "sqs_transport_adds_only_sqs_endpoint" {
   variables {
     nat_gateway_mode       = "single"
     audit_stream_transport = "sqs_fifo"
+    internal_tls           = { enabled = true, namespace = "internal.example.com" }
   }
 
   assert {
@@ -146,9 +147,19 @@ run "sqs_transport_adds_only_sqs_endpoint" {
   }
 
   assert {
-    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "backend", "console", "gateway", "opa", "presidio"])
+    condition     = toset(keys(output.primary.application_task_role_arns)) == toset(["agent", "audit_consumer", "audit_producer", "backend", "console", "gateway", "opa", "presidio"])
     error_message = "Every application service must have a separated task role."
   }
+}
+
+run "sqs_transport_rejects_plaintext_producer" {
+  command = plan
+
+  variables {
+    audit_stream_transport = "sqs_fifo"
+  }
+
+  expect_failures = [var.audit_stream_transport]
 }
 
 run "approved_runtime_arn_allowlists_plan" {

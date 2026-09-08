@@ -188,6 +188,12 @@ variable "gateway_sidecar_task_cpu" {
   default     = 2048
 }
 
+variable "enable_policy_sidecar_colocation" {
+  description = "Place OPA and Presidio beside the credential-free gateway. Privileged callers retain standalone policy services. Enable only for release-sequence step 7."
+  type        = bool
+  default     = false
+}
+
 variable "gateway_sidecar_task_memory" {
   description = "Fargate memory in MiB for the combined Gateway, OPA, and Presidio task."
   type        = number
@@ -323,6 +329,10 @@ variable "audit_stream_transport" {
   validation {
     condition     = contains(["kafka", "sqs_fifo"], var.audit_stream_transport)
     error_message = "audit_stream_transport must be kafka or sqs_fifo."
+  }
+  validation {
+    condition     = var.audit_stream_transport != "sqs_fifo" || var.internal_tls.enabled
+    error_message = "SQS audit transport requires internal_tls.enabled=true so gateway-to-producer authentication is encrypted."
   }
 }
 

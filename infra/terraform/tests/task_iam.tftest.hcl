@@ -138,17 +138,33 @@ run "execution_roles_only_receive_their_task_secrets" {
   }
 }
 
+run "fargate_service_alarms_cover_memory_and_task_health" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      contains(output.primary.alarm_names, "authclaw-test-test-primary-backend-high-memory"),
+      contains(output.primary.alarm_names, "authclaw-test-test-primary-backend-running-tasks-low"),
+      contains(output.primary.alarm_names, "authclaw-test-test-primary-backend-pending-tasks"),
+      contains(output.primary.alarm_names, "authclaw-test-test-primary-ecs-deployment-failure"),
+    ])
+    error_message = "Fargate services must alarm on memory pressure and running/pending task health."
+  }
+}
+
 run "sqs_runtime_roles_remain_separate" {
   command = plan
   variables {
-    audit_stream_transport   = "sqs_fifo"
-    enable_audit_consumer    = true
-    clickhouse_host          = "clickhouse.test.invalid"
-    agent_customer_role_arns = ["arn:aws:iam::210987654321:role/authclaw-customer"]
+    audit_stream_transport           = "sqs_fifo"
+    enable_policy_sidecar_colocation = true
+    internal_tls                     = { enabled = true, namespace = "internal.example.com" }
+    enable_audit_consumer            = true
+    clickhouse_host                  = "clickhouse.test.invalid"
+    agent_customer_role_arns         = ["arn:aws:iam::210987654321:role/authclaw-customer"]
   }
   assert {
-    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "opa", "presidio", "audit_consumer"])
-    error_message = "SQS transport must retain independent runtime identities for every service."
+    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "opa", "presidio", "audit_consumer", "audit_producer"])
+    error_message = "SQS transport must use an independent audit producer identity."
   }
   assert {
     condition     = toset(output.execution_iam_review.audit_consumer.secret_names) == toset(["CLICKHOUSE_PASSWORD"])
@@ -157,6 +173,58 @@ run "sqs_runtime_roles_remain_separate" {
   assert {
     condition     = length(output.runtime_iam_review.customer_roles) == 1
     error_message = "Only the configured customer role may be assumed."
+  }
+  assert {
+    condition = (
+      output.runtime_iam_review.task_role_arns.gateway == null &&
+      contains(output.runtime_iam_review.roles, "audit_producer") &&
+      contains(output.execution_iam_review.audit_producer.secret_names, "AUDIT_PRODUCER_SECRET") &&
+      !contains(output.execution_iam_review.audit_producer.secret_names, "DATABASE_URL") &&
+      !contains(output.execution_iam_review.audit_producer.secret_names, "JWT_SECRET")
+    )
+    error_message = "The co-located gateway must be credential-free and use a minimally secret-bearing producer task."
+  }
+}
+
+run "policy_sidecars_are_task_local_when_enabled" {
+  command = plan
+  variables {
+    enable_policy_sidecar_colocation = true
+  }
+  assert {
+    condition     = output.runtime_iam_review.policy_sidecars_colocated && output.runtime_iam_review.sidecars_isolated
+    error_message = "The step-7 switch must use loopback endpoints while retaining policy services for privileged callers."
+  }
+  assert {
+    condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "opa", "presidio", "audit_consumer"])
+    error_message = "Independent policy services must retain their own runtime identities."
+  }
+  assert {
+    condition = (
+      toset(output.runtime_iam_review.task_containers.gateway) == toset(["gateway", "opa", "presidio"]) &&
+      toset(output.runtime_iam_review.task_containers.backend) == toset(["backend"]) &&
+      toset(output.runtime_iam_review.task_containers.agent) == toset(["agent"])
+    )
+    error_message = "Every OPA/Presidio caller must receive its required local sidecar."
+  }
+  assert {
+    condition = (
+      contains(keys(output.execution_iam_review), "opa") &&
+      contains(keys(output.execution_iam_review), "presidio") &&
+      output.runtime_iam_review.sidecars_have_no_port_mappings &&
+      output.runtime_iam_review.colocated_sidecars_have_no_task_role &&
+      output.runtime_iam_review.task_role_arns.gateway == null
+    )
+    error_message = "Co-located policy containers must expose no ENI ports or application task credentials."
+  }
+  assert {
+    condition = (
+      { for item in output.runtime_iam_review.task_policy_environment.gateway : item.name => item.value }["OPA_URL"] == "http://127.0.0.1:8181" &&
+      { for item in output.runtime_iam_review.task_policy_environment.gateway : item.name => item.value }["PRESIDIO_URL"] == "http://127.0.0.1:3000" &&
+      startswith({ for item in output.runtime_iam_review.task_policy_environment.backend : item.name => item.value }["PRESIDIO_URL"], "http") &&
+      startswith({ for item in output.runtime_iam_review.task_policy_environment.agent : item.name => item.value }["AUTHCLAW_OPA_POLICY_URL"], "http")
+    )
+    error_message = "Task-local policy URLs must only be injected into tasks that own the corresponding sidecar."
   }
 }
 
@@ -197,6 +265,14 @@ run "tls_and_direct_aws_are_scoped" {
       contains(output.execution_iam_review[service].secret_names, "TLS_KEY_PEM")
     ]) && contains(output.runtime_iam_review.roles, "console")
     error_message = "Protected services must use TLS with task-specific certificate injection."
+  }
+  assert {
+    condition = (
+      toset(output.runtime_ingress_ports.console_to_app) == toset([8443]) &&
+      toset(values(output.runtime_ingress_ports.alb_to_public)) == toset([8443]) &&
+      toset(output.runtime_ingress_ports.service_to_service) == toset([8443])
+    )
+    error_message = "Internal TLS must route console, ALB, and service-to-service traffic only through port 8443."
   }
   assert {
     condition = alltrue(flatten([for statements in output.runtime_iam_review.direct_permissions :

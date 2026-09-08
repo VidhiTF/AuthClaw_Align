@@ -1,6 +1,8 @@
 locals {
-  audit_sqs_enabled           = var.audit_stream_transport == "sqs_fifo"
-  audit_sqs_producer_services = toset(["backend", "gateway"])
+  audit_sqs_enabled = var.audit_stream_transport == "sqs_fifo"
+  # The gateway may share a task with untrusted policy engines, so SQS
+  # credentials are held by a separate producer task.
+  audit_sqs_producer_services = toset(["backend", "audit_producer"])
   audit_sqs_environment = [
     { name = "AUDIT_STREAM_TRANSPORT", value = var.audit_stream_transport },
   ]

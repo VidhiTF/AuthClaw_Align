@@ -36,9 +36,11 @@ This inventory separates three identities that should not be conflated:
 
 1. **Task execution role / ECS platform path** — Fargate retrieves images and
    injected secrets and starts the `awslogs` driver before application code runs.
-2. **Task role / application path** — backend, gateway, agent, and audit-consumer
-   SDK calls execute with the task role or with explicitly supplied customer
-   credentials.
+2. **Task role / application path** — backend, agent, the isolated audit producer,
+   and audit-consumer SDK calls execute with their task role or with explicitly
+   supplied customer credentials. The co-located gateway/OPA/Presidio task has no
+   task role; in SQS mode the gateway calls the isolated producer over authenticated
+   internal HTTPS.
 3. **Deployment/operator path** — GitHub-hosted runners and operator workstations are
    outside the workload VPC, so their AWS calls do not justify workload VPC endpoints.
 
@@ -61,7 +63,7 @@ SDK calls described below.
 | **Secrets Manager — agent `SecretManager`** in [`secret_manager.py`](../../services/agent/services/secret_manager.py), when the AWS backend is enabled | `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`, `secretsmanager:CreateSecret`, `secretsmanager:DeleteSecret` | Tenant/provider secret namespace; create/delete must not be granted to the ECS execution role | Same regional Secrets Manager DNS → interface endpoint | Existing endpoint is required for this supported mode; application task-role policy is fail-closed behind `runtime_secrets_manager_secret_arns` |
 | **KMS — backend envelope provider** in [`crypto.py`](../../backend/app/core/crypto.py), when `AUTHCLAW_SECRET_PROVIDER=aws_kms` | `kms:Decrypt` | Configured AuthClaw KMS key ARN and required encryption context | `kms.<region>.amazonaws.com` → private-DNS interface endpoint ENIs on TCP 443 | Existing KMS endpoint is required; application task-role policy is fail-closed behind `runtime_kms_key_arns`, and current Terraform selects `env` unless explicitly changed |
 | **KMS — agent envelope provider** in [`secret_manager.py`](../../services/agent/services/secret_manager.py), when AWS KMS is enabled | `kms:GenerateDataKey`, `kms:Decrypt` | Configured AuthClaw KMS key ARN, encryption context `authclaw-purpose=provider-credentials` | Same regional KMS DNS → interface endpoint | Existing endpoint is required for this supported mode; application task-role policy is fail-closed behind `runtime_kms_key_arns` |
-| **SQS — backend and gateway publishers** in [`audit_transport.py`](../../backend/app/services/audit_transport.py) and [`sqs_fifo.go`](../../gateway/sqs_fifo.go) | `sqs:SendMessage` | Regional AuthClaw audit FIFO queue ARN only | Queue URL host `sqs.<region>.amazonaws.com` → private-DNS interface endpoint ENIs on TCP 443 | Conditional endpoint is correct for `sqs_fifo`; no NAT in that mode |
+| **SQS — backend and isolated audit producer publishers** in [`audit_transport.py`](../../backend/app/services/audit_transport.py), [`audit_producer.go`](../../gateway/audit_producer.go), and [`sqs_fifo.go`](../../gateway/sqs_fifo.go) | `sqs:SendMessage`; the gateway calls the isolated producer over authenticated internal HTTPS and has no task role or direct SQS permission | Regional AuthClaw audit FIFO queue ARN only | Producer queue URL host `sqs.<region>.amazonaws.com` → private-DNS interface endpoint ENIs on TCP 443; gateway → `audit_producer` on internal TLS port 8443 | Conditional endpoint is correct for `sqs_fifo`; no NAT for the producer-to-SQS path |
 | **SQS — audit consumer** in [`transport.py`](../../audit_consumer/transport.py) | `sqs:ReceiveMessage`, `sqs:ChangeMessageVisibility`, `sqs:DeleteMessage` | Regional AuthClaw audit FIFO queue ARN only; DLQ is controlled by the queue redrive policy | Same regional SQS DNS → interface endpoint | Conditional endpoint is correct for `sqs_fifo`; no NAT in that mode |
 | **STS — backend connector verification** in [`cloud_connectors.py`](../../backend/app/services/cloud_connectors.py) | `sts:GetCallerIdentity` | Supplied connector principal; STS has no resource-level ARN for this action | `sts.<region>.amazonaws.com` → private-DNS interface endpoint | STS endpoint is implemented and regional endpoint mode is forced; live DNS/path proof remains |
 | **STS — agent document connector and remediation runtime** in [`document_processing/connectors.py`](../../services/agent/document_processing/connectors.py) and [`remediation_runtime.py`](../../services/agent/services/remediation_runtime.py) | `sts:AssumeRole` | Exact approved customer role ARN(s), external-ID/trust constraints, bounded session name and duration | Regional STS DNS → private-DNS interface endpoint | Endpoint and fail-closed role ARN allowlist are implemented; live assumption/denial proof remains |
@@ -114,7 +116,7 @@ when SQS FIFO is selected. No Kinesis endpoint is a valid outcome in either plan
 | Conditional audit endpoint | SQS is added only for `sqs_fifo` | Correct and consistent with proposed ADR-0011 and Kafka rollback |
 | Endpoint policies | Explicit policies cover S3 and every interface endpoint | Implemented with TLS denial, execution/application principal separation, scoped stack resources, and fail-closed optional allowlists; AWS denial exercises pending |
 | ECS execution IAM | Managed execution policy plus an inline secret/KMS policy | Kept for image pull, logs, and task secret injection; application permissions are not added to it |
-| ECS application IAM | Backend, gateway, agent, and audit consumer have separate task roles; optional permissions require exact ARN inputs | Implemented in Terraform; state migration and live allowed/denied calls pending |
+| ECS application IAM | Backend, agent, isolated SQS producer, and audit consumer have separate task roles; the co-located gateway policy task has none; optional permissions require exact ARN inputs | Implemented in Terraform; state migration and live allowed/denied calls pending |
 | Runtime secret selection | Terraform sets `AUTHCLAW_SECRET_PROVIDER=env`; ECS injects values from Secrets Manager | Direct backend KMS and agent secret-backend calls are supported code paths, not the currently selected deployment mode; endpoint stays required, task grants must follow the approved feature matrix |
 
 The existing SQS task-role actions and queue/KMS resource scopes in

@@ -49,10 +49,32 @@ output "runtime_iam_review" {
     roles              = keys(aws_iam_role.runtime)
     customer_roles     = var.agent_customer_role_arns
     direct_permissions = local.direct_aws_statements
-    internal_urls      = local.internal_urls
-    tls_services       = local.tls_services
-    sidecars_isolated = alltrue([for name in ["opa", "presidio"] :
-      aws_ecs_service.private[name].task_definition == aws_ecs_task_definition.service[name].arn
+    internal_urls = merge(local.internal_urls, {
+      opa      = local.internal_opa_url
+      presidio = local.internal_presidio_url
+    })
+    tls_services              = local.tls_services
+    policy_sidecars_colocated = var.enable_policy_sidecar_colocation
+    task_containers = {
+      for name in keys(local.task_definition_configs) : name => concat([name], local.policy_sidecars[name])
+    }
+    task_policy_environment = local.service_policy_environment
+    task_role_arns          = local.effective_task_role_arns
+    sidecars_have_no_port_mappings = alltrue([
+      for config in values(local.policy_sidecar_configs) : length(config.port_mappings) == 0
+    ])
+    sidecars_isolated = var.enable_policy_sidecar_colocation ? (
+      local.service_policy_environment.gateway[0].value == "http://127.0.0.1:8181" &&
+      local.service_policy_environment.gateway[1].value == "http://127.0.0.1:3000" &&
+      contains(keys(local.service_configs), "opa") &&
+      contains(keys(local.service_configs), "presidio") &&
+      length(local.policy_sidecars.gateway) == 2
+      ) : alltrue([for name in ["opa", "presidio"] :
+        aws_ecs_service.private[name].task_definition == aws_ecs_task_definition.service[name].arn
+    ])
+    colocated_sidecars_have_no_task_role = alltrue([
+      for name, sidecars in local.policy_sidecars :
+      length(sidecars) == 0 || local.effective_task_role_arns[name] == null
     ])
   }
 }
