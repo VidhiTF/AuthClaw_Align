@@ -354,7 +354,7 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
         run: >-
           go test ./... -count=1
-          -run '^(TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream)'
+          -run '^(TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
 
   console:
     name: Console Tests and Build
