@@ -74,6 +74,7 @@ jobs:
       TF_VAR_primary_certificate_arn: ${{ vars.BETA_CERTIFICATE_ARN }}
       TF_VAR_primary_region: ${{ vars.AWS_REGION }}
       TF_VAR_enable_policy_sidecar_colocation: ${{ vars.ENABLE_POLICY_SIDECAR_COLOCATION || 'false' }}
+      TF_VAR_internal_tls: ${{ vars.INTERNAL_TLS_JSON || '{}' }}
       TF_VAR_service_cpu_architectures: ${{ vars.SERVICE_CPU_ARCHITECTURES_JSON || '{}' }}
       TF_VAR_audit_stream_transport: ${{ vars.AUDIT_STREAM_TRANSPORT || 'kafka' }}
       TF_VAR_enable_audit_consumer: ${{ vars.ENABLE_AUDIT_CONSUMER || 'false' }}
@@ -100,8 +101,13 @@ jobs:
             { echo '::error::ENABLE_POLICY_SIDECAR_COLOCATION must be true or false'; exit 1; }
           jq -e 'type == "object" and all(.[]; . == "ARM64" or . == "X86_64")' <<<"$TF_VAR_service_cpu_architectures" >/dev/null ||
             { echo '::error::SERVICE_CPU_ARCHITECTURES_JSON must map services to ARM64 or X86_64'; exit 1; }
+          jq -e 'type == "object" and ((.enabled // false) | type == "boolean")' <<<"$TF_VAR_internal_tls" >/dev/null ||
+            { echo '::error::INTERNAL_TLS_JSON must be a Terraform internal_tls object'; exit 1; }
           [[ "$TF_VAR_audit_stream_transport" == kafka || "$TF_VAR_audit_stream_transport" == sqs_fifo ]] ||
             { echo '::error::AUDIT_STREAM_TRANSPORT must be kafka or sqs_fifo'; exit 1; }
+          [[ "$TF_VAR_audit_stream_transport" != sqs_fifo ]] ||
+            jq -e '.enabled == true and (.namespace | type == "string" and length > 0) and (.proxy_image | type == "string" and test("@sha256:[0-9a-f]{64}$"))' <<<"$TF_VAR_internal_tls" >/dev/null ||
+            { echo '::error::SQS audit transport requires enabled internal TLS with a namespace and immutable proxy image'; exit 1; }
           [[ "$TF_VAR_enable_audit_consumer" == true || "$TF_VAR_enable_audit_consumer" == false ]] ||
             { echo '::error::ENABLE_AUDIT_CONSUMER must be true or false'; exit 1; }
           jq -e 'type == "array" and all(.[]; type == "string")' <<<"$TF_VAR_audit_sqs_alarm_action_arns" >/dev/null ||
@@ -114,7 +120,7 @@ jobs:
             (keys | sort) == ([
               "audit_sqs_alarm_action_arns", "audit_stream_transport", "clickhouse_host",
               "container_images", "edge_alarm_action_arns", "enable_audit_consumer",
-              "enable_policy_sidecar_colocation", "service_cpu_architectures"
+              "enable_policy_sidecar_colocation", "internal_tls", "service_cpu_architectures"
             ] | sort) and
             (.enable_policy_sidecar_colocation | type == "boolean") and
             (.enable_audit_consumer | type == "boolean") and
@@ -124,6 +130,12 @@ jobs:
             (.service_cpu_architectures | type == "object") and
             ((.service_cpu_architectures | keys) - ["agent", "audit_consumer", "backend", "console", "gateway", "opa", "presidio"] | length == 0) and
             all(.service_cpu_architectures[]; . == "ARM64" or . == "X86_64") and
+            (.internal_tls | type == "object") and
+            ((.internal_tls | keys | sort) == (["enabled", "namespace", "proxy_image"] | sort)) and
+            (.internal_tls.enabled | type == "boolean") and
+            (.internal_tls.namespace | type == "string") and
+            (.internal_tls.proxy_image | type == "string" and test("@sha256:[0-9a-f]{64}$")) and
+            (.audit_stream_transport != "sqs_fifo" or .internal_tls.enabled == true) and
             (.audit_sqs_alarm_action_arns | type == "array") and
             all(.audit_sqs_alarm_action_arns[]; type == "string") and
             (.edge_alarm_action_arns | type == "array" and length > 0) and

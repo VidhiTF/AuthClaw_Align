@@ -48,7 +48,7 @@ selects ARM64 Fargate first and defers EC2; capture its approved status at step 
 Repository ADR-0002 concerns URL boundaries, not compute.
 
 The controlled-beta environment also exposes `AUDIT_STREAM_TRANSPORT` (`kafka` or
-`sqs_fifo`), `ENABLE_AUDIT_CONSUMER`, `CLICKHOUSE_HOST`,
+`sqs_fifo`), `INTERNAL_TLS_JSON`, `ENABLE_AUDIT_CONSUMER`, `CLICKHOUSE_HOST`,
 `AUDIT_SQS_ALARM_ACTION_ARNS_JSON`, and `SERVICE_CPU_ARCHITECTURES_JSON`. Keep the
 protected `EDGE_ALARM_ACTION_ARNS_JSON` list populated with the approved incident
 destinations for edge, ECS health, capacity and deployment-failure alarms. Keep the
@@ -56,22 +56,25 @@ architecture map empty for the x86 baseline, then canary one service with ARM64 
 step-8 checkpoint before expanding the map. These protected values are part of the
 configuration checksum and must change only in their numbered release. Transport
 selection still requires the step-6 reconciliation evidence; a variable change is
-not proof of a successful cutover.
+not proof of a successful cutover. SQS selection requires `INTERNAL_TLS_JSON` to
+enable internal TLS with the issued namespace and immutable proxy digest. Provision
+the gateway and audit-producer certificates and dedicated producer-secret value
+before applying that release; Terraform blocks an HTTP producer path.
 
 Set protected `ROLLBACK_TFVARS_JSON` to the reviewed previous values for co-location,
-service CPU architectures, transport, audit consumer/ClickHouse, alarm destinations,
+service CPU architectures, transport, internal TLS, audit consumer/ClickHouse, alarm destinations,
 and all seven immutable container image digests. The workflow accepts only those
 runtime keys, applies them as a reverse Terraform plan after a failed runtime rollout,
 then requires every restored service revision and deployed digest to match Terraform
 state and that retained configuration. Update this value at each rollback checkpoint.
 
-For step 7, retain `ecs list-services` JSON and the active gateway, backend and agent
+For step 7, retain `ecs list-services` JSON and the active gateway
 `ecs describe-task-definition` JSON, then run the offline check below. Its output is
 the raw `colocation` check; retain its referenced inputs beside it.
 
 ```bash
 python3 scripts/verify_ecs_colocation.py --gateway gateway-task.json \
-  --backend backend-task.json --agent agent-task.json --services services.json \
+  --services services.json \
   --architecture-map "$SERVICE_CPU_ARCHITECTURES_JSON" \
   > colocation-verification.json
 ```

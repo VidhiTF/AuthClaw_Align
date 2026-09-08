@@ -408,6 +408,10 @@ variable "audit_stream_transport" {
     condition     = contains(["kafka", "sqs_fifo"], var.audit_stream_transport)
     error_message = "audit_stream_transport must be kafka or sqs_fifo."
   }
+  validation {
+    condition     = var.audit_stream_transport != "sqs_fifo" || var.internal_tls.enabled
+    error_message = "SQS audit transport requires internal_tls.enabled=true so gateway-to-producer authentication is encrypted."
+  }
 }
 
 variable "audit_sqs_max_receive_count" {

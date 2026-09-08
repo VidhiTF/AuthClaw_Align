@@ -109,6 +109,11 @@ run "ec2_graviton_capacity_provider" {
   }
 
   assert {
+    condition     = output.primary.ecs_launch_model.awsvpc_block_imds
+    error_message = "EC2-backed awsvpc tasks must be blocked from instance metadata credentials."
+  }
+
+  assert {
     condition = alltrue([
       contains(output.primary.alarm_names, "authclaw-test-test-primary-ecs-graviton-capacity-reservation"),
       contains(output.primary.alarm_names, "authclaw-test-test-primary-ecs-graviton-instance-health"),

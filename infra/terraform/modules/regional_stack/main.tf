@@ -1233,6 +1233,7 @@ resource "aws_launch_template" "ecs_graviton" {
     "ECS_CLUSTER=${aws_ecs_cluster.main.name}",
     "ECS_ENABLE_SPOT_INSTANCE_DRAINING=true",
     "ECS_CONTAINER_INSTANCE_PROPAGATE_TAGS_FROM=ec2_instance",
+    "ECS_AWSVPC_BLOCK_IMDS=true",
     "EOF",
   ]))
 

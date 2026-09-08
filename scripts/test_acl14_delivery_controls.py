@@ -230,6 +230,8 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("AUDIT_SQS_ALARM_ACTION_ARNS_JSON must be a JSON string array", DEPLOY)
         self.assertIn("EDGE_ALARM_ACTION_ARNS_JSON must contain at least one alarm destination ARN", DEPLOY)
         self.assertIn("CLICKHOUSE_HOST is required when the audit consumer is enabled", DEPLOY)
+        self.assertIn("SQS audit transport requires enabled internal TLS", DEPLOY)
+        self.assertIn("ECS_AWSVPC_BLOCK_IMDS=true", REGIONAL_STACK)
 
     def test_master_protection_requires_review_and_pre_merge_ci(self):
         protection = json.loads((ROOT / ".github/branch-protection-master.json").read_text(encoding="utf-8"))

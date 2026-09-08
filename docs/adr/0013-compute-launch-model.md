@@ -259,7 +259,8 @@ must contain all of the following:
    and a named Security approver who is eligible to review under CODEOWNERS. Record
    who can stop the experiment and who owns cleanup and cost review.
 8. **Reviewed design:** approve the proposed host-security and observability design,
-   including instance IAM, IMDS protection, encrypted storage, administrative access,
+   including instance IAM, IMDSv2 plus `ECS_AWSVPC_BLOCK_IMDS=true` for `awsvpc`
+   tasks, encrypted storage, administrative access,
    AMI source, vulnerability/age tracking, logs, dashboards, alarms, and evidence
    retention. Stage A reviews the design; it does not require controls that can only be
    demonstrated on the experimental infrastructure.

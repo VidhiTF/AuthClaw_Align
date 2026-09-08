@@ -87,6 +87,7 @@ output "ecs_launch_model" {
     asg_desired_size       = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.desired_size : null
     asg_max_size           = var.ecs_ec2_graviton.enabled ? var.ecs_ec2_graviton.max_size : null
     x86_provider_enabled   = var.ecs_ec2_graviton.x86_provider_enabled
+    awsvpc_block_imds      = var.ecs_ec2_graviton.enabled ? strcontains(base64decode(aws_launch_template.ecs_graviton[0].user_data), "ECS_AWSVPC_BLOCK_IMDS=true") : null
   }
 }
 

@@ -157,6 +157,7 @@ run "sqs_runtime_roles_remain_separate" {
   variables {
     audit_stream_transport           = "sqs_fifo"
     enable_policy_sidecar_colocation = true
+    internal_tls                     = { enabled = true, namespace = "internal.example.com" }
     enable_audit_consumer            = true
     clickhouse_host                  = "clickhouse.test.invalid"
     agent_customer_role_arns         = ["arn:aws:iam::210987654321:role/authclaw-customer"]
@@ -177,7 +178,9 @@ run "sqs_runtime_roles_remain_separate" {
     condition = (
       output.runtime_iam_review.task_role_arns.gateway == null &&
       contains(output.runtime_iam_review.roles, "audit_producer") &&
-      toset(output.execution_iam_review.audit_producer.secret_names) == toset(["AUDIT_PRODUCER_SECRET"])
+      contains(output.execution_iam_review.audit_producer.secret_names, "AUDIT_PRODUCER_SECRET") &&
+      !contains(output.execution_iam_review.audit_producer.secret_names, "DATABASE_URL") &&
+      !contains(output.execution_iam_review.audit_producer.secret_names, "JWT_SECRET")
     )
     error_message = "The co-located gateway must be credential-free and use a minimally secret-bearing producer task."
   }
