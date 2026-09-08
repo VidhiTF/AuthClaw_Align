@@ -431,7 +431,7 @@ resource "aws_security_group" "app" {
   vpc_id      = aws_vpc.main.id
 
   dynamic "ingress" {
-    for_each = toset([8000, 8001, 8080])
+    for_each = var.internal_tls.enabled ? toset([8443]) : toset([8000, 8001, 8080])
     content {
       description     = "Console outbound API and health-check calls"
       from_port       = ingress.value
@@ -444,18 +444,18 @@ resource "aws_security_group" "app" {
   dynamic "ingress" {
     for_each = local.public_services
     content {
-      from_port       = ingress.value.container_port
-      to_port         = ingress.value.container_port
+      from_port       = local.service_ports[ingress.key]
+      to_port         = local.service_ports[ingress.key]
       protocol        = "tcp"
       security_groups = [aws_security_group.alb.id]
     }
   }
 
   dynamic "ingress" {
-    for_each = local.service_configs
+    for_each = toset(values(local.service_ports))
     content {
-      from_port = ingress.value.container_port
-      to_port   = ingress.value.container_port
+      from_port = ingress.value
+      to_port   = ingress.value
       protocol  = "tcp"
       self      = true
     }

@@ -126,6 +126,9 @@ output "execution_iam_review" {
 output "runtime_iam_review" {
   value = module.primary.runtime_iam_review
 }
+output "runtime_ingress_ports" {
+  value = module.primary.runtime_ingress_ports
+}
 output "required_secret_arns" {
   value = module.primary.required_secret_arns
 }

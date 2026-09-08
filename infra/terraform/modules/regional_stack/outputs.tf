@@ -139,6 +139,16 @@ output "endpoint_client_security_group_id" {
   value = aws_security_group.app.id
 }
 
+output "runtime_ingress_ports" {
+  value = {
+    console_to_app = var.internal_tls.enabled ? [8443] : [8000, 8001, 8080]
+    alb_to_public = {
+      for service in keys(local.public_services) : service => local.service_ports[service]
+    }
+    service_to_service = distinct([for port in values(local.service_ports) : tonumber(port)])
+  }
+}
+
 output "endpoint_ingress_source_count" {
   value = try(length(one(aws_security_group.vpc_endpoints[0].ingress).security_groups), 0)
 }

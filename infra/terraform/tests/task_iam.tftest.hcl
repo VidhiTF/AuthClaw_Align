@@ -267,6 +267,14 @@ run "tls_and_direct_aws_are_scoped" {
     error_message = "Protected services must use TLS with task-specific certificate injection."
   }
   assert {
+    condition = (
+      toset(output.runtime_ingress_ports.console_to_app) == toset([8443]) &&
+      toset(values(output.runtime_ingress_ports.alb_to_public)) == toset([8443]) &&
+      toset(output.runtime_ingress_ports.service_to_service) == toset([8443])
+    )
+    error_message = "Internal TLS must route console, ALB, and service-to-service traffic only through port 8443."
+  }
+  assert {
     condition = alltrue(flatten([for statements in output.runtime_iam_review.direct_permissions :
       [for statement in statements : !contains(tolist(statement.Resource), "*")]
     ])) && contains(output.runtime_iam_review.roles, "database_crypto_preflight")

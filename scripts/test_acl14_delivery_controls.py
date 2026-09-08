@@ -18,6 +18,15 @@ RUNTIME_IAM = (ROOT / "infra/terraform/modules/regional_stack/runtime_iam.tf").r
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
+    def test_internal_tls_security_group_routes_only_to_tls_ports(self):
+        self.assertIn(
+            "for_each = var.internal_tls.enabled ? toset([8443]) : toset([8000, 8001, 8080])",
+            REGIONAL_STACK,
+        )
+        self.assertIn("from_port       = local.service_ports[ingress.key]", REGIONAL_STACK)
+        self.assertIn("to_port         = local.service_ports[ingress.key]", REGIONAL_STACK)
+        self.assertIn("for_each = toset(values(local.service_ports))", REGIONAL_STACK)
+
     def test_all_ecs_services_enable_health_based_circuit_breaker_rollback(self):
         services = re.findall(r'resource "aws_ecs_service" "[^"]+" \{(.*?)(?=\nresource |\Z)', REGIONAL_STACK, re.S)
         self.assertEqual(len(services), 3)
