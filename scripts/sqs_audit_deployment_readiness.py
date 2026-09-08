@@ -219,7 +219,7 @@ def main() -> int:
             "aws cloudwatch describe-alarms --alarm-names <audit_sqs.alarm_names>",
             "aws iam simulate-principal-policy for producer/consumer task roles",
             "aws ec2 describe-vpc-endpoints --vpc-endpoint-ids <network_path.interface_endpoint_ids.sqs>",
-            "aws ecs describe-services and describe-task-definition for backend/gateway/agent/audit_consumer",
+            "aws ecs describe-services and describe-task-definition for backend/gateway/agent/audit_producer/audit_consumer",
         ],
         "checks": checks,
         "collection_errors": redact({

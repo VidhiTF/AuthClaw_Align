@@ -36,9 +36,11 @@ This inventory separates three identities that should not be conflated:
 
 1. **Task execution role / ECS platform path** — Fargate retrieves images and
    injected secrets and starts the `awslogs` driver before application code runs.
-2. **Task role / application path** — backend, gateway, agent, and audit-consumer
-   SDK calls execute with the task role or with explicitly supplied customer
-   credentials.
+2. **Task role / application path** — backend, agent, the isolated audit producer,
+   and audit-consumer SDK calls execute with their task role or with explicitly
+   supplied customer credentials. The co-located gateway/OPA/Presidio task has no
+   task role; in SQS mode the gateway calls the isolated producer over authenticated
+   internal HTTPS.
 3. **Deployment/operator path** — GitHub-hosted runners and operator workstations are
    outside the workload VPC, so their AWS calls do not justify workload VPC endpoints.
 

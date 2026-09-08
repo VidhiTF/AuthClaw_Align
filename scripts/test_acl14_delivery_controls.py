@@ -17,6 +17,16 @@ REGIONAL_STACK = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / 
 RUNTIME_IAM = (ROOT / "infra/terraform/modules/regional_stack/runtime_iam.tf").read_text(encoding="utf-8")
 IAM_INVENTORY = (ROOT / "docs/security/P0_10_11_LOCAL_INVENTORY.md").read_text(encoding="utf-8")
 AWS_SERVICE_INVENTORY = (ROOT / "docs/compliance/P0_08_RUNTIME_AWS_SERVICE_INVENTORY.md").read_text(encoding="utf-8")
+AWS_READINESS_TASKS = (ROOT / "docs/AWS_DEPLOYMENT_READINESS_TASK_LIST.md").read_text(encoding="utf-8")
+AUDIT_READINESS_MATRIX = (ROOT / "infra/security/audit-transport-readiness-matrix.md").read_text(encoding="utf-8")
+SQS_READINESS = (ROOT / "scripts/sqs_audit_deployment_readiness.py").read_text(encoding="utf-8")
+SQS_PENDING_EVIDENCE = tuple(
+    (ROOT / path).read_text(encoding="utf-8")
+    for path in (
+        "infra/security/sqs-audit-deployment-readiness.pending.json",
+        "infra/security/sqs-audit-deployment-readiness.pending.md",
+    )
+)
 
 
 class ACL14DeliveryControlTests(unittest.TestCase):
@@ -28,6 +38,13 @@ class ACL14DeliveryControlTests(unittest.TestCase):
             self.assertIn("no task role or direct SQS permission", inventory)
         self.assertNotIn("SQS producer policies attach only to backend/gateway", IAM_INVENTORY)
         self.assertNotIn("SQS — backend and gateway publishers", AWS_SERVICE_INVENTORY)
+        self.assertNotIn("backend, gateway, agent, and audit-consumer", AWS_SERVICE_INVENTORY)
+        self.assertNotIn("backend/gateway producer-only", AUDIT_READINESS_MATRIX)
+        self.assertNotIn("task roles for backend, agent, gateway", AWS_READINESS_TASKS)
+        self.assertIn("backend and the isolated `audit_producer`", AUDIT_READINESS_MATRIX)
+        self.assertIn("gateway/agent/audit_producer/audit_consumer", SQS_READINESS)
+        for pending_evidence in SQS_PENDING_EVIDENCE:
+            self.assertIn("gateway/agent/audit_producer/audit_consumer", pending_evidence)
 
     def test_internal_tls_security_group_routes_only_to_tls_ports(self):
         self.assertIn(
