@@ -59,26 +59,35 @@ class Store:
 
 def _event(tenant_id: str, sequence: int, prefix: str, prior_hash: str = "GENESIS") -> dict[str, Any]:
     record_id = f"{prefix}-{sequence:012d}"
+    timestamp = (datetime(2026, 9, 1, tzinfo=timezone.utc) + timedelta(seconds=sequence)).isoformat()
     canonical = {
         "tenant_id": tenant_id,
         "record_id": record_id,
         "tenant_sequence": sequence,
         "chain_version": 2,
+        "timestamp": timestamp,
+        "actor_id": "local-e2e",
+        "actor_type": "harness",
         "action": "audit.transport.verify",
+        "policy_id": "",
+        "provider": "local",
+        "model": "simulation",
+        "reason": "transport parity verification",
+        "prompt_count": 0,
+        "request_size": 0,
+        "response_status": 200,
+        "duration_ms": 0,
+        "frameworks_affected": [],
+        "execution_trace": "[]",
+        "request_id": f"request-{record_id}",
     }
     canonical_payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     integrity_hash = hashlib.sha256((canonical_payload + prior_hash).encode("utf-8")).hexdigest()
     return {
+        **canonical,
         "id": record_id,
-        "tenant_id": tenant_id,
-        "tenant_sequence": sequence,
         "idempotency_key": f"local-e2e:{record_id}",
-        "chain_version": 2,
         "canonical_payload": canonical_payload,
-        "timestamp": (datetime(2026, 9, 1, tzinfo=timezone.utc) + timedelta(seconds=sequence)).isoformat(),
-        "actor_id": "local-e2e",
-        "actor_type": "harness",
-        "action": "audit.transport.verify",
         "prior_hash": prior_hash,
         "integrity_hash": integrity_hash,
     }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,14 +51,26 @@ var (
 	auditIdempotencyCollisions atomic.Uint64
 	auditOutboxBacklog         atomic.Uint64
 	auditOutboxOldestAge       atomic.Uint64
+	auditFailOpenLosses        atomic.Uint64
+	auditPostResponseFailures  atomic.Uint64
 	auditOutboxMu              sync.Mutex
 )
+
+var auditEventEmitter = EmitAuditEvent
 
 type auditOutboxEnvelope struct {
 	FailedAt    time.Time   `json:"failed_at"`
 	ErrorReason string      `json:"error_reason"`
 	Event       *AuditEvent `json:"event"`
 }
+
+type auditPersistenceError struct {
+	cause             error
+	recoveryAvailable bool
+}
+
+func (e *auditPersistenceError) Error() string { return e.cause.Error() }
+func (e *auditPersistenceError) Unwrap() error { return e.cause }
 
 func auditFailClosedEnabled() bool {
 	return envBool("AUDIT_FAIL_CLOSED", isProductionEnv())
@@ -123,12 +137,13 @@ func EmitAuditEvent(ctx context.Context, event *AuditEvent) error {
 		}
 		if auditFailClosedEnabled() {
 			auditFailClosedFailures.Add(1)
-			return fmt.Errorf(
-				"canonical audit append failed (local recovery copy available=%t): %w",
-				outboxAvailable,
-				err,
-			)
+			return &auditPersistenceError{
+				cause:             fmt.Errorf("canonical audit append failed (local recovery copy available=%t): %w", outboxAvailable, err),
+				recoveryAvailable: outboxAvailable,
+			}
 		}
+		auditFailOpenLosses.Add(1)
+		log.Printf("[AUDIT] class=%s provider=%s result=fail_open recovery_available=%t err=%v", event.Action, event.Provider, outboxAvailable, err)
 		return nil
 	}
 
@@ -144,6 +159,66 @@ func EmitAuditEvent(ctx context.Context, event *AuditEvent) error {
 		logToStdout(event)
 	}
 	return nil
+}
+
+func auditIdempotencyKey(requestID, eventClass string) string {
+	if strings.TrimSpace(requestID) == "" {
+		return ""
+	}
+	return "gateway:" + requestID + ":" + eventClass
+}
+
+func emitRequiredDecision(w http.ResponseWriter, r *http.Request, event *AuditEvent, eventClass string) bool {
+	if event.IdempotencyKey == "" {
+		event.IdempotencyKey = auditIdempotencyKey(event.RequestID, "decision:"+eventClass)
+	}
+	if err := auditEventEmitter(r.Context(), event); err != nil {
+		if auditFailClosedEnabled() {
+			log.Printf("[AUDIT] class=%s route=%s provider=%s result=fail_closed err=%v", eventClass, r.URL.Path, event.Provider, err)
+			writeGatewayError(w, http.StatusServiceUnavailable, "AuditUnavailable", "Audit persistence is temporarily unavailable.")
+			return false
+		}
+		auditFailOpenLosses.Add(1)
+		log.Printf("[AUDIT] class=%s route=%s provider=%s result=fail_open err=%v", eventClass, r.URL.Path, event.Provider, err)
+	}
+	return true
+}
+
+func requireProviderAttempt(w http.ResponseWriter, r *http.Request, event *AuditEvent) bool {
+	event.Action = "provider_attempt"
+	event.DecisionReason = "Provider egress authorized"
+	event.IdempotencyKey = auditIdempotencyKey(event.RequestID, "provider_attempt")
+	if !auditFailClosedEnabled() {
+		emitAuditTelemetry(r.Context(), event, "provider_attempt")
+		return true
+	}
+	return emitRequiredDecision(w, r, event, "provider_attempt")
+}
+
+func emitAuditTelemetry(ctx context.Context, event *AuditEvent, eventClass string) {
+	if event.IdempotencyKey == "" {
+		event.IdempotencyKey = auditIdempotencyKey(event.RequestID, "telemetry:"+eventClass)
+	}
+	EmitAuditEventAsync(ctx, event)
+}
+
+func emitPostResponseOutcome(ctx context.Context, route string, event *AuditEvent) {
+	event.IdempotencyKey = auditIdempotencyKey(event.RequestID, "provider_outcome")
+	if !auditFailClosedEnabled() {
+		EmitAuditEventAsync(ctx, event)
+		return
+	}
+	if err := auditEventEmitter(ctx, event); err != nil {
+		auditPostResponseFailures.Add(1)
+		var persistenceErr *auditPersistenceError
+		if !errors.As(err, &persistenceErr) || !persistenceErr.recoveryAvailable {
+			if recoveryErr := writeAuditOutbox(event, err); recoveryErr != nil {
+				auditOutboxFailures.Add(1)
+				log.Printf("[AUDIT] class=provider_outcome route=%s provider=%s result=recovery_failed err=%v", route, event.Provider, recoveryErr)
+			}
+		}
+		log.Printf("[AUDIT] class=provider_outcome route=%s provider=%s result=post_response_failure err=%v", route, event.Provider, err)
+	}
 }
 
 var auditAsyncSlots = make(chan struct{}, 4)
@@ -337,5 +412,7 @@ func AuditMetricsSnapshot() map[string]uint64 {
 		"authclaw_gateway_audit_idempotency_collisions_total": auditIdempotencyCollisions.Load(),
 		"authclaw_gateway_audit_outbox_backlog":               auditOutboxBacklog.Load(),
 		"authclaw_gateway_audit_outbox_oldest_age_seconds":    auditOutboxOldestAge.Load(),
+		"authclaw_gateway_audit_fail_open_losses_total":       auditFailOpenLosses.Load(),
+		"authclaw_gateway_audit_post_response_failures_total": auditPostResponseFailures.Load(),
 	}
 }

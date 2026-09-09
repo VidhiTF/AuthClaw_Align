@@ -11,12 +11,12 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -967,40 +967,89 @@ func RunInTenantTx(ctx context.Context, tenantID string, fn func(*sql.Tx) error)
 }
 
 // Tokenization Mappings Store & Helpers
+var cryptographicRandomReader io.Reader = rand.Reader
+
 func hashToken(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(h[:])
 }
 
-func cryptoRandInt(max int) int {
-	var n uint32
-	binary.Read(rand.Reader, binary.BigEndian, &n)
-	return int(n % uint32(max))
+func cryptoRandIntFrom(reader io.Reader, max int) (int, error) {
+	if max <= 0 {
+		return 0, fmt.Errorf("random upper bound must be positive")
+	}
+	n, err := rand.Int(reader, big.NewInt(int64(max)))
+	if err != nil {
+		return 0, fmt.Errorf("read cryptographic randomness: %w", err)
+	}
+	return int(n.Int64()), nil
 }
 
-func generateShortUUID() string {
+func cryptoRandInt(max int) (int, error) {
+	return cryptoRandIntFrom(cryptographicRandomReader, max)
+}
+
+func generateShortUUIDFrom(reader io.Reader) (string, error) {
 	b := make([]byte, 4)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := io.ReadFull(reader, b); err != nil {
+		return "", fmt.Errorf("read cryptographic randomness: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
-func getSyntheticBase(entityType string) string {
+func generateShortUUID() (string, error) {
+	return generateShortUUIDFrom(cryptographicRandomReader)
+}
+
+func getSyntheticBase(entityType string) (string, error) {
 	switch entityType {
 	case "PERSON":
 		names := []string{"Alice Smith", "Bob Jones", "Charlie Brown", "Diana Prince", "Evan Wright", "Fiona Gallagher", "George Clark", "Hannah Abbott"}
-		return names[cryptoRandInt(len(names))]
+		index, err := cryptoRandInt(len(names))
+		if err != nil {
+			return "", err
+		}
+		return names[index], nil
 	case "EMAIL_ADDRESS":
 		domains := []string{"example.org", "testmail.net", "dummycorp.com"}
-		return fmt.Sprintf("user.%d@%s", cryptoRandInt(1000), domains[cryptoRandInt(len(domains))])
+		number, err := cryptoRandInt(1000)
+		if err != nil {
+			return "", err
+		}
+		domainIndex, err := cryptoRandInt(len(domains))
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("user.%d@%s", number, domains[domainIndex]), nil
 	case "PHONE_NUMBER":
-		return fmt.Sprintf("555-01%02d", cryptoRandInt(100))
+		number, err := cryptoRandInt(100)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("555-01%02d", number), nil
 	case "US_SSN":
-		return fmt.Sprintf("%03d-%02d-%04d", cryptoRandInt(1000), cryptoRandInt(100), cryptoRandInt(10000))
+		area, err := cryptoRandInt(1000)
+		if err != nil {
+			return "", err
+		}
+		group, err := cryptoRandInt(100)
+		if err != nil {
+			return "", err
+		}
+		serial, err := cryptoRandInt(10000)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%03d-%02d-%04d", area, group, serial), nil
 	case "HEALTH_DATA":
 		conditions := []string{"mild condition", "routine treatment", "general symptoms", "medical issue"}
-		return conditions[cryptoRandInt(len(conditions))]
+		index, err := cryptoRandInt(len(conditions))
+		if err != nil {
+			return "", err
+		}
+		return conditions[index], nil
 	default:
-		return "synthetic-placeholder"
+		return "synthetic-placeholder", nil
 	}
 }
 
@@ -1016,7 +1065,10 @@ func isTokenValueExists(ctx context.Context, tx *sql.Tx, tenantID, tokenValue st
 func GenerateTokenValue(ctx context.Context, tx *sql.Tx, tenantID, originalValue, entityType, strategy string) (string, error) {
 	switch strategy {
 	case "mask":
-		uuidPart := generateShortUUID()
+		uuidPart, err := generateShortUUID()
+		if err != nil {
+			return "", fmt.Errorf("generate mask token: %w", err)
+		}
 		return fmt.Sprintf("[REDACTED_%s_%s]", entityType, uuidPart), nil
 
 	case "hash":
@@ -1030,7 +1082,10 @@ func GenerateTokenValue(ctx context.Context, tx *sql.Tx, tenantID, originalValue
 		return fmt.Sprintf("[HASH_%s_%s]", entityType, hashPart), nil
 
 	case "synthetic":
-		baseVal := getSyntheticBase(entityType)
+		baseVal, err := getSyntheticBase(entityType)
+		if err != nil {
+			return "", fmt.Errorf("generate synthetic token: %w", err)
+		}
 		tokenVal := baseVal
 		exists, err := isTokenValueExists(ctx, tx, tenantID, tokenVal)
 		if err != nil {
@@ -1424,6 +1479,7 @@ type StreamOutboundRedactor struct {
 	runtimeConfig RedactionRuntimeConfig
 	buffer        string
 	tailRunes     int
+	err           error
 }
 
 func NewStreamOutboundRedactor(tenantID string, customRules []RegexRule, runtimeConfig RedactionRuntimeConfig) *StreamOutboundRedactor {
@@ -1444,7 +1500,7 @@ func splitSafeRunePrefix(text string, tailRunes int) (string, string) {
 }
 
 func (sr *StreamOutboundRedactor) ProcessChunk(ctx context.Context, chunk string) string {
-	if chunk == "" {
+	if chunk == "" || sr.err != nil {
 		return ""
 	}
 	sr.buffer += chunk
@@ -1456,15 +1512,16 @@ func (sr *StreamOutboundRedactor) ProcessChunk(ctx context.Context, chunk string
 	redacted, _, err := redactOutboundText(ctx, sr.tenantID, safe, sr.customRules, sr.runtimeConfig)
 	if err != nil {
 		log.Printf("[REDACTION] outbound_stream status=redact_failed err=%v", err)
-		sr.buffer = tail
-		return safe
+		sr.err = err
+		sr.buffer = ""
+		return ""
 	}
 	sr.buffer = tail
 	return redacted
 }
 
 func (sr *StreamOutboundRedactor) Flush(ctx context.Context) string {
-	if sr.buffer == "" {
+	if sr.buffer == "" || sr.err != nil {
 		return ""
 	}
 	buffer := sr.buffer
@@ -1472,7 +1529,8 @@ func (sr *StreamOutboundRedactor) Flush(ctx context.Context) string {
 	redacted, _, err := redactOutboundText(ctx, sr.tenantID, buffer, sr.customRules, sr.runtimeConfig)
 	if err != nil {
 		log.Printf("[REDACTION] outbound_stream status=flush_failed err=%v", err)
-		return buffer
+		sr.err = err
+		return ""
 	}
 	return redacted
 }
@@ -1560,6 +1618,9 @@ func NewStreamingProtectionReader(ctx context.Context, originalBody io.ReadClose
 }
 
 func (s *StreamingReversalReader) Read(p []byte) (int, error) {
+	if s.outbound != nil && s.outbound.err != nil {
+		return 0, s.outbound.err
+	}
 	if s.outBuffer.Len() > 0 {
 		return s.outBuffer.Read(p)
 	}
@@ -1569,7 +1630,11 @@ func (s *StreamingReversalReader) Read(p []byte) (int, error) {
 
 	if s.scanner.Scan() {
 		line := s.scanner.Text()
-		for _, modifiedLine := range s.processLine(line) {
+		lines := s.processLine(line)
+		if s.outbound != nil && s.outbound.err != nil {
+			return 0, s.outbound.err
+		}
+		for _, modifiedLine := range lines {
 			s.outBuffer.WriteString(modifiedLine + "\n")
 		}
 		return s.outBuffer.Read(p)
@@ -1580,7 +1645,11 @@ func (s *StreamingReversalReader) Read(p []byte) (int, error) {
 	}
 
 	s.eof = true
-	for _, line := range s.flushPendingLines() {
+	lines := s.flushPendingLines()
+	if s.outbound != nil && s.outbound.err != nil {
+		return 0, s.outbound.err
+	}
+	for _, line := range lines {
 		s.outBuffer.WriteString(line + "\n")
 	}
 	if s.outBuffer.Len() > 0 {

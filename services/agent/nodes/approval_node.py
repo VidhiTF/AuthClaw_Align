@@ -4,10 +4,9 @@ from approval_store import create_approval
 
 import time
 import concurrent.futures
+from contextvars import copy_context
 
 def _approval_reason(state: AuthState) -> str:
-    if state.get("unknown_provider_risk"):
-        return "unknown_provider_risk"
     if state.get("security_policy_action") == "require_approval" or state.get("block_category") in {"pii", "secrets", "sensitive_data"}:
         return "sensitive_data"
     if state.get("policy_decision") in {"REQUIRE_APPROVAL", "BLOCK"} or state.get("block_reason") == "policy_violation":
@@ -36,6 +35,7 @@ def approval_node(state: AuthState):
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
             future = executor.submit(
+                copy_context().run,
                 create_approval,
                 query=state["message"],
                 risk_level=state["risk_level"],

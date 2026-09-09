@@ -68,6 +68,21 @@ class DataSubjectRequestStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
 
 
+class FindingStatus(str, enum.Enum):
+    """Canonical lifecycle states accepted for compliance findings."""
+
+    OPEN = "OPEN"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+    IN_PROGRESS = "IN_PROGRESS"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    RESOLVED = "RESOLVED"
+    FALSE_POSITIVE = "FALSE_POSITIVE"
+    ACCEPTED_RISK = "ACCEPTED_RISK"
+
+
+FINDING_STATUS_VALUES = tuple(status.value for status in FindingStatus)
+
+
 class DataSubjectRequest(Base):
     """Tenant-scoped GDPR data-subject request lifecycle."""
     __tablename__ = "data_subject_requests"
@@ -989,6 +1004,11 @@ class Finding(Base):
     owner = relationship("User")
 
     __table_args__ = (
+        CheckConstraint(
+            "status IN ('OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'AWAITING_APPROVAL', "
+            "'RESOLVED', 'FALSE_POSITIVE', 'ACCEPTED_RISK')",
+            name="ck_findings_status",
+        ),
         Index("idx_finding_tenant", "tenant_id"),
         Index("idx_finding_workflow", "workflow_id"),
         Index("idx_finding_framework", "framework"),

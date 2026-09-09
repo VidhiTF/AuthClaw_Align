@@ -53,6 +53,22 @@ def list_notifications(
     unread_only: bool = False,
     db: Session = Depends(get_tenant_db),
 ) -> NotificationListResponse:
+    return _notification_list_response(db, request, limit=limit, unread_only=unread_only)
+
+
+def _notification_list_response(
+    db: Session,
+    request: Request,
+    *,
+    limit: int,
+    unread_only: bool,
+) -> NotificationListResponse:
+    """Build the notification list from plain values.
+
+    Endpoints must pass native ``int``/``bool`` values here. FastAPI's
+    ``Query`` default objects are not valid SQLAlchemy ``limit`` arguments,
+    so endpoint functions must never be called directly as helpers.
+    """
     query = _visible_notifications(db, request)
     unread_count = query.filter(Notification.read_at.is_(None)).count()
     if unread_only:
@@ -88,4 +104,4 @@ def mark_all_notifications_read(
         notification.read_at = now
     if unread:
         db.commit()
-    return list_notifications(request, db=db)
+    return _notification_list_response(db, request, limit=50, unread_only=False)

@@ -4,7 +4,10 @@ import json
 import logging
 import os
 import re
+import base64
 from typing import Optional
+
+from app.orchestrator.remediation_state import MutationPhase, new_mutation_state, upgrade_mutation_state
 
 logger = logging.getLogger("orchestrator.scanner")
 
@@ -19,6 +22,20 @@ SENSITIVE_PATTERNS = [
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _checksum_sha256(data: bytes) -> str:
+    return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
+
+
+def _precondition_failed(exc: Exception) -> bool:
+    response = getattr(exc, "response", {}) or {}
+    error = response.get("Error", {}) if isinstance(response, dict) else {}
+    return str(error.get("Code", "")) in {"PreconditionFailed", "412"} or "precondition" in str(exc).lower()
+
+
+class RemediationConflictError(RuntimeError):
+    """The target no longer matches the prepared remediation operation."""
 
 
 def redact_sensitive_text(text: str) -> tuple[str, dict]:
@@ -164,18 +181,74 @@ class DocumentScanner:
             "content_type": obj.get("ContentType") or "text/plain",
             "version_id": obj.get("VersionId"),
             "etag": obj.get("ETag", "").strip('"'),
+            "etag_header": obj.get("ETag", ""),
+            "metadata": obj.get("Metadata") or {},
         }
         try:
             return body, body.decode("utf-8"), metadata
         except UnicodeDecodeError:
             return body, body.decode("latin-1"), metadata
 
-    def execute_remediation(self, workflow_id: str, action_id: str, plan_item: dict) -> dict:
-        """Apply an approved S3 redaction mutation and return before/after proof."""
+    def _validated_target(self, plan_item: dict) -> tuple[dict, str]:
         target = plan_item.get("target") or {}
         object_key = target.get("object_key") or plan_item.get("finding_control", "")
         if target.get("type") != "s3_object":
             raise RuntimeError(f"Unsupported remediation target: {target.get('type') or 'unknown'}")
+        if not target.get("bucket") or target["bucket"] != self.bucket:
+            raise RuntimeError("Configured S3 bucket does not match the approved target bucket")
+        return target, object_key
+
+    def _immutable_backup(self, mutation_state: dict, body: bytes, content_type: str) -> None:
+        backup = mutation_state["backup"]
+        metadata = {
+            "authclaw-role": "rollback-source",
+            "operation-id": mutation_state["operation_id"],
+        }
+        try:
+            result = self.s3_client.put_object(
+                Bucket=self.bucket,
+                Key=backup["key"],
+                Body=body,
+                ContentType=content_type,
+                Metadata=metadata,
+                IfNoneMatch="*",
+                ChecksumSHA256=_checksum_sha256(body),
+            )
+            backup["etag"] = result.get("ETag", "").strip('"')
+            backup["version_id"] = result.get("VersionId")
+            return
+        except Exception as exc:
+            if not _precondition_failed(exc):
+                raise
+
+        existing_bytes, _, existing_metadata = self._read_text_object(backup["key"])
+        if (
+            _sha256(existing_bytes) != backup["sha256"]
+            or existing_metadata["metadata"].get("operation-id") != mutation_state["operation_id"]
+        ):
+            raise RemediationConflictError("Existing rollback backup does not match the prepared operation")
+        backup["etag"] = existing_metadata.get("etag")
+        backup["version_id"] = existing_metadata.get("version_id")
+
+    def prepare_remediation(
+        self,
+        workflow_id: str,
+        action_id: str,
+        plan_item: dict,
+        existing_state: Optional[dict] = None,
+    ) -> dict:
+        """Create an immutable backup and return state that must be persisted before apply."""
+        target, object_key = self._validated_target(plan_item)
+        state = upgrade_mutation_state(
+            workflow_id,
+            action_id,
+            {"status": "RUNNING", "mutation_state": existing_state} if existing_state else {"status": "PENDING"},
+        )
+        if existing_state:
+            if state["phase"] in {MutationPhase.APPLIED.value, MutationPhase.PREPARED.value, MutationPhase.APPLYING.value}:
+                return self.reconcile_remediation(state)
+            if state["phase"] != MutationPhase.PENDING.value:
+                return state
 
         before_bytes, before_text, metadata = self._read_text_object(object_key)
         after_text, redaction = redact_sensitive_text(before_text)
@@ -184,47 +257,176 @@ class DocumentScanner:
             raise RuntimeError("No redactable sensitive values were found during apply")
 
         backup_key = f".authclaw-rollback/{workflow_id}/{action_id}/{object_key.lstrip('/')}"
-        self.s3_client.put_object(
-            Bucket=self.bucket,
-            Key=backup_key,
-            Body=before_bytes,
-            ContentType=metadata["content_type"],
-            Metadata={"authclaw-role": "rollback-source", "workflow-id": workflow_id, "action-id": action_id},
-        )
-        put_result = self.s3_client.put_object(
-            Bucket=self.bucket,
-            Key=object_key,
-            Body=after_bytes,
-            ContentType=metadata["content_type"],
-            Metadata={"authclaw-remediated": "true", "workflow-id": workflow_id, "action-id": action_id},
-        )
+        state.update({
+            "phase": MutationPhase.PREPARED.value,
+            "target": {
+                "bucket": self.bucket,
+                "key": object_key,
+                "content_type": metadata["content_type"],
+            },
+            "original": {
+                "sha256": _sha256(before_bytes),
+                "etag": metadata.get("etag"),
+                "etag_header": metadata.get("etag_header") or metadata.get("etag"),
+                "version_id": metadata.get("version_id"),
+                "verification": verification_summary(before_text),
+            },
+            "intended": {
+                "sha256": _sha256(after_bytes),
+                "verification": verification_summary(after_text),
+                "redaction": redaction,
+            },
+            "backup": {
+                "bucket": self.bucket,
+                "key": backup_key,
+                "sha256": _sha256(before_bytes),
+            },
+            "mutation": None,
+            "conflict": None,
+        })
+        self._immutable_backup(state, before_bytes, metadata["content_type"])
+        return state
 
-        verified_bytes, verified_text, after_metadata = self._read_text_object(object_key)
-        before_verification = verification_summary(before_text)
-        after_verification = verification_summary(verified_text)
-        verified = _sha256(verified_bytes) == _sha256(after_bytes) and after_verification["total"] == 0
+    def reconcile_remediation(self, mutation_state: dict) -> dict:
+        """Resolve an in-flight operation from the current target contents."""
+        target = mutation_state.get("target") or {}
+        if not target.get("key"):
+            mutation_state["phase"] = MutationPhase.UNKNOWN.value
+            mutation_state["conflict"] = "missing_target_state"
+            return mutation_state
 
+        current_bytes, _, metadata = self._read_text_object(target["key"])
+        current_sha = _sha256(current_bytes)
+        if current_sha == (mutation_state.get("original") or {}).get("sha256"):
+            mutation_state["phase"] = MutationPhase.PREPARED.value
+            mutation_state["conflict"] = None
+            return mutation_state
+        if (
+            current_sha == (mutation_state.get("intended") or {}).get("sha256")
+            and metadata["metadata"].get("operation-id") == mutation_state.get("operation_id")
+        ):
+            mutation_state["phase"] = MutationPhase.APPLIED.value
+            mutation_state["mutation"] = {
+                "sha256": current_sha,
+                "etag": metadata.get("etag"),
+                "etag_header": metadata.get("etag_header") or metadata.get("etag"),
+                "version_id": metadata.get("version_id"),
+                "reconciled": True,
+            }
+            mutation_state["conflict"] = None
+            return mutation_state
+
+        mutation_state["phase"] = MutationPhase.CONFLICTED.value
+        mutation_state["conflict"] = "target_changed_outside_prepared_operation"
+        return mutation_state
+
+    def _result_from_state(self, mutation_state: dict, target: dict, plan_item: dict) -> dict:
+        redaction = (mutation_state.get("intended") or {}).get("redaction") or {"total": 0}
+        mutation = mutation_state.get("mutation") or {}
         return {
             "connector": "aws_s3",
-            "control": object_key,
+            "control": mutation_state["target"]["key"],
             "target": target,
-            "status": "success" if verified else "failed",
-            "details": f"Redacted {redaction['total']} sensitive value(s) in s3://{self.bucket}/{object_key}",
-            "mutation_id": put_result.get("VersionId") or put_result.get("ETag", "").strip('"'),
-            "before_verification": before_verification,
-            "after_verification": after_verification,
-            "before_sha256": _sha256(before_bytes),
-            "after_sha256": _sha256(verified_bytes),
+            "status": "success",
+            "details": f"Redacted {redaction.get('total', 0)} sensitive value(s) in s3://{self.bucket}/{mutation_state['target']['key']}",
+            "mutation_id": mutation.get("version_id") or mutation.get("etag"),
+            "before_verification": mutation_state["original"]["verification"],
+            "after_verification": mutation_state["intended"]["verification"],
+            "before_sha256": mutation_state["original"]["sha256"],
+            "after_sha256": mutation_state["intended"]["sha256"],
             "cli_diff": plan_item.get("diff", {}),
-            "rollback_ref": {
-                "bucket": self.bucket,
-                "backup_key": backup_key,
-                "target_key": object_key,
-                "content_type": metadata["content_type"],
-                "before_version_id": metadata.get("version_id"),
-                "after_version_id": after_metadata.get("version_id"),
-            },
+            "mutation_state": mutation_state,
+            "rollback_ref": self.rollback_ref_from_state(mutation_state),
         }
+
+    def rollback_ref_from_state(self, mutation_state: dict) -> dict:
+        mutation = mutation_state.get("mutation") or {}
+        return {
+            "state_version": mutation_state["state_version"],
+            "operation_id": mutation_state["operation_id"],
+            "bucket": self.bucket,
+            "backup_key": mutation_state["backup"]["key"],
+            "target_key": mutation_state["target"]["key"],
+            "content_type": mutation_state["target"]["content_type"],
+            "original_sha256": mutation_state["original"]["sha256"],
+            "intended_sha256": mutation_state["intended"]["sha256"],
+            "before_version_id": mutation_state["original"].get("version_id"),
+            "after_version_id": mutation.get("version_id"),
+            "mutation_etag": mutation.get("etag"),
+            "mutation_etag_header": mutation.get("etag_header") or mutation.get("etag"),
+        }
+
+    def apply_prepared_remediation(self, mutation_state: dict, plan_item: dict) -> dict:
+        """Conditionally apply a prepared mutation, reconciling ambiguous errors."""
+        target, object_key = self._validated_target(plan_item)
+        mutation_state = self.reconcile_remediation(mutation_state)
+        if mutation_state["phase"] == MutationPhase.APPLIED.value:
+            return self._result_from_state(mutation_state, target, plan_item)
+        if mutation_state["phase"] != MutationPhase.PREPARED.value:
+            raise RemediationConflictError(mutation_state.get("conflict") or "Prepared remediation is not applicable")
+
+        backup_bytes, backup_text, backup_metadata = self._read_text_object(mutation_state["backup"]["key"])
+        if _sha256(backup_bytes) != mutation_state["backup"]["sha256"]:
+            raise RemediationConflictError("Rollback backup checksum does not match prepared state")
+        after_text, _ = redact_sensitive_text(backup_text)
+        after_bytes = after_text.encode("utf-8")
+        if _sha256(after_bytes) != mutation_state["intended"]["sha256"]:
+            raise RemediationConflictError("Prepared redaction output is not reproducible")
+
+        mutation_state["phase"] = MutationPhase.APPLYING.value
+        try:
+            put_result = self.s3_client.put_object(
+                Bucket=self.bucket,
+                Key=object_key,
+                Body=after_bytes,
+                ContentType=mutation_state["target"]["content_type"],
+                Metadata={
+                    "authclaw-remediated": "true",
+                    "operation-id": mutation_state["operation_id"],
+                },
+                IfMatch=mutation_state["original"].get("etag_header") or mutation_state["original"].get("etag"),
+                ChecksumSHA256=_checksum_sha256(after_bytes),
+            )
+            mutation_state["mutation"] = {
+                "sha256": mutation_state["intended"]["sha256"],
+                "etag": put_result.get("ETag", "").strip('"'),
+                "etag_header": put_result.get("ETag", ""),
+                "version_id": put_result.get("VersionId"),
+                "reconciled": False,
+            }
+        except Exception as exc:
+            reconciled = self.reconcile_remediation(mutation_state)
+            if reconciled["phase"] == MutationPhase.APPLIED.value:
+                return self._result_from_state(reconciled, target, plan_item)
+            if _precondition_failed(exc) or reconciled["phase"] == MutationPhase.CONFLICTED.value:
+                raise RemediationConflictError(reconciled.get("conflict") or "Target changed before remediation") from exc
+            raise RuntimeError("S3 mutation outcome is unresolved; retry will reconcile prepared state") from exc
+
+        verified_bytes, verified_text, verified_metadata = self._read_text_object(object_key)
+        verified_sha = _sha256(verified_bytes)
+        if (
+            verified_sha != mutation_state["intended"]["sha256"]
+            or verification_summary(verified_text)["total"] != 0
+            or verified_metadata["metadata"].get("operation-id") != mutation_state["operation_id"]
+        ):
+            mutation_state["phase"] = MutationPhase.CONFLICTED.value
+            mutation_state["conflict"] = "post_mutation_verification_mismatch"
+            raise RemediationConflictError("Post-mutation verification did not match the prepared operation")
+
+        mutation_state["phase"] = MutationPhase.APPLIED.value
+        mutation_state["mutation"] = {
+            "sha256": verified_sha,
+            "etag": verified_metadata.get("etag") or put_result.get("ETag", "").strip('"'),
+            "etag_header": verified_metadata.get("etag_header") or put_result.get("ETag", ""),
+            "version_id": verified_metadata.get("version_id") or put_result.get("VersionId"),
+            "reconciled": False,
+        }
+        return self._result_from_state(mutation_state, target, plan_item)
+
+    def execute_remediation(self, workflow_id: str, action_id: str, plan_item: dict) -> dict:
+        """Compatibility wrapper for callers that do not persist intermediate state."""
+        prepared = self.prepare_remediation(workflow_id, action_id, plan_item)
+        return self.apply_prepared_remediation(prepared, plan_item)
 
     def rollback_remediation(self, rollback_plan: dict) -> dict:
         """Restore the original S3 object from the rollback copy."""
@@ -232,6 +434,8 @@ class DocumentScanner:
             raise RuntimeError("AWS S3 rollback requires AWS_ENABLED=true, AWS_S3_BUCKET, and AWS credentials")
 
         rollback_ref = rollback_plan.get("rollback_ref") or {}
+        if not rollback_ref.get("bucket") or rollback_ref["bucket"] != self.bucket:
+            raise RuntimeError("Configured S3 bucket does not match the rollback bucket")
         backup_key = rollback_ref.get("backup_key")
         target_key = rollback_ref.get("target_key")
         if not backup_key or not target_key:
@@ -239,13 +443,46 @@ class DocumentScanner:
 
         backup_obj = self.s3_client.get_object(Bucket=self.bucket, Key=backup_key)
         body = backup_obj["Body"].read()
-        result = self.s3_client.put_object(
-            Bucket=self.bucket,
-            Key=target_key,
-            Body=body,
-            ContentType=rollback_ref.get("content_type") or backup_obj.get("ContentType") or "text/plain",
-            Metadata={"authclaw-rollback": "true"},
-        )
+        if rollback_ref.get("original_sha256") and _sha256(body) != rollback_ref["original_sha256"]:
+            raise RemediationConflictError("Rollback backup checksum does not match the recorded original")
+
+        current_metadata = None
+        try:
+            current_bytes, _, current_metadata = self._read_text_object(target_key)
+        except Exception:
+            if not (rollback_ref.get("mutation_etag_header") or rollback_ref.get("mutation_etag")):
+                raise
+        else:
+            if rollback_ref.get("original_sha256") and _sha256(current_bytes) == rollback_ref["original_sha256"]:
+                return {
+                    "connector": "aws_s3",
+                    "control": target_key,
+                    "status": "rolled_back",
+                    "details": f"S3 target {target_key} already contains the recorded original",
+                    "mutation_id": current_metadata.get("version_id") or current_metadata.get("etag"),
+                }
+            expected_etag = rollback_ref.get("mutation_etag")
+            same_mutation = (
+                expected_etag
+                and current_metadata.get("etag") == expected_etag
+                and current_metadata["metadata"].get("operation-id") == rollback_ref.get("operation_id")
+            )
+            if rollback_ref.get("intended_sha256") and _sha256(current_bytes) != rollback_ref["intended_sha256"] and not same_mutation:
+                raise RemediationConflictError("S3 target changed after remediation; automatic rollback refused")
+
+        put_args = {
+            "Bucket": self.bucket,
+            "Key": target_key,
+            "Body": body,
+            "ContentType": rollback_ref.get("content_type") or backup_obj.get("ContentType") or "text/plain",
+            "Metadata": {"authclaw-rollback": "true", "operation-id": rollback_ref.get("operation_id", "")},
+        }
+        if rollback_ref.get("mutation_etag_header") or rollback_ref.get("mutation_etag"):
+            put_args["IfMatch"] = rollback_ref.get("mutation_etag_header") or rollback_ref.get("mutation_etag")
+        result = self.s3_client.put_object(**put_args)
+        restored_bytes, _, _ = self._read_text_object(target_key)
+        if rollback_ref.get("original_sha256") and _sha256(restored_bytes) != rollback_ref["original_sha256"]:
+            raise RemediationConflictError("Rollback result does not match the recorded original")
         return {
             "connector": "aws_s3",
             "control": target_key,

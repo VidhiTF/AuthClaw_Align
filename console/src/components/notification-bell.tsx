@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Bell, CheckCheck, CircleAlert, CircleCheck, TriangleAlert } from "lucide-react";
+import { performNotificationMutation } from "@/lib/notification-mutation";
 import { formatDateTime } from "@/lib/ui-format";
 
 type Notification = {
@@ -37,6 +38,8 @@ export default function NotificationBell() {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [mutating, setMutating] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -60,16 +63,29 @@ export default function NotificationBell() {
   }, [load]);
 
   const markRead = async (id: string) => {
-    const wasUnread = items.some((item) => item.id === id && !item.read_at);
-    setItems((current) => current.map((item) => item.id === id ? { ...item, read_at: new Date().toISOString() } : item));
-    if (wasUnread) setUnreadCount((current) => Math.max(0, current - 1));
-    await fetch(`/api/notifications/${id}/read`, { method: "POST" }).catch(() => undefined);
+    setMutationError(null);
+    setMutating(true);
+    try {
+      await performNotificationMutation(`/api/notifications/${id}/read`);
+      await load();
+    } catch {
+      setMutationError("Could not mark the notification as read. Please try again.");
+    } finally {
+      setMutating(false);
+    }
   };
 
   const markAllRead = async () => {
-    setItems((current) => current.map((item) => ({ ...item, read_at: item.read_at || new Date().toISOString() })));
-    setUnreadCount(0);
-    await fetch("/api/notifications/read-all", { method: "POST" }).catch(() => undefined);
+    setMutationError(null);
+    setMutating(true);
+    try {
+      await performNotificationMutation("/api/notifications/read-all");
+      await load();
+    } catch {
+      setMutationError("Could not mark notifications as read. Please try again.");
+    } finally {
+      setMutating(false);
+    }
   };
 
   return (
@@ -103,13 +119,19 @@ export default function NotificationBell() {
           </div>
           <button
             onClick={markAllRead}
-            disabled={unreadCount === 0}
+            disabled={unreadCount === 0 || mutating}
             className="inline-flex items-center gap-1.5 rounded-lg border border-[#E6E9F0] px-2.5 py-1.5 text-[10px] font-bold text-[#475069] hover:bg-[#F5F7FA] disabled:text-[#A8B0C0]"
           >
             <CheckCheck className="h-3.5 w-3.5" />
             Read all
           </button>
         </div>
+
+        {mutationError && (
+          <p role="alert" className="border-b border-red-100 bg-red-50 px-4 py-2 text-xs font-medium text-red-700">
+            {mutationError}
+          </p>
+        )}
 
         <div className="max-h-96 overflow-y-auto p-2">
           {items.length === 0 ? (

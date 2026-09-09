@@ -85,6 +85,10 @@ type responseWriter struct {
 	status int
 }
 
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.status = code
 	rw.ResponseWriter.WriteHeader(code)
@@ -178,28 +182,39 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if credentialErr != nil {
 		log.Printf("Provider credential load failed: %v", credentialErr)
 		queueNotification(r.Context(), tenantID, "", "gateway_api_key_issue", "warning", "Provider credential unavailable", "The saved provider credential could not be decrypted. Verify that backend and gateway use the same envelope key.", "/connect")
-		writeGatewayError(w, http.StatusBadGateway, "ProviderCredentialUnavailable", "Provider credential could not be loaded.")
-		EmitAuditEvent(r.Context(), &AuditEvent{
+		if !emitRequiredDecision(w, r, &AuditEvent{
 			ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 			TenantID: tenantID, Action: "block", DecisionReason: "Provider credential unavailable",
 			Provider: provider, RequestSize: int(r.ContentLength), ResponseStatus: http.StatusBadGateway, DurationMs: 0,
-		})
+		}, "provider_credential_unavailable") {
+			return
+		}
+		writeGatewayError(w, http.StatusBadGateway, "ProviderCredentialUnavailable", "Provider credential could not be loaded.")
 		return
 	}
 	if tenantID != "" && requiresTenantProviderCredential(provider) && (providerCredential == nil || providerCredential.APIKey == "") {
 		queueNotification(r.Context(), tenantID, "", "gateway_api_key_issue", "warning", "Provider credential missing", "Save an active provider API key before sending gateway traffic.", "/connect")
-		writeGatewayError(w, http.StatusBadGateway, "ProviderCredentialMissing", "Save an active provider API key before sending gateway traffic.")
-		EmitAuditEvent(r.Context(), &AuditEvent{
+		if !emitRequiredDecision(w, r, &AuditEvent{
 			ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 			TenantID: tenantID, Action: "block", DecisionReason: "Provider credential missing",
 			Provider: provider, ResponseStatus: http.StatusBadGateway, DurationMs: 0,
-		})
+		}, "provider_credential_missing") {
+			return
+		}
+		writeGatewayError(w, http.StatusBadGateway, "ProviderCredentialMissing", "Save an active provider API key before sending gateway traffic.")
 		return
 	}
 	if providerCredential != nil && providerCredential.Endpoint != "" {
 		targetURLStr = providerCredential.Endpoint
 	}
 	if targetURLStr == "" {
+		if !emitRequiredDecision(w, r, &AuditEvent{
+			ID: generateID(), RequestID: requestID, Timestamp: time.Now(), TenantID: tenantID,
+			Action: "block", DecisionReason: "Provider endpoint not configured", Provider: provider,
+			ResponseStatus: http.StatusBadGateway,
+		}, "provider_endpoint_missing") {
+			return
+		}
 		http.Error(w, "Provider endpoint not configured", http.StatusBadGateway)
 		return
 	}
@@ -218,8 +233,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil && tenantID != "" && supportsSensitiveDataProtection(provider) {
 		log.Printf("[GATEWAY] request normalization failed request_id=%s provider=%s err=%v", requestID, provider, err)
 		RecordPolicyAction("fail_closed")
-		writeGatewayError(w, http.StatusBadRequest, "SensitiveDataInspectionFailed", "Request blocked: request body could not be inspected safely.")
-		EmitAuditEvent(r.Context(), &AuditEvent{
+		if !emitRequiredDecision(w, r, &AuditEvent{
 			ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 			TenantID: tenantID, Action: "block",
 			DecisionReason: "Request normalization failed before sensitive-data inspection",
@@ -227,17 +241,22 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ResponseStatus: http.StatusBadRequest, DurationMs: 0,
 			FrameworksAffected: []string{"GDPR", "SOC2"},
 			ExecutionTrace:     []string{"stage=normalize", "result=fail_closed"},
-		})
+		}, "request_normalization_failed") {
+			return
+		}
+		writeGatewayError(w, http.StatusBadRequest, "SensitiveDataInspectionFailed", "Request blocked: request body could not be inspected safely.")
 		return
 	}
 	if routeErr := ValidateProviderRoute(provider, r, targetURLStr, model); routeErr != nil {
-		writeGatewayError(w, http.StatusBadRequest, "ProviderRouteInvalid", routeErr.Error())
-		EmitAuditEvent(r.Context(), &AuditEvent{
+		if !emitRequiredDecision(w, r, &AuditEvent{
 			ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 			TenantID: tenantID, Action: "block", DecisionReason: routeErr.Error(),
 			Provider: provider, Model: model, PromptCount: promptCount,
 			RequestSize: int(r.ContentLength), ResponseStatus: http.StatusBadRequest, DurationMs: 0,
-		})
+		}, "provider_route_invalid") {
+			return
+		}
+		writeGatewayError(w, http.StatusBadRequest, "ProviderRouteInvalid", routeErr.Error())
 		return
 	}
 
@@ -246,14 +265,16 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	config, policyID, policyLoadErr := LoadPolicyWithCache(r.Context(), tenantID)
 	if policyLoadErr != nil {
 		log.Printf("[POLICY-ERROR] Early policy load failed: %v", policyLoadErr)
-		writeGatewayError(w, http.StatusForbidden, "PolicyEvaluationFailed", "Request blocked: policy loading or parsing error")
-		EmitAuditEvent(r.Context(), &AuditEvent{
+		if !emitRequiredDecision(w, r, &AuditEvent{
 			ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 			TenantID: tenantID, PolicyID: policyID, Action: "block",
 			DecisionReason: "Request blocked: policy loading or parsing error",
 			Provider:       provider, Model: model, PromptCount: promptCount,
 			RequestSize: int(r.ContentLength), ResponseStatus: http.StatusForbidden, DurationMs: 0,
-		})
+		}, "policy_load_failed") {
+			return
+		}
+		writeGatewayError(w, http.StatusForbidden, "PolicyEvaluationFailed", "Request blocked: policy loading or parsing error")
 		return
 	}
 	var customRules []RegexRule
@@ -265,22 +286,23 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		blockMatch, blockMatchErr := FindBlockingRuleMatch(config, normalized.Prompts)
 		if blockMatchErr != nil {
 			log.Printf("Custom block rule evaluation failed: %v", blockMatchErr)
-			http.Error(w, "Request blocked: custom policy evaluation failed", http.StatusForbidden)
-			EmitAuditEvent(r.Context(), &AuditEvent{
+			if !emitRequiredDecision(w, r, &AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "block",
 				DecisionReason: "Custom block policy evaluation failed", Provider: provider, Model: model,
 				PromptCount: promptCount, RequestSize: int(r.ContentLength),
 				ResponseStatus: http.StatusForbidden, DurationMs: 0,
-			})
+			}, "custom_block_evaluation_failed") {
+				return
+			}
+			http.Error(w, "Request blocked: custom policy evaluation failed", http.StatusForbidden)
 			return
 		}
 		if blockMatch != nil {
 			reason := PolicyRuleDecisionReason(blockMatch, "block")
 			RecordPolicyAction("block")
 			queueNotification(r.Context(), tenantID, "", "policy_violation_block", "critical", "Policy blocked request", reason, "/audit")
-			writeGatewayError(w, http.StatusForbidden, "PolicyBlocked", reason)
-			EmitAuditEventAsync(r.Context(), &AuditEvent{
+			if !emitRequiredDecision(w, r, &AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "block",
 				DecisionReason: reason, Provider: provider, Model: model,
@@ -288,7 +310,10 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				ResponseStatus: http.StatusForbidden, DurationMs: 0,
 				FrameworksAffected: []string{"GDPR", "SOC2"},
 				ExecutionTrace:     PolicyRuleAuditTrace(blockMatch, "block"),
-			})
+			}, "custom_policy_block") {
+				return
+			}
+			writeGatewayError(w, http.StatusForbidden, "PolicyBlocked", reason)
 			return
 		}
 	}
@@ -302,8 +327,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if warningMatchErr != nil {
 			log.Printf("Custom warning rule evaluation failed: %v", warningMatchErr)
 			RecordPolicyAction("fail_closed")
-			http.Error(w, "Request blocked: warning policy evaluation failed", http.StatusForbidden)
-			EmitAuditEvent(r.Context(), &AuditEvent{
+			if !emitRequiredDecision(w, r, &AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "block",
 				DecisionReason: "Warning policy evaluation failed", Provider: provider, Model: model,
@@ -311,7 +335,10 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				ResponseStatus: http.StatusForbidden, DurationMs: 0,
 				FrameworksAffected: []string{"GDPR", "SOC2"},
 				ExecutionTrace:     []string{"stage=warn", "result=fail_closed"},
-			})
+			}, "warning_policy_evaluation_failed") {
+				return
+			}
+			http.Error(w, "Request blocked: warning policy evaluation failed", http.StatusForbidden)
 			return
 		}
 		if warningMatch != nil {
@@ -321,7 +348,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-AuthClaw-Policy-Action", "warn")
 			w.Header().Set("X-AuthClaw-Policy-Warning", "true")
 			queueNotification(r.Context(), tenantID, "", "policy_violation_warn", "warning", "Policy warning applied", reason, "/audit")
-			EmitAuditEventAsync(r.Context(), &AuditEvent{
+			emitAuditTelemetry(r.Context(), &AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "warn",
 				DecisionReason: reason, Provider: provider, Model: model,
@@ -329,21 +356,23 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				ResponseStatus: 0, DurationMs: 0,
 				FrameworksAffected: []string{"GDPR", "SOC2"},
 				ExecutionTrace:     PolicyRuleAuditTrace(warningMatch, "warn"),
-			})
+			}, "policy_warning")
 		}
 	}
 	if normalized != nil && len(normalized.Prompts) > 0 {
 		approvalMatch, approvalMatchErr := FindApprovalRuleMatch(config, normalized.Prompts)
 		if approvalMatchErr != nil {
 			log.Printf("HITL rule evaluation failed: %v", approvalMatchErr)
-			http.Error(w, "Request blocked: approval policy evaluation failed", http.StatusForbidden)
-			EmitAuditEvent(r.Context(), &AuditEvent{
+			if !emitRequiredDecision(w, r, &AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "block",
 				DecisionReason: "HITL policy evaluation failed", Provider: provider, Model: model,
 				PromptCount: promptCount, RequestSize: int(r.ContentLength),
 				ResponseStatus: http.StatusForbidden, DurationMs: 0,
-			})
+			}, "approval_policy_evaluation_failed") {
+				return
+			}
+			http.Error(w, "Request blocked: approval policy evaluation failed", http.StatusForbidden)
 			return
 		}
 		if approvalMatch != nil {
@@ -352,14 +381,16 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			)
 			if approvalErr != nil {
 				log.Printf("Failed to create gateway approval: %v", approvalErr)
-				http.Error(w, "Request blocked: failed to create human approval", http.StatusForbidden)
-				EmitAuditEvent(r.Context(), &AuditEvent{
+				if !emitRequiredDecision(w, r, &AuditEvent{
 					ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 					TenantID: tenantID, PolicyID: policyID, Action: "block",
 					DecisionReason: "Failed to create HITL approval", Provider: provider, Model: model,
 					PromptCount: promptCount, RequestSize: int(r.ContentLength),
 					ResponseStatus: http.StatusForbidden, DurationMs: 0,
-				})
+				}, "approval_creation_failed") {
+					return
+				}
+				http.Error(w, "Request blocked: failed to create human approval", http.StatusForbidden)
 				return
 			}
 
@@ -367,38 +398,42 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			status, waitErr := WaitForGatewayApproval(r.Context(), tenantID, approvalID, timeout)
 			if waitErr != nil {
 				log.Printf("Gateway approval wait failed: %v", waitErr)
-				http.Error(w, "Request blocked: human approval wait failed", http.StatusForbidden)
-				EmitAuditEvent(r.Context(), &AuditEvent{
+				if !emitRequiredDecision(w, r, &AuditEvent{
 					ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 					TenantID: tenantID, PolicyID: policyID, Action: "block",
 					DecisionReason: "HITL approval wait failed", Provider: provider, Model: model,
 					PromptCount: promptCount, RequestSize: int(r.ContentLength),
 					ResponseStatus: http.StatusForbidden, DurationMs: 0,
-				})
+				}, "approval_wait_failed") {
+					return
+				}
+				http.Error(w, "Request blocked: human approval wait failed", http.StatusForbidden)
 				return
 			}
 			if status != "APPROVED" {
-				writeJSON(w, http.StatusForbidden, gatewayErrorResponse{
-					Error:      "ApprovalRequired",
-					Message:    fmt.Sprintf("Request blocked: HITL approval status is %s", status),
-					ApprovalID: approvalID,
-				})
-				EmitAuditEvent(r.Context(), &AuditEvent{
+				if !emitRequiredDecision(w, r, &AuditEvent{
 					ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 					TenantID: tenantID, PolicyID: policyID, Action: "block",
 					DecisionReason: fmt.Sprintf("HITL approval %s", status), Provider: provider, Model: model,
 					PromptCount: promptCount, RequestSize: int(r.ContentLength),
 					ResponseStatus: http.StatusForbidden, DurationMs: 0,
+				}, "approval_not_granted") {
+					return
+				}
+				writeJSON(w, http.StatusForbidden, gatewayErrorResponse{
+					Error: "ApprovalRequired", Message: fmt.Sprintf("Request blocked: HITL approval status is %s", status), ApprovalID: approvalID,
 				})
 				return
 			}
-			EmitAuditEvent(r.Context(), &AuditEvent{
+			if !emitRequiredDecision(w, r, &AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "approval_allow",
 				DecisionReason: "HITL approved: " + PolicyRuleDecisionReason(approvalMatch, "require_approval"),
 				Provider:       provider, Model: model, PromptCount: promptCount,
 				RequestSize: int(r.ContentLength), ResponseStatus: http.StatusOK, DurationMs: 0,
-			})
+			}, "approval_allow") {
+				return
+			}
 			finalAllowReason = "HITL approved: " + PolicyRuleDecisionReason(approvalMatch, "require_approval")
 		}
 	}
@@ -424,7 +459,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					} else if !strings.Contains(strings.ToLower(finalAllowReason), "redact") {
 						finalAllowReason += " + redacted"
 					}
-					EmitAuditEventAsync(r.Context(), &AuditEvent{
+					emitAuditTelemetry(r.Context(), &AuditEvent{
 						ID:                 generateID(),
 						RequestID:          requestID,
 						Timestamp:          time.Now(),
@@ -440,13 +475,12 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						DurationMs:         redactDurationMs,
 						FrameworksAffected: []string{"GDPR", "SOC2"},
 						ExecutionTrace:     []string{"stage=pre_egress", "result=redacted"},
-					})
+					}, "prompt_redaction")
 				}
 				if rebuildErr := applyRedactedPromptsToRequest(r, normalized.Prompts, redactedPrompts, rebuilder); rebuildErr != nil {
 					log.Printf("[REDACTION] status=rebuild_failed request_id=%s provider=%s err=%v", requestID, provider, rebuildErr)
 					RecordPolicyAction("fail_closed")
-					http.Error(w, "Request blocked: sanitized request could not be prepared", http.StatusForbidden)
-					EmitAuditEvent(r.Context(), &AuditEvent{
+					if !emitRequiredDecision(w, r, &AuditEvent{
 						ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 						TenantID: tenantID, PolicyID: policyID, Action: "block",
 						DecisionReason: "Sanitized request rebuild failed", Provider: provider, Model: model,
@@ -454,14 +488,16 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						ResponseStatus: http.StatusForbidden, DurationMs: redactDurationMs,
 						FrameworksAffected: []string{"GDPR", "SOC2"},
 						ExecutionTrace:     []string{"stage=rebuild", "result=fail_closed"},
-					})
+					}, "redaction_rebuild_failed") {
+						return
+					}
+					http.Error(w, "Request blocked: sanitized request could not be prepared", http.StatusForbidden)
 					return
 				}
 			} else {
 				log.Printf("[REDACTION] status=error duration_ms=%d request_id=%s provider=%s prompt_count=%d err=%v", redactDurationMs, requestID, provider, len(normalized.Prompts), redactErr)
 				RecordPolicyAction("fail_closed")
-				http.Error(w, "Request blocked: sensitive-data redaction failed", http.StatusForbidden)
-				EmitAuditEvent(r.Context(), &AuditEvent{
+				if !emitRequiredDecision(w, r, &AuditEvent{
 					ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 					TenantID: tenantID, PolicyID: policyID, Action: "block",
 					DecisionReason: "Sensitive-data redaction failed before provider egress",
@@ -470,7 +506,10 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					DurationMs:         redactDurationMs,
 					FrameworksAffected: []string{"GDPR", "SOC2"},
 					ExecutionTrace:     []string{"stage=redact", "result=fail_closed"},
-				})
+				}, "redaction_failed") {
+					return
+				}
+				http.Error(w, "Request blocked: sensitive-data redaction failed", http.StatusForbidden)
 				return
 			}
 		}
@@ -495,9 +534,6 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !allow {
 		RecordPolicyAction("block")
 		queueNotification(r.Context(), tenantID, "", "policy_violation_block", "critical", "Policy blocked request", reason, "/audit")
-		writeGatewayError(w, http.StatusForbidden, "Forbidden", reason)
-
-		// Emit Block Audit Event
 		event := &AuditEvent{
 			ID:             generateID(),
 			RequestID:      requestID,
@@ -513,28 +549,49 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ResponseStatus: http.StatusForbidden,
 			DurationMs:     0,
 		}
-		EmitAuditEvent(r.Context(), event)
+		if !emitRequiredDecision(w, r, event, "policy_block") {
+			return
+		}
+		writeGatewayError(w, http.StatusForbidden, "Forbidden", reason)
 		return
 	}
 	// Runs AFTER OPA (which can also block on model whitelist).
 	// Checked here to prevent any AWS request when daily cap is exceeded.
 	if provider == ProviderBedrock {
 		if limitErr := CheckBedrockUsageLimits(r.Context(), tenantID); limitErr != nil {
-			writeGatewayError(w, http.StatusTooManyRequests, "BedrockLimitExceeded", limitErr.Error())
-			EmitAuditEvent(r.Context(), &AuditEvent{
+			if !emitRequiredDecision(w, r, &AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "block",
 				DecisionReason: limitErr.Error(), Provider: provider, Model: model,
 				PromptCount: promptCount, RequestSize: int(r.ContentLength),
 				ResponseStatus: http.StatusTooManyRequests, DurationMs: 0,
-			})
+			}, "bedrock_limit_exceeded") {
+				return
+			}
+			writeGatewayError(w, http.StatusTooManyRequests, "BedrockLimitExceeded", limitErr.Error())
 			return
 		}
 	}
 
 	target, err := url.Parse(targetURLStr)
 	if err != nil {
+		if !emitRequiredDecision(w, r, &AuditEvent{
+			ID: generateID(), RequestID: requestID, Timestamp: time.Now(), TenantID: tenantID,
+			Action: "block", DecisionReason: "Invalid provider target URL", Provider: provider, Model: model,
+			ResponseStatus: http.StatusInternalServerError,
+		}, "provider_target_invalid") {
+			return
+		}
 		http.Error(w, "Invalid target URL", http.StatusInternalServerError)
+		return
+	}
+	attemptEvent := &AuditEvent{
+		ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
+		TenantID: tenantID, PolicyID: policyID, Provider: provider, Model: model,
+		PromptCount: promptCount, RequestSize: int(r.ContentLength),
+		ExecutionTrace: []string{"stage=pre_egress", "result=authorized"},
+	}
+	if !requireProviderAttempt(w, r, attemptEvent) {
 		return
 	}
 
@@ -671,7 +728,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ResponseStatus: wrappedWriter.status,
 		DurationMs:     duration,
 	}
-	EmitAuditEventAsync(r.Context(), event)
+	emitPostResponseOutcome(r.Context(), r.URL.Path, event)
 	if provider == ProviderBedrock && wrappedWriter.status == http.StatusOK {
 		// Estimate tokens from prompt count (Bedrock response body already consumed)
 		// 4 chars ≈ 1 token — rough estimate for cost tracking

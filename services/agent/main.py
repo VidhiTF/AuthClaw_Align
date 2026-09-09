@@ -1035,7 +1035,19 @@ def execute_agent_capability(
             detail="operation must be one of: chat, rag, remediation_plan",
         )
 
-    tenant_id = resolve_tenant(x_api_key, authorization)
+    from services.execution_auth import authorize_agent_operation
+
+    principal = optional_user_from_request(request)
+    # The tenant middleware has already resolved a signed external tenant to the
+    # internal tenant ID. Forwarded gateway credentials remain transport inputs;
+    # they cannot replace the authenticated control-plane tenant or identity.
+    tenant_id = require_tenant_context()
+    try:
+        execution_identity = authorize_agent_operation(principal, operation, tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     correlation_id = request.state.correlation_id
     canonical_service = get_canonical_agent_service()
     logger.info(
@@ -1067,6 +1079,7 @@ def execute_agent_capability(
                 session_id=execution_request.session_id,
                 x_api_key=x_api_key,
                 authorization=authorization,
+                username=execution_identity.user_id,
                 route_id=execution_request.route_id,
                 correlation_id=correlation_id,
             )

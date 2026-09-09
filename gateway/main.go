@@ -24,16 +24,32 @@ func HealthHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func NewGatewayRouter(proxy http.Handler) http.Handler {
+	return newGatewayRouter(proxy, AuthMiddleware, RateLimitMiddleware)
+}
+
+type gatewayMiddleware func(http.Handler) http.Handler
+
+func newGatewayRouter(proxy http.Handler, auth, rateLimit gatewayMiddleware) http.Handler {
 	r := chi.NewRouter()
 	if envBool("GATEWAY_HTTP_LOGGER_ENABLED", true) {
 		r.Use(middleware.Logger)
 	}
 	r.Use(middleware.Recoverer)
 	r.Get("/health", HealthHandler)
-	r.Route("/v1", func(r chi.Router) {
-		r.Use(AuthMiddleware)
-		r.Use(RateLimitMiddleware)
-		r.Handle("/*", proxy)
+	r.Group(func(r chi.Router) {
+		r.Use(auth)
+		r.Use(rateLimit)
+		routes, err := configuredProviderRoutes()
+		if err != nil {
+			panic(err)
+		}
+		for _, route := range routes {
+			if route.Method == "*" {
+				r.Handle(route.Pattern, proxy)
+				continue
+			}
+			r.Method(route.Method, route.Pattern, proxy)
+		}
 	})
 	return r
 }

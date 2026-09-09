@@ -15,7 +15,7 @@ from app.db.dependencies import get_db
 from app.db.models import Tenant, User, APIKey, PendingApproval, ApprovalAudit
 from app.core.auth import hash_key
 from app.core.crypto import decrypt_secret
-from app.api.v1.endpoints.workflows import _verify_mfa_if_enabled
+from app.api.v1.endpoints.workflows import _has_fresh_mfa, _verify_mfa_if_enabled
 from tests.db_safety import destructive_test_urls
 
 owner_db_url, db_url = destructive_test_urls()
@@ -188,6 +188,49 @@ def test_phase10_production_approval_requires_mfa_enrollment(monkeypatch):
 
     monkeypatch.setenv("AUTHCLAW_ENV", "local")
     assert _verify_mfa_if_enabled(user, request=None, body=None) == (False, None)
+
+
+def test_phase10_fresh_mfa_boundary():
+    now = datetime.now(timezone.utc)
+    assert _has_fresh_mfa(True, now - timedelta(minutes=29)) is True
+    assert _has_fresh_mfa(True, now - timedelta(minutes=31)) is False
+    assert _has_fresh_mfa(False, now) is False
+    assert _has_fresh_mfa(True, None) is False
+
+
+def test_phase10_stale_mfa_rejected_before_approval_commit(
+    client: TestClient,
+    db_session: Session,
+):
+    tenant_id, _, headers = _create_admin_tenant(
+        db_session,
+        "Test Tenant Stale MFA",
+        "admin@stale-mfa.example",
+        "system_admin_key_stale_mfa",
+    )
+    workflow_id, approval_id = _create_workflow_approval(client, headers)
+    stale_timestamp = datetime.now(timezone.utc) - timedelta(minutes=31)
+
+    with patch(
+        "app.api.v1.endpoints.workflows._verify_mfa_if_enabled",
+        return_value=(True, stale_timestamp),
+    ):
+        response = client.post(f"/v1/workflows/{workflow_id}/approve", headers=headers)
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    assert response.json()["detail"] == "Fresh MFA is required for destructive remediation"
+
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+    approval = db_session.query(PendingApproval).filter(
+        PendingApproval.id == uuid.UUID(approval_id)
+    ).one()
+    assert approval.status == "PENDING"
+    assert approval.approver_id is None
+    assert db_session.query(ApprovalAudit).filter(
+        ApprovalAudit.approval_id == uuid.UUID(approval_id),
+        ApprovalAudit.action == "APPROVED",
+    ).count() == 0
+    db_session.execute(text("SET app.current_tenant_id = ''"))
 
 
 def test_phase10_approval_expiration(client: TestClient, db_session: Session):

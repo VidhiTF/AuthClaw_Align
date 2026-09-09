@@ -8,12 +8,22 @@ from typing import List, Optional, Tuple, Dict, Any
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session, joinedload
 
-from app.db.models import Finding, EvidenceRecord
+from app.db.models import Finding, FindingStatus, EvidenceRecord, User
 from app.services import event_backbone
 
 logger = logging.getLogger("services.findings")
 
 _kafka_producer = None
+
+TERMINAL_FINDING_STATUSES = frozenset(
+    {FindingStatus.RESOLVED, FindingStatus.FALSE_POSITIVE, FindingStatus.ACCEPTED_RISK}
+)
+
+
+def _coerce_finding_status(status: str | FindingStatus) -> FindingStatus:
+    if isinstance(status, FindingStatus):
+        return status
+    return FindingStatus(status.strip().upper())
 
 
 def _init_kafka_producer():
@@ -74,6 +84,7 @@ def create_finding(
     Create or update a finding, deduplicating by finding_key.
     finding_key = framework|finding_type|source_reference
     """
+    canonical_status = _coerce_finding_status(status).value
     finding_key = f"{framework}|{finding_type}|{source_reference}"
     
     existing = (
@@ -98,12 +109,12 @@ def create_finding(
         existing.updated_at = datetime.now(tz=timezone.utc)
         
         # If the finding was resolved, reopen it since the issue reappeared
-        if existing.status in ("RESOLVED", "FALSE_POSITIVE", "ACCEPTED_RISK") and status == "OPEN":
+        if existing.status in ("RESOLVED", "FALSE_POSITIVE", "ACCEPTED_RISK") and canonical_status == "OPEN":
             existing.status = "OPEN"
             existing.resolved_at = None
-        elif status != "OPEN":
+        elif canonical_status != "OPEN":
             # If explicit status provided (not the default OPEN), respect it
-            existing.status = status
+            existing.status = canonical_status
             
         db.commit()
         db.refresh(existing)
@@ -127,7 +138,7 @@ def create_finding(
         title=title,
         description=description,
         severity=severity,
-        status=status,
+        status=canonical_status,
         finding_type=finding_type,
         risk_score=risk_score,
         remediation_summary=remediation_summary,
@@ -228,11 +239,11 @@ def update_status(
     if not finding:
         return None
 
-    status = status.upper()
-    finding.status = status
+    canonical_status = _coerce_finding_status(status)
+    finding.status = canonical_status.value
     finding.updated_at = datetime.now(tz=timezone.utc)
     
-    if status in ("RESOLVED", "FALSE_POSITIVE", "ACCEPTED_RISK"):
+    if canonical_status in TERMINAL_FINDING_STATUSES:
         finding.resolved_at = datetime.now(tz=timezone.utc)
     else:
         finding.resolved_at = None
@@ -259,7 +270,20 @@ def assign_owner(
     if not finding:
         return None
 
-    finding.owner_user_id = uuid.UUID(owner_user_id) if owner_user_id else None
+    owner_id = None
+    if owner_user_id is not None:
+        try:
+            owner_id = uuid.UUID(owner_user_id)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("Invalid or unavailable owner") from exc
+        owner = db.query(User).filter(
+            User.id == owner_id,
+            User.tenant_id == uuid.UUID(tenant_id),
+            User.is_active.is_(True),
+        ).first()
+        if owner is None:
+            raise ValueError("Invalid or unavailable owner")
+    finding.owner_user_id = owner_id
     finding.updated_at = datetime.now(tz=timezone.utc)
     db.commit()
     db.refresh(finding)
@@ -271,13 +295,17 @@ def resolve_finding(
     *,
     tenant_id: str,
     finding_id: str,
+    status: str | FindingStatus,
     remediation_summary: str,
 ) -> Optional[Finding]:
+    canonical_status = _coerce_finding_status(status)
+    if canonical_status not in TERMINAL_FINDING_STATUSES:
+        raise ValueError(f"Finding status {canonical_status.value!r} is not terminal")
     finding = get_finding(db, tenant_id=tenant_id, finding_id=finding_id)
     if not finding:
         return None
 
-    finding.status = "RESOLVED"
+    finding.status = canonical_status.value
     finding.remediation_summary = remediation_summary
     finding.resolved_at = datetime.now(tz=timezone.utc)
     finding.updated_at = datetime.now(tz=timezone.utc)
@@ -285,7 +313,12 @@ def resolve_finding(
     db.refresh(finding)
     
     try:
-        _emit_finding_audit(str(finding.id), tenant_id, finding.framework, "FINDING_RESOLVED")
+        action = {
+            FindingStatus.RESOLVED: "FINDING_RESOLVED",
+            FindingStatus.FALSE_POSITIVE: "FINDING_FALSE_POSITIVE",
+            FindingStatus.ACCEPTED_RISK: "FINDING_ACCEPTED_RISK",
+        }[canonical_status]
+        _emit_finding_audit(str(finding.id), tenant_id, finding.framework, action)
     except Exception:
         pass
         

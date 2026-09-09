@@ -118,3 +118,36 @@ terraform test
 - Configure ACM certificates in every region where HTTPS listeners are used.
 - Test RDS replica promotion regularly; Terraform creates the standby path, but operations prove the RTO.
 - Avoid committing real `*.tfvars` files; only `*.tfvars.example` is tracked.
+
+## Finding-status migration 047
+
+Revision 047 rejects non-canonical values already present in `public.findings`; it
+does not silently rewrite them. Before the maintenance window, run this read-only
+preflight with a maintenance identity and obtain an explicit disposition for every
+returned status:
+
+```sql
+SELECT status, count(*)
+FROM public.findings
+WHERE status NOT IN (
+  'OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'AWAITING_APPROVAL',
+  'RESOLVED', 'FALSE_POSITIVE', 'ACCEPTED_RISK'
+)
+GROUP BY status
+ORDER BY status;
+```
+
+Use this coupled rollout so an old process is never restarted against an
+unexpected schema head:
+
+1. Build and deploy the compatibility backend and gateway with
+   `expected_db_revision = "046,047"`; confirm both services are healthy on 046.
+2. Apply migration 047 in the same controlled maintenance window and confirm both
+   services remain healthy on 047.
+3. Set `expected_db_revision = "047"` and perform a rolling restart so the
+   temporary compatibility allowance is removed.
+
+Do not leave `046,047` configured after the migration. Before 047 is applied, the
+safe rollback is the previous image and revision 046. After writes have occurred
+under the new constraint, prefer a forward fix; downgrading removes the database
+constraint and requires a separately approved data-integrity decision.

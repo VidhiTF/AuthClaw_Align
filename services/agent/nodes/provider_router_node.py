@@ -44,6 +44,8 @@ def provider_router_node(state: AuthState):
         state["route_id"] = selection.route_id
         state["provider_route_source"] = selection.source
 
+    state["provider_status"] = "ready"
+
     log_agent_event(
         tenant_id=tenant_id,
         session_id=session_id,
