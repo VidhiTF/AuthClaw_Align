@@ -22,7 +22,6 @@ logger = logging.getLogger("services.access_requests")
 OTP_TTL_MINUTES = 15
 ALLOWED_TRANSITIONS = {
     "PENDING": {"APPROVED", "REJECTED", "INVITED"},
-    "APPROVED": {"INVITED"},
 }
 
 
@@ -211,8 +210,6 @@ def create_access_request_invitation(
     except EmailDeliveryError:
         metadata["delivery"] = "failed"
         metadata["delivery_error"] = "Invitation delivery is temporarily unavailable."
-        if demo_otp_visible():
-            metadata["dev_otp"] = otp
         event_backbone.increment_metric("access_request_invitation_delivery_failed_total")
     return metadata
 
