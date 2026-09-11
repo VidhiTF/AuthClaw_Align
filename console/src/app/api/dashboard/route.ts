@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { backendFetch, handleApiError } from "@/lib/api-client";
+import { getSessionContext, handleApiError } from "@/lib/api-client";
 
 export const dynamic = "force-dynamic";
 
-interface AuditMetricRecord {
+interface AuditMetricRecord { action?: string | null;
   duration_ms?: number | null;
   duration?: number | null;
   timestamp?: string | null;
@@ -15,24 +15,24 @@ interface AuditMetricResponse {
   records?: AuditMetricRecord[];
 }
 
-export async function GET() {
-  try {
-    const [approvals, redactionMetrics] = await Promise.all([
-      backendFetch("/v1/workflows/approvals") as Promise<Array<{ status: string }>>,
-      backendFetch("/v1/redaction/metrics") as Promise<{ redactions_24h: number }>,
-    ]);
+export async function GET(request: Request) {
+  try { const context = await getSessionContext(); if ("response" in context) return context.response;
+    const hours = Math.max(1, Math.min(720, Number(new URL(request.url).searchParams.get("hours")) || 24)); const headers = { Authorization: `Bearer ${context.session.apiKey}` }; const apiUrl = process.env.API_URL || "http://localhost:8000";
+    const [approvalsResponse, auditResponse] = await Promise.all([fetch(`${apiUrl}/v1/workflows/approvals`, { headers, cache: "no-store", signal: AbortSignal.timeout(15000) }), fetch(`${apiUrl}/v1/audit-logs?limit=100`, { headers, cache: "no-store", signal: AbortSignal.timeout(15000) })]);
+    if (!approvalsResponse.ok || !auditResponse.ok) throw new Error("Dashboard backend request failed");
+    const [approvals, auditMetrics] = await Promise.all([approvalsResponse.json() as Promise<Array<{ status: string }>>, auditResponse.json() as Promise<AuditMetricResponse>]);
     const openApprovals = approvals.filter((item) => item.status === "PENDING").length;
-    const redactions24h = redactionMetrics.redactions_24h;
+    const redactions24h = (auditMetrics.records || []).filter((record) => record.action === "redact" && new Date(record.timestamp || record.created_at || "").getTime() >= Date.now() - hours * 3600000).length;
 
     let requestsPerSec: number | null = null;
     let p99LatencyMs: number | null = null;
     let totalRequests = 0;
 
     try {
-      const logsData = await backendFetch("/v1/audit-logs?limit=100") as AuditMetricResponse;
-      if (logsData.records && logsData.records.length > 0) {
-        totalRequests = logsData.total || logsData.records.length;
-        const latencies = logsData.records
+      const logsData = auditMetrics;
+      const records = (logsData.records || []).filter((record) => new Date(record.timestamp || record.created_at || "").getTime() >= Date.now() - hours * 3600000); if (records.length > 0) {
+        totalRequests = records.length;
+        const latencies = records
           .map((record) => record.duration_ms || record.duration)
           .filter((latency): latency is number => latency !== undefined && latency !== null)
           .sort((a: number, b: number) => a - b);
@@ -45,7 +45,7 @@ export async function GET() {
           p99LatencyMs = latencies[p99Index];
         }
 
-        const timestamps = logsData.records
+        const timestamps = records
           .map((record) => new Date(record.timestamp || record.created_at || "").getTime())
           .filter((t: number) => !isNaN(t));
 
@@ -67,7 +67,7 @@ export async function GET() {
       redactions24h,
       totalRequests,
       requestsPerSec,
-      p99LatencyMs,
+      p99LatencyMs, recentActivity: (auditMetrics.records || []).slice(0, 8),
     });
   } catch (error: unknown) {
     console.error("Dashboard API Error:", error);
