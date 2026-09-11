@@ -5,9 +5,11 @@ import {
   AlertTriangle,
   CheckCircle2,
   Cloud,
-  GitPullRequest,
   KeyRound,
+  Link2,
   Loader2,
+  MoreVertical,
+  Play,
   RefreshCw,
   ShieldCheck,
   Trash2,
@@ -45,12 +47,6 @@ interface CloudListResponse {
   connectors: CloudConnector[];
 }
 
-const providerHints: Record<Provider, string> = {
-  aws: "Use a least-privilege IAM access key. S3 inventory/remediation and IAM scan actions only need scoped permissions.",
-  github: "Use a fine-grained PAT or GitHub App token with repo metadata, security events, and pull request write access.",
-  gcp: "Paste a service-account JSON key with Cloud Asset, IAM read, and the narrow remediation permission you need.",
-};
-
 const defaultForms: Record<Provider, Record<string, string>> = {
   aws: { access_key_id: "", secret_access_key: "", region: "us-east-1", bucket: "" },
   github: { token: "", owner: "", repo: "" },
@@ -67,6 +63,18 @@ function StatusIcon({ status }: { status: string }) {
   if (status === "connected") return <CheckCircle2 className="h-4 w-4 text-emerald-500" />;
   if (status === "error") return <XCircle className="h-4 w-4 text-red-500" />;
   return <AlertTriangle className="h-4 w-4 text-amber-500" />;
+}
+
+function ProviderMark({ provider }: { provider: Provider }) {
+  if (provider === "github") return <span className="flex h-7 w-7 items-center justify-center rounded-full bg-black text-[9px] font-black text-white">GH</span>;
+  if (provider === "gcp") return <Cloud className="h-6 w-6 text-[#4285F4]" />;
+  return <span className="text-sm font-black tracking-tight text-[#F59E0B]">aws</span>;
+}
+
+function connectorDate(value?: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
 export default function CloudPage() {
@@ -124,6 +132,9 @@ export default function CloudPage() {
       : selectedCatalog?.actions || [],
     [catalog, selectedCatalog, selectedConnector]
   );
+  const credentialFields = selectedCatalog
+    ? [...selectedCatalog.fields, ...selectedCatalog.optional_fields]
+    : Object.keys(defaultForms[selectedProvider]);
   const activeAction = actions.includes(action) ? action : actions[0] || "inventory";
   const actionRequiresMfa = activeAction === "remediate" || activeAction === "pr-remediation";
 
@@ -214,16 +225,18 @@ export default function CloudPage() {
   };
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
+    <div className="ac-page ac-page-cloud mx-auto max-w-none space-y-5">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h1 className="text-3xl font-extrabold tracking-tight text-[#0E1726]">Cloud Connectors</h1>
-          <p className="mt-1 text-sm text-[#6B7488]">Connect AWS, GitHub, and Google Cloud, then run inventory, security, and remediation actions.</p>
+          <p className="mt-1 text-sm text-[#6B7488]">Connect and manage your cloud providers for secure AI governance.</p>
         </div>
-        <button onClick={load} className="inline-flex items-center gap-2 rounded-lg border border-[#E6E9F0] bg-white px-3 py-2 text-xs font-semibold text-[#475069] hover:bg-[#F5F7FA]">
-          <RefreshCw className="h-4 w-4" />
-          Refresh
-        </button>
+        <div className="text-right">
+          <button onClick={load} className="inline-flex items-center gap-2 rounded-md border border-[#D7DCE5] bg-white px-4 py-2 text-xs font-semibold text-[#263244] hover:bg-[#F5F7FA]">
+            <RefreshCw className="h-4 w-4" /> Refresh
+          </button>
+          <p className="mt-1 text-[10px] text-[#6B7488]">Last refreshed just now</p>
+        </div>
       </div>
 
       {(message || error) && (
@@ -232,41 +245,40 @@ export default function CloudPage() {
         </div>
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
-        <form onSubmit={saveConnector} className="rounded-[8px] border border-[#E6E9F0] bg-white p-5 shadow-xl">
-          <div className="mb-5 flex items-start justify-between gap-4">
+      <div className="ac-cloud-workspace grid gap-4 xl:grid-cols-[minmax(19rem,0.78fr)_minmax(0,1.65fr)]">
+        <form onSubmit={saveConnector} className="ac-cloud-setup rounded-md border border-[#DCE1E9] bg-white p-4 shadow-none">
+          <div className="mb-4">
             <div>
-              <h2 className="flex items-center gap-2 text-sm font-bold text-[#0E1726]">
-                <KeyRound className="h-4 w-4 text-indigo-500" />
-                Direct Cloud Login
-              </h2>
-              <p className="mt-1 text-xs leading-relaxed text-[#6B7488]">{providerHints[selectedProvider]}</p>
+              <h2 className="text-base font-bold text-[#0E1726]">Direct Cloud Login</h2>
+              <p className="mt-0.5 text-xs text-[#6B7488]">Connect a cloud provider using your real credentials.</p>
             </div>
-            <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[10px] font-bold uppercase text-emerald-600">
-              Encrypted
-            </span>
           </div>
 
-          <div className="mb-4 grid grid-cols-3 gap-2">
+          <label className="mb-2 block text-xs font-semibold text-[#263244]">Provider</label>
+          <div className="ac-provider-picker mb-4 grid grid-cols-3 gap-2">
             {(["aws", "github", "gcp"] as Provider[]).map((provider) => (
               <button
                 key={provider}
                 type="button"
                 onClick={() => updateProvider(provider)}
-                className={`rounded-lg border px-3 py-2 text-xs font-bold uppercase ${selectedProvider === provider ? "border-indigo-500 bg-indigo-500/10 text-indigo-600" : "border-[#E6E9F0] bg-[#F5F7FA] text-[#6B7488]"}`}
+                className={`flex min-h-20 flex-col items-center justify-center gap-1 rounded-md border bg-white px-2 py-2 text-xs font-semibold ${selectedProvider === provider ? "border-[#6D28D9] text-[#6D28D9] ring-1 ring-[#6D28D9]" : "border-[#DCE1E9] text-[#263244] hover:border-[#A78BFA]"}`}
               >
-                {provider}
+                <ProviderMark provider={provider} />
+                <span>{provider === "gcp" ? "GCP" : provider === "github" ? "GitHub" : "AWS"}</span>
+                <span className={`h-3.5 w-3.5 rounded-full border ${selectedProvider === provider ? "border-[4px] border-[#6D28D9]" : "border-[#8A94A8]"}`} />
               </button>
             ))}
           </div>
 
-          <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">Display Name</label>
-          <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} className="mb-4 w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none" />
+          <label className="mb-1.5 block text-xs font-semibold text-[#263244]">Display name</label>
+          <input placeholder="e.g. Production AWS" value={displayName} onChange={(event) => setDisplayName(event.target.value)} className="mb-4 h-9 w-full rounded-md border border-[#D7DCE5] bg-white px-3 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none" />
+
+          <p className="mb-2 text-xs font-semibold text-[#263244]">Credentials</p>
 
           <div className="space-y-3">
-            {[...(selectedCatalog?.fields || []), ...(selectedCatalog?.optional_fields || [])].map((field) => (
+            {credentialFields.map((field) => (
               <div key={field}>
-                <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">
+                <label className="mb-1.5 block text-xs font-medium text-[#263244]">
                   {field.replace(/_/g, " ")}
                   {selectedCatalog?.optional_fields.includes(field) ? "" : " *"}
                 </label>
@@ -275,141 +287,82 @@ export default function CloudPage() {
                     value={form[field] || ""}
                     onChange={(event) => setForm((current) => ({ ...current, [field]: event.target.value }))}
                     rows={6}
-                    className="w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 font-mono text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
+                    className="w-full rounded-md border border-[#D7DCE5] bg-white px-3 py-2 font-mono text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
                   />
                 ) : (
                   <input
                     type={field.includes("secret") || field === "token" ? "password" : "text"}
                     value={form[field] || ""}
                     onChange={(event) => setForm((current) => ({ ...current, [field]: event.target.value }))}
-                    className="w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
+                    placeholder={field === "access_key_id" ? "AKIA..." : undefined}
+                    className="h-9 w-full rounded-md border border-[#D7DCE5] bg-white px-3 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
                   />
                 )}
               </div>
             ))}
           </div>
 
-          <div className="mt-4 rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] p-3 text-[10px] leading-relaxed text-[#6B7488]">
-            Secrets are envelope-encrypted in the backend and never returned to the browser after save. Use cloud-native least-privilege credentials and rotate them regularly.
+          <div className="mt-4 flex gap-2 rounded-md bg-[#F3F7FF] p-3 text-[10px] leading-relaxed text-[#475069]">
+            <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-[#2563EB]" />
+            <span><strong className="block text-[#1D4ED8]">Your credentials are encrypted</strong>Credentials are encrypted at rest and never displayed after saving.</span>
           </div>
 
-          <button disabled={saving} className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50">
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+          <button disabled={saving} className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-[#6D28D9] px-4 text-xs font-semibold text-white hover:bg-[#5B21B6] disabled:opacity-50">
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
             {saving ? "Connecting..." : "Connect Provider"}
           </button>
+          <p className="mt-3 text-[10px] leading-relaxed text-[#6B7488]">By connecting, you confirm you have the necessary permissions to access this cloud account.</p>
         </form>
 
-        <div className="space-y-6">
-          <div className="rounded-[8px] border border-[#E6E9F0] bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-[#E6E9F0] px-5 py-4">
+        <div className="space-y-4">
+          <section className="overflow-hidden rounded-md border border-[#DCE1E9] bg-white">
+            <div className="flex items-start justify-between px-4 pb-3 pt-4">
               <div>
-                <h2 className="text-sm font-bold text-[#0E1726]">Connected Clouds</h2>
-                <p className="mt-1 text-xs text-[#6B7488]">{connectors.length} active connector{connectors.length === 1 ? "" : "s"}</p>
+                <h2 className="text-base font-bold text-[#0E1726]">Connected Clouds</h2>
+                <p className="mt-0.5 text-xs text-[#6B7488]">Select a connected provider to view details and perform actions.</p>
               </div>
               {loading && <Loader2 className="h-4 w-4 animate-spin text-[#6B7488]" />}
             </div>
-
-            {connectors.length === 0 ? (
-              <div className="p-8 text-center text-xs text-[#6B7488]">
-                <Cloud className="mx-auto mb-3 h-9 w-9 text-[#A8B0C0]" />
-                No cloud connectors yet.
-              </div>
-            ) : (
-              <div className="divide-y divide-[#E6E9F0]">
-                {connectors.map((connector) => (
-                  <button
-                    key={connector.id}
-                    type="button"
-                    onClick={() => setSelectedConnectorId(connector.id)}
-                    className={`w-full px-5 py-4 text-left transition hover:bg-[#F5F7FA] ${selectedConnector?.id === connector.id ? "bg-[#F5F7FA]" : "bg-white"}`}
-                  >
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <StatusIcon status={connector.status} />
-                          <span className="font-semibold text-[#0E1726]">{connector.display_name}</span>
-                          <span className="font-mono text-[10px] uppercase text-[#6B7488]">{connector.provider}</span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-[#6B7488]">
-                          {Object.entries(connector.metadata || {}).slice(0, 4).map(([key, value]) => (
-                            <span key={key} className="rounded border border-[#E6E9F0] bg-white px-2 py-1 font-mono">
-                              {key}: {String(value)}
-                            </span>
-                          ))}
-                        </div>
-                        {connector.last_error && <p className="mt-2 text-xs text-red-500">{connector.last_error}</p>}
-                      </div>
-                      <span className={`shrink-0 rounded-full border px-2 py-1 text-[10px] font-bold uppercase ${statusClass(connector.status)}`}>
-                        {connector.status}
-                      </span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {selectedConnector && (
-            <div className="rounded-[8px] border border-[#E6E9F0] bg-white p-5 shadow-xl">
-              <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                <div>
-                  <h2 className="text-sm font-bold text-[#0E1726]">Cloud Actions</h2>
-                  <p className="mt-1 text-xs text-[#6B7488]">Run provider actions through the audited connector API.</p>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => verifyConnector(selectedConnector.id)} className="inline-flex items-center gap-1 rounded-lg border border-[#E6E9F0] px-3 py-2 text-xs font-semibold text-[#475069] hover:bg-[#F5F7FA]">
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    Verify
-                  </button>
-                  <button onClick={() => revokeConnector(selectedConnector.id)} className="inline-flex items-center gap-1 rounded-lg border border-red-500/20 px-3 py-2 text-xs font-semibold text-red-500 hover:bg-red-500/10">
-                    <Trash2 className="h-3.5 w-3.5" />
-                    Revoke
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
-                <div>
-                  <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">Action</label>
-                  <select value={activeAction} onChange={(event) => setAction(event.target.value)} className="w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none">
-                    {actions.map((item) => <option key={item} value={item}>{item}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">Payload JSON</label>
-                  <textarea value={actionPayload} onChange={(event) => setActionPayload(event.target.value)} rows={4} className="w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 font-mono text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none" />
-                </div>
-              </div>
-
-              {actionRequiresMfa && (
-                <div className="mt-4 grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
-                  <div>
-                    <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-[#6B7488]">Fresh MFA Code</label>
-                    <input
-                      type="password"
-                      value={actionTotp}
-                      onChange={(event) => setActionTotp(event.target.value)}
-                      className="w-full rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] px-3 py-2 text-xs text-[#0E1726] focus:border-indigo-500/80 focus:outline-none"
-                    />
-                  </div>
-                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-[10px] leading-relaxed text-amber-700">
-                    External mutations use a fresh TOTP or backup code and run through the audited connector API.
-                  </div>
-                </div>
-              )}
-
-              <button onClick={runAction} disabled={running} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50">
-                {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitPullRequest className="h-4 w-4" />}
-                Run Action
-              </button>
-
-              {actionResult != null && (
-                <pre className="mt-4 max-h-[420px] overflow-auto rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] p-4 text-xs text-[#475069]">
-                  {JSON.stringify(actionResult, null, 2)}
-                </pre>
-              )}
+            <div className="overflow-x-auto px-4 pb-4">
+              <table className="w-full min-w-[680px] border-collapse text-left text-[11px]">
+                <thead className="border border-[#E2E6ED] bg-[#F5F7FA] text-[9px] font-semibold text-[#475069]">
+                  <tr><th className="px-3 py-2">Provider</th><th className="px-3 py-2">Display Name</th><th className="px-3 py-2">Status</th><th className="px-3 py-2">Connected At</th><th className="px-3 py-2">Last Used</th><th className="px-3 py-2 text-center">Actions</th></tr>
+                </thead>
+                <tbody>
+                  {connectors.length === 0 ? (
+                    <tr><td colSpan={6} className="border border-t-0 border-[#E2E6ED] px-3 py-8 text-center text-xs text-[#6B7488]">No cloud connectors yet. Add your first provider using the secure login form.</td></tr>
+                  ) : connectors.map((connector) => (
+                    <tr key={connector.id} onClick={() => setSelectedConnectorId(connector.id)} className={`cursor-pointer border-x border-b border-[#E2E6ED] ${selectedConnector?.id === connector.id ? "bg-[#F4ECFF] shadow-[inset_3px_0_0_#6D28D9]" : "hover:bg-[#FAFAFC]"}`}>
+                      <td className="px-3 py-2.5"><ProviderMark provider={connector.provider} /></td>
+                      <td className="px-3 py-2.5 font-semibold text-[#172033]">{connector.display_name}</td>
+                      <td className="px-3 py-2.5"><span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[9px] font-semibold capitalize ${statusClass(connector.status)}`}><StatusIcon status={connector.status} />{connector.status}</span></td>
+                      <td className="px-3 py-2.5 text-[#475069]">{connectorDate(connector.created_at)}</td>
+                      <td className="px-3 py-2.5 text-[#475069]">{connectorDate(connector.last_verified_at)}</td>
+                      <td className="px-3 py-2.5 text-center"><MoreVertical className="mx-auto h-4 w-4" /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          )}
+          </section>
+
+          <section className="rounded-md border border-[#DCE1E9] bg-white p-4">
+            <div className="mb-4 flex items-start justify-between gap-4">
+              <div><h2 className="text-base font-bold text-[#0E1726]">Cloud Actions</h2><p className="mt-0.5 text-xs text-[#6B7488]">Perform operational actions on the selected cloud provider.</p></div>
+              <div className="flex items-center gap-4 rounded-md bg-[#F5F7FA] px-3 py-2 text-[10px]"><span className="font-medium text-[#263244]">All actions are audited</span><a href="/audit" className="font-semibold text-[#6D28D9]">View audit logs →</a></div>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div><label className="mb-1.5 block text-xs font-semibold">Action</label><select value={activeAction} onChange={(event) => setAction(event.target.value)} className="h-9 w-full rounded-md border border-[#D7DCE5] bg-white px-3 text-xs"><option value="inventory">Select an action</option>{actions.map((item) => <option key={item} value={item}>{item}</option>)}</select><p className="mt-1 text-[10px] text-[#6B7488]">Runs through the audited connector API.</p></div>
+              <div><label className="mb-1.5 block text-xs font-semibold">Fresh MFA Code (optional)</label><input type="password" placeholder="Enter 6-digit code" value={actionTotp} onChange={(event) => setActionTotp(event.target.value)} className="h-9 w-full rounded-md border border-[#D7DCE5] bg-white px-3 text-xs"/><p className="mt-1 text-[10px] text-[#6B7488]">Required for protected mutation actions.</p></div>
+            </div>
+            <div className="mt-4"><label className="mb-1.5 block text-xs font-semibold">Payload (JSON)</label><textarea value={actionPayload} onChange={(event) => setActionPayload(event.target.value)} rows={7} className="w-full resize-none rounded-none border border-[#D7DCE5] bg-[#FBFCFE] p-4 font-mono text-xs leading-6 text-[#1D4ED8]" /></div>
+            {actionResult != null && <pre className="mt-3 max-h-48 overflow-auto border border-[#D7DCE5] bg-[#F5F7FA] p-3 text-xs">{JSON.stringify(actionResult, null, 2)}</pre>}
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button onClick={() => selectedConnector && verifyConnector(selectedConnector.id)} disabled={!selectedConnector} className="inline-flex h-9 items-center gap-2 rounded-md border border-[#D7DCE5] px-4 text-xs font-semibold disabled:opacity-40"><ShieldCheck className="h-4 w-4"/>Verify Connection</button>
+              <button onClick={() => selectedConnector && revokeConnector(selectedConnector.id)} disabled={!selectedConnector} className="inline-flex h-9 items-center gap-2 rounded-md border border-red-500 px-4 text-xs font-semibold text-red-600 disabled:opacity-40"><Trash2 className="h-4 w-4"/>Revoke Connection</button>
+              <button onClick={runAction} disabled={running || !selectedConnector} className="ml-auto inline-flex h-9 items-center gap-2 rounded-md bg-[#6D28D9] px-5 text-xs font-semibold text-white disabled:opacity-40">{running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}Run Action</button>
+            </div>
+          </section>
         </div>
       </div>
     </div>

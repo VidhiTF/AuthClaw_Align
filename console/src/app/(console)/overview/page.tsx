@@ -1,15 +1,14 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ShieldCheck,
   Activity,
   EyeOff,
   Clock,
-  Award,
   ArrowUpRight,
   RefreshCw,
   CheckCircle2,
+  UserRound,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -39,46 +38,56 @@ interface ComplianceScoreState {
   frameworks: FrameworkScore[];
 }
 
+interface RecentAuditRecord {
+  record_id: string;
+  timestamp: string;
+  action: string;
+  provider?: string;
+  model?: string;
+  reason?: string;
+}
+
 export default function OverviewPage() {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [complianceScores, setComplianceScores] = useState<ComplianceScoreState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [recentActivity, setRecentActivity] = useState<RecentAuditRecord[]>([]);
+  const [loading, setLoading] = useState(true); const [trafficRange, setTrafficRange] = useState(24); const trafficRangeRef = useRef(24);
 
-  const fetchMetrics = async () => {
+  const fetchMetrics = useCallback(async (full = true, hours = trafficRangeRef.current) => {
     try {
-      setLoading(true);
-      const [dashboardRes, scoresRes] = await Promise.all([
-        fetch("/api/dashboard"),
-        fetch("/api/compliance-scores?persist_snapshot=false"),
-      ]);
-      if (dashboardRes.status === 401 || scoresRes.status === 401) {
+      if (full) setLoading(true);
+      const scoresPromise = full ? fetch("/api/compliance-scores?persist_snapshot=false") : Promise.resolve(null);
+      const dashboardRes = await fetch(`/api/dashboard?hours=${hours}`);
+      if (dashboardRes.status === 401) {
         window.location.href = "/login";
         return;
       }
       if (!dashboardRes.ok) throw new Error("Failed to load metrics");
       const data = await dashboardRes.json();
-      setMetrics(data);
-      if (scoresRes.ok) {
+      setMetrics(data); setRecentActivity(data.recentActivity || []); if (full) setLoading(false);
+      const scoresRes = await scoresPromise;
+      if (scoresRes?.status === 401) { window.location.href = "/login"; return; }
+      if (scoresRes?.ok) {
         setComplianceScores(await scoresRes.json());
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Could not retrieve real-time metrics";
       console.warn("Overview fetch metrics failed:", message);
     } finally {
-      setLoading(false);
+      if (full) setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     const initialFetch = window.setTimeout(() => {
       void fetchMetrics();
     }, 0);
-    const interval = setInterval(fetchMetrics, 5000);
+    const interval = setInterval(() => void fetchMetrics(false), 30000);
     return () => {
       window.clearTimeout(initialFetch);
       clearInterval(interval);
     };
-  }, []);
+  }, [fetchMetrics]);
 
   const frameworkLabels: Record<FrameworkScore["framework"], { name: string; color: string; desc: string }> = {
     SOC2: { name: "SOC 2 Type II", color: "bg-emerald-500", desc: "Security, confidentiality, monitoring, and remediation controls" },
@@ -89,7 +98,7 @@ export default function OverviewPage() {
   const complianceReadiness = complianceScores?.frameworks || [];
 
   return (
-    <div className="space-y-8 max-w-7xl mx-auto">
+    <div className="ac-page ac-page-overview mx-auto max-w-none space-y-5">
       {/* Page Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -102,7 +111,7 @@ export default function OverviewPage() {
         </div>
         <div className="flex items-center gap-3">
           <button
-            onClick={fetchMetrics}
+            onClick={() => void fetchMetrics()}
             className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[#F5F7FA] hover:bg-[#EEF1F6] text-[#0E1726] border border-[#E6E9F0] text-xs font-semibold transition"
           >
             <RefreshCw className="w-3.5 h-3.5" />
@@ -155,34 +164,28 @@ export default function OverviewPage() {
             </div>
           </div>
           <div className="mt-4 flex items-center justify-between text-xs">
-            <span className="text-[#6B7488]">Masked or hashed (last 24h)</span>
+            <span className="text-[#6B7488]">Masked or hashed ({trafficRange === 24 ? "last 24h" : trafficRange === 168 ? "last 7d" : "last 30d"})</span>
             <span className="text-emerald-400 font-semibold">Active Engine</span>
           </div>
         </div>
 
-        {/* Requests Per Second Card */}
+        {/* Open Approvals Card */}
         <div className="relative overflow-hidden rounded-[20px] bg-white border border-[#E6E9F0] p-6 shadow-xl hover:border-sky-500/30 transition-all duration-300">
           <div className="absolute top-0 right-0 w-24 h-24 rounded-full bg-sky-500/5 blur-[40px] pointer-events-none" />
           <div className="flex justify-between items-start">
             <div>
-              <p className="text-[10px] uppercase tracking-widest font-bold text-[#6B7488]">Throughput</p>
+              <p className="text-[10px] uppercase tracking-widest font-bold text-[#6B7488]">Open Approvals</p>
               <h3 className="text-2xl font-bold text-[#0E1726] mt-2">
-                {loading ? (
-                  "..."
-                ) : metrics?.requestsPerSec !== null && metrics?.requestsPerSec !== undefined ? (
-                  `${metrics.requestsPerSec} req/s`
-                ) : (
-                  <span className="text-sm font-medium text-[#6B7488]">No data available yet</span>
-                )}
+                {loading ? "..." : metrics?.openApprovals ?? 0}
               </h3>
             </div>
             <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400">
-              <RefreshCw className="w-5 h-5" />
+              <UserRound className="w-5 h-5" />
             </div>
           </div>
           <div className="mt-4 flex items-center justify-between text-xs text-[#6B7488]">
-            <span>Average request frequency</span>
-            <span>Real-time</span>
+            <span>Awaiting operator decision</span>
+            <Link href="/approvals" className="font-semibold text-[#6D28D9]">Review queue</Link>
           </div>
         </div>
 
@@ -214,99 +217,29 @@ export default function OverviewPage() {
 
       </div>
 
-      {/* Main Grid: Compliance Readiness + Approvals Quick Look */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2.15fr)_minmax(18rem,.9fr)]">
+        <div className="space-y-4">
+          <section className="rounded-md border border-[#DCE1E9] bg-white p-5">
+            <div className="flex items-start justify-between gap-4">
+              <div><h3 className="text-lg font-bold">Traffic intelligence</h3><p className="mt-0.5 text-xs text-[#6B7488]">Governed AI requests, redactions, and policy actions.</p></div>
+              <div className="flex overflow-hidden rounded-md border border-[#DCE1E9] text-[10px] font-semibold">{[[24,"24h"],[168,"7d"],[720,"30d"]].map(([hours,label]) => <button key={hours} type="button" aria-pressed={trafficRange === hours} onClick={() => { trafficRangeRef.current = Number(hours); setTrafficRange(Number(hours)); void fetchMetrics(false, Number(hours)); }} className={trafficRange === hours ? "bg-[#F1ECFE] px-4 py-2 text-[#6D28D9]" : "px-4 py-2 hover:bg-[#F5F7FA]"}>{label}</button>)}</div>
+            </div>
+            <div className="mt-5 grid min-h-44 place-items-center border-y border-[#EEF1F6] bg-[linear-gradient(#EEF1F6_1px,transparent_1px),linear-gradient(90deg,#EEF1F6_1px,transparent_1px)] bg-[size:100%_25%,12.5%_100%]">
+              <div className="rounded-md bg-white/90 px-4 py-3 text-center text-xs text-[#6B7488]"><Activity className="mx-auto mb-2 h-5 w-5 text-[#6D28D9]"/>Historical traffic appears as real gateway telemetry accumulates.</div>
+            </div>
+            <div className="mt-4 grid grid-cols-3 gap-3 text-xs"><div><span className="text-[#6D28D9]">●</span> Total requests<strong className="mt-1 block text-sm">{metrics?.totalRequests ?? 0}</strong></div><div><span className="text-[#E9A93C]">●</span> Redactions<strong className="mt-1 block text-sm">{metrics?.redactions24h ?? 0}</strong></div><div><span className="text-[#94A3B8]">●</span> Throughput<strong className="mt-1 block text-sm">{metrics?.requestsPerSec == null ? "—" : `${metrics.requestsPerSec}/s`}</strong></div></div>
+          </section>
 
-        {/* Compliance Readiness Column (Span 2) */}
-        <div className="lg:col-span-2 rounded-[20px] bg-white border border-[#E6E9F0] p-6 shadow-xl flex flex-col justify-between">
-          <div>
-            <h3 className="text-lg font-bold text-[#0E1726] flex items-center gap-2">
-              <Award className="w-5 h-5 text-indigo-400" />
-              AI Governance Readiness {complianceScores ? `(${complianceScores.overall_score}%)` : ""}
-            </h3>
-            <p className="text-[#6B7488] text-xs mt-1">
-              Live readiness based on evidence records, findings, audit-chain events, policies, and redaction activity.
-            </p>
-          </div>
-
-          <div className="space-y-6 mt-6">
-            {complianceReadiness.length === 0 && (
-              <div className="rounded-xl border border-[#E6E9F0] bg-[#F5F7FA] p-4 text-xs text-[#6B7488]">
-                Compliance scores will appear after the scoring endpoint responds.
-              </div>
-            )}
-            {complianceReadiness.map((framework) => {
-              const meta = frameworkLabels[framework.framework];
-              return (
-              <div key={framework.framework} className="space-y-2">
-                <div className="flex justify-between text-xs">
-                  <span className="font-semibold text-[#475069]">{meta.name}</span>
-                  <span className="font-bold text-[#0E1726]">{framework.score}% score</span>
-                </div>
-                <div className="h-2 w-full bg-[#F5F7FA]/80 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full ${meta.color} rounded-full transition-all duration-1000`}
-                    style={{ width: `${framework.score}%` }}
-                  />
-                </div>
-                <p className="text-[10px] text-[#6B7488]">
-                  {meta.desc} - {framework.metrics.evidence_count} evidence - {framework.metrics.open_findings} open findings
-                </p>
-              </div>
-            );})}
-          </div>
-
-          <div className="mt-6 pt-4 border-t border-[#E6E9F0] flex justify-end">
-            <Link href="/compliance" className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition">
-              View framework controls <ArrowUpRight className="w-3.5 h-3.5" />
-            </Link>
-          </div>
+          <section className="overflow-hidden rounded-md border border-[#DCE1E9] bg-white">
+            <div className="flex items-center justify-between px-5 py-4"><div><h3 className="text-lg font-bold">Compliance readiness</h3><p className="text-xs text-[#6B7488]">Policy coverage and control status across key frameworks.</p></div><Link href="/compliance" className="text-xs font-semibold text-[#6D28D9]">View details →</Link></div>
+            <table className="w-full text-left text-xs"><thead><tr><th className="px-5 py-2">Framework</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Coverage</th><th className="px-4 py-2">Evidence</th><th className="px-5 py-2">Open issues</th></tr></thead><tbody>{complianceReadiness.length === 0 ? <tr><td colSpan={5} className="px-5 py-8 text-center text-[#6B7488]">Compliance scores will appear after the live scoring endpoint responds.</td></tr> : complianceReadiness.map((framework) => { const meta = frameworkLabels[framework.framework]; return <tr key={framework.framework} className="border-t border-[#EEF1F6]"><td className="px-5 py-3 font-semibold">{meta.name}</td><td className="px-4 py-3 text-emerald-700"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5"/>{framework.readiness_level}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><span>{framework.score}%</span><span className="h-1.5 w-20 overflow-hidden rounded-full bg-[#EEF1F6]"><span className="block h-full bg-[#6D28D9]" style={{width:`${framework.score}%`}}/></span></div></td><td className="px-4 py-3">{framework.metrics.evidence_count}</td><td className="px-5 py-3">{framework.metrics.open_findings}</td></tr>; })}</tbody></table>
+          </section>
         </div>
 
-        {/* Open Approvals Quick Look Card */}
-        <div className="rounded-[20px] bg-white/80 border border-[#E6E9F0] p-6 shadow-xl flex flex-col justify-between">
-          <div>
-            <h3 className="text-lg font-bold text-[#0E1726] flex items-center gap-2">
-              <ShieldCheck className="w-5 h-5 text-emerald-400" />
-              Governance Status
-            </h3>
-            <p className="text-[#6B7488] text-xs mt-1">
-              Runtime controls protecting traffic before it reaches the model provider.
-            </p>
-          </div>
-
-          <div className="my-6 flex flex-col items-center justify-center text-center py-4">
-            {loading ? (
-              <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500" />
-            ) : metrics?.openApprovals && metrics.openApprovals > 0 ? (
-              <>
-                <div className="w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-2xl font-black text-amber-400 mb-3 animate-pulse">
-                  {metrics.openApprovals}
-                </div>
-                <h4 className="text-sm font-semibold text-[#0E1726]">Pending Authorization</h4>
-                <p className="text-[11px] text-[#6B7488] max-w-[200px] mt-1">
-                  A governance action is waiting for admin review.
-                </p>
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="w-12 h-12 text-emerald-400 mb-3" />
-                <h4 className="text-sm font-semibold text-[#0E1726]">All Clear</h4>
-                <p className="text-[11px] text-[#6B7488] max-w-[200px] mt-1">
-                  No pending governance actions awaiting review.
-                </p>
-              </>
-            )}
-          </div>
-
-          <Link
-            href="/gateway"
-            className="w-full text-center py-2.5 rounded-lg bg-[#F5F7FA] hover:bg-[#F5F7FA] text-xs font-semibold text-[#0E1726] border border-[#E6E9F0] transition"
-          >
-            Configure Gateway
-          </Link>
-        </div>
-
+        <aside className="rounded-md border border-[#DCE1E9] bg-white p-5">
+          <div className="flex items-center justify-between"><h3 className="text-lg font-bold">Recent activity</h3><Link href="/audit" className="text-xs font-semibold text-[#6D28D9]">View all →</Link></div>
+          <div className="mt-3 divide-y divide-[#EEF1F6]">{recentActivity.length === 0 ? <div className="py-10 text-center text-xs text-[#6B7488]">No recent audit activity.</div> : recentActivity.map((record, index) => <Link href="/audit" key={record.record_id} className="flex gap-3 py-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${index % 3 === 0 ? "bg-[#6D28D9]" : index % 3 === 1 ? "bg-emerald-500" : "bg-[#E9A93C]"}`}/><span className="min-w-0"><strong className="block truncate text-xs">{record.action.replaceAll("_", " ")}</strong><span className="mt-0.5 block truncate text-[10px] text-[#6B7488]">{record.provider || "AuthClaw"}{record.model ? ` · ${record.model}` : ""}</span></span><time className="ml-auto shrink-0 text-[9px] text-[#6B7488]">{new Date(record.timestamp).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</time></Link>)}</div>
+        </aside>
       </div>
     </div>
   );

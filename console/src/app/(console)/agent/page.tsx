@@ -757,7 +757,7 @@ export default function AgentPage() {
   };
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="ac-page ac-page-agent space-y-6 max-w-7xl mx-auto">
       {/* Header */}
       <div>
         <h1 className="text-3xl font-extrabold tracking-tight text-[#0E1726]">

@@ -475,7 +475,7 @@ export default function PoliciesPage() {
   };
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="ac-page ac-page-policies space-y-6 max-w-7xl mx-auto">
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-extrabold tracking-tight text-[#0E1726]">Custom Redaction Policy</h1>
@@ -524,8 +524,8 @@ export default function PoliciesPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <section className="xl:col-span-2 space-y-4">
+      <div className="ac-policy-workspace grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <section className="ac-policy-builder xl:col-span-2 space-y-4">
           <div className="rounded-lg bg-white border border-[#E6E9F0] p-5 space-y-4">
             <div className="flex items-center justify-between gap-4">
               <div>
@@ -696,7 +696,7 @@ export default function PoliciesPage() {
           </div>
         </section>
 
-        <aside className="space-y-4">
+        <aside className="ac-policy-inspector space-y-4">
           {validationResult && (
             <section className="rounded-lg bg-white border border-[#E6E9F0] p-4">
               <div className="flex items-center gap-2 mb-3">

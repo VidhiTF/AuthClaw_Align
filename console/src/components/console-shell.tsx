@@ -15,6 +15,7 @@ import {
   Menu,
   MessageSquare,
   ScrollText,
+  Search,
   Settings,
   ShieldAlert,
   ShieldCheck,
@@ -54,6 +55,7 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
   const router = useRouter();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const normalizedRole = userRole?.toLowerCase() || "viewer";
   const hasPlatformAccess = platformRole.toUpperCase() === "ADMIN";
   const allowedNavigation = navigation.filter((item) => item.roles.includes(normalizedRole));
@@ -69,6 +71,14 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
   };
 
   const currentPage = pathname === "/notifications" ? "Notifications" : navigation.find((item) => pathname === item.href)?.name || "Overview";
+
+  const submitSearch = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return;
+    const match = allowedNavigation.find((item) => item.name.toLowerCase().includes(query));
+    if (match) router.push(match.href);
+  };
 
   const navLinks = (onClick?: () => void) => (
     <>
@@ -94,7 +104,7 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
   );
 
   return (
-    <div className="authclaw-console min-h-screen bg-[#FBFAF9] text-[#0E1726] flex flex-col font-sans">
+    <div className="authclaw-console ac-console-shell min-h-screen bg-[#FBFAF9] text-[#0E1726] flex flex-col font-sans">
       <header className="md:hidden m-3 flex items-center justify-between rounded-[20px] border border-[#E6E9F0] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)]">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-[10px] bg-[#6D28D9] flex items-center justify-center">
@@ -118,7 +128,7 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
       </header>
 
       <div className="flex flex-1 relative">
-        <aside className="sticky top-4 m-4 mr-0 hidden h-[calc(100vh-2rem)] w-64 flex-col overflow-hidden rounded-[20px] border border-[#E6E9F0] bg-white shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)] md:flex">
+        <aside className="ac-console-sidebar sticky top-0 hidden h-screen w-60 flex-col overflow-hidden border-r border-[#E6E9F0] bg-white md:flex">
           <div className="h-16 flex items-center gap-2.5 px-6 border-b border-[#E6E9F0]">
             <div className="w-8 h-8 rounded-[10px] bg-[#6D28D9] flex items-center justify-center shadow-[0_8px_20px_-8px_rgba(109,40,217,.6)]">
               <ShieldCheck className="w-4.5 h-4.5 text-white" />
@@ -187,12 +197,18 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
           </div>
 
         <div className="flex-1 flex flex-col min-w-0 bg-[#FBFAF9]">
-          <header className="sticky top-4 z-30 mx-4 mt-4 hidden h-14 items-center justify-between rounded-[20px] border border-[#E6E9F0] bg-white/90 px-6 shadow-[0_1px_2px_rgba(11,31,63,.05),0_12px_30px_-12px_rgba(11,31,63,.18)] backdrop-blur-md md:flex">
-            <div className="flex items-center gap-3">
-              <span className="text-[#6B7488] text-sm">Governance Layer</span>
-              <span className="text-[#A8B0C0]">/</span>
-              <span className="text-[#0E1726] text-sm font-medium">{currentPage}</span>
-            </div>
+          <header className="ac-console-header sticky top-0 z-30 hidden h-16 items-center justify-between border-b border-[#E6E9F0] bg-white px-6 md:flex">
+            <form onSubmit={submitSearch} className="relative w-full max-w-[34rem]">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#6B7488]" />
+              <input
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                aria-label="Search pages"
+                placeholder="Search resources, policies, or users..."
+                className="h-9 w-full rounded-md border border-[#E6E9F0] bg-[#F8F9FB] pl-9 pr-3 text-xs text-[#0E1726] outline-none focus:border-[#A78BFA] focus:ring-2 focus:ring-[#6D28D9]/10"
+              />
+              <span className="sr-only">Current page: {currentPage}</span>
+            </form>
 
             <div className="flex items-center gap-2">
               <NotificationBell />
@@ -236,7 +252,7 @@ export default function ConsoleShell({ children, userEmail, tenantId, tenantName
             </div>
           </header>
 
-          <main className="flex-1 overflow-auto p-6 md:p-8">{children}</main>
+          <main className="ac-console-main flex-1 overflow-auto p-6 md:p-8">{children}</main>
         </div>
       </div>
     </div>

@@ -877,7 +877,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="ac-page ac-page-settings space-y-6 max-w-7xl mx-auto">
       {/* Header */}
       <div>
         <h1 className="text-3xl font-extrabold tracking-tight text-[#0E1726]">
@@ -888,8 +888,9 @@ export default function SettingsPage() {
         </p>
       </div>
 
+      <div className="ac-settings-workspace">
       {/* Tabs Selector */}
-      <div className="flex gap-6 overflow-x-auto border-b border-[#E6E9F0]">
+      <div className="ac-settings-nav flex gap-6 overflow-x-auto border-b border-[#E6E9F0]" aria-label="Settings sections">
         <button
           onClick={() => setActiveTab("users")}
           className={`pb-3.5 text-sm font-semibold transition relative ${
@@ -897,7 +898,8 @@ export default function SettingsPage() {
           }`}
         >
           {activeTab === "users" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full" />}
-          User Managemen
+          <Users className="h-4 w-4" />
+          User Management
         </button>
         <button
           onClick={() => setActiveTab("security")}
@@ -906,6 +908,7 @@ export default function SettingsPage() {
           }`}
         >
           {activeTab === "security" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full" />}
+          <Lock className="h-4 w-4" />
           Security / MFA
         </button>
         <button
@@ -916,6 +919,7 @@ export default function SettingsPage() {
           }`}
         >
           {activeTab === "keys" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full" />}
+          <KeyRound className="h-4 w-4" />
           API Keys Lifecycle
         </button>
         <button
@@ -926,6 +930,7 @@ export default function SettingsPage() {
           }`}
         >
           {activeTab === "cloud" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full" />}
+          <Cloud className="h-4 w-4" />
           Cloud Logins
         </button>
         <button
@@ -936,6 +941,7 @@ export default function SettingsPage() {
           }`}
         >
           {activeTab === "workers" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full" />}
+          <RotateCw className="h-4 w-4" />
           Worker Tokens
         </button>
         <button
@@ -946,6 +952,7 @@ export default function SettingsPage() {
           }`}
         >
           {activeTab === "limits" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full" />}
+          <ShieldAlert className="h-4 w-4" />
           Usage Limits
         </button>
         <button
@@ -955,6 +962,7 @@ export default function SettingsPage() {
           }`}
         >
           {activeTab === "tenant" && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500 rounded-full" />}
+          <Building className="h-4 w-4" />
           Tenant Status
         </button>
       </div>
@@ -1450,7 +1458,7 @@ export default function SettingsPage() {
                 <div>
                   <h3 className="text-sm font-bold text-[#0E1726] flex items-center gap-2">
                     <Cloud className="w-4 h-4 text-indigo-400" />
-                    Cloud Credential Vaul
+                    Cloud Credential Vault
                   </h3>
                   <p className="mt-1 text-xs text-[#6B7488]">
                     Store AWS, GitHub, or GCP credentials for verified scans and approved remediation. Secrets are encrypted and never shown again.
@@ -2017,6 +2025,7 @@ export default function SettingsPage() {
           )}
         </div>
       )}
+      </div>
 
       {/* Add User Modal */}
       {isUserModalOpen && (
