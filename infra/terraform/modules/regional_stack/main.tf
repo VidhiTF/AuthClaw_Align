@@ -1713,7 +1713,6 @@ resource "aws_ecs_task_definition" "service" {
         each.key == "console" ? [
           { name = "AUTHCLAW_BFF_CLIENT_IP_ENABLED", value = tostring(var.bff_client_ip_signing_enabled) },
           { name = "AUTHCLAW_OIDC_LOGIN_PAUSED", value = tostring(var.oidc_login_paused) },
-          { name = "API_URL", value = local.api_base_url },
           { name = "AUTHCLAW_CONSOLE_ALB_INGRESS_ONLY", value = "true" }
         ] : [],
         contains(tolist(local.audit_sqs_producer_services), each.key) ? local.audit_sqs_producer_environment : [],

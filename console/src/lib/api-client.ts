@@ -44,6 +44,7 @@ async function readSessionContext(invalidSessionMessage?: string) {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
   });
+  if (validation.status >= 500) throw new BackendRequestError("Identity service unavailable", 503);
   if (!validation.ok) {
     if (invalidSessionMessage) throw new Error(invalidSessionMessage);
     return { payload: null, session: null };
