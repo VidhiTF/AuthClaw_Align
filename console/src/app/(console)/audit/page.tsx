@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
-import { formatDateTime } from "@/lib/ui-format";
+import { csvCell, formatDateTime } from "@/lib/ui-format";
 
 interface AuditRecord {
   record_id: string;
@@ -201,7 +201,7 @@ export default function AuditPage() {
       r.chain_valid ? "Verified" : "Unverified"
     ]);
 
-    const csvContent = [headers.join(","), ...rows.map((e) => e.map(val => `"${val}"`).join(","))].join("\n");
+    const csvContent = [headers.map(csvCell).join(","), ...rows.map((e) => e.map(csvCell).join(","))].join("\r\n");
     const dataStr = "data:text/csv;charset=utf-8," + encodeURIComponent(csvContent);
     const downloadAnchor = document.createElement("a");
     downloadAnchor.setAttribute("href", dataStr);

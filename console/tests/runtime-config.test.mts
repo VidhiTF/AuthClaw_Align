@@ -16,4 +16,8 @@ test("public browser URLs come from server runtime configuration", () => {
   assert.match(route, /"Cache-Control": "no-store"/);
   assert.doesNotMatch(connect, /process\.env\.NEXT_PUBLIC_GATEWAY_URL/);
   assert.doesNotMatch(settings, /process\.env\.NEXT_PUBLIC_API_URL/);
+  const terraform = fs.readFileSync(path.join(root, "../infra/terraform/modules/regional_stack/main.tf"), "utf8");
+  assert.equal([...terraform.matchAll(/name = "API_URL"/g)].length, 1);
+  assert.match(terraform, /name = "API_URL", value = local\.internal_urls\.backend/);
+  assert.match(terraform, /name = "PUBLIC_API_URL", value = local\.api_base_url/);
 });

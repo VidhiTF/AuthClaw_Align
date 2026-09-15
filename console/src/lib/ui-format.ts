@@ -57,3 +57,10 @@ export function shortId(id: string) {
 }
 
 export const readinessLabel = (value: string) => value.replaceAll("_", " ").toUpperCase();
+
+// Human-view CSV: neutralize formula-like text before escaping; save/reopen behavior is spreadsheet-specific.
+export function csvCell(value: unknown): string {
+  let text = String(value ?? "");
+  if (typeof value === "string" && (/^[\s\p{Cc}\p{Cf}]*[=+\-@＝＋－＠]/u.test(text) || /^[\t\r\n]/.test(text))) text = `'${text}`;
+  return `"${text.replaceAll('"', '""')}"`;
+}

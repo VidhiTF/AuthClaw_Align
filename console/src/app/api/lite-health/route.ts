@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { agentFetch, backendFetch, handleApiError } from "@/lib/api-client";
+import { agentFetch, backendFetch, getSessionContext, handleApiError } from "@/lib/api-client";
 
 interface HealthItem {
   key: string;
@@ -10,6 +10,8 @@ interface HealthItem {
 
 export async function GET() {
   try {
+    const context = await getSessionContext();
+    if ("response" in context) return context.response;
     const items: HealthItem[] = [];
 
     const gatewayUrl =
@@ -27,7 +29,7 @@ export async function GET() {
         label: "Secret management configured",
         ok: Boolean(secretStatus?.configured),
         detail: secretStatus
-          ? `${secretStatus.provider} provider, key ${secretStatus.key_version}: ${secretStatus.detail}`
+          ? (secretStatus.configured ? "Secret management configured" : "Secret management not configured")
           : `Backend returned ${backendRes.status}`,
       });
     } catch {
@@ -35,7 +37,7 @@ export async function GET() {
         key: "secret_management",
         label: "Secret management configured",
         ok: false,
-        detail: `Could not reach ${backendUrl}/health`,
+        detail: "Backend health check unavailable",
       });
     }
 
@@ -45,14 +47,14 @@ export async function GET() {
         key: "gateway",
         label: "Gateway reachable",
         ok: gatewayRes.ok,
-        detail: gatewayRes.ok ? gatewayUrl : `Gateway returned ${gatewayRes.status}`,
+        detail: gatewayRes.ok ? "Gateway reachable" : `Gateway returned ${gatewayRes.status}`,
       });
     } catch {
       items.push({
         key: "gateway",
         label: "Gateway reachable",
         ok: false,
-        detail: `Could not reach ${gatewayUrl}`,
+        detail: "Gateway health check unavailable",
       });
     }
 
@@ -66,12 +68,12 @@ export async function GET() {
           ? "Canonical agent API is ready"
           : "Canonical agent API is not ready",
       });
-    } catch (error: unknown) {
+    } catch {
       items.push({
         key: "agent",
         label: "Agent service authenticated",
         ok: false,
-        detail: error instanceof Error ? error.message : "Failed to reach agent service",
+        detail: "Agent readiness check unavailable",
       });
     }
 
@@ -83,12 +85,12 @@ export async function GET() {
         ok: Array.isArray(routes) && routes.length > 0,
         detail: Array.isArray(routes) && routes.length > 0 ? `${routes.length} route(s)` : "No gateway routes found",
       });
-    } catch (error: unknown) {
+    } catch {
       items.push({
         key: "routes",
         label: "Provider route configured",
         ok: false,
-        detail: error instanceof Error ? error.message : "Failed to check routes",
+        detail: "Provider route check unavailable",
       });
     }
 
@@ -103,12 +105,12 @@ export async function GET() {
         ok: active.length > 0,
         detail: active.length > 0 ? `${active.length} active provider key(s)` : "No active provider keys found",
       });
-    } catch (error: unknown) {
+    } catch {
       items.push({
         key: "credentials",
         label: "Provider key configured",
         ok: false,
-        detail: error instanceof Error ? error.message : "Failed to check credentials",
+        detail: "Provider credential check unavailable",
       });
     }
 
@@ -118,14 +120,14 @@ export async function GET() {
         key: "policy",
         label: "Custom policy active",
         ok: Boolean(policy?.id),
-        detail: policy?.name ? `${policy.name} v${policy.version}` : "No active policy",
+        detail: policy?.id ? "Custom policy active" : "No active policy",
       });
-    } catch (error: unknown) {
+    } catch {
       items.push({
         key: "policy",
         label: "Custom policy active",
         ok: false,
-        detail: error instanceof Error ? error.message : "No active policy",
+        detail: "Policy check unavailable",
       });
     }
 
@@ -137,12 +139,12 @@ export async function GET() {
         ok: true,
         detail: "Audit endpoint responded",
       });
-    } catch (error: unknown) {
+    } catch {
       items.push({
         key: "audit",
         label: "Audit API reachable",
         ok: false,
-        detail: error instanceof Error ? error.message : "Failed to check audit endpoint",
+        detail: "Audit check unavailable",
       });
     }
 
