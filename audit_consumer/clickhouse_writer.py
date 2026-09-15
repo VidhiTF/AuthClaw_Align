@@ -3,6 +3,7 @@ clickhouse_writer.py — Writes audit event rows to ClickHouse with retry logic.
 """
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -25,6 +26,9 @@ def get_client(
         database=database,
         username=username,
         password=password,
+        secure=os.getenv("CLICKHOUSE_SECURE", "false").lower() == "true",
+        verify=True,
+        ca_cert=os.getenv("CLICKHOUSE_CA_CERT") or None,
     )
 
 

@@ -15,6 +15,7 @@ from clickhouse_writer import audit_event_exists, get_client, get_tenant_tail, i
 from hash_chain import standardize_uuid, standardize_timestamp
 from metrics import metrics
 from transport import make_audit_consumer
+from urllib.parse import parse_qs, urlparse
 
 load_dotenv()
 
@@ -62,6 +63,11 @@ def validate_runtime_environment() -> None:
         raise RuntimeError(
             "CLICKHOUSE_PASSWORD must be set to a non-default secret in shared environments"
         )
+    if os.getenv("CLICKHOUSE_SECURE", "false").lower() != "true":
+        raise RuntimeError("CLICKHOUSE_SECURE=true is required in shared environments")
+    dsn = os.getenv("AUDIT_POSTGRES_URL", "")
+    if not dsn or parse_qs(urlparse(dsn).query).get("sslmode") != ["verify-full"]:
+        raise RuntimeError("AUDIT_POSTGRES_URL with sslmode=verify-full is required in shared environments")
 
 
 class _MetricsHandler(BaseHTTPRequestHandler):
@@ -299,6 +305,25 @@ def _process_message(ch_client, payload: dict) -> None:
 
     if not tenant_id or not record_id:
         raise InvalidAuditEvent("tenant_id and record_id are required")
+    dsn = os.getenv("AUDIT_POSTGRES_URL", "")
+    if dsn:
+        # Read authoritative evidence before even accepting a duplicate replay.
+        # This credential must have SELECT only; no append or mutation privileges.
+        try:
+            import psycopg
+
+            with psycopg.connect(dsn, connect_timeout=5) as connection:
+                connection.execute("SET TRANSACTION READ ONLY")
+                connection.execute("SELECT set_config('app.current_tenant_id', %s, true)", (tenant_id,))
+                proof = connection.execute(
+                    "SELECT canonical_payload, prior_hash, integrity_hash FROM public.audit_log_metadata "
+                    "WHERE tenant_id = %s::uuid AND record_id = %s::uuid",
+                    (tenant_id, record_id),
+                ).fetchone()
+        except Exception as exc:
+            raise RetryableMirrorError("PostgreSQL origin verification unavailable") from exc
+        if proof is None or tuple(proof) != (row["canonical_payload"], row["prior_hash"], row["integrity_hash"]):
+            raise InvalidAuditEvent("event does not match authoritative PostgreSQL evidence")
     try:
         exists = audit_event_exists(ch_client, record_id)
     except Exception as exc:

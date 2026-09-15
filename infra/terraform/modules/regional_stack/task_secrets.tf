@@ -51,7 +51,7 @@ locals {
       { name = "AUTHCLAW_REDACTION_SALT", valueFrom = aws_secretsmanager_secret.agent_redaction.arn }
     ] : []
   ) }
-  audit_consumer_secrets = var.clickhouse_host != "" ? [
+  audit_consumer_secrets = concat(var.clickhouse_host != "" ? [
     { name = "CLICKHOUSE_PASSWORD", valueFrom = aws_secretsmanager_secret.clickhouse_password[0].arn }
-  ] : []
+  ] : [], [for name, arn in var.audit_consumer_secret_arns : { name = name, valueFrom = arn }])
 }

@@ -560,6 +560,18 @@ variable "enable_audit_consumer" {
   default     = false
 }
 
+variable "audit_consumer_environment" {
+  description = "Non-secret audit transport TLS settings."
+  type        = map(string)
+  default     = {}
+}
+
+variable "audit_consumer_secret_arns" {
+  description = "External PostgreSQL verifier and Kafka SASL secret ARNs."
+  type        = map(string)
+  default     = {}
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

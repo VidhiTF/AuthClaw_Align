@@ -41,6 +41,11 @@ def rendered_compose_config() -> dict:
 
 def main() -> None:
     config = rendered_compose_config()
+    audit_environment = config["services"]["audit_consumer"]["environment"]
+    assert audit_environment["AUTHCLAW_ENV"] == config["services"]["backend"]["environment"]["AUTHCLAW_ENV"]
+    assert "KAFKA_SECURITY_PROTOCOL" in audit_environment
+    assert "CLICKHOUSE_SECURE" in audit_environment
+    assert "AUDIT_POSTGRES_URL" in audit_environment
     agent_environment = config["services"]["agent"]["environment"]
     assert agent_environment["GOOGLE_API_KEY"] == DUMMY_GEMINI_KEY
     assert (

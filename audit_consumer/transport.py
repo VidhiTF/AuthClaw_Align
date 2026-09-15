@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import logging
 import os
 import threading
@@ -16,6 +17,26 @@ AUDIT_EVENTS_TOPIC = "audit.events"
 AUDIT_DLQ_TOPIC = "audit.deadletter"
 DEFAULT_CONSUMER_TOPICS = [GATEWAY_TRAFFIC_TOPIC, AUDIT_EVENTS_TOPIC]
 logger = logging.getLogger("audit_consumer.transport")
+
+
+def kafka_security_options() -> dict[str, Any]:
+    protocol = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT").upper()
+    shared = os.getenv("AUTHCLAW_ENV", "local").lower() not in {"local", "development", "dev", "test"}
+    if protocol not in {"PLAINTEXT", "SASL_SSL"} or (shared and protocol != "SASL_SSL"):
+        raise RuntimeError("KAFKA_SECURITY_PROTOCOL must be SASL_SSL in shared environments")
+    options: dict[str, Any] = {"security_protocol": protocol}
+    if protocol == "SASL_SSL":
+        username = os.getenv("KAFKA_SASL_USERNAME", "")
+        password = os.getenv("KAFKA_SASL_PASSWORD", "")
+        if not username or not password:
+            raise RuntimeError("Kafka SASL credentials are required")
+        options.update(
+            sasl_mechanism=os.getenv("KAFKA_SASL_MECHANISM", "SCRAM-SHA-256"),
+            sasl_plain_username=username, sasl_plain_password=password,
+            ssl_check_hostname=True,
+            ssl_cafile=os.getenv("KAFKA_SSL_CAFILE") or None,
+        )
+    return options
 
 
 @dataclass(frozen=True)
@@ -59,19 +80,21 @@ class KafkaAuditConsumer:
         self.group_id = os.getenv("KAFKA_GROUP_ID", "authclaw-audit-consumer")
         self.dlq_topic = os.getenv("KAFKA_DLQ_TOPIC", AUDIT_DLQ_TOPIC)
         self._observe_lag = observe_lag
+        security = kafka_security_options()
         self._consumer = KafkaConsumer(
             *self.topics,
             bootstrap_servers=brokers,
             group_id=self.group_id,
-            value_deserializer=lambda value: json.loads(value.decode("utf-8")),
             auto_offset_reset="earliest",
             enable_auto_commit=False,
+            **security,
         )
         self._dlq = KafkaProducer(
             bootstrap_servers=brokers,
             value_serializer=lambda value: json.dumps(value).encode("utf-8"),
             key_serializer=lambda key: key.encode("utf-8") if key else b"",
-            acks=1,
+            acks="all",
+            **security,
         )
 
     def poll(self, timeout_ms: int) -> list[list[AuditMessage]]:
@@ -87,12 +110,23 @@ class KafkaAuditConsumer:
                     )
                 except Exception as exc:
                     logger.warning("Unable to observe Kafka consumer lag: %s", exc)
-            batches.append(
-                [
-                    AuditMessage(value=item.value, offset=item.offset, _position=position)
-                    for item in batch
-                ]
-            )
+            messages = []
+            for item in batch:
+                error = None
+                try:
+                    payload = json.loads(item.value.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("audit envelope must be a JSON object")
+                except (UnicodeError, ValueError, AttributeError, TypeError) as exc:
+                    error = exc
+                    payload = {
+                        "raw_value_base64": base64.b64encode(item.value or b"").decode("ascii"),
+                        "topic": position.topic, "partition": position.partition,
+                        "offset": item.offset,
+                    }
+                messages.append(AuditMessage(value=payload, offset=item.offset,
+                                             _position=position, validation_error=error))
+            batches.append(messages)
         return batches
 
     def ack(self, message: AuditMessage) -> None:

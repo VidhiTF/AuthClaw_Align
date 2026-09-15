@@ -479,6 +479,26 @@ variable "enable_audit_consumer" {
   default = false
 }
 
+variable "audit_consumer_environment" {
+  description = "Non-secret audit TLS settings and certificate paths; shared workers require CLICKHOUSE_SECURE=true and KAFKA_SECURITY_PROTOCOL=SASL_SSL for Kafka."
+  type        = map(string)
+  default     = {}
+  validation {
+    condition = length(setsubtract(toset(keys(var.audit_consumer_environment)), toset(["CLICKHOUSE_SECURE", "CLICKHOUSE_CA_CERT", "KAFKA_SECURITY_PROTOCOL", "KAFKA_SASL_MECHANISM", "KAFKA_SSL_CAFILE"]))) == 0
+    error_message = "Only audit TLS options belong here; credentials must use secret ARNs."
+  }
+}
+
+variable "audit_consumer_secret_arns" {
+  description = "Externally provisioned AUDIT_POSTGRES_URL (SELECT-only, sslmode=verify-full) and Kafka SASL credential secret ARNs."
+  type        = map(string)
+  default     = {}
+  validation {
+    condition = length(setsubtract(toset(keys(var.audit_consumer_secret_arns)), toset(["AUDIT_POSTGRES_URL", "KAFKA_SASL_USERNAME", "KAFKA_SASL_PASSWORD"]))) == 0
+    error_message = "Only audit verifier and Kafka SASL credentials belong here."
+  }
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

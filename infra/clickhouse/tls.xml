@@ -1,0 +1,11 @@
+<clickhouse>
+    <!-- Mount as config.d/audit-tls.xml only in secure deployments. -->
+    <http_port remove="remove"/>
+    <https_port>8443</https_port>
+    <openSSL>
+        <server>
+            <certificateFile>/etc/audit-tls/clickhouse.crt</certificateFile>
+            <privateKeyFile>/etc/audit-tls/clickhouse.key</privateKeyFile>
+        </server>
+    </openSSL>
+</clickhouse>
