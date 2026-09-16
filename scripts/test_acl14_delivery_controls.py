@@ -284,6 +284,9 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("SQS audit transport requires enabled internal TLS", DEPLOY)
         self.assertIn("ECS_AWSVPC_BLOCK_IMDS=true", REGIONAL_STACK)
 
+    def test_terraform_tests_do_not_inherit_ci_plan_variables(self):
+        self.assertIn("rm infra/terraform/ci.auto.tfvars.json\n          terraform -chdir=infra/terraform test", CI)
+
     def test_master_protection_requires_review_and_pre_merge_ci(self):
         protection = json.loads((ROOT / ".github/branch-protection-master.json").read_text(encoding="utf-8"))
         self.assertTrue(protection["required_status_checks"]["strict"])
