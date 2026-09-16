@@ -5,6 +5,8 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
   schedule:
     - cron: '23 2 * * 1'
   workflow_dispatch:
@@ -21,9 +23,10 @@ on:
 permissions:
   actions: read
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: authclaw-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: authclaw-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -36,6 +39,7 @@ env:
 jobs:
   changes:
     name: Detect Changed Components
+    if: github.event_name != 'pull_request_review' || github.event.pull_request.base.ref == 'master'
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.changes.outputs.backend }}
@@ -77,7 +81,11 @@ jobs:
           fetch-depth: 2
       - run: |
           git diff --check HEAD^
-          python3 -m unittest scripts.test_acl14_delivery_controls scripts.ci_plan_test scripts.test_iam_release_evidence scripts.test_verify_p007_edge_evidence scripts.test_p008_private_paths_evidence scripts.test_container_vulnerability_policy scripts.test_ecr_release_control scripts.test_release_evidence scripts.test_ecs_database_job scripts.test_verify_ecs_colocation
+          python3 -m unittest scripts.test_acl14_delivery_controls scripts.test_repository_policy scripts.ci_plan_test scripts.test_iam_release_evidence scripts.test_verify_p007_edge_evidence scripts.test_p008_private_paths_evidence scripts.test_container_vulnerability_policy scripts.test_ecr_release_control scripts.test_release_evidence scripts.test_ecs_database_job scripts.test_verify_ecs_colocation
+      - name: Verify T01 approval and activation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/repository_policy.py --verify-github
 
   smoke:
     name: Master Smoke and Contract Integration
@@ -494,7 +502,7 @@ jobs:
 
   checks:
     name: ACL-14 Required Checks
-    if: always()
+    if: always() && (github.event_name != 'pull_request_review' || github.event.pull_request.base.ref == 'master')
     needs: [changes, policy, smoke, security, backend, backend-integration, audit, agent, sdk, gateway, console, compose, terraform, arm64-images]
     runs-on: ubuntu-latest
     steps:

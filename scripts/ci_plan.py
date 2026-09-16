@@ -38,6 +38,8 @@ def plan(
     release_enabled=False,
 ):
     """Unknown executable/config paths fan out, while prose stays lightweight."""
+    if event == "pull_request_review":
+        event = "pull_request"
     if event not in {"pull_request", "push", "schedule", "workflow_dispatch"}:
         raise ValueError(f"Unsupported CI event: {event}")
     full = event == "schedule" or (event == "workflow_dispatch" and full_regression)

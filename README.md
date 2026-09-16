@@ -62,13 +62,16 @@ not match.
 
 ## Delivery and controlled beta
 
-Master-only CI exposes `ACL-14 Required Checks`. One runner detects changed components
-and runs their essential backend, gateway, console, agent, audit, SDK, or Terraform
-checks. Feature branches and pull requests do not trigger GitHub Actions. Expensive
-release-image builds run only while `CONTROLLED_BETA_ENABLED=true`. A successful run
-on `master` triggers the controlled-beta workflow, but
-its deployment job runs only when the `controlled-beta` environment variable
-`CONTROLLED_BETA_ENABLED` is `true` and every required AWS/DNS input exists.
+Pull requests targeting `master` run path-aware CI before merge. `ACL-14 Required
+Checks` requires all selected jobs to succeed; only unselected component jobs may
+skip. Repository Policy always runs. Pushes to `master` run policy and selected
+smoke/contract checks. Scheduled and manual full regression provide broader
+coverage. A skipped suite is not test evidence.
+
+Release images run only on eligible master pushes with
+`CONTROLLED_BETA_ENABLED=true`. The controlled-beta deployment workflow additionally
+requires successful source CI, all seven release images, the release completion
+gate, and required environment inputs. PR, scheduled, and manual CI do not deploy.
 
 Enabled releases use GitHub OIDC for short-lived AWS access, promote tested images to
 KMS-encrypted ECR repositories, deploy containers by digest, use encrypted Terraform
@@ -95,8 +98,8 @@ See `docs/COMPLIANCE_BOUNDARY.md`, `docs/ARCHITECTURE.md`, and
 ## Branch workflow
 
 All human and AI-assisted contributions follow [CONTRIBUTING.md](CONTRIBUTING.md)
-and [AGENTS.md](AGENTS.md). T01 requires Ravi and Vidhi approval and a recorded
-merge before action-plan implementation tasks begin; use the
+and [AGENTS.md](AGENTS.md). T01 requires the manifest stakeholders to approve
+and the activation verifier to confirm the merge before implementation; use the
 [pull request template](.github/pull_request_template.md) to supply evidence.
 
 - `master` — release integration branch; required protection is defined in
@@ -105,10 +108,13 @@ merge before action-plan implementation tasks begin; use the
 - `dev/vidhi` — `services/agent/**` work.
 - `dev/ravi` — `console/**` and console contract-adapter work.
 
-Changes reach `master` through pull requests and owner review. CI runs after merge on
-`master`, so contributors must run the applicable local tests before review. Feature branches use `feat|fix|chore/<area>/<JIRA-KEY>-slug`, for example
-`feat/infra/ACL-14-encrypted-beta`. The repository owner must apply the checked-in
-protection payload; `CODEOWNERS` alone does not enforce these rules.
+Changes reach `master` through pull requests, two independent approvals, applicable
+component/risk-owner review, and passing required PR CI. Contributors also run
+relevant local checks. Feature branches use `feat|fix|chore/<area>/<task>-slug`,
+for example `chore/docs/T01-engineering-rules`. The administrator must apply and
+verify the checked-in protection payload before T01 merge; see
+[branch governance](docs/BRANCH_GOVERNANCE.md). CODEOWNERS routes reviews but does
+not configure protection by itself.
 
 ## Provenance
 

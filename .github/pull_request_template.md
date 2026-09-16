@@ -10,7 +10,7 @@
 Read [CONTRIBUTING.md](../CONTRIBUTING.md) and [AGENTS.md](../AGENTS.md).
 Complete every field; use N/A with a reason where appropriate.
 
-- T01 PR/task record (for T02–T21: approvals, merged commit, effective date):
+- T01 activation verifier output (manifest, approvals, merged SHA, UTC effective date):
 - [ ] T01 is merged and effective before implementation, or this PR is T01,
       read-only verification, or documentation preparation (explain).
 
@@ -23,6 +23,20 @@ Complete every field; use N/A with a reason where appropriate.
 - Active runtime path and reproduction/direct evidence (or documentation scope):
 - Why the corrected disposition warrants this change:
 - [ ] This PR contains one coherent change without unrelated cleanup.
+
+## Customer impact
+
+- User-visible changes, affected customers, and operational/support impact:
+
+## Release notes
+
+- Release-note entry/link, or explicit no-note disposition with reason:
+
+## Schema and rolling-deployment compatibility
+
+- API/database/event schema compatibility, old/new producer and consumer behavior:
+- Mixed-version rollout order, expand/contract migrations, and compatibility window:
+- Migration steps and data backfill, or N/A tied to changed paths:
 
 ## Existing-code reuse
 
@@ -43,11 +57,19 @@ Complete every field; use N/A with a reason where appropriate.
 ## Security and compliance
 
 - [ ] No secrets, personal data, tokens or keys were committed or logged.
-- [ ] Tenant isolation and authorization were tested.
+- Security implications and affected trust boundaries:
 - [ ] Audit/evidence behavior was considered.
 - [ ] Migration and rollback steps are documented where applicable.
 - Production-like fail-closed behavior and relevant negative-case evidence for
   secrets, transport security, debugging, and external services (or N/A with reason):
+
+## Tenant isolation evidence
+
+- Tenant key and trusted source; affected paths and operations:
+- Application enforcement and database enforcement (RLS/role/transaction context):
+- Negative cross-tenant reads, inserts, updates, exports, and applicable similarity
+  searches: commands, test identities/roles, expected denial, and observed results:
+- Layer-specific gaps/alternative controls; N/A only with path/operation-specific reason:
 
 ## Test evidence
 
@@ -56,7 +78,9 @@ Complete every field; use N/A with a reason where appropriate.
 - Acceptance criteria mapped to tests or reproducible operational proof:
 - Failures, skipped checks, limitations, and reasons:
 
-CI runs after merge on `master`; absent PR CI is not passing evidence.
+PR CI must pass before merge. Path-based skips are valid only for unselected
+components; list the selection and actual coverage. Post-merge smoke, full
+regression, and release/deployment results are separate evidence.
 
 ## Risk
 
@@ -69,17 +93,17 @@ CI runs after merge on `master`; absent PR CI is not passing evidence.
 ## Reviewer sign-off
 
 - Implementing engineer:
-- Independent engineer and required additional reviewers per CONTRIBUTING.md:
+- Component-owner/deputy and risk-review roles for changed paths per CODEOWNERS:
 - Reviewed commit and approval links (completed by the reviewers):
 - Acceptance criteria independently verified and evidence checked:
 - [ ] Required cross-review and owner approval are complete; no self-approval.
 
 ## T01 completion record (T01 only; otherwise N/A)
 
-- Manual T01 policy-check evidence from CONTRIBUTING.md:
-- Ravi approval link and reviewed commit:
-- Vidhi approval link and reviewed commit:
-- Kunal post-merge record: full merged commit SHA/link and effective date/timezone:
+- Repository Policy tests and activation-verifier evidence:
+- Both manifest stakeholder approval links and final reviewed commit:
+- Administrator evidence of live two-approval and required-check enforcement:
+- Record-owner retained verifier output: merged SHA/link and UTC effective date:
 
-Leave pending evidence explicitly pending. Kunal completes the post-merge record
-in the T01 PR/task before implementation tasks begin.
+Leave pending evidence explicitly pending. The version-controlled activation
+manifest and verified GitHub reviews/merge are authoritative, not this PR body.

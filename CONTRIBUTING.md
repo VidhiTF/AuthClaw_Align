@@ -12,22 +12,28 @@ T01 must be approved and merged into `master` before implementation tasks
 T02–T21 begin. Read-only verification and documentation preparation may proceed.
 An edited file, an AI review, or an open PR does not satisfy this gate.
 
-Kunal owns T01. Ravi and Vidhi must both approve the rule set. Kunal records the
-following evidence in the T01 PR/task record after merge; link that completed
-record in each implementation PR. Do not invent approvals or predate activation.
+The version-controlled [activation manifest](.github/t01-activation.json) pins
+the T01 PR, repository, two one-time stakeholder approvers, and record owner.
+`python scripts/repository_policy.py --verify-github` checks GitHub review and
+merge evidence: both stakeholders must approve the final head, the PR must be
+merged, and its merge commit must be an ancestor of `master`. Its output records
+the verified SHA and UTC effective date from GitHub's merge event. The manifest
+and authenticated GitHub evidence are authoritative, never a mutable PR body.
+The record owner retains the output with task evidence after merge; a new
+timestamp or assertion in a task description cannot activate T01.
 
-| Required evidence | Record to complete |
-| --- | --- |
-| T01 PR/task record | Pending: link |
-| Ravi approval | Pending: review link and reviewed commit |
-| Vidhi approval | Pending: review link and reviewed commit |
-| Merged commit on `master` | Pending: full SHA and merge link, recorded by Kunal |
-| Effective date | Pending: YYYY-MM-DD and timezone, recorded by Kunal |
-| T01 policy check | Pending: checklist evidence below |
+For T01's own PR, CI requires both final-head approvals but permits the merge to
+remain pending. Other PRs fail this gate until T01 is merged. Preparation can
+continue locally before activation. Missing evidence or API failures fail closed.
+PR review submission, editing, and dismissal rerun CI to refresh the gate, using
+the same component selection as PR updates. If a run needs a manual retry, rerun
+the latest PR CI; do not push an empty commit because it invalidates approvals.
 
-The pending entries describe the state when this guidance was prepared. The
-linked, completed T01 PR/task record is the authoritative activation evidence;
-later PRs must consult it rather than infer activation from this file's presence.
+T01 must not merge until an administrator applies and verifies the checked-in
+two-approval protection configuration. See the
+[activation runbook](docs/BRANCH_GOVERNANCE.md#t01-enforcement-bootstrap).
+This setup is part of T01, not deferred to T19. Activation is pending until the
+live settings, stakeholder approvals, required checks, and merge are evidenced.
 
 ## Engineering rules
 
@@ -58,7 +64,9 @@ later PRs must consult it rather than infer activation from this file's presence
    Consolidation must preserve caller-visible behavior; if those properties
    cannot be maintained, do not merge the cluster.
 7. **Keep PRs reviewable.** Submit one coherent change, state acceptance criteria,
-   document risk and concrete rollback steps, and avoid unrelated cleanup.
+   customer impact, release-note disposition, schema and rolling-deployment
+   compatibility, migrations, security implications, risk, and concrete rollback
+   steps. Avoid unrelated cleanup.
 8. **Reject insecure defaults.** Production-like modes, including shared test,
    staging, and production, must fail closed for missing or invalid secrets,
    transport security, debugging, and external service configuration or failures.
@@ -73,36 +81,55 @@ later PRs must consult it rather than infer activation from this file's presence
    change and the required repository-policy review.
 10. **Close with evidence and independent review.** Supply test output or
     reproducible operational proof mapped to acceptance criteria. Record failures,
-    skipped checks, and limitations honestly. One of the other two engineers must
-    verify acceptance; follow the additional cross-review requirements below.
-    Self-review or AI assistance cannot replace named engineer approval.
+    skipped checks, and limitations honestly. Independent owners of affected
+    components and risk boundaries verify acceptance as described below.
+    Self-review or AI assistance cannot replace human approval.
+
+### Tenant-sensitive evidence
+
+For affected tenant data paths, identify the tenant key and its trusted source,
+application authorization/scoping, and database enforcement (including RLS,
+restricted roles, and transaction tenant context where applicable). Supply denied
+cross-tenant reads, inserts, updates, exports, and applicable similarity-search
+evidence. Verify the layers independently; a privileged database test role must
+not mask missing tenant enforcement. Document any absent layer and the actual
+alternative control without claiming coverage. N/A requires a reason tied to the
+changed paths and operations. A checked box is not evidence.
 
 ## Cross-review and completion
 
-| Implementer | Required cross-review |
-| --- | --- |
-| Kunal | Ravi; also Vidhi for T01 and release-governance changes |
-| Ravi | Vidhi; also Kunal for security-sensitive or repository-policy changes |
-| Vidhi | Kunal; also Ravi for API-contract and configuration changes |
+Review follows changed paths and risk boundaries, not the author's identity.
+Require two independent human approvals, including a component owner or designated
+deputy for each affected boundary. API/schema changes also require a consuming
+component's owner; security, tenant, or authentication changes require the security
+role; CI, release, ownership, and policy changes require governance custodians.
+The author cannot satisfy a review role. Record the roles and evidence reviewed.
 
-T01 specifically requires both Ravi and Vidhi regardless of who prepares the
-files. Cross-owner review and repository-owner approval from existing branch
-governance still apply. Reviewers identify the commit reviewed and independently
-check the acceptance evidence before signing off. Material follow-up edits need
-renewed review. Record the merged change and verification evidence in the task
-record before closing it.
+[CODEOWNERS](.github/CODEOWNERS) holds current role assignments; the role model and
+primary/deputy responsibilities are in [branch governance](docs/BRANCH_GOVERNANCE.md).
+This user-owned repository cannot use organization teams. After a transfer to an
+organization, replace login assignments with real teams having repository access.
+Membership changes update assignments, not these engineering rules. Never invent
+team handles. The policy verifier requires two current-head approvals and the
+primary owner for every changed path (a deputy when the primary is the author).
+It uses base-branch ownership for subsequent PRs so a PR cannot reassign its own
+reviewers. Cross-cutting risk and consumer-contract acceptance remain explicit
+review obligations beyond path matching.
 
-CI currently runs after merge on `master`, not on PRs. Run applicable documented
-local checks before review; do not describe a skipped or absent workflow as a
-passing test. Documentation-only changes may use link, content, and diff checks
-with a stated reason that runtime tests are not applicable. These rules are a
-review gate; this document does not configure GitHub branch protection. Settings
-enforcement remains governed by the existing branch policy and T19.
+Reviewers identify the final commit and independently check acceptance evidence.
+Material edits invalidate approvals. Record the merged change and evidence before
+closing work. PR CI runs before merge and is required through `ACL-14 Required
+Checks`. Change detection selects component suites; an unselected suite may skip,
+but a selected missing/skipped/failed suite fails the aggregate gate. Report actual
+coverage rather than calling a skip a pass. Master pushes run policy and selected
+smoke checks; scheduled/manual full regression and enabled release-image/deployment
+validation are separate. See branch governance for the exact event model.
 
 ## T01 policy check
 
-The implementer supplies evidence for this checklist in the T01 PR; Ravi and
-Vidhi verify it before approval. This is a manual policy check, not a new CI job.
+The implementer supplies this checklist; the manifest's stakeholders verify it.
+The existing Repository Policy job runs `scripts.test_repository_policy` and the
+live activation verifier. Tests supplement, rather than replace, human acceptance.
 
 - [ ] All ten rules are present here and apply to human and AI-assisted changes.
 - [ ] AGENTS.md and the PR template link to this guidance.
@@ -112,6 +139,7 @@ Vidhi verify it before approval. This is a manual policy check, not a new CI job
       remain intact and the Markdown links resolve.
 - [ ] The T01 prerequisite and named approvals are explicit; no implementation
       task is bundled with T01.
-- [ ] Ravi and Vidhi approvals are linked to the reviewed rule set.
-- [ ] After merge, Kunal records the full merged commit and effective date in the
-      T01 PR/task record so implementation work can start.
+- [ ] Both stakeholder approvals cover the final head and live two-approval
+      protection is verified by an administrator before merge.
+- [ ] After merge, the record owner retains verifier output containing the merged
+      SHA and effective date; downstream CI verifies the same GitHub evidence.

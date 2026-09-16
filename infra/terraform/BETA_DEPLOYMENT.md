@@ -35,16 +35,12 @@ deployment job safely skipped.
 
 ## Branch protection
 
-The master-only CI workflow exposes one stable post-merge context,
-`ACL-14 Required Checks`, after the affected components pass their essential checks.
-When controlled beta is enabled, the same workflow also builds the seven immutable
-release images required by deployment. The context is release/deployment evidence,
-not a pre-merge required status check.
-An authenticated repository owner can apply the checked-in protection configuration:
-
-```powershell
-gh api --method PUT repos/AgentsArchitects/AuthClaw/branches/master/protection --input .github/branch-protection-master.json
-```
+The required pre-merge PR context is `ACL-14 Required Checks`. It verifies the
+path-selected suites and Repository Policy. Master pushes separately run selected
+smoke checks; enabled controlled-beta release images and deployment require an
+eligible master push and successful release gates. A PR success is not deployment
+evidence. See [branch governance](../../docs/BRANCH_GOVERNANCE.md) for the actual
+triggers and administrator T01 protection bootstrap, including read-back evidence.
 
 ## Rollback
 
