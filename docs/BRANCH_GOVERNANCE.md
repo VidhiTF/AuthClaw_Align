@@ -49,12 +49,24 @@ Signed commits remain required where supported by the repository configuration.
 
 ## T01 enforcement bootstrap
 
-T01 remains blocked until the administrator completes this setup. The preparing
-account KunalTF has push access but no admin access; live enforcement has not been
-changed by this PR. Do not merge based solely on this file or a green old CI run.
+Administrative setup was applied outside this PR. On 2026-09-16, read-back of
+[ruleset 21141288](https://github.com/VidhiTF/AuthClaw_Align/rules/21141288) and
+`verify_live_protection` confirmed active enforcement of all required controls
+with zero bypass actors. The administrator also reported classic protection
+requiring two approvals and administrator enforcement. This is a dated record,
+not a substitute for the verifier's fresh check on each run. T01 still requires
+final-head stakeholder approvals, growth exceptions, required checks, and merge.
 
 1. Inspect live protection and rulesets with an administrator account. Apply the
    reviewed two-approval payload while preserving any stronger existing settings:
+
+   This is a personal repository. The PUT payload deliberately omits the
+   organization-only `dismissal_restrictions` and `bypass_pull_request_allowances`
+   nested fields; sending even empty objects for those fields causes HTTP 422.
+   The top-level `restrictions: null` means no push-actor restriction and is part
+   of the update endpoint's required payload. Do not add organization-only fields
+   back when copying a configuration. Existing ruleset 21141288 already enforces
+   the controls; these commands are for future administrator setup or repair.
 
    ```powershell
    gh api repos/VidhiTF/AuthClaw_Align/branches/master/protection
@@ -64,12 +76,14 @@ changed by this PR. Do not merge based solely on this file or a green old CI run
    ```
 
    Also install the additive, CI-readable
-   [review ruleset](../.github/master-review-ruleset.json). If its name already
-   exists, update that resolved ID with PUT instead of creating a duplicate.
+   [review ruleset](../.github/master-review-ruleset.json). Its current ID is
+   21141288; do not create a duplicate. For a new repository only, create it with
+   POST if no matching ruleset exists. For updates, read the existing ruleset and
+   preserve stronger settings before using PUT with the reviewed merged payload.
    Keep the existing deletion/force-push ruleset and stronger controls intact:
 
    ```powershell
-   gh api --method POST repos/VidhiTF/AuthClaw_Align/rulesets --input .github/master-review-ruleset.json
+   gh api repos/VidhiTF/AuthClaw_Align/rulesets/21141288
    gh api repos/VidhiTF/AuthClaw_Align/rules/branches/master
    ```
 

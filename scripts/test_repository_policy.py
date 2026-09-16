@@ -57,6 +57,9 @@ class RepositoryGuidanceTests(unittest.TestCase):
         self.assertIn("python3 scripts/repository_policy.py --verify-github", workflow)
         protection = json.loads((ROOT / ".github/branch-protection-master.json").read_text())
         reviews = protection["required_pull_request_reviews"]
+        for organization_only in ("dismissal_restrictions", "bypass_pull_request_allowances"):
+            self.assertNotIn(organization_only, reviews)
+        self.assertIsNone(protection["restrictions"])
         self.assertGreaterEqual(reviews["required_approving_review_count"], 2)
         for setting in ("require_code_owner_reviews", "dismiss_stale_reviews", "require_last_push_approval"):
             self.assertTrue(reviews[setting])
