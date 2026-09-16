@@ -431,6 +431,7 @@ jobs:
             "ci_skip_aws_validation": true,
             "enable_secondary": false,
             "enable_cross_region_db_replica": false,
+            "internal_tls": {"enabled": true, "namespace": "internal.example.com"},
             "primary_availability_zones": ["us-east-1a", "us-east-1b"],
             "container_images": {
               "agent": "example.com/authclaw/agent:test",

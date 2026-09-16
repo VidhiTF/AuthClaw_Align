@@ -567,13 +567,25 @@ variable "audit_consumer_environment" {
 }
 
 variable "audit_consumer_secret_arns" {
-  description = "External PostgreSQL (authclaw_audit_verifier member) and Kafka SASL secret ARNs."
+  description = "Primary-region PostgreSQL (authclaw_audit_verifier member) and Kafka SASL secret ARNs."
   type        = map(string)
   default     = {}
 }
 
 variable "audit_consumer_secret_kms_key_arns" {
-  description = "Customer-managed KMS key ARNs used by external audit-consumer secrets."
+  description = "Primary-region customer-managed KMS key ARNs used by audit-consumer secrets."
+  type        = set(string)
+  default     = []
+}
+
+variable "secondary_audit_consumer_secret_arns" {
+  description = "Secondary-region PostgreSQL verifier and Kafka SASL secret ARNs."
+  type        = map(string)
+  default     = {}
+}
+
+variable "secondary_audit_consumer_secret_kms_key_arns" {
+  description = "Secondary-region customer-managed KMS key ARNs used by audit-consumer secrets."
   type        = set(string)
   default     = []
 }

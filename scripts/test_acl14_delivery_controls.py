@@ -13,6 +13,7 @@ WORKFLOWS = tuple((ROOT / ".github/workflows").glob("*.yml")) + tuple(
 )
 REGISTRY = (ROOT / "infra/terraform/registry.tf").read_text(encoding="utf-8")
 VARIABLES = (ROOT / "infra/terraform/variables.tf").read_text(encoding="utf-8")
+TERRAFORM_MAIN = (ROOT / "infra/terraform/main.tf").read_text(encoding="utf-8")
 REGIONAL_STACK = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "infra/terraform/modules/regional_stack").glob("*.tf"))
 RUNTIME_IAM = (ROOT / "infra/terraform/modules/regional_stack/runtime_iam.tf").read_text(encoding="utf-8")
 IAM_INVENTORY = (ROOT / "docs/security/P0_10_11_LOCAL_INVENTORY.md").read_text(encoding="utf-8")
@@ -209,6 +210,8 @@ class ACL14DeliveryControlTests(unittest.TestCase):
             "- name: Upload deployment and rollback evidence", 1
         )[0]
         self.assertIn("ROLLBACK_TFVARS_JSON", DEPLOY)
+        self.assertIn(". as $config", DEPLOY)
+        self.assertIn("$config", DEPLOY)
         self.assertIn('rollback.tfvars.json', rollback)
         self.assertIn('-var-file="$GITHUB_WORKSPACE/rollback.tfvars.json"', rollback)
         self.assertIn("rollback.tfplan", rollback)
@@ -267,6 +270,17 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("AUDIT_SQS_ALARM_ACTION_ARNS_JSON must be a JSON string array", DEPLOY)
         self.assertIn("EDGE_ALARM_ACTION_ARNS_JSON must contain at least one alarm destination ARN", DEPLOY)
         self.assertIn("CLICKHOUSE_HOST is required when the audit consumer is enabled", DEPLOY)
+        self.assertIn("KAFKA_BROKERS is required when Kafka audit transport is enabled", DEPLOY)
+        self.assertIn('(.audit_stream_transport != "kafka" or (.kafka_brokers | test("\\\\S")))', DEPLOY)
+        self.assertIn("TF_VAR_clickhouse_port", DEPLOY)
+        self.assertIn("TF_VAR_audit_consumer_environment", DEPLOY)
+        self.assertIn("TF_VAR_audit_consumer_secret_arns", DEPLOY)
+        self.assertIn("TF_VAR_audit_consumer_secret_kms_key_arns", DEPLOY)
+        self.assertIn("secondary_audit_consumer_secret_arns", VARIABLES)
+        self.assertIn("secondary_audit_consumer_secret_kms_key_arns", VARIABLES)
+        secondary = TERRAFORM_MAIN.split('module "secondary"', 1)[1]
+        self.assertIn("var.secondary_audit_consumer_secret_arns", secondary)
+        self.assertIn("var.secondary_audit_consumer_secret_kms_key_arns", secondary)
         self.assertIn("SQS audit transport requires enabled internal TLS", DEPLOY)
         self.assertIn("ECS_AWSVPC_BLOCK_IMDS=true", REGIONAL_STACK)
 

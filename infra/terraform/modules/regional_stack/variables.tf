@@ -484,7 +484,7 @@ variable "audit_consumer_environment" {
   type        = map(string)
   default     = {}
   validation {
-    condition = length(setsubtract(toset(keys(var.audit_consumer_environment)), toset(["CLICKHOUSE_SECURE", "CLICKHOUSE_CA_CERT", "KAFKA_SECURITY_PROTOCOL", "KAFKA_SASL_MECHANISM", "KAFKA_SSL_CAFILE"]))) == 0
+    condition     = length(setsubtract(toset(keys(var.audit_consumer_environment)), toset(["CLICKHOUSE_SECURE", "CLICKHOUSE_CA_CERT", "KAFKA_SECURITY_PROTOCOL", "KAFKA_SASL_MECHANISM", "KAFKA_SSL_CAFILE"]))) == 0
     error_message = "Only audit TLS options belong here; credentials must use secret ARNs."
   }
 }
@@ -494,8 +494,14 @@ variable "audit_consumer_secret_arns" {
   type        = map(string)
   default     = {}
   validation {
-    condition = length(setsubtract(toset(keys(var.audit_consumer_secret_arns)), toset(["AUDIT_POSTGRES_URL", "KAFKA_SASL_USERNAME", "KAFKA_SASL_PASSWORD"]))) == 0
+    condition     = length(setsubtract(toset(keys(var.audit_consumer_secret_arns)), toset(["AUDIT_POSTGRES_URL", "KAFKA_SASL_USERNAME", "KAFKA_SASL_PASSWORD"]))) == 0
     error_message = "Only audit verifier and Kafka SASL credentials belong here."
+  }
+  validation {
+    condition = alltrue([for arn in values(var.audit_consumer_secret_arns) :
+      can(regex("^arn:[^:]+:secretsmanager:${var.region}:[0-9]{12}:secret:.+$", arn))
+    ])
+    error_message = "Audit-consumer secrets must be Secrets Manager ARNs in this stack's region."
   }
 }
 
@@ -503,6 +509,12 @@ variable "audit_consumer_secret_kms_key_arns" {
   description = "Customer-managed KMS key ARNs used by external audit-consumer secrets."
   type        = set(string)
   default     = []
+  validation {
+    condition = alltrue([for arn in var.audit_consumer_secret_kms_key_arns :
+      can(regex("^arn:[^:]+:kms:${var.region}:[0-9]{12}:key/.+$", arn))
+    ])
+    error_message = "Audit-consumer KMS keys must be key ARNs in this stack's region."
+  }
 }
 
 variable "tags" {

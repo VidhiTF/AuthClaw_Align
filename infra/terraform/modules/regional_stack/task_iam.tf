@@ -104,8 +104,8 @@ locals {
           Resource = local.execution_secret_arns[name]
         },
         {
-          Effect   = "Allow"
-          Action   = ["kms:Decrypt"]
+          Effect = "Allow"
+          Action = ["kms:Decrypt"]
           Resource = distinct(concat(
             [aws_kms_key.main.arn],
             name == "audit_consumer" ? tolist(var.audit_consumer_secret_kms_key_arns) : []

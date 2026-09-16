@@ -1922,7 +1922,7 @@ resource "aws_ecs_task_definition" "audit_consumer" {
       error_message = "Audit consumer requires a ClickHouse host and externally provisioned password secret."
     }
     precondition {
-      condition = lookup(var.audit_consumer_environment, "CLICKHOUSE_SECURE", "false") == "true" && contains(keys(var.audit_consumer_secret_arns), "AUDIT_POSTGRES_URL") && (var.audit_stream_transport != "kafka" || (lookup(var.audit_consumer_environment, "KAFKA_SECURITY_PROTOCOL", "") == "SASL_SSL" && contains(keys(var.audit_consumer_secret_arns), "KAFKA_SASL_USERNAME") && contains(keys(var.audit_consumer_secret_arns), "KAFKA_SASL_PASSWORD")))
+      condition     = lookup(var.audit_consumer_environment, "CLICKHOUSE_SECURE", "false") == "true" && contains(keys(var.audit_consumer_secret_arns), "AUDIT_POSTGRES_URL") && (var.audit_stream_transport != "kafka" || (lookup(var.audit_consumer_environment, "KAFKA_SECURITY_PROTOCOL", "") == "SASL_SSL" && contains(keys(var.audit_consumer_secret_arns), "KAFKA_SASL_USERNAME") && contains(keys(var.audit_consumer_secret_arns), "KAFKA_SASL_PASSWORD")))
       error_message = "Shared audit consumers require verified HTTPS, a PostgreSQL verifier secret and authenticated Kafka TLS when Kafka is selected."
     }
   }
@@ -1957,7 +1957,7 @@ resource "aws_ecs_task_definition" "audit_consumer" {
           protocol      = "tcp"
         }
       ]
-      secrets = local.audit_consumer_secrets
+      secrets                = local.audit_consumer_secrets
       readonlyRootFilesystem = true
       privileged             = false
       stopTimeout            = 30

@@ -130,5 +130,8 @@ output "runtime_ingress_ports" {
   value = module.primary.runtime_ingress_ports
 }
 output "required_secret_arns" {
-  value = module.primary.required_secret_arns
+  value = distinct(concat(
+    module.primary.required_secret_arns,
+    var.enable_secondary ? module.secondary[0].required_secret_arns : [],
+  ))
 }

@@ -160,15 +160,19 @@ run "sqs_runtime_roles_remain_separate" {
     internal_tls                     = { enabled = true, namespace = "internal.example.com" }
     enable_audit_consumer            = true
     clickhouse_host                  = "clickhouse.test.invalid"
-    agent_customer_role_arns         = ["arn:aws:iam::210987654321:role/authclaw-customer"]
+    audit_consumer_environment       = { CLICKHOUSE_SECURE = "true" }
+    audit_consumer_secret_arns = {
+      AUDIT_POSTGRES_URL = "arn:aws:secretsmanager:us-east-1:123456789012:secret:audit-postgres-abcdef"
+    }
+    agent_customer_role_arns = ["arn:aws:iam::210987654321:role/authclaw-customer"]
   }
   assert {
     condition     = toset(output.runtime_iam_review.roles) == toset(["backend", "agent", "gateway", "console", "opa", "presidio", "audit_consumer", "audit_producer"])
     error_message = "SQS transport must use an independent audit producer identity."
   }
   assert {
-    condition     = toset(output.execution_iam_review.audit_consumer.secret_names) == toset(["CLICKHOUSE_PASSWORD"])
-    error_message = "Audit consumer must not receive database or application signing secrets."
+    condition     = toset(output.execution_iam_review.audit_consumer.secret_names) == toset(["AUDIT_POSTGRES_URL", "CLICKHOUSE_PASSWORD"])
+    error_message = "Audit consumer must receive only its verifier and ClickHouse credentials."
   }
   assert {
     condition     = length(output.runtime_iam_review.customer_roles) == 1
@@ -183,6 +187,25 @@ run "sqs_runtime_roles_remain_separate" {
       !contains(output.execution_iam_review.audit_producer.secret_names, "JWT_SECRET")
     )
     error_message = "The co-located gateway must be credential-free and use a minimally secret-bearing producer task."
+  }
+}
+
+run "regional_audit_secrets_remain_isolated" {
+  command = plan
+  variables {
+    enable_secondary               = true
+    enable_cross_region_db_replica = false
+    audit_stream_transport         = "sqs_fifo"
+    internal_tls                   = { enabled = true, namespace = "internal.example.com" }
+    enable_audit_consumer          = true
+    clickhouse_host                = "clickhouse.test.invalid"
+    audit_consumer_environment     = { CLICKHOUSE_SECURE = "true" }
+    audit_consumer_secret_arns = {
+      AUDIT_POSTGRES_URL = "arn:aws:secretsmanager:us-east-1:123456789012:secret:audit-postgres-primary"
+    }
+    secondary_audit_consumer_secret_arns = {
+      AUDIT_POSTGRES_URL = "arn:aws:secretsmanager:us-west-2:123456789012:secret:audit-postgres-secondary"
+    }
   }
 }
 

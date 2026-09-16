@@ -37,8 +37,9 @@ Shared workers require `CLICKHOUSE_SECURE=true`, `AUDIT_POSTGRES_URL` with
 `sslmode=verify-full`, and (for Kafka) `KAFKA_SECURITY_PROTOCOL=SASL_SSL` with
 `KAFKA_SASL_USERNAME` and `KAFKA_SASL_PASSWORD`. System certificate trust is the
 default; optional `CLICKHOUSE_CA_CERT` and `KAFKA_SSL_CAFILE` paths must exist in
-the worker image. Supply credentials through `audit_consumer_secret_arns` and TLS
-options through `audit_consumer_environment` in Terraform. Set `clickhouse_port=8443`.
+the worker image. Supply primary credentials through `audit_consumer_secret_arns`,
+separate secondary-region credentials through `secondary_audit_consumer_secret_arns`,
+and TLS options through `audit_consumer_environment`. Set `clickhouse_port=8443`.
 Local Compose explicitly defaults to local/plaintext and no PostgreSQL verifier;
 it is not a shared deployment. Origin verification does not change canonical v2
 hashes. Exact authenticated replay is deduplicated; mismatched evidence is rejected,
@@ -81,10 +82,10 @@ ClickHouse HTTPS configuration follows [ClickHouse TLS documentation](https://gi
   READ those topics and its consumer group, and WRITE only `audit.deadletter`.
   Verify an unrelated principal cannot publish. Require replication and
   `min.insync.replicas` appropriate to the deployment; DLQ clients use `acks=all`.
-- Provision a dedicated PostgreSQL LOGIN with SELECT only on
-  `public.audit_log_metadata`, schema USAGE and database CONNECT. It must have no
-  append-function EXECUTE, mutation, inherited writer or superuser permissions.
-  Validate tenant RLS using the worker's transaction-local `app.current_tenant_id`.
+- Provision a dedicated PostgreSQL LOGIN that inherits only the NOLOGIN
+  `authclaw_audit_verifier` capability role. It needs database CONNECT but no direct
+  table privileges, writer-role membership, mutation privileges or superuser rights.
+  Verify it can execute `public.verify_audit_origin` and that unrelated roles cannot.
   Do not reuse a producer or database-owner credential.
 - In staging, prove trusted TLS connections succeed and expired/untrusted/wrong-host
   certificates and missing SASL credentials fail. Verify forged/rehashed, tampered,
