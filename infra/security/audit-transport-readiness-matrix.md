@@ -30,4 +30,70 @@ Status labels:
 | Generated evidence is not committed or regenerated unnecessarily by CI | LOCAL-PASS | Benchmark evidence is committed once as local simulation; CI runs the functional harness and readiness pending script without committing generated artifacts. |
 | Deployed queue attributes, alarms, IAM simulation, endpoint coverage, ECS task roles and canary audit chain | LIVE-EVIDENCE-PENDING | Read-only deployment collector returns pending evidence without AWS: `scripts/sqs_audit_deployment_readiness.py`; production verification requires `--live` with approved read-only AWS access and optional explicit `--run-canary`. |
 
-Final local verdict: `LOCAL-PASS` with AWS-only evidence pending. No code-level/local blockers are known.
+The preceding evidence predates audit origin and transport hardening. Secure release
+readiness remains LIVE-EVIDENCE-PENDING until the following checks are collected.
+
+Shared workers require `CLICKHOUSE_SECURE=true`, `AUDIT_POSTGRES_URL` with
+`sslmode=verify-full`, and (for Kafka) `KAFKA_SECURITY_PROTOCOL=SASL_SSL` with
+`KAFKA_SASL_USERNAME` and `KAFKA_SASL_PASSWORD`. System certificate trust is the
+default; optional `CLICKHOUSE_CA_CERT` and `KAFKA_SSL_CAFILE` paths must exist in
+the worker image. Supply primary credentials through `audit_consumer_secret_arns`,
+separate secondary-region credentials through `secondary_audit_consumer_secret_arns`,
+and TLS options through `audit_consumer_environment`. Set `clickhouse_port=8443`.
+Local Compose explicitly defaults to local/plaintext and no PostgreSQL verifier;
+it is not a shared deployment. Origin verification does not change canonical v2
+hashes. Exact authenticated replay is deduplicated; mismatched evidence is rejected,
+and PostgreSQL unavailability leaves transport positions unacknowledged.
+
+Configure servers and clients in the same rollout, without applying these changes
+to running services from this task:
+
+- Mount `infra/clickhouse/tls.xml` as `/etc/clickhouse-server/config.d/audit-tls.xml`
+  and provision the referenced certificate/key with the server DNS name in its SAN.
+  Move health checks, schema jobs and other ClickHouse HTTP clients to verified HTTPS.
+  Disable or firewall plaintext native access as well. Give the mirror principal only
+  `SELECT, INSERT ON authclaw.audit_events`; inspect `SHOW GRANTS` for inherited roles
+  and verify UPDATE/DELETE/ALTER/TRUNCATE are denied.
+- For Redpanda, merge the following into the existing broker configuration (preserve
+  data directory, advertised DNS names, partitions, retention and offsets). Provision
+  SCRAM users externally; enable authorization and remove anonymous publishing.
+  Migrate all producers and topic-init jobs to authenticated TLS together. Existing
+  local producers use plaintext and cannot be pointed at this listener unchanged.
+
+```yaml
+redpanda:
+  kafka_api:
+    - name: audit_secure
+      address: 0.0.0.0
+      port: 9093
+      authentication_method: sasl
+  kafka_api_tls:
+    - name: audit_secure
+      enabled: true
+      require_client_auth: false
+      cert_file: /etc/audit-tls/broker.crt
+      key_file: /etc/audit-tls/broker.key
+```
+
+Listener configuration follows [Redpanda authentication documentation](https://docs.redpanda.com/streaming/current/manage/security/authentication/).
+ClickHouse HTTPS configuration follows [ClickHouse TLS documentation](https://github.com/ClickHouse/clickhouse-docs/blob/main/docs/guides/sre/tls/configuring-tls.md).
+
+- Broker ACLs: trusted producers may WRITE only their audit topics; the mirror may
+  READ those topics and its consumer group, and WRITE only `audit.deadletter`.
+  Verify an unrelated principal cannot publish. Require replication and
+  `min.insync.replicas` appropriate to the deployment; DLQ clients use `acks=all`.
+- Provision a dedicated PostgreSQL LOGIN that inherits only the NOLOGIN
+  `authclaw_audit_verifier` capability role. It needs database CONNECT but no direct
+  table privileges, writer-role membership, mutation privileges or superuser rights.
+  Verify it can execute `public.verify_audit_origin` and that unrelated roles cannot.
+  Do not reuse a producer or database-owner credential.
+- In staging, prove trusted TLS connections succeed and expired/untrusted/wrong-host
+  certificates and missing SASL credentials fail. Verify forged/rehashed, tampered,
+  cross-tenant and replayed events against PostgreSQL, Kafka DLQ outages and retries,
+  SQS visibility/redrive, tenant ordering and mirror continuity. Record effective
+  grants, ACLs and immutable evidence before release.
+- Retain the previous worker image/task definition, database volumes, broker offsets,
+  queue evidence and certificate configuration. Do not reset offsets or delete data
+  during rollout or rollback; stop the worker and restore the recorded compatible
+  image/configuration if verification fails. Rollback must preserve origin checks
+  and secure transport in shared environments.

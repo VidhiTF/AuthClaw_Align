@@ -19,7 +19,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import APIKey, Policy, User
+from app.db.models import APIKey, AuditLogMetadata, Policy, User
 from app.db.session import database_auth_context
 from tests.db_safety import destructive_test_urls
 
@@ -154,6 +154,59 @@ def test_missing_or_forged_context_reads_nothing(isolation: IsolationHarness):
 
     with isolation.session_for(tenant_a) as db:
         assert db.query(User).filter(User.tenant_id == tenant_b.tenant_id).first() is None
+
+
+def test_writer_privileges_cannot_bypass_restricted_audit_verifier(
+    isolation: IsolationHarness,
+):
+    tenant = isolation.create_identity("audit-verifier")
+    record_id = uuid4()
+    canonical_payload = '{"trusted":true}'
+    integrity_hash = "a" * 64
+    with isolation.session_for(tenant) as db:
+        db.add(
+            AuditLogMetadata(
+                tenant_id=tenant.tenant_id,
+                record_id=record_id,
+                tenant_sequence=1,
+                idempotency_key=f"audit-verifier-{record_id}",
+                canonical_payload=canonical_payload,
+                action="audit.verify",
+                prior_hash="GENESIS",
+                integrity_hash=integrity_hash,
+            )
+        )
+        db.commit()
+
+    with isolation.owner_engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT has_function_privilege('authclaw_audit_verifier', "
+                "'public.verify_audit_origin(uuid,uuid,text,text,text)', 'EXECUTE')"
+            )
+        ).scalar_one() is True
+
+    with pytest.raises(DBAPIError):
+        with isolation.app_engine.begin() as connection:
+            connection.execute(
+                text("SELECT set_config('app.current_tenant_id', :tenant, true)"),
+                {"tenant": str(tenant.tenant_id)},
+            )
+            assert connection.execute(
+                text("SELECT count(*) FROM public.audit_log_metadata")
+            ).scalar_one() == 0
+            connection.execute(
+                text(
+                    "SELECT public.verify_audit_origin("
+                    ":tenant, :record, :payload, 'GENESIS', :integrity)"
+                ),
+                {
+                    "tenant": tenant.tenant_id,
+                    "record": record_id,
+                    "payload": canonical_payload,
+                    "integrity": integrity_hash,
+                },
+            )
 
 
 def test_authenticated_sessions_only_read_their_own_tenant(isolation: IsolationHarness):

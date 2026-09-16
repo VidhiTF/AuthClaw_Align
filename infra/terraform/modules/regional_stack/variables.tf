@@ -143,11 +143,11 @@ variable "authclaw_env" {
 
 variable "expected_db_revision" {
   type    = string
-  default = "047"
+  default = "048"
 
   validation {
-    condition     = contains(["046", "047", "046,047"], var.expected_db_revision)
-    error_message = "expected_db_revision must be 046, 047, or the temporary 046,047 rollout bridge."
+    condition     = contains(["047", "048", "047,048"], var.expected_db_revision)
+    error_message = "expected_db_revision must be 047, 048, or the temporary 047,048 rollout bridge."
   }
 }
 
@@ -477,6 +477,44 @@ variable "clickhouse_password" {
 variable "enable_audit_consumer" {
   type    = bool
   default = false
+}
+
+variable "audit_consumer_environment" {
+  description = "Non-secret audit TLS settings and certificate paths; shared workers require CLICKHOUSE_SECURE=true and KAFKA_SECURITY_PROTOCOL=SASL_SSL for Kafka."
+  type        = map(string)
+  default     = {}
+  validation {
+    condition     = length(setsubtract(toset(keys(var.audit_consumer_environment)), toset(["CLICKHOUSE_SECURE", "CLICKHOUSE_CA_CERT", "KAFKA_SECURITY_PROTOCOL", "KAFKA_SASL_MECHANISM", "KAFKA_SSL_CAFILE"]))) == 0
+    error_message = "Only audit TLS options belong here; credentials must use secret ARNs."
+  }
+}
+
+variable "audit_consumer_secret_arns" {
+  description = "Externally provisioned AUDIT_POSTGRES_URL (member of authclaw_audit_verifier, sslmode=verify-full) and Kafka SASL credential secret ARNs."
+  type        = map(string)
+  default     = {}
+  validation {
+    condition     = length(setsubtract(toset(keys(var.audit_consumer_secret_arns)), toset(["AUDIT_POSTGRES_URL", "KAFKA_SASL_USERNAME", "KAFKA_SASL_PASSWORD"]))) == 0
+    error_message = "Only audit verifier and Kafka SASL credentials belong here."
+  }
+  validation {
+    condition = alltrue([for arn in values(var.audit_consumer_secret_arns) :
+      can(regex("^arn:[^:]+:secretsmanager:${var.region}:[0-9]{12}:secret:.+$", arn))
+    ])
+    error_message = "Audit-consumer secrets must be Secrets Manager ARNs in this stack's region."
+  }
+}
+
+variable "audit_consumer_secret_kms_key_arns" {
+  description = "Customer-managed KMS key ARNs used by external audit-consumer secrets."
+  type        = set(string)
+  default     = []
+  validation {
+    condition = alltrue([for arn in var.audit_consumer_secret_kms_key_arns :
+      can(regex("^arn:[^:]+:kms:${var.region}:[0-9]{12}:key/.+$", arn))
+    ])
+    error_message = "Audit-consumer KMS keys must be key ARNs in this stack's region."
+  }
 }
 
 variable "tags" {

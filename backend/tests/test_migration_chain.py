@@ -25,6 +25,11 @@ def test_bootstrap_creates_roles_before_worker_schema(monkeypatch):
     monkeypatch.setattr(bootstrap, "ensure_auth_definer_role", lambda conn: None)
     monkeypatch.setattr(bootstrap, "ensure_agent_auth_definer_role", lambda conn: None)
     monkeypatch.setattr(
+        bootstrap,
+        "ensure_audit_verifier_role",
+        lambda conn: created.add("audit_verifier"),
+    )
+    monkeypatch.setattr(
         bootstrap, "ensure_login_role", lambda conn, role: created.add(role.name)
     )
 
@@ -33,6 +38,7 @@ def test_bootstrap_creates_roles_before_worker_schema(monkeypatch):
 
     def prepare_worker(conn, owner):
         assert owner in created, "worker schema owner must exist first"
+        assert "audit_verifier" in created
         raise BoundaryReached
 
     monkeypatch.setattr(
@@ -42,17 +48,28 @@ def test_bootstrap_creates_roles_before_worker_schema(monkeypatch):
         bootstrap.prepare(MagicMock(), "fresh_test", roles)
 
 
-def test_finding_status_migration_follows_platform_history():
+def test_audit_origin_reader_migration_follows_platform_history(monkeypatch):
     backend = Path(__file__).resolve().parents[1]
     config = Config(str(backend / "alembic.ini"))
     config.set_main_option("script_location", str(backend / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["047"]
+    assert scripts.get_heads() == ["048"]
+    assert scripts.get_revision("048").down_revision == "047"
     assert scripts.get_revision("047").down_revision == "046"
     assert scripts.get_revision("046").down_revision == "045"
     assert scripts.get_revision("045").down_revision == "044"
     revisions = list(scripts.walk_revisions())
     assert len({revision.revision for revision in revisions}) == len(revisions)
+
+    statements = []
+    migration = scripts.get_revision("048").module
+    monkeypatch.setattr(migration.op, "execute", statements.append)
+    migration.upgrade()
+    function = statements[0]
+    assert "SECURITY DEFINER" in function
+    assert "RETURNS boolean" in function
+    assert "CREATE POLICY" not in function
+    assert "FROM PUBLIC" in function
 
 
 def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch):
@@ -61,12 +78,12 @@ def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch)
     from app.core.startup_checks import compatible_database_revisions
 
     monkeypatch.delenv("AUTHCLAW_EXPECTED_DB_REVISION", raising=False)
-    assert compatible_database_revisions() == ("047",)
+    assert compatible_database_revisions() == ("048",)
 
-    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "046, 047")
-    assert compatible_database_revisions() == ("046", "047")
+    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "047, 048")
+    assert compatible_database_revisions() == ("047", "048")
 
-    for invalid in ("047,047", "46", "047,048", "045,046,047", "047,head"):
+    for invalid in ("048,048", "47", "046,047", "046,047,048", "048,head"):
         monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", invalid)
         with pytest.raises(RuntimeError):
             compatible_database_revisions()

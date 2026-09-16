@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import sys
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -240,3 +241,48 @@ def test_failed_message_is_acknowledged_only_after_durable_dlq_publish(monkeypat
     else:
         assert transport.ack.call_count == 2
         transport.retry.assert_not_called()
+
+
+@pytest.mark.parametrize("proof_kind", ["valid", "missing", "forged", "cross-tenant", "outage", "replay"])
+def test_authoritative_origin_is_checked_before_insertion_or_replay(monkeypatch, proof_kind):
+    payload = event()
+    insert = configure(monkeypatch, exists=proof_kind == "replay")
+    monkeypatch.setenv("AUDIT_POSTGRES_URL", "postgresql://reader@postgres/authclaw")
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    proof = (proof_kind in {"valid", "replay"},)
+    connection.execute.return_value.fetchone.return_value = proof
+    connect = MagicMock(return_value=connection)
+    if proof_kind == "outage":
+        connect.side_effect = OSError("unavailable")
+    monkeypatch.setitem(sys.modules, "psycopg", types.SimpleNamespace(connect=connect))
+    if proof_kind in {"valid", "replay"}:
+        _process_message(MagicMock(), payload)
+        assert insert.call_count == (proof_kind == "valid")
+    else:
+        error = RetryableMirrorError if proof_kind == "outage" else InvalidAuditEvent
+        with pytest.raises(error):
+            _process_message(MagicMock(), payload)
+        insert.assert_not_called()
+    if proof_kind != "outage":
+        assert connection.execute.call_args.args[1] == (
+            TENANT,
+            RECORD,
+            payload["canonical_payload"],
+            payload["prior_hash"],
+            payload["integrity_hash"],
+        )
+
+
+def test_shared_environment_requires_https_and_authoritative_database(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_ENV", "staging")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "strong-runtime-secret")
+    monkeypatch.setenv("CLICKHOUSE_SECURE", "false")
+    with pytest.raises(RuntimeError, match="CLICKHOUSE_SECURE"):
+        consumer.validate_runtime_environment()
+    monkeypatch.setenv("CLICKHOUSE_SECURE", "true")
+    monkeypatch.setenv("AUDIT_POSTGRES_URL", "postgresql://reader@postgres/db?sslmode=require")
+    with pytest.raises(RuntimeError, match="verify-full"):
+        consumer.validate_runtime_environment()
+    monkeypatch.setenv("AUDIT_POSTGRES_URL", "postgresql://reader@postgres/db?sslmode=verify-full")
+    consumer.validate_runtime_environment()

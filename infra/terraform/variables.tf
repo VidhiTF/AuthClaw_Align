@@ -210,13 +210,13 @@ variable "authclaw_env" {
 }
 
 variable "expected_db_revision" {
-  description = "Allowed Alembic head: use 046,047 only during the controlled 047 rollout, then tighten to 047."
+  description = "Allowed Alembic head: use 047,048 only during the controlled 048 rollout, then tighten to 048."
   type        = string
-  default     = "047"
+  default     = "048"
 
   validation {
-    condition     = contains(["046", "047", "046,047"], var.expected_db_revision)
-    error_message = "expected_db_revision must be 046, 047, or the temporary 046,047 rollout bridge."
+    condition     = contains(["047", "048", "047,048"], var.expected_db_revision)
+    error_message = "expected_db_revision must be 047, 048, or the temporary 047,048 rollout bridge."
   }
 }
 
@@ -558,6 +558,36 @@ variable "enable_audit_consumer" {
   description = "Run the audit consumer ECS service when Kafka/ClickHouse are configured."
   type        = bool
   default     = false
+}
+
+variable "audit_consumer_environment" {
+  description = "Non-secret audit transport TLS settings."
+  type        = map(string)
+  default     = {}
+}
+
+variable "audit_consumer_secret_arns" {
+  description = "Primary-region PostgreSQL (authclaw_audit_verifier member) and Kafka SASL secret ARNs."
+  type        = map(string)
+  default     = {}
+}
+
+variable "audit_consumer_secret_kms_key_arns" {
+  description = "Primary-region customer-managed KMS key ARNs used by audit-consumer secrets."
+  type        = set(string)
+  default     = []
+}
+
+variable "secondary_audit_consumer_secret_arns" {
+  description = "Secondary-region PostgreSQL verifier and Kafka SASL secret ARNs."
+  type        = map(string)
+  default     = {}
+}
+
+variable "secondary_audit_consumer_secret_kms_key_arns" {
+  description = "Secondary-region customer-managed KMS key ARNs used by audit-consumer secrets."
+  type        = set(string)
+  default     = []
 }
 
 variable "tags" {

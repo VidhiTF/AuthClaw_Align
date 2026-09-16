@@ -6,6 +6,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from clickhouse_writer import audit_event_exists, insert_audit_event
 
 
+def test_clickhouse_https_always_verifies_certificate(monkeypatch):
+    from unittest.mock import MagicMock
+    import clickhouse_writer
+
+    monkeypatch.setenv("CLICKHOUSE_SECURE", "true")
+    monkeypatch.setenv("CLICKHOUSE_CA_CERT", "/certs/ca.pem")
+    factory = MagicMock()
+    monkeypatch.setattr(clickhouse_writer.clickhouse_connect, "get_client", factory)
+    clickhouse_writer.get_client("clickhouse", 8443, "authclaw", "mirror", "test-secret")
+    assert factory.call_args.kwargs["secure"] is True
+    assert factory.call_args.kwargs["verify"] is True
+    assert factory.call_args.kwargs["ca_cert"] == "/certs/ca.pem"
+
+
 class QueryResult:
     def __init__(self, rows):
         self.result_rows = rows

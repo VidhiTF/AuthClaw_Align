@@ -1921,6 +1921,10 @@ resource "aws_ecs_task_definition" "audit_consumer" {
       condition     = trimspace(var.clickhouse_host) != ""
       error_message = "Audit consumer requires a ClickHouse host and externally provisioned password secret."
     }
+    precondition {
+      condition     = lookup(var.audit_consumer_environment, "CLICKHOUSE_SECURE", "false") == "true" && contains(keys(var.audit_consumer_secret_arns), "AUDIT_POSTGRES_URL") && (var.audit_stream_transport != "kafka" || (lookup(var.audit_consumer_environment, "KAFKA_SECURITY_PROTOCOL", "") == "SASL_SSL" && contains(keys(var.audit_consumer_secret_arns), "KAFKA_SASL_USERNAME") && contains(keys(var.audit_consumer_secret_arns), "KAFKA_SASL_PASSWORD")))
+      error_message = "Shared audit consumers require verified HTTPS, a PostgreSQL verifier secret and authenticated Kafka TLS when Kafka is selected."
+    }
   }
 
   runtime_platform {
@@ -1937,7 +1941,7 @@ resource "aws_ecs_task_definition" "audit_consumer" {
       essential = true
       cpu       = var.service_cpu
       memory    = var.service_memory
-      environment = concat(local.common_environment, local.audit_sqs_environment, local.audit_sqs_consumer_environment, [
+      environment = concat(local.common_environment, local.audit_sqs_environment, local.audit_sqs_consumer_environment, [for name, value in var.audit_consumer_environment : { name = name, value = value }], [
         { name = "KAFKA_TOPICS", value = "gateway.traffic,audit.events" },
         { name = "KAFKA_DLQ_TOPIC", value = "audit.deadletter" },
         { name = "AUDIT_CONSUMER_METRICS_PORT", value = "9108" },
@@ -1953,9 +1957,7 @@ resource "aws_ecs_task_definition" "audit_consumer" {
           protocol      = "tcp"
         }
       ]
-      secrets = var.clickhouse_host != "" ? [
-        { name = "CLICKHOUSE_PASSWORD", valueFrom = aws_secretsmanager_secret.clickhouse_password[0].arn }
-      ] : []
+      secrets                = local.audit_consumer_secrets
       readonlyRootFilesystem = true
       privileged             = false
       stopTimeout            = 30

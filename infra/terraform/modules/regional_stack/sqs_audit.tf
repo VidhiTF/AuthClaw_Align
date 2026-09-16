@@ -10,6 +10,7 @@ locals {
     { name = "SQS_AUDIT_QUEUE_URL", value = aws_sqs_queue.audit[0].url }
   ]) : local.audit_sqs_environment
   audit_sqs_consumer_environment = local.audit_sqs_enabled ? [
+    { name = "SQS_AUDIT_QUEUE_URL", value = aws_sqs_queue.audit[0].url },
     { name = "SQS_LONG_POLL_SECONDS", value = tostring(var.audit_sqs_long_poll_seconds) },
     { name = "SQS_MAX_MESSAGES", value = tostring(var.audit_sqs_max_messages) },
     { name = "SQS_VISIBILITY_TIMEOUT_SECONDS", value = tostring(var.audit_sqs_visibility_timeout_seconds) }

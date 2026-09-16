@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import types
+import base64
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,6 +10,42 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from transport import AuditMessage, KafkaAuditConsumer, SQSFIFOAuditConsumer, make_audit_consumer  # noqa: E402
+
+
+@pytest.mark.parametrize("raw", [b"\xff", b"{", b"[]", None])
+def test_kafka_malformed_record_does_not_block_valid_successor(monkeypatch, raw):
+    position = types.SimpleNamespace(topic="audit.events", partition=2)
+    adapter = KafkaAuditConsumer.__new__(KafkaAuditConsumer)
+    adapter._consumer = MagicMock()
+    adapter._observe_lag = MagicMock()
+    adapter._consumer.poll.return_value = types.SimpleNamespace(items=lambda: [(position, [
+        types.SimpleNamespace(value=raw, offset=4),
+        types.SimpleNamespace(value=b'{"tenant_id":"valid"}', offset=5),
+    ])])
+    first, later = adapter.poll(1000)[0]
+    assert first.validation_error is not None
+    assert base64.b64decode(first.value["raw_value_base64"]) == (raw or b"")
+    assert (first.value["topic"], first.value["partition"], first.value["offset"]) == ("audit.events", 2, 4)
+    assert later.validation_error is None
+    assert later.value == {"tenant_id": "valid"}
+
+
+def test_kafka_shared_transport_requires_credentials_and_verified_tls(monkeypatch):
+    from transport import kafka_security_options
+
+    monkeypatch.setenv("AUTHCLAW_ENV", "staging")
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")
+    with pytest.raises(RuntimeError, match="SASL_SSL"):
+        kafka_security_options()
+    monkeypatch.setenv("KAFKA_SECURITY_PROTOCOL", "SASL_SSL")
+    monkeypatch.delenv("KAFKA_SASL_PASSWORD", raising=False)
+    with pytest.raises(RuntimeError, match="credentials"):
+        kafka_security_options()
+    monkeypatch.setenv("KAFKA_SASL_USERNAME", "audit-reader")
+    monkeypatch.setenv("KAFKA_SASL_PASSWORD", "test-secret")
+    options = kafka_security_options()
+    assert options["ssl_check_hostname"] is True
+    assert options["security_protocol"] == "SASL_SSL"
 
 
 TENANT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
