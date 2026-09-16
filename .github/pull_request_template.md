@@ -63,6 +63,15 @@ Complete every field; use N/A with a reason where appropriate.
 - Production-like fail-closed behavior and relevant negative-case evidence for
   secrets, transport security, debugging, and external services (or N/A with reason):
 
+## Material line-growth exception
+
+- Positive net growth in non-prose files, counted per file (code, tests and config):
+- At 100 or more lines, explain the exception and rejected reuse/deletion options;
+  below that threshold, state the count and why an exception is not required:
+- Component owners must include the marker printed by
+  `python scripts/repository_policy.py --pr-evidence <PR-number>` in their current-head
+  approving review. The author cannot grant this exception; PR edits change its digest.
+
 ## Tenant isolation evidence
 
 - Tenant key and trusted source; affected paths and operations:

@@ -8,7 +8,11 @@ import re
 import unittest
 from unittest.mock import patch
 
-from scripts.repository_policy import approval_users, validate_manifest, verify_github, verify_owner_reviews, verify_t01
+from scripts.repository_policy import (REQUIRED_SECTIONS, approval_users, growth_evidence,
+    validate_live_rules, validate_manifest, verify_github, verify_live_protection,
+    verify_owner_reviews, verify_pr_evidence, verify_t01)
+from scripts import check_line_budget
+from io import StringIO
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -86,6 +90,8 @@ class ActivationTests(unittest.TestCase):
         self.reviews = [{"id": n, "user": {"login": user}, "state": "APPROVED",
                          "commit_id": self.sha}
                         for n, user in enumerate(self.record["required_approvers"], 1)]
+        self.pr["body"] = "\n".join(f"## {heading}\nEvidence documents scripts/repository_policy.py behavior with unit test results."
+                                    for heading in REQUIRED_SECTIONS)
 
     def test_checked_in_manifest_and_github_merge_evidence(self):
         validate_manifest(self.record)
@@ -166,7 +172,8 @@ class ActivationTests(unittest.TestCase):
         rules = f"* @{primary} @{deputy}\n/private/ @missing @{deputy}\n"
         content = {"content": base64.b64encode(rules.encode()).decode()}
         api.side_effect = [self.pr, self.reviews, current, self.reviews,
-                           [{"filename": "public/file.py", "previous_filename": "private/file.py"}], content]
+                           [{"filename": "public/file.py", "previous_filename": "private/file.py", "additions": 1, "deletions": 0}], content,
+                           {"content": base64.b64encode(b"template").decode()}]
         with self.assertRaisesRegex(ValueError, "private/file.py"):
             verify_github(self.record, {"pull_request": current})
         self.assertIn("ref=" + "e" * 40, api.call_args.args[0])
@@ -177,6 +184,19 @@ class ActivationTests(unittest.TestCase):
         api.side_effect = [self.pr, self.reviews, current, self.reviews, [{"filename": "README.md"}]]
         with self.assertRaisesRegex(ValueError, "Incomplete"):
             verify_github(self.record, {"pull_request": current})
+
+    @patch("scripts.repository_policy.api")
+    def test_material_growth_requires_explicit_owner_exception(self, api):
+        self.pr.update(state="open", merged=False, merged_at=None, changed_files=1)
+        files = [{"filename": "scripts/repository_policy.py", "additions": 100, "deletions": 0}]
+        api.side_effect = [self.pr, self.reviews, files]
+        with self.assertRaisesRegex(ValueError, "line-growth approval"):
+            verify_github(self.record, {"pull_request": self.pr})
+        evidence = verify_pr_evidence(self.pr["body"], (ROOT / ".github/pull_request_template.md").read_text())
+        _, digest = growth_evidence(files, evidence)
+        self.reviews[0]["body"] = f"Line-growth-approved: {self.sha} {digest}"
+        api.side_effect = [self.pr, self.reviews, files]
+        self.assertEqual(verify_github(self.record, {"pull_request": self.pr})["status"], "approved-awaiting-merge")
 
 
 class OwnerReviewTests(unittest.TestCase):
@@ -198,6 +218,104 @@ class OwnerReviewTests(unittest.TestCase):
             verify_owner_reviews(rules, ["backend/policy.py"], {"platform", "agent"}, "author")
         with self.assertRaisesRegex(ValueError, "Unsupported"):
             verify_owner_reviews("*.py @owner", ["code.py"], {"owner", "other"}, "author")
+
+
+class LiveProtectionTests(unittest.TestCase):
+    def setUp(self):
+        self.rules = json.loads((ROOT / ".github/master-review-ruleset.json").read_text())["rules"]
+
+    def test_desired_rules_require_live_review_and_ci_controls(self):
+        validate_live_rules(self.rules)
+        for kind in ("pull_request", "required_status_checks", "deletion"):
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                validate_live_rules([rule for rule in self.rules if rule["type"] != kind])
+        self.rules[3]["parameters"]["required_approving_review_count"] = 1
+        with self.assertRaises(ValueError):
+            validate_live_rules(self.rules)
+
+    def test_each_required_control_fails_closed(self):
+        for section, key in ((3, "dismiss_stale_reviews_on_push"), (3, "require_code_owner_review"),
+                             (3, "require_last_push_approval"), (3, "required_review_thread_resolution"),
+                             (4, "strict_required_status_checks_policy")):
+            rules = deepcopy(self.rules)
+            rules[section]["parameters"][key] = False
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate_live_rules(rules)
+
+    @patch("scripts.repository_policy.api")
+    def test_live_missing_or_bypass_rules_cannot_pass(self, api):
+        api.return_value = [{"type": "deletion", "ruleset_id": 1}]
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            verify_live_protection("example/repo")
+        rules = [dict(rule, ruleset_id=1) for rule in self.rules]
+        for bypass, enforcement in ((1, "ACTIVE"), (0, "EVALUATE")):
+            api.side_effect = [rules, {"enforcement": "active", "node_id": "RRS_1"},
+                               {"data": {"node": {"enforcement": enforcement, "bypassActors": {"totalCount": bypass}}}}]
+            with self.assertRaisesRegex(ValueError, "no administrator"):
+                verify_live_protection("example/repo")
+
+    @patch("scripts.repository_policy.api")
+    def test_valid_live_rules_pass_and_api_failure_is_not_a_bypass(self, api):
+        api.side_effect = [[dict(rule, ruleset_id=1) for rule in self.rules],
+                           {"enforcement": "active", "node_id": "RRS_1"},
+                           {"data": {"node": {"enforcement": "ACTIVE", "bypassActors": {"totalCount": 0}}}}]
+        self.assertEqual(verify_live_protection("example/repo")["ruleset_id"], 1)
+        api.side_effect = RuntimeError("API unavailable")
+        with self.assertRaises(RuntimeError):
+            verify_live_protection("example/repo")
+
+
+class EvidenceAndBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.template = (ROOT / ".github/pull_request_template.md").read_text(encoding="utf-8")
+        self.body = "\n".join(f"## {heading}\nReviewed backend/app paths; tests provide the operation-specific evidence."
+                              for heading in REQUIRED_SECTIONS)
+
+    def test_missing_empty_template_placeholder_and_duplicate_sections_fail(self):
+        for body in ("", self.template, self.body.replace("## Risk", "## Other"),
+                     self.body + "\n## Risk\nDuplicated risk section cannot shadow evidence."):
+            with self.subTest(body=body[:30]), self.assertRaises(ValueError):
+                verify_pr_evidence(body, self.template)
+        for value in ("", "N/A", "TBD", "done", "TBD TODO pending done not applicable"):
+            bad = self.body.replace("## Existing-code reuse\nReviewed backend/app paths; tests provide the operation-specific evidence.",
+                                    "## Existing-code reuse\n" + value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                verify_pr_evidence(bad, self.template)
+        self.assertEqual(set(verify_pr_evidence(self.body, self.template)), set(REQUIRED_SECTIONS))
+
+    def test_growth_cannot_be_offset_by_deletion_or_rename_and_digest_binds_evidence(self):
+        evidence = verify_pr_evidence(self.body, self.template)
+        files = [{"filename": "scripts/tool.py", "additions": 110, "deletions": 10},
+                 {"filename": "backend/old.py", "additions": 0, "deletions": 300},
+                 {"filename": "docs/guide.md", "additions": 500, "deletions": 0}]
+        growth, digest = growth_evidence(files, evidence)
+        self.assertEqual(growth, {"scripts/tool.py": 100})
+        self.assertNotEqual(digest, growth_evidence(files, dict(evidence, Risk="Changed risk evidence"))[1])
+        files[0]["additions"] += 1
+        self.assertNotEqual(digest, growth_evidence(files, evidence)[1])
+        growth, _ = growth_evidence([{"filename": "requirements.txt", "additions": 100, "deletions": 0}], evidence)
+        self.assertEqual(growth, {"requirements.txt": 100})
+
+    def test_growth_exception_requires_current_explicit_approval_not_old_marker(self):
+        marker = "Line-growth-approved: " + "a" * 40 + " " + "b" * 64
+        review = {"id": 1, "user": {"login": "owner"}, "state": "APPROVED", "commit_id": "a" * 40, "body": marker}
+        self.assertEqual(approval_users([review], "a" * 40, "author", marker), {"owner"})
+        for replacement in ({"body": "Approved without growth exception"}, {"state": "DISMISSED"},
+                            {"commit_id": "c" * 40}, {"body": "Rejected " + marker}):
+            self.assertFalse(approval_users([review, dict(review, id=2, **replacement)], "a" * 40, "author", marker))
+
+    def test_budget_checker_rejects_empty_missing_and_over_budget_reports(self):
+        def run(payload):
+            with patch("sys.stdin", StringIO(json.dumps(payload))), patch("sys.stdout", StringIO()), \
+                 patch.object(check_line_budget, "load_budgets", return_value=[("backend/app/*", 10)]):
+                return check_line_budget.main()
+        with self.assertRaises(SystemExit):
+            run({})
+        report = lambda path, code: {"Python": {"reports": [{"name": path, "stats": {"code": code}}]}}
+        with self.assertRaises(SystemExit):
+            run(report("other/file.py", 1))
+        self.assertEqual(run(report("./backend/app/file.py", 10)), 0)
+        self.assertEqual(run(report("backend/app/file.py", 11)), 1)
 
 
 if __name__ == "__main__":

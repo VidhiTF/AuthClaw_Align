@@ -63,6 +63,22 @@ changed by this PR. Do not merge based solely on this file or a green old CI run
    gh api repos/VidhiTF/AuthClaw_Align/branches/master/protection
    ```
 
+   Also install the additive, CI-readable
+   [review ruleset](../.github/master-review-ruleset.json). If its name already
+   exists, update that resolved ID with PUT instead of creating a duplicate.
+   Keep the existing deletion/force-push ruleset and stronger controls intact:
+
+   ```powershell
+   gh api --method POST repos/VidhiTF/AuthClaw_Align/rulesets --input .github/master-review-ruleset.json
+   gh api repos/VidhiTF/AuthClaw_Align/rules/branches/master
+   ```
+
+   CI queries this effective-rules endpoint, validates one complete enforcing
+   ruleset, and uses GraphQL `RepositoryRuleset.bypassActors.totalCount` to require
+   no bypasses. Ordinary CI does not receive an admin token. Missing permissions
+   or incomplete controls fail closed. Classic protection alone is not sufficient
+   for this read-only machine gate; keep both checked-in configurations aligned.
+
 2. Verify the read-back: two approvals, CODEOWNER review, stale dismissal, latest
    push approval, strict required CI, administrator enforcement, and no bypasses.
    Retain the output and a PR showing that one approval cannot merge. Do not
@@ -71,6 +87,9 @@ changed by this PR. Do not merge based solely on this file or a green old CI run
    [t01-activation.json](../.github/t01-activation.json). Rerun the latest PR CI
    if necessary; review submission, editing, and dismissal also rerun CI. Pending
    approvals intentionally fail Repository Policy. A new push needs new approvals.
+   For material growth, the component owners also include the explicit exception
+   marker from `python scripts/repository_policy.py --pr-evidence 52` in their
+   approving reviews. See CONTRIBUTING.md for the threshold and digest contract.
 4. Confirm required checks and stakeholder evidence, then merge T01. CODEOWNERS
    is read from the base branch, so its new ownership mapping takes effect after
    this merge. The T01 verifier supplies the specific bootstrap stakeholder gate.
@@ -93,6 +112,8 @@ only administrator read-back and merge-blocking evidence prove live enforcement.
   always run. `ACL-14 Required Checks` rejects failed, missing, or skipped selected
   jobs; only unselected jobs may skip. Documentation-only changes can legitimately
   skip component suites while policy checks run.
+  PR-description edits rerun the evidence gate. Policy also runs the existing
+  Tokei line-budget checker and verifies live enforcement before activation.
 - Master pushes normally run policy and selected smoke/contract checks. Scheduled
   and manual full regression select the established broader suites. ARM64 image
   checks require the relevant input/configuration and eligible event.

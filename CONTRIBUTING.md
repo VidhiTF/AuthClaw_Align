@@ -32,6 +32,14 @@ the latest PR CI; do not push an empty commit because it invalidates approvals.
 T01 must not merge until an administrator applies and verifies the checked-in
 two-approval protection configuration. See the
 [activation runbook](docs/BRANCH_GOVERNANCE.md#t01-enforcement-bootstrap).
+The verifier reads the live effective branch rules and checks active enforcement,
+two approvals, CODEOWNER review, dismissal of stale reviews, latest-push approval,
+resolved threads, strict required CI, deletion/force-push protection, linear
+history, and zero bypass actors. An inaccessible, missing, or weakened ruleset
+fails CI even when approvals are present. The reviewed
+[ruleset payload](.github/master-review-ruleset.json) makes these controls readable
+by ordinary CI without giving PR code an administrator token. The administrator
+also aligns classic branch protection with the existing two-approval payload.
 This setup is part of T01, not deferred to T19. Activation is pending until the
 live settings, stakeholder approvals, required checks, and merge are evidenced.
 
@@ -95,6 +103,38 @@ evidence. Verify the layers independently; a privileged database test role must
 not mask missing tenant enforcement. Document any absent layer and the actual
 alternative control without claiming coverage. N/A requires a reason tied to the
 changed paths and operations. A checked box is not evidence.
+
+### PR evidence and code-growth gates
+
+CI validates every required evidence section in the PR template. Missing/duplicate
+headings, untouched template instructions, blank answers, and obvious placeholders
+fail. N/A needs a concrete reason. PR-body edits trigger reevaluation. These checks
+detect missing evidence; they cannot establish semantic necessity or the truth of
+a prose claim. The independent component owner makes that decision.
+
+The existing `scripts/check_line_budget.py` runs on Tokei 12.1.2 per-file code
+counts for every AGENTS.md budget scope. Empty/incomplete reports and exceeded
+budgets fail. Material growth does not waive a hard budget.
+
+Material growth is at least 100 positive net added lines, summed per changed
+non-prose file. Code, configuration, tests, and tooling count; `.md`, `.rst`, and
+`.txt` files under `docs/` are treated as prose. Other `.txt` configuration counts.
+Deletion elsewhere cannot offset growth. Explain the
+exception in the PR's **Material line-growth exception** section. Each affected
+growing path requires its independent primary/deputy owner to explicitly approve
+the exception in a current-head GitHub review using:
+
+```text
+Line-growth-approved: <full-head-SHA> <evidence-SHA256>
+```
+
+Obtain the exact marker with
+`python scripts/repository_policy.py --pr-evidence <PR-number>`. The digest binds
+all required PR evidence sections and the per-file growth map. A changed commit,
+changed evidence, dismissal, or replacement approval without the marker invalidates
+the exception. A PR-author assertion or comment is insufficient. Two independent
+ordinary approvals are still required. Record actual counts even below the threshold.
+Put the marker only in the approving review, not in the PR evidence it hashes.
 
 ## Cross-review and completion
 
