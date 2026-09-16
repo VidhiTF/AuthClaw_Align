@@ -201,11 +201,14 @@ def post_message(
                 f"ID: {scan_res['workflow_id']}. State: {scan_res['current_state']}."
             )
             results_payload = scan_res
-        except HTTPException:
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                logger.exception("Failed to trigger scan from chat")
+                raise HTTPException(exc.status_code, "Unable to start the scan. Please try again later.") from None
             raise
-        except Exception as exc:
-            logger.error("Failed to trigger scan from chat: %s", exc)
-            response_text = f"Failed to execute scan request: {str(exc)}"
+        except Exception:
+            logger.exception("Failed to trigger scan from chat")
+            response_text = "Unable to start the scan. Please try again later."
 
     elif intent == "EXECUTION_REQUEST":
         # Find UUID in user message
@@ -225,11 +228,14 @@ def post_message(
                     f"Remediation workflow initiated for scan {workflow_id}. "
                     "A pending approval requires your MFA confirmation before execution."
                 )
-            except HTTPException:
+            except HTTPException as exc:
+                if exc.status_code >= 500:
+                    logger.exception("Failed to trigger remediation from chat")
+                    raise HTTPException(exc.status_code, "Unable to start remediation. Please try again later.") from None
                 raise
-            except Exception as exc:
-                logger.error("Failed to trigger remediation from chat: %s", exc)
-                response_text = f"Failed to execute remediation: {str(exc)}"
+            except Exception:
+                logger.exception("Failed to trigger remediation from chat")
+                response_text = "Unable to start remediation. Please try again later."
 
     else:  # READ_ONLY: Query Gemini via reverse proxy (current message only)
         gateway_url = os.getenv("GATEWAY_URL", "http://localhost:8080")
