@@ -108,14 +108,17 @@ def simulate_policy_decision(
             },
         )
 
-    result = simulate_policy(
-        policy_yaml,
-        model=simulation.model,
-        route=simulation.route,
-        prompts=simulation.prompts,
-        topics=simulation.topics,
-        rate_limit_exceeded=simulation.rate_limit_exceeded,
-    )
+    try:
+        result = simulate_policy(
+            policy_yaml,
+            model=simulation.model,
+            route=simulation.route,
+            prompts=simulation.prompts,
+            topics=simulation.topics,
+            rate_limit_exceeded=simulation.rate_limit_exceeded,
+        )
+    except PolicyValidationError as exc:
+        raise _validation_http_error(exc) from exc
     return PolicySimulationResponse(
         **result.as_dict(),
         policy_id=policy.id if policy else simulation.policy_id,

@@ -10,6 +10,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, require_roles, require_scopes
+from app.core.bff_client_ip import authenticate_bff_client_ip
 from app.db.dependencies import get_db
 from app.db.models import Tenant, TrustCenterShare
 from app.services.email_service import EmailDeliveryError
@@ -217,11 +218,19 @@ def get_public_trust_center_export(
         pass
 
 
-@router.post("/public/{token}/request-access")
+def _limit_auditor_access(request: Request, token: str, operation: str) -> None:
+    from app.api.v1.endpoints.onboarding import _enforce_onboarding_rate_limit, _rate_limit_hash
+    for kind, identity, limit in (("ip", request.client.host if request.client else "unknown", 60), ("share", token, 10 if operation == "send" else 30)):
+        _enforce_onboarding_rate_limit(f"auditor:{operation}:{kind}:{_rate_limit_hash(identity)}", limit, 900, "Too many auditor access requests")
+
+
+@router.post("/public/{token}/request-access", dependencies=[Depends(authenticate_bff_client_ip)])
 def request_public_trust_center_access(
     token: str,
+    request: Request,
     db: Session = Depends(get_db),
 ):
+    _limit_auditor_access(request, token, "send")
     try:
         share = _public_share_or_404(db, token)
         tenant = db.query(Tenant).filter(Tenant.id == share.tenant_id).first()
@@ -235,12 +244,14 @@ def request_public_trust_center_access(
         pass
 
 
-@router.post("/public/{token}/verify-access")
+@router.post("/public/{token}/verify-access", dependencies=[Depends(authenticate_bff_client_ip)])
 def verify_public_trust_center_access(
     token: str,
     payload: TrustCenterAccessVerifyRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
+    _limit_auditor_access(request, token, "verify")
     try:
         share = _public_share_or_404(db, token)
         try:

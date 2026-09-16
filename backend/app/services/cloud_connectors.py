@@ -180,6 +180,8 @@ def _credentials(connector: CloudConnector) -> dict[str, Any]:
 
 
 def verify_connector(db: Session, connector: CloudConnector, *, commit: bool = True) -> dict[str, Any]:
+    if connector.status == "revoked" or connector.revoked_at is not None:
+        raise ValueError("Connector is revoked")
     try:
         result = _verify(connector.provider, _credentials(connector), connector.metadata_json or {})
         connector.status = "connected"
@@ -198,7 +200,7 @@ def verify_connector(db: Session, connector: CloudConnector, *, commit: bool = T
 
 
 def run_action(db: Session, connector: CloudConnector, action: str, payload: dict[str, Any], actor_id: Any, request_id: str = "") -> dict[str, Any]:
-    if connector.status == "revoked":
+    if connector.status == "revoked" or connector.revoked_at is not None:
         raise ValueError("Connector is revoked")
     action = action.strip().lower()
     if action not in PROVIDERS[connector.provider]["actions"]:

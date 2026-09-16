@@ -1,4 +1,4 @@
-"""Body-bound, short-lived console client identity for password login."""
+"""Path/body-bound, short-lived console client identity for public auth routes."""
 
 import hashlib
 import hmac
@@ -42,7 +42,8 @@ async def authenticate_bff_client_ip(request: Request) -> None:
     body = await request.body()
     if len(body) > 65536:
         raise invalid
-    material = DOMAIN + context + "\n" + hashlib.sha256(body).hexdigest()
+    path = request.url.path.removeprefix("/api") if request.url.path.startswith("/api/v1/") else request.url.path
+    material = f"authclaw:bff-client-ip:v1\n{request.method}\n{path}\n{context}\n" + hashlib.sha256(body).hexdigest()
     secret = os.getenv("BFF_CLIENT_IP_SECRET", "")
     if len(secret) < 32:
         raise HTTPException(503, "Client identity verification unavailable")

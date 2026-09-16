@@ -38,3 +38,5 @@ langchain-core==1.4.9
 # Phase 14 — AWS Connector Framework (boto3 only loaded when AWS_ENABLED=true)
 boto3==1.43.46
 pypdf==6.14.2
+
+google-re2==1.1.20251105  # Linear-time policy regex matching shared with gateway

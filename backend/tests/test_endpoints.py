@@ -135,6 +135,14 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     db_session: Session,
     monkeypatch,
 ):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    signing_key = Ed25519PrivateKey.generate()
+    monkeypatch.delenv("AUDIT_EXPORT_SIGNING_PRIVATE_KEY_PEM", raising=False)
+    monkeypatch.setenv("AUDIT_EXPORT_SIGNING_PRIVATE_KEY", base64.b64encode(
+        signing_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    ).decode("ascii"))
     metrics_before = event_backbone.metrics_snapshot()
     tenant_a_id, tenant_b_id = uuid4(), uuid4()
     owner_a_id, viewer_a_id, owner_b_id = uuid4(), uuid4(), uuid4()
