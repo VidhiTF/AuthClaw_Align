@@ -10,6 +10,11 @@ from scripts.ci_plan import HEAVY_JOBS, changed_paths, plan, verify
 
 
 class CIPlanTests(unittest.TestCase):
+    def test_review_events_recheck_the_same_pr_plan_without_release(self):
+        for paths in (["README.md"], ["gateway/main.go"], ["scripts/repository_policy.py"]):
+            self.assertEqual(plan("pull_request_review", paths, release_enabled=True),
+                             plan("pull_request", paths, release_enabled=True))
+
     def expected(self, event, paths, **kwargs):
         return set(json.loads(plan(event, paths, **kwargs)["expected_jobs"]))
 

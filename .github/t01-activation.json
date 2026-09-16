@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "task": "T01",
+  "repository": "VidhiTF/AuthClaw_Align",
+  "pull_request": 52,
+  "base_branch": "master",
+  "required_approvers": ["RaviiTF", "VidhiTF"],
+  "record_owner": "KunalTF",
+  "effective_date_source": "github.merged_at",
+  "merged_commit_source": "github.merge_commit_sha"
+}

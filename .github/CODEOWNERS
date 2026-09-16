@@ -1,11 +1,21 @@
-# Either eligible engineer can review every change.
-* @RaviiTF @VidhiTF @KunalTF
-
-# Component rules retain the same reviewer set.
-/gateway/ @RaviiTF @VidhiTF @KunalTF
-/backend/ @RaviiTF @VidhiTF @KunalTF
-/audit_consumer/ @RaviiTF @VidhiTF @KunalTF
-/infra/ @RaviiTF @VidhiTF @KunalTF
-/.github/ @RaviiTF @VidhiTF @KunalTF
-/services/agent/ @RaviiTF @VidhiTF @KunalTF
-/console/ @RaviiTF @VidhiTF @KunalTF
+# Role assignments for this user-owned repository; see docs/BRANCH_GOVERNANCE.md.
+# Two independent approvals are required; each boundary has a primary and deputy.
+# Governance custodians (default and policy surfaces)
+* @RaviiTF @VidhiTF
+# Platform/security: primary KunalTF, deputy VidhiTF
+/gateway/ @KunalTF @VidhiTF
+/backend/ @KunalTF @VidhiTF
+/audit_consumer/ @KunalTF @VidhiTF
+/infra/ @KunalTF @VidhiTF
+/scripts/ @KunalTF @VidhiTF
+/sdk/ @KunalTF @VidhiTF
+# Agent: primary VidhiTF, deputy KunalTF
+/services/agent/ @VidhiTF @KunalTF
+# Console/API consumer: primary RaviiTF, deputy VidhiTF
+/console/ @RaviiTF @VidhiTF
+# Governance custodians protect ownership, CI, activation, and contribution rules.
+/.github/ @RaviiTF @VidhiTF
+/AGENTS.md @RaviiTF @VidhiTF
+/CONTRIBUTING.md @RaviiTF @VidhiTF
+/scripts/repository_policy.py @RaviiTF @VidhiTF
+/scripts/test_repository_policy.py @RaviiTF @VidhiTF

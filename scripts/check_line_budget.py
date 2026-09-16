@@ -30,7 +30,7 @@ def iter_tokei_reports(payload: dict) -> list[tuple[str, int]]:
         if language == "Total" or not isinstance(summary, dict):
             continue
         for report in summary.get("reports", []):
-            name = str(report.get("name", "")).replace("\\", "/")
+            name = str(report.get("name", "")).replace("\\", "/").removeprefix("./")
             code = report.get("stats", {}).get("code")
             if name and isinstance(code, int):
                 reports.append((name, code))
@@ -55,7 +55,10 @@ def main() -> int:
 
     budgets = load_budgets()
     overages: list[tuple[str, int, int, str]] = []
-    for path, code_lines in iter_tokei_reports(json.loads(raw)):
+    reports = iter_tokei_reports(json.loads(raw))
+    if not reports or any(not any(fnmatch.fnmatch(path, pattern) for path, _ in reports) for pattern, _ in budgets):
+        raise SystemExit("Incomplete Tokei report: every budget scope must have file evidence")
+    for path, code_lines in reports:
         match = budget_for(path, budgets)
         if match and code_lines > match[1]:
             overages.append((path, code_lines, match[1], match[0]))
