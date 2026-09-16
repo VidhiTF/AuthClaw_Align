@@ -1,3 +1,28 @@
+# AuthClaw agent guardrails
+
+## Required engineering workflow
+
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) for all human and AI-assisted changes.
+It defines the T01 gate, engineering rules, evidence requirements, and named
+cross-review. Read it before editing and use the existing
+[PR template](.github/pull_request_template.md) when preparing a change.
+
+- Before T02–T21 implementation, verify the T01 PR/task record contains Ravi and
+  Vidhi approvals, the merged `master` commit, and Kunal's recorded effective date.
+  Until then, limit work to T01, read-only verification, or documentation preparation.
+- Search existing implementations, extension points, configuration, and test seams
+  first. Document reuse decisions and why new production lines are unavoidable
+  before adding them. Prefer safe deletion and consolidation.
+- Confirm runtime evidence and the corrected issue disposition before remediation.
+  Characterize behavior before risky refactoring and verify the intended contract.
+- Keep one coherent scope, respect the budgets below, and document line growth,
+  tests or operational proof, risk, and rollback in the PR.
+- Require fail-closed production-like defaults for secrets, transport security,
+  debugging, and external services, with relevant negative-case evidence.
+- Follow the semantic duplicate protocol below before merging logical duplicates.
+- Obtain the named independent engineer review in CONTRIBUTING.md. Never mark
+  approvals, merge evidence, tests, or completion as satisfied without evidence.
+
 ## Repository Remote
 
 Use the `align` remote (`https://github.com/VidhiTF/AuthClaw_Align.git`) for

@@ -94,6 +94,11 @@ See `docs/COMPLIANCE_BOUNDARY.md`, `docs/ARCHITECTURE.md`, and
 
 ## Branch workflow
 
+All human and AI-assisted contributions follow [CONTRIBUTING.md](CONTRIBUTING.md)
+and [AGENTS.md](AGENTS.md). T01 requires Ravi and Vidhi approval and a recorded
+merge before action-plan implementation tasks begin; use the
+[pull request template](.github/pull_request_template.md) to supply evidence.
+
 - `master` — release integration branch; required protection is defined in
   `.github/branch-protection-master.json`.
 - `dev/kunal` — gateway, backend, audit, infrastructure and CI work.
