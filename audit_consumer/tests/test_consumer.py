@@ -269,6 +269,10 @@ def test_authoritative_origin_is_checked_before_insertion_or_replay(monkeypatch,
             _process_message(MagicMock(), payload)
         insert.assert_not_called()
     if proof_kind != "outage":
+        assert connection.execute.call_args_list[1].args == (
+            "SELECT set_config('app.current_tenant_id', %s, true)",
+            (TENANT,),
+        )
         assert connection.execute.call_args.args[1] == (TENANT, RECORD)
 
 
