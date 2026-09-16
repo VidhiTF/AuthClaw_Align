@@ -27,12 +27,12 @@ are relative to `backend`. Gateway paths are relative to `gateway`.
 
 The patch includes only supporting RE2 lock entries, BFF route signing, test
 fixtures and CI selection. It does not include the earlier agent implementation,
-tenant registry, migration bumps, UI redesign or console dependency upgrades.
+tenant registry, migration bumps or UI redesign.
 Gateway remains compatible with master revisions 046/047.
 
 Shared deployments must explicitly configure an audit export signing key and
 independent verification trust keys. Bedrock entitlement and budget configuration
 is documented in `BEDROCK_VALIDATION.md`. No live deployment is certified here.
 
-The unchanged master console dependency lock has known audit findings. They are
-outside these two reports and are not waived by this patch.
+The separately requested dependency updates use Next.js and eslint-config-next
+16.3.5, sharp 0.35.4, and js-yaml 5.4.2 to address the console audit findings.
