@@ -173,6 +173,9 @@ jobs:
             tests/test_auth_baseline.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
             tests/test_client_ip.py tests/test_bff_client_ip.py tests/test_release4_abuse_controls.py \
             tests/test_oidc_transactions.py \
+            tests/test_reset_abuse_security.py tests/test_review_logging_and_event_identity.py \
+            tests/test_cloud_security.py tests/test_policy_chat_security.py tests/test_review_audit_security.py \
+            tests/test_audit_export.py tests/test_trust_center.py \
             tests/test_worker_hmac.py tests/test_worker_cleanup.py tests/test_ephemeral_workers.py \
             tests/test_migration_chain.py tests/test_migration_044.py tests/test_auth_session_binding_migration.py tests/test_platform_admin_seed.py \
             tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
@@ -249,6 +252,13 @@ jobs:
           ../.ci-backend-integration/bin/python scripts/bootstrap_database_security.py prepare
           DATABASE_URL="$BACKEND_MIGRATION_DATABASE_URL" ../.ci-backend-integration/bin/python -m alembic upgrade head
           ../.ci-backend-integration/bin/python scripts/bootstrap_database_security.py finalize-backend
+      - name: Verify auditor OTP concurrency
+        working-directory: backend
+        env:
+          REVIEW_DATABASE_URL: ${{ env.BOOTSTRAP_DATABASE_URL }}
+        run: >-
+          timeout 120s ../.ci-backend-integration/bin/python -m pytest -p no:cacheprovider -q
+          tests/test_review_otp_postgres.py
       - name: Run destructive PostgreSQL suites serially
         working-directory: backend
         run: >-
@@ -275,7 +285,8 @@ jobs:
         run: |
           export DATABASE_URL="${BACKEND_DATABASE_URL/postgresql+psycopg:/postgresql:}"
           export AUDIT_TEST_OWNER_DATABASE_URL="${OWNER_DATABASE_URL/postgresql+psycopg:/postgresql:}"
-          go test ./... -count=1 -run '^TestAuditAuthenticatedContextPostgres$'
+          export BEDROCK_TEST_OWNER_DATABASE_URL="$AUDIT_TEST_OWNER_DATABASE_URL"
+          go test ./... -count=1 -run '^Test(AuditAuthenticatedContextPostgres|BedrockBudgetAuthenticatedPostgres)$'
 
   audit:
     name: Audit Consumer Tests
@@ -424,7 +435,7 @@ jobs:
           terraform -chdir=infra/terraform fmt -check -recursive
           terraform -chdir=infra/terraform init -backend=false
           terraform -chdir=infra/terraform validate
-          cat > infra/terraform/ci.auto.tfvars.json <<'JSON'
+          cat > infra/terraform/ci-plan.tfvars.json <<'JSON'
           {
             "environment": "ci",
             "authclaw_env": "ci",
@@ -444,19 +455,18 @@ jobs:
             }
           }
           JSON
-          terraform -chdir=infra/terraform plan -input=false -lock=false -out=kafka.tfplan -var=audit_stream_transport=kafka
+          terraform -chdir=infra/terraform plan -input=false -lock=false -var-file=ci-plan.tfvars.json -out=kafka.tfplan -var=audit_stream_transport=kafka
           terraform -chdir=infra/terraform show -json kafka.tfplan > infra/terraform/kafka-plan.json
           python scripts/assert_audit_transport_plan.py kafka infra/terraform/kafka-plan.json
-          terraform -chdir=infra/terraform plan -input=false -lock=false -out=sqs.tfplan -var=audit_stream_transport=sqs_fifo
+          terraform -chdir=infra/terraform plan -input=false -lock=false -var-file=ci-plan.tfvars.json -out=sqs.tfplan -var=audit_stream_transport=sqs_fifo
           terraform -chdir=infra/terraform show -json sqs.tfplan > infra/terraform/sqs-plan.json
           python scripts/assert_audit_transport_plan.py sqs_fifo infra/terraform/sqs-plan.json
-          if terraform -chdir=infra/terraform plan -input=false -lock=false -var=audit_stream_transport=sqs_fifo -var=audit_sqs_require_alarm_actions=true; then
+          if terraform -chdir=infra/terraform plan -input=false -lock=false -var-file=ci-plan.tfvars.json -var=audit_stream_transport=sqs_fifo -var=audit_sqs_require_alarm_actions=true; then
             echo "::error::production sqs_fifo plan must require audit_sqs_alarm_action_arns"
             exit 1
           fi
-          terraform -chdir=infra/terraform plan -input=false -lock=false -out=sqs-prod.tfplan -var=audit_stream_transport=sqs_fifo -var=audit_sqs_require_alarm_actions=true -var='audit_sqs_alarm_action_arns=["arn:aws:sns:us-east-1:123456789012:authclaw-audit-alerts"]'
+          terraform -chdir=infra/terraform plan -input=false -lock=false -var-file=ci-plan.tfvars.json -out=sqs-prod.tfplan -var=audit_stream_transport=sqs_fifo -var=audit_sqs_require_alarm_actions=true -var='audit_sqs_alarm_action_arns=["arn:aws:sns:us-east-1:123456789012:authclaw-audit-alerts"]'
           python scripts/sqs_audit_deployment_readiness.py --output-json infra/security/sqs-audit-ci-pending.json --output-md infra/security/sqs-audit-ci-pending.md
-          rm infra/terraform/ci.auto.tfvars.json
           terraform -chdir=infra/terraform test
       - name: Internal TLS and SMTP certificate checks
         run: >-

@@ -7,6 +7,7 @@ import binascii
 import hashlib
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from sqlalchemy.orm import Session
+from app.core.startup_checks import is_shared_environment
 
 from app.services.audit_store import (
     GENESIS_HASH,
@@ -29,8 +31,10 @@ from app.services.audit_store import (
 )
 
 EXPORT_FORMAT = "authclaw.audit.export.v2"
+SCOPED_EXPORT_FORMAT = "authclaw.audit.export.v3"
+PROOF_FIELDS = {"record_id", "tenant_id", "tenant_sequence", "prior_hash", "integrity_hash"}
 SIGNATURE_ALGORITHM = "Ed25519"
-VERIFIER_VERSION = "2.0.0"
+VERIFIER_VERSION = "3.0.0"
 
 
 @dataclass(frozen=True)
@@ -88,8 +92,8 @@ def _private_key_from_env() -> Ed25519PrivateKey:
             raise RuntimeError("AUDIT_EXPORT_SIGNING_PRIVATE_KEY must encode 32 bytes")
         return Ed25519PrivateKey.from_private_bytes(raw)
 
-    if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
-        raise RuntimeError("an audit export signing private key is required in production")
+    if is_shared_environment():
+        raise RuntimeError("an audit export signing private key is required in shared environments")
     seed = os.getenv(
         "AUDIT_EXPORT_DEV_SIGNING_SEED",
         "authclaw-dev-audit-export-signing-seed",
@@ -117,7 +121,7 @@ def trusted_signing_keys_from_env() -> dict[str, Any]:
         if not isinstance(value, dict):
             raise RuntimeError("AUDIT_EXPORT_TRUSTED_KEYS_JSON must be an object")
         return value
-    if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
+    if is_shared_environment():
         return {}
     metadata = signing_key_metadata()
     return {
@@ -222,10 +226,21 @@ def _contiguous_selection(
     return included, selected_ids
 
 
-def _chain_report(records: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+def _chain_report(records: list[dict[str, Any]], *, allow_proofs: bool = False) -> tuple[bool, list[str]]:
     errors: list[str] = []
     if not records:
         return True, errors
+    for index, record in enumerate(records):
+        if "proof_only" in record and (
+            not allow_proofs or record["proof_only"] is not True
+            or set(record) != PROOF_FIELDS | {"proof_only"}
+            or type(record["tenant_sequence"]) is not int or record["tenant_sequence"] < 1
+            or any(not isinstance(record[key], str) or not record[key] for key in ("record_id", "tenant_id"))
+            or not isinstance(record["prior_hash"], str)
+            or (record["prior_hash"] != GENESIS_HASH and not re.fullmatch(r"[0-9a-f]{64}", record["prior_hash"]))
+            or not isinstance(record["integrity_hash"], str) or not re.fullmatch(r"[0-9a-f]{64}", record["integrity_hash"])
+        ):
+            return False, [f"record {index} invalid opaque proof"]
     prior_hash = records[0]["prior_hash"]
     prior_sequence = records[0]["tenant_sequence"] - 1
     tenant_id = records[0].get("tenant_id")
@@ -241,7 +256,7 @@ def _chain_report(records: list[dict[str, Any]]) -> tuple[bool, list[str]]:
             errors.append(f"record {index} tenant_sequence is not contiguous")
         if record["prior_hash"] != prior_hash:
             errors.append(f"record {index} prior_hash mismatch")
-        if compute_integrity_hash(record, record["prior_hash"]) != record["integrity_hash"]:
+        if not record.get("proof_only") and compute_integrity_hash(record, record["prior_hash"]) != record["integrity_hash"]:
             errors.append(f"record {index} integrity_hash mismatch for {record_id}")
         prior_sequence = record["tenant_sequence"]
         prior_hash = record["integrity_hash"]
@@ -256,7 +271,7 @@ def _verifier_checksum() -> str:
 def _control_links(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     links: dict[str, list[str]] = {}
     for record in records:
-        for framework in record["frameworks_affected"]:
+        for framework in record.get("frameworks_affected", []):
             links.setdefault(framework, []).append(record["record_id"])
     return [
         {
@@ -290,11 +305,17 @@ def build_signed_audit_export(
         end=end,
     )
     chain_valid, chain_errors = _chain_report(records)
+    if not chain_valid:
+        raise ValueError("Cannot export an invalid audit chain")
+    export_format = SCOPED_EXPORT_FORMAT if framework else EXPORT_FORMAT
+    if framework:
+        selected = set(selected_ids)
+        records = [record if record["record_id"] in selected else {**{key: record[key] for key in PROOF_FIELDS}, "proof_only": True} for record in records]
     first, last = (records[0], records[-1]) if records else ({}, {})
     key = signing_key_metadata()
     records_digest = _sha256_hex(_canonical_bytes(records))
     manifest = {
-        "format_version": EXPORT_FORMAT,
+        "format_version": export_format,
         "export_id": str(uuid.uuid4()),
         "generated_at": standardize_timestamp(datetime.now(tz=timezone.utc)),
         "tenant_id": str(tenant_id),
@@ -319,6 +340,7 @@ def build_signed_audit_export(
         "control_links": _control_links(records),
         "proof": {
             "algorithm": "SHA-256",
+            "hidden_payloads": "Trusted signer attests opaque chain commitments; their payload hashes cannot be recomputed by the recipient." if framework else "none",
             "records_sha256": records_digest,
             "chain_valid_at_export": chain_valid,
             "chain_errors": chain_errors,
@@ -340,7 +362,7 @@ def build_signed_audit_export(
     body_bytes = _canonical_bytes(signed_body)
     signature = _private_key_from_env().sign(body_bytes)
     return {
-        "format": EXPORT_FORMAT,
+        "format": export_format,
         **signed_body,
         "digest": {"algorithm": "SHA-256", "value": _sha256_hex(body_bytes)},
         "signature": {
@@ -357,7 +379,8 @@ def verify_signed_audit_export(
     trusted_keys: Mapping[str, Any] | None = None,
 ) -> VerificationResult:
     errors: list[str] = []
-    if artifact.get("format") != EXPORT_FORMAT:
+    scoped = artifact.get("format") == SCOPED_EXPORT_FORMAT
+    if artifact.get("format") not in {EXPORT_FORMAT, SCOPED_EXPORT_FORMAT}:
         errors.append(f"unsupported export format: {artifact.get('format', '')}")
     manifest = artifact.get("manifest")
     records = artifact.get("records")
@@ -398,14 +421,33 @@ def verify_signed_audit_export(
         increment_metric("audit_export_signing_key_failures_total")
 
     normalized = [
-        _normalize_record(record, index)
+        record if "proof_only" in record else _normalize_record(record, index)
         for index, record in enumerate(records, 1)
         if isinstance(record, dict)
     ]
     if len(normalized) != len(records):
         errors.append("records must be JSON objects")
-    chain_valid, chain_errors = _chain_report(normalized)
+    chain_valid, chain_errors = _chain_report(normalized, allow_proofs=scoped and signature_valid)
     errors.extend(chain_errors)
+    if manifest.get("format_version") != artifact.get("format"):
+        errors.append("manifest format mismatch")
+    if scoped:
+        selection = manifest.get("selection")
+        if not isinstance(selection, dict):
+            errors.append("selection must be a JSON object")
+            selection = {}
+        filters = selection.get("filters")
+        if not isinstance(filters, dict):
+            errors.append("selection filters must be a JSON object")
+            filters = {}
+        framework = filters.get("framework")
+        visible = [row for row in normalized if "proof_only" not in row]
+        if not framework or any(framework not in row["frameworks_affected"] for row in visible):
+            errors.append("framework scope mismatch")
+        if selection.get("selected_record_ids") != [row["record_id"] for row in visible]:
+            errors.append("selected records mismatch")
+        if selection.get("proof_records_retained") != len(normalized) - len(visible):
+            errors.append("opaque proof count mismatch")
 
     proof = manifest.get("proof") if isinstance(manifest.get("proof"), dict) else {}
     if proof.get("records_sha256") != _sha256_hex(_canonical_bytes(records)):

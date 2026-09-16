@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     # API
     API_TITLE: str = "AuthClaw API"
     API_VERSION: str = "0.1.0"
-    DEBUG: bool = True
+    DEBUG: bool = False
     
     # Database
     DATABASE_URL: str = "postgresql://authclaw:authclaw@localhost:5432/authclaw"

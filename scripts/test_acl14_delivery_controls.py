@@ -140,6 +140,14 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("vars.CI_ARM64_ENABLED == 'true'", CI)
         self.assertIn("description: Also build and smoke-test ARM64 runtime images", CI)
 
+    def test_terraform_plan_fixture_is_tls_enabled_and_isolated_from_tests(self):
+        self.assertNotIn("ci.auto.tfvars.json", CI)
+        self.assertIn('"internal_tls": {"enabled": true, "namespace": "internal.example.com"}', CI)
+        plans = [line for line in CI.splitlines() if "terraform -chdir=infra/terraform plan " in line]
+        self.assertEqual(len(plans), 4)
+        for plan in plans:
+            self.assertIn("-var-file=ci-plan.tfvars.json", plan)
+
     def test_required_gate_rejects_unexpected_skips_and_release_gate_is_always_run(self):
         self.assertIn("EXPECTED_JOBS: ${{ needs.changes.outputs.expected_jobs }}", CI)
         self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", CI)
@@ -283,9 +291,6 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("var.secondary_audit_consumer_secret_kms_key_arns", secondary)
         self.assertIn("SQS audit transport requires enabled internal TLS", DEPLOY)
         self.assertIn("ECS_AWSVPC_BLOCK_IMDS=true", REGIONAL_STACK)
-
-    def test_terraform_tests_do_not_inherit_ci_plan_variables(self):
-        self.assertIn("rm infra/terraform/ci.auto.tfvars.json\n          terraform -chdir=infra/terraform test", CI)
 
     def test_master_protection_requires_review_and_pre_merge_ci(self):
         protection = json.loads((ROOT / ".github/branch-protection-master.json").read_text(encoding="utf-8"))

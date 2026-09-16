@@ -18,14 +18,7 @@ def main():
                     key_str = key.strip()
                     val_str = val.strip()
                     
-                    # Ensure sslmode=disable is set for PostgreSQL
-                    if key_str == "DATABASE_URL" and "sslmode" not in val_str:
-                        if "?" in val_str:
-                            val_str += "&sslmode=disable"
-                        else:
-                            val_str += "?sslmode=disable"
-                            
-                    env[key_str] = val_str
+                    env.setdefault(key_str, val_str)
                     
     # Force PORT to 8080
     env["PORT"] = "8080"

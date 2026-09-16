@@ -11,6 +11,7 @@ from app.core.config import settings
 engine = create_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
+    hide_parameters=True,
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
@@ -21,7 +22,7 @@ _platform_url = os.getenv("PLATFORM_AUTH_DATABASE_URL", "").strip()
 if _platform_url.startswith("postgresql://"):
     _platform_url = _platform_url.replace("postgresql://", "postgresql+psycopg://", 1)
 PlatformSessionLocal = (
-    sessionmaker(bind=create_engine(_platform_url, pool_pre_ping=True, pool_size=1, max_overflow=2))
+    sessionmaker(bind=create_engine(_platform_url, pool_pre_ping=True, pool_size=1, max_overflow=2, hide_parameters=True))
     if _platform_url else None
 )
 _database_auth_context: ContextVar[tuple[str, str] | None] = ContextVar(

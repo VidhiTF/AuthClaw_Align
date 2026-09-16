@@ -17,10 +17,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, require_scopes
-from app.db.models import ChatMessage, ChatSession, ComplianceWorkflow
-from app.orchestrator.runner import ComplianceWorkflowRunner, _create_approval_in_db, emit_audit_event
+from app.db.models import ChatMessage, ChatSession
+from app.api.v1.endpoints.workflows import WorkflowCreateRequest, create_workflow, remediate_workflow
 from app.rag import service as rag_service
-from app.services.notifications import create_notification
 
 logger = logging.getLogger("api.chat")
 router = APIRouter()
@@ -193,21 +192,23 @@ def post_message(
             framework = "SOC2"
 
         try:
-            runner = ComplianceWorkflowRunner(db)
-            scan_res = runner.start(
-                tenant_id=str(tenant_id),
-                framework=framework,
-                request_id=None,
-            )
+            scan_res = create_workflow(
+                WorkflowCreateRequest(framework=framework), request, db,
+            ).model_dump(mode="json")
             response_text = (
                 f"Initiating {framework} compliance scan. EPHEMERAL WORKER started.\n\n"
                 f"[System] Workflow launched successfully! Scan completed immediately without immediate approval. "
                 f"ID: {scan_res['workflow_id']}. State: {scan_res['current_state']}."
             )
             results_payload = scan_res
-        except Exception as exc:
-            logger.error("Failed to trigger scan from chat: %s", exc)
-            response_text = f"Failed to execute scan request: {str(exc)}"
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                logger.exception("Failed to trigger scan from chat")
+                raise HTTPException(exc.status_code, "Unable to start the scan. Please try again later.") from None
+            raise
+        except Exception:
+            logger.exception("Failed to trigger scan from chat")
+            response_text = "Unable to start the scan. Please try again later."
 
     elif intent == "EXECUTION_REQUEST":
         # Find UUID in user message
@@ -221,67 +222,20 @@ def post_message(
             )
         else:
             workflow_id = match.group(0)
-            wf = db.query(ComplianceWorkflow).filter(
-                ComplianceWorkflow.workflow_id == workflow_id,
-                ComplianceWorkflow.tenant_id == tenant_id
-            ).first()
-            if not wf:
-                response_text = f"Compliance workflow {workflow_id} not found."
-            elif wf.execution_status != "COMPLETED":
-                response_text = f"Workflow {workflow_id} is not in COMPLETED state (current state: {wf.execution_status})."
-            elif not wf.remediation_plan:
-                response_text = f"No remediation plan is available for workflow {workflow_id}."
-            else:
-                try:
-                    approval_id = _create_approval_in_db(db, str(tenant_id), workflow_id, wf.remediation_plan)
-
-                    wf.execution_status = "PAUSED"
-                    wf.current_state = "AWAITING_APPROVAL"
-                    wf.approval_status = "PENDING"
-                    wf.approval_id = uuid.UUID(approval_id)
-
-                    from sqlalchemy.orm.attributes import flag_modified
-                    state_data = wf.state_data or {}
-                    state_data.update({
-                        "current_state": "AWAITING_APPROVAL",
-                        "execution_status": "PAUSED",
-                        "remediation_state": "NOT_STARTED",
-                        "remediation_actions": [],
-                        "rollback_result": {},
-                        "approval_status": "PENDING",
-                        "approval_id": approval_id,
-                    })
-                    wf.state_data = state_data
-                    flag_modified(wf, "state_data")
-                    wf.updated_at = datetime.utcnow()
-
-                    db.commit()
-                    create_notification(
-                        db,
-                        tenant_id=tenant_id,
-                        type="approval_requested",
-                        severity="warning",
-                        title="Approval requested",
-                        body=f"Workflow {workflow_id} is waiting for remediation approval.",
-                        link="/agent",
-                    )
-
-                    emit_audit_event(
-                        workflow_id, str(tenant_id), wf.request_id or "",
-                        "COMPLETE→AWAITING_APPROVAL", "create_approval", "pending"
-                    )
-
-                    runner = ComplianceWorkflowRunner(db)
-                    wf_status = runner.get_status(workflow_id, str(tenant_id))
-
-                    response_text = (
-                        f"Remediation workflow initiated for scan {workflow_id}. "
-                        f"A pending approval has been generated and requires your MFA confirmation to execute remediation."
-                    )
-                    results_payload = wf_status
-                except Exception as exc:
-                    logger.error("Failed to trigger remediation from chat: %s", exc)
-                    response_text = f"Failed to execute remediation: {str(exc)}"
+            try:
+                results_payload = remediate_workflow(workflow_id, request, db).model_dump(mode="json")
+                response_text = (
+                    f"Remediation workflow initiated for scan {workflow_id}. "
+                    "A pending approval requires your MFA confirmation before execution."
+                )
+            except HTTPException as exc:
+                if exc.status_code >= 500:
+                    logger.exception("Failed to trigger remediation from chat")
+                    raise HTTPException(exc.status_code, "Unable to start remediation. Please try again later.") from None
+                raise
+            except Exception:
+                logger.exception("Failed to trigger remediation from chat")
+                response_text = "Unable to start remediation. Please try again later."
 
     else:  # READ_ONLY: Query Gemini via reverse proxy (current message only)
         gateway_url = os.getenv("GATEWAY_URL", "http://localhost:8080")

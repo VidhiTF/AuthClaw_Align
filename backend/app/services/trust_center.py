@@ -63,6 +63,7 @@ def mask_email(email: str) -> str:
 
 
 def issue_auditor_otp(db: Session, share: TrustCenterShare, tenant_name: str) -> dict[str, Any]:
+    _lock_active_share(db, share)
     email = (share.auditor_email or "").strip().lower()
     if not email:
         raise ValueError("This Trust Center share has no verified auditor email")
@@ -91,7 +92,14 @@ def issue_auditor_otp(db: Session, share: TrustCenterShare, tenant_name: str) ->
     }
 
 
+def _lock_active_share(db: Session, share: TrustCenterShare) -> None:
+    db.refresh(share, with_for_update=True)
+    if share.status != "active" or share.revoked_at or _metadata_time(share.expires_at.isoformat()) <= now_utc():
+        raise ValueError("Trust Center share is inactive or expired")
+
+
 def verify_auditor_otp(db: Session, share: TrustCenterShare, raw_share_token: str, otp: str) -> dict[str, Any]:
+    _lock_active_share(db, share)
     metadata = dict(share.metadata_json or {})
     expires_at = _metadata_time(metadata.get("auditor_otp_expires_at"))
     attempts = int(metadata.get("auditor_otp_attempts") or 0)
@@ -112,7 +120,6 @@ def verify_auditor_otp(db: Session, share: TrustCenterShare, raw_share_token: st
     for key in ("auditor_otp_hash", "auditor_otp_expires_at", "auditor_otp_attempts"):
         metadata.pop(key, None)
     share.metadata_json = metadata
-    db.commit()
     expires = now_utc() + timedelta(minutes=AUDITOR_ACCESS_TTL_MINUTES)
     active, keys = get_session_key_ring()
     access_token = jwt.encode(
@@ -128,6 +135,7 @@ def verify_auditor_otp(db: Session, share: TrustCenterShare, raw_share_token: st
         algorithm="HS256",
         headers={"kid": active},
     )
+    db.commit()
     return {"access_token": access_token, "expires_at": expires.isoformat()}
 
 

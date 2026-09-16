@@ -229,9 +229,17 @@ export async function publicBackendJson(
   options: RequestInit,
   fallback: string,
   errorKey: ErrorKey = "error",
-  tolerantJson = false
+  tolerantJson = false,
+  request?: Request
 ) {
   try {
+    if (request && (path === "/v1/auth/password-reset/request" || /^\/v1\/trust-center\/public\/[^/]+\/(request|verify)-access$/.test(path))) {
+      if (options.body != null && typeof options.body !== "string") throw new Error("Signed request body must be text");
+      const { bffClientIPHeaders } = await import("./bff-client-ip");
+      const headers = new Headers(options.headers);
+      for (const [key, value] of Object.entries(bffClientIPHeaders(request, options.body ?? "", path))) headers.set(key, value);
+      options = { ...options, headers };
+    }
     const response = await fetchBackend(`${BACKEND_URL}${path}`, options);
     const data = tolerantJson ? await response.json().catch(() => ({})) : await response.json();
     return NextResponse.json(data, { status: response.status });
@@ -253,17 +261,19 @@ export async function publicBackendPostJson(
     const body = await request.json();
     const headers = new Headers(options.headers);
     headers.set("Content-Type", "application/json");
+    const payload = JSON.stringify(mapBody(body));
     return publicBackendJson(
       path,
       {
         ...options,
         method: "POST",
         headers,
-        body: JSON.stringify(mapBody(body)),
+        body: payload,
       },
       fallback,
       errorKey,
-      tolerantJson
+      tolerantJson,
+      request
     );
   } catch {
     return NextResponse.json({ [errorKey]: fallback }, { status: 500 });

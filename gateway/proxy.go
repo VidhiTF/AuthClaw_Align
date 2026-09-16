@@ -25,7 +25,7 @@ type ProxyServer struct {
 	BedrockBaseURL     string
 }
 
-var providerProxyTransport = func() http.RoundTripper {
+var providerProxyTransport = providerReadTimeout(func() http.RoundTripper {
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return http.DefaultTransport
@@ -33,8 +33,8 @@ var providerProxyTransport = func() http.RoundTripper {
 	clone := transport.Clone()
 	clone.MaxIdleConns = 200
 	clone.MaxIdleConnsPerHost = 100
-	return clone
-}()
+	return configureProviderTransport(clone)
+}(), 30*time.Second)
 
 func NewProxyServer() *ProxyServer {
 	openAIBase := os.Getenv("OPENAI_BASE_URL")
@@ -176,6 +176,15 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Determine provider
 	provider := ProviderForRequest(r)
+	if provider == ProviderBedrock {
+		if _, _, err := bedrockEntitlement(tenantID, ExtractBedrockModel(r.URL.Path)); err != nil {
+			if !emitRequiredDecision(w, r, &AuditEvent{ID: generateID(), RequestID: requestID, Timestamp: time.Now(), TenantID: tenantID, Provider: provider, Action: "block", DecisionReason: "Bedrock entitlement denied", ResponseStatus: http.StatusForbidden}, "bedrock_entitlement_denied") {
+				return
+			}
+			writeGatewayError(w, http.StatusForbidden, "BedrockNotAuthorized", "Bedrock is not enabled for this tenant and model.")
+			return
+		}
+	}
 	targetURLStr := p.RouteRequest(r)
 
 	providerCredential, credentialErr := LoadProviderCredential(r.Context(), tenantID, provider)
@@ -204,7 +213,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeGatewayError(w, http.StatusBadGateway, "ProviderCredentialMissing", "Save an active provider API key before sending gateway traffic.")
 		return
 	}
-	if providerCredential != nil && providerCredential.Endpoint != "" {
+	if provider != ProviderBedrock && providerCredential != nil && providerCredential.Endpoint != "" {
 		targetURLStr = providerCredential.Endpoint
 	}
 	if targetURLStr == "" {
@@ -558,17 +567,23 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Runs AFTER OPA (which can also block on model whitelist).
 	// Checked here to prevent any AWS request when daily cap is exceeded.
 	if provider == ProviderBedrock {
-		if limitErr := CheckBedrockUsageLimits(r.Context(), tenantID); limitErr != nil {
+		body, bodyErr := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if bodyErr != nil {
+			writeGatewayError(w, http.StatusBadRequest, "InvalidBody", "Unable to reserve request budget.")
+			return
+		}
+		if limitErr := ReserveBedrockUsage(r.Context(), tenantID, model, body); limitErr != nil {
 			if !emitRequiredDecision(w, r, &AuditEvent{
 				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 				TenantID: tenantID, PolicyID: policyID, Action: "block",
-				DecisionReason: limitErr.Error(), Provider: provider, Model: model,
+				DecisionReason: "Bedrock budget unavailable or exhausted", Provider: provider, Model: model,
 				PromptCount: promptCount, RequestSize: int(r.ContentLength),
 				ResponseStatus: http.StatusTooManyRequests, DurationMs: 0,
 			}, "bedrock_limit_exceeded") {
 				return
 			}
-			writeGatewayError(w, http.StatusTooManyRequests, "BedrockLimitExceeded", limitErr.Error())
+			writeGatewayError(w, http.StatusTooManyRequests, "BedrockLimitExceeded", "Bedrock budget unavailable or exhausted.")
 			return
 		}
 	}
@@ -598,6 +613,9 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Create reverse proxy
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = providerProxyTransport
+	if provider == ProviderBedrock {
+		proxy.Transport = bedrockSigningTransport{providerProxyTransport}
+	}
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 		log.Printf("[PROXY] status=bad_gateway request_id=%s provider=%s target=%s err=%v", requestID, provider, target.String(), proxyErr)
 		writeJSON(rw, http.StatusBadGateway, gatewayErrorResponse{
@@ -637,15 +655,7 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Strip the /bedrock prefix from the path before forwarding
 			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/bedrock")
 			req.Header.Del("Authorization")
-			// bodyBytes already captured by ExtractAndNormalize; re-read for signing
-			var bodyForSigning []byte
-			if req.Body != nil {
-				bodyForSigning, _ = io.ReadAll(req.Body)
-				req.Body = io.NopCloser(bytes.NewBuffer(bodyForSigning))
-			}
-			if signErr := SignBedrockRequest(req, bodyForSigning); signErr != nil {
-				log.Printf("[BEDROCK] SigV4 signing failed: %v", signErr)
-			}
+
 		}
 	}
 
@@ -729,13 +739,4 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		DurationMs:     duration,
 	}
 	emitPostResponseOutcome(r.Context(), r.URL.Path, event)
-	if provider == ProviderBedrock && wrappedWriter.status == http.StatusOK {
-		// Estimate tokens from prompt count (Bedrock response body already consumed)
-		// 4 chars ≈ 1 token — rough estimate for cost tracking
-		estimatedTokens := 0
-		for _, p := range originalPrompts {
-			estimatedTokens += len(p) / 4
-		}
-		go IncrementBedrockUsage(r.Context(), tenantID, estimatedTokens)
-	}
 }

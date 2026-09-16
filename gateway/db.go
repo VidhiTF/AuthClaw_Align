@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 var DB *sql.DB
@@ -130,24 +130,40 @@ func ValidateDatabaseSecurity() error {
 	return nil
 }
 
-// InitDB initializes the database connection
-func InitDB() {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgresql://authclaw:authclaw@localhost:5432/authclaw?sslmode=disable"
-	} else if !strings.Contains(dbURL, "sslmode") {
-		if strings.Contains(dbURL, "?") {
-			dbURL += "&sslmode=disable"
-		} else {
-			dbURL += "?sslmode=disable"
+func databaseConfig(raw string) (pq.Config, error) {
+	if strings.TrimSpace(raw) == "" {
+		if isSharedEnv() {
+			return pq.Config{}, fmt.Errorf("DATABASE_URL is required in shared environments")
+		}
+		raw = "postgresql://authclaw:authclaw@localhost:5432/authclaw?sslmode=disable"
+	}
+	cfg, err := pq.NewConfig(raw)
+	if err != nil {
+		return pq.Config{}, fmt.Errorf("invalid DATABASE_URL")
+	}
+	if cfg.SSLMode == "" {
+		cfg.SSLMode = pq.SSLModeDisable
+		if isSharedEnv() {
+			cfg.SSLMode = pq.SSLModeVerifyFull
 		}
 	}
+	if isSharedEnv() && cfg.SSLMode != pq.SSLModeVerifyFull {
+		return pq.Config{}, fmt.Errorf("shared DATABASE_URL must use sslmode=verify-full with a trusted CA and matching hostname")
+	}
+	return cfg, nil
+}
 
-	var err error
-	DB, err = sql.Open("postgres", dbURL)
+// InitDB initializes the database connection
+func InitDB() {
+	cfg, err := databaseConfig(os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatalf("Invalid database configuration: %v", err)
+	}
+	connector, err := pq.NewConnectorConfig(cfg)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
+	DB = sql.OpenDB(connector)
 
 	if err = DB.Ping(); err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)

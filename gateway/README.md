@@ -38,7 +38,8 @@ For Azure OpenAI, save the provider credential endpoint as the deployment-scoped
 `https://YOUR_RESOURCE.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT/chat/completions`.
 Set `AZURE_OPENAI_API_VERSION` to override the default `2024-10-21` query parameter.
 Bedrock uses only the `/bedrock/model/.../invoke` public form and remains disabled unless
-the Bedrock feature flags and AWS runtime credentials are configured.
+the Bedrock feature flags, explicit tenant/model budgets, and AWS runtime credentials are configured.
+See [Bedrock authorization and reservations](../docs/security/BEDROCK_VALIDATION.md).
 
 ---
 

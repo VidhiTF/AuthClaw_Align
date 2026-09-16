@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -245,17 +246,8 @@ func ExtractAndNormalize(r *http.Request, provider string) (*NormalizedRequest, 
 			return marshalRebuiltProviderRequest(bodyBytes, geminiReq)
 		}
 		return normalized, rebuilder, nil
-	// and the Amazon Titan format for Titan models. We normalize both to NormalizedRequest.
 	case "bedrock":
-		// Try Anthropic Messages API format first (Claude via Bedrock)
-		var anthropicReq AnthropicRequest
-		if err := json.Unmarshal(bodyBytes, &anthropicReq); err == nil && anthropicReq.Model != "" {
-			return normalized, normalizeAnthropicRequest(normalized, &anthropicReq, bodyBytes), nil
-		}
-		// Fallback: extract model from URL path (Bedrock model ID is in the path)
-		normalized.Model = ExtractBedrockModel("")
-		rebuilder := func(newPrompts []string) ([]byte, error) { return bodyBytes, nil }
-		return normalized, rebuilder, nil
+		return normalizeBedrockRequest(r.URL.Path, bodyBytes)
 
 	default:
 		// Non-parsed or passthrough
@@ -264,4 +256,144 @@ func ExtractAndNormalize(r *http.Request, provider string) (*NormalizedRequest, 
 		}
 		return normalized, rebuilder, nil
 	}
+}
+
+// Bedrock is text-only until every additional content schema can be inspected.
+// Keep raw JSON values so provider options retain their original numeric precision.
+func normalizeBedrockRequest(path string, body []byte) (*NormalizedRequest, func([]string) ([]byte, error), error) {
+	model := ExtractBedrockModel(path)
+	invalid := fmt.Errorf("unsupported or malformed Bedrock text request")
+	if model == "" || strings.TrimPrefix(path, "/bedrock") != "/model/"+model+"/invoke" {
+		return nil, nil, invalid
+	}
+	var document map[string]interface{}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&document); err != nil || document == nil {
+		return nil, nil, invalid
+	}
+	var extra interface{}
+	if decoder.Decode(&extra) != io.EOF {
+		return nil, nil, invalid
+	}
+	normalized := &NormalizedRequest{Provider: ProviderBedrock, Model: model}
+	var setters []func(string)
+	validKeys := func(object map[string]interface{}, allowed ...string) bool {
+		keys := make(map[string]bool, len(allowed))
+		for _, key := range allowed {
+			keys[key] = true
+		}
+		for key := range object {
+			if !keys[key] {
+				return false
+			}
+		}
+		return true
+	}
+	text := func(object map[string]interface{}, key string) bool {
+		value, ok := object[key].(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			return false
+		}
+		normalized.Prompts = append(normalized.Prompts, value)
+		setters = append(setters, func(value string) { object[key] = value })
+		return true
+	}
+	texts := func(object map[string]interface{}, key string) bool {
+		if _, exists := object[key]; !exists {
+			return true
+		}
+		values, ok := object[key].([]interface{})
+		if !ok {
+			return false
+		}
+		for i, raw := range values {
+			value, ok := raw.(string)
+			if !ok || value == "" {
+				return false
+			}
+			normalized.Prompts = append(normalized.Prompts, value)
+			index := i
+			setters = append(setters, func(value string) { values[index] = value })
+		}
+		return true
+	}
+	content := func(object map[string]interface{}, key string) bool {
+		if _, ok := object[key].(string); ok {
+			return text(object, key)
+		}
+		blocks, ok := object[key].([]interface{})
+		if !ok || len(blocks) == 0 {
+			return false
+		}
+		for _, raw := range blocks {
+			block, ok := raw.(map[string]interface{})
+			if !ok || block["type"] != "text" || !validKeys(block, "type", "text") || !text(block, "text") {
+				return false
+			}
+		}
+		return true
+	}
+	positiveInteger := func(object map[string]interface{}, key string) bool {
+		value, ok := object[key].(json.Number)
+		if !ok {
+			return false
+		}
+		number, err := value.Int64()
+		return err == nil && number > 0
+	}
+	numericOptions := func(object map[string]interface{}, keys ...string) bool {
+		for _, key := range keys {
+			if value, exists := object[key]; exists {
+				if _, ok := value.(json.Number); !ok {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	family := model
+	for _, prefix := range []string{"us.", "eu.", "apac.", "global."} {
+		family = strings.TrimPrefix(family, prefix)
+	}
+	switch {
+	case strings.HasPrefix(family, "anthropic.claude-"):
+		if !validKeys(document, "anthropic_version", "max_tokens", "system", "messages", "temperature", "top_p", "top_k", "stop_sequences") ||
+			document["anthropic_version"] != "bedrock-2023-05-31" || !positiveInteger(document, "max_tokens") || !numericOptions(document, "temperature", "top_p", "top_k") {
+			return nil, nil, invalid
+		}
+		if _, exists := document["system"]; exists && !content(document, "system") {
+			return nil, nil, invalid
+		}
+		messages, ok := document["messages"].([]interface{})
+		if !ok || len(messages) == 0 {
+			return nil, nil, invalid
+		}
+		for _, raw := range messages {
+			message, ok := raw.(map[string]interface{})
+			if !ok || !validKeys(message, "role", "content") || (message["role"] != "user" && message["role"] != "assistant") || !content(message, "content") {
+				return nil, nil, invalid
+			}
+		}
+		if !texts(document, "stop_sequences") {
+			return nil, nil, invalid
+		}
+	case strings.HasPrefix(family, "amazon.titan-text-"):
+		config, ok := document["textGenerationConfig"].(map[string]interface{})
+		if !ok || !validKeys(document, "inputText", "textGenerationConfig") || !validKeys(config, "maxTokenCount", "stopSequences", "temperature", "topP") ||
+			!positiveInteger(config, "maxTokenCount") || !numericOptions(config, "temperature", "topP") || !text(document, "inputText") || !texts(config, "stopSequences") {
+			return nil, nil, invalid
+		}
+	default:
+		return nil, nil, invalid
+	}
+	return normalized, func(prompts []string) ([]byte, error) {
+		if len(prompts) != len(setters) {
+			return nil, fmt.Errorf("prompt replacement count mismatch")
+		}
+		for i, set := range setters {
+			set(prompts[i])
+		}
+		return json.Marshal(document)
+	}, nil
 }

@@ -16,9 +16,9 @@ SECRET = "synthetic-test-key-with-at-least-32-characters"
 BODY = b'{"email":"test@example.com","password":"synthetic"}'
 
 
-def signed(ip="198.51.100.9", age=0, body=BODY, nonce="a" * 32):
+def signed(ip="198.51.100.9", age=0, body=BODY, nonce="a" * 32, path="/v1/auth/login"):
     context = f"{ip};{int(time.time()) - age};{nonce}"
-    material = DOMAIN + context + "\n" + hashlib.sha256(body).hexdigest()
+    material = DOMAIN.replace("/v1/auth/login", path) + context + "\n" + hashlib.sha256(body).hexdigest()
     return {
         "x-authclaw-client-context": context,
         "x-authclaw-client-signature": hmac.new(
@@ -46,10 +46,18 @@ def client(monkeypatch):
 
     @app.post("/v1/auth/login", dependencies=[Depends(authenticate_bff_client_ip)])
     @app.post("/api/v1/auth/login", dependencies=[Depends(authenticate_bff_client_ip)])
+    @app.post("/v1/auth/password-reset/request", dependencies=[Depends(authenticate_bff_client_ip)])
     def login(request: Request):
         return {"ip": request.client.host}
 
     return TestClient(app)
+
+
+def test_client_identity_is_bound_to_reset_path(client):
+    path = "/v1/auth/password-reset/request"
+    assert client.post(path, headers=signed(), content=BODY).status_code == 400
+    response = client.post(path, headers=signed(path=path), content=BODY)
+    assert response.json()["ip"] == "198.51.100.9"
 
 
 def test_signed_clients_are_distinct_and_nonce_is_one_time(client):

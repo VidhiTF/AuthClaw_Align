@@ -1,263 +1,215 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"math"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/aws/aws-sdk-go-v2/config"
 )
 
-// This file handles everything specific to AWS Bedrock:
-// AWS SigV4 signing, usage limits, and request/response helpers.
-
-// isBedrockEnabled returns true only when both master flags are explicitly set.
 func isBedrockEnabled() bool {
-	aws := strings.ToLower(os.Getenv("AWS_ENABLED"))
-	bdr := strings.ToLower(os.Getenv("BEDROCK_ENABLED"))
-	return aws == "true" && bdr == "true"
+	return strings.EqualFold(os.Getenv("AWS_ENABLED"), "true") && strings.EqualFold(os.Getenv("BEDROCK_ENABLED"), "true")
 }
 
-func hmacSHA256(key []byte, data string) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write([]byte(data))
-	return h.Sum(nil)
+type bedrockModelBudget struct {
+	// Trusted operator-supplied full model input ceiling, not a client token estimate.
+	MaxInputTokens  int     `json:"max_input_tokens"`
+	MaxOutputTokens int     `json:"max_output_tokens"`
+	InputPrice      float64 `json:"input_usd_per_million"`
+	OutputPrice     float64 `json:"output_usd_per_million"`
+}
+type bedrockTenantBudget struct {
+	Models   map[string]bedrockModelBudget `json:"models"`
+	Requests int                           `json:"max_daily_requests"`
+	Tokens   int                           `json:"max_daily_tokens"`
+	Cost     float64                       `json:"max_daily_cost_usd"`
 }
 
-func sha256Hex(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
+var bedrockBudgets struct {
+	sync.Mutex
+	raw     string
+	tenants map[string]bedrockTenantBudget
+	err     error
 }
 
-// SignBedrockRequest applies AWS SigV4 signing to an outbound HTTP request.
-// Reads credentials exclusively from environment variables.
-// Modifies the Authorization and x-amz-* headers in-place.
-func SignBedrockRequest(req *http.Request, bodyBytes []byte) error {
-	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+func bedrockEntitlement(tenant, model string) (bedrockTenantBudget, bedrockModelBudget, error) {
+	var budget bedrockTenantBudget
+	var price bedrockModelBudget
+	if tenant == "" || !isBedrockEnabled() {
+		return budget, price, fmt.Errorf("Bedrock is not enabled for this tenant")
+	}
+	raw := os.Getenv("BEDROCK_TENANTS_JSON")
+	bedrockBudgets.Lock()
+	defer bedrockBudgets.Unlock()
+	if raw != bedrockBudgets.raw || bedrockBudgets.tenants == nil {
+		bedrockBudgets.raw, bedrockBudgets.tenants = raw, nil
+		bedrockBudgets.err = json.Unmarshal([]byte(raw), &bedrockBudgets.tenants)
+	}
+	budget = bedrockBudgets.tenants[tenant]
+	price, allowed := budget.Models[model]
+	if bedrockBudgets.err != nil || !allowed || budget.Requests <= 0 || budget.Requests > 1000000000 ||
+		budget.Tokens <= 0 || budget.Tokens > 1000000000 || !finitePositive(budget.Cost, 999999) ||
+		price.MaxInputTokens <= 0 || price.MaxInputTokens > 10000000 || price.MaxOutputTokens <= 0 ||
+		price.MaxOutputTokens > 10000000 || !finitePositive(price.InputPrice, 1000000) || !finitePositive(price.OutputPrice, 1000000) {
+		return budget, price, fmt.Errorf("Bedrock tenant/model entitlement or budget is missing or invalid")
+	}
+	return budget, price, nil
+}
+func finitePositive(value, ceiling float64) bool {
+	return value > 0 && value <= ceiling && !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func bedrockReservation(body []byte, price bedrockModelBudget) (int, float64, error) {
+	var request struct {
+		MaxTokens  int `json:"max_tokens"`
+		Generation struct {
+			MaxTokens int `json:"maxTokenCount"`
+		} `json:"textGenerationConfig"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return 0, 0, fmt.Errorf("invalid Bedrock output limit")
+	}
+	output := request.MaxTokens
+	if output == 0 {
+		output = request.Generation.MaxTokens
+	}
+	if output <= 0 || output > price.MaxOutputTokens {
+		return 0, 0, fmt.Errorf("Bedrock output limit is missing or exceeds entitlement")
+	}
+	// Reserve the entire configured model input ceiling plus bounded output; no optimistic refunds.
+	cost := math.Ceil((float64(price.MaxInputTokens)*price.InputPrice+float64(output)*price.OutputPrice)/100) / 10000
+	return price.MaxInputTokens + output, cost, nil
+}
+
+// Atomic admission and UTC rollover execute under the caller's authenticated tenant context.
+// Every request, including failed egress, retains its conservative reservation until rollover.
+// A transaction that began before midnight must never reset a newer day after waiting on a row lock.
+func ReserveBedrockUsage(ctx context.Context, tenant, model string, body []byte) error {
+	budget, price, err := bedrockEntitlement(tenant, model)
+	if err != nil {
+		return err
+	}
+	tokens, cost, err := bedrockReservation(body, price)
+	if err != nil {
+		return err
+	}
+	if DB == nil {
+		return fmt.Errorf("Bedrock budget storage is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err = RunInTenantTx(ctx, tenant, func(tx *sql.Tx) error {
+		var admitted int
+		return tx.QueryRowContext(ctx, `
+            INSERT INTO aws_usage_limits (tenant_id, daily_requests, daily_tokens, daily_cost_estimate,
+                max_daily_requests, max_daily_tokens, max_daily_cost_usd, last_reset, updated_at)
+            SELECT $1::uuid, 1, $2::integer, $3::numeric, $4::integer, $5::integer, $6::numeric, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            WHERE $2::integer <= $5::integer AND $3::numeric <= $6::numeric
+            ON CONFLICT (tenant_id) DO UPDATE SET
+                daily_requests = CASE WHEN (aws_usage_limits.last_reset AT TIME ZONE 'UTC')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date THEN aws_usage_limits.daily_requests + 1 ELSE 1 END,
+                daily_tokens = CASE WHEN (aws_usage_limits.last_reset AT TIME ZONE 'UTC')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date THEN aws_usage_limits.daily_tokens + $2::integer ELSE $2::integer END,
+                daily_cost_estimate = CASE WHEN (aws_usage_limits.last_reset AT TIME ZONE 'UTC')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date THEN aws_usage_limits.daily_cost_estimate + $3::numeric ELSE $3::numeric END,
+                max_daily_requests=$4::integer, max_daily_tokens=$5::integer, max_daily_cost_usd=$6::numeric,
+                last_reset=GREATEST(aws_usage_limits.last_reset, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP
+            WHERE (CASE WHEN (aws_usage_limits.last_reset AT TIME ZONE 'UTC')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date THEN aws_usage_limits.daily_requests ELSE 0 END) < $4::integer
+              AND (CASE WHEN (aws_usage_limits.last_reset AT TIME ZONE 'UTC')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date THEN aws_usage_limits.daily_tokens ELSE 0 END) <= $5::integer - $2::integer
+              AND (CASE WHEN (aws_usage_limits.last_reset AT TIME ZONE 'UTC')::date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date THEN aws_usage_limits.daily_cost_estimate ELSE 0 END) <= $6::numeric - $3::numeric
+            RETURNING daily_requests`, tenant, tokens, fmt.Sprintf("%.4f", cost), budget.Requests, budget.Tokens,
+			fmt.Sprintf("%.4f", math.Floor(budget.Cost*10000)/10000)).Scan(&admitted)
+	})
+	if err != nil {
+		return fmt.Errorf("Bedrock budget unavailable or exhausted: %w", err)
+	}
+	return nil
+}
+
+var bedrockAWSCredentials struct {
+	sync.Mutex
+	region   string
+	provider aws.CredentialsProvider
+}
+
+func bedrockCredentials(ctx context.Context, region string) (aws.Credentials, error) {
+	bedrockAWSCredentials.Lock()
+	if bedrockAWSCredentials.provider == nil || bedrockAWSCredentials.region != region {
+		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+		if err != nil {
+			bedrockAWSCredentials.Unlock()
+			return aws.Credentials{}, err
+		}
+		bedrockAWSCredentials.provider, bedrockAWSCredentials.region = cfg.Credentials, region
+	}
+	provider := bedrockAWSCredentials.provider
+	bedrockAWSCredentials.Unlock()
+	return provider.Retrieve(ctx)
+}
+
+// The SDK handles canonical signing, temporary session tokens, and renewable task/role credentials.
+func SignBedrockRequest(req *http.Request, body []byte) error {
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
 		region = "us-east-1"
 	}
-
-	if accessKey == "" || secretKey == "" {
-		return fmt.Errorf(
-			"AWS credentials not configured: set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in .env.local",
-		)
+	suffix := ".amazonaws.com"
+	if strings.HasPrefix(region, "cn-") {
+		suffix += ".cn"
 	}
-
-	service := "bedrock"
-	now := time.Now().UTC()
-	amzDate := now.Format("20060102T150405Z")
-	dateStamp := now.Format("20060102")
-
-	// ── Step 1: Canonical request ─────────────────────────────────────────────
-	bodyHash := sha256Hex(bodyBytes)
-
-	host := req.URL.Host
-	if host == "" {
-		host = req.Host
+	if req.URL.Scheme != "https" || req.URL.Host != "bedrock-runtime."+region+suffix || req.URL.User != nil || req.URL.RawQuery != "" {
+		return fmt.Errorf("Bedrock signing requires the regional HTTPS runtime endpoint")
 	}
-
-	req.Header.Set("host", host)
-	req.Header.Set("x-amz-date", amzDate)
-	req.Header.Set("x-amz-content-sha256", bodyHash)
-
-	// Canonical headers (sorted lowercase)
-	canonicalHeaders := fmt.Sprintf(
-		"host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n",
-		host, bodyHash, amzDate,
-	)
-	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
-
-	canonicalURI := req.URL.Path
-	if canonicalURI == "" {
-		canonicalURI = "/"
-	}
-
-	canonicalRequest := strings.Join([]string{
-		req.Method,
-		canonicalURI,
-		req.URL.RawQuery,
-		canonicalHeaders,
-		signedHeaders,
-		bodyHash,
-	}, "\n")
-
-	// ── Step 2: String to sign ────────────────────────────────────────────────
-	credentialScope := fmt.Sprintf("%s/%s/%s/aws4_request", dateStamp, region, service)
-	stringToSign := strings.Join([]string{
-		"AWS4-HMAC-SHA256",
-		amzDate,
-		credentialScope,
-		sha256Hex([]byte(canonicalRequest)),
-	}, "\n")
-
-	// ── Step 3: Derived signing key ───────────────────────────────────────────
-	kDate := hmacSHA256([]byte("AWS4"+secretKey), dateStamp)
-	kRegion := hmacSHA256(kDate, region)
-	kService := hmacSHA256(kRegion, service)
-	kSigning := hmacSHA256(kService, "aws4_request")
-	signature := hex.EncodeToString(hmacSHA256(kSigning, stringToSign))
-
-	// ── Step 4: Authorization header ─────────────────────────────────────────
-	authHeader := fmt.Sprintf(
-		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-		accessKey, credentialScope, signedHeaders, signature,
-	)
-	req.Header.Set("Authorization", authHeader)
-
-	return nil
-}
-
-// CheckBedrockUsageLimits reads current usage from Postgres for the tenant.
-// Returns non-nil error if any hard limit is exceeded; nil means safe to proceed.
-// This is called BEFORE the reverse proxy forwards the request to Bedrock.
-func CheckBedrockUsageLimits(ctx context.Context, tenantID string) error {
-	var (
-		dailyRequests    int
-		maxDailyRequests int
-		dailyTokens      int
-		maxDailyTokens   int
-		dailyCost        float64
-		maxDailyCost     float64
-		lastReset        time.Time
-		found            bool
-	)
-
-	err := RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx,
-			`SELECT daily_requests, max_daily_requests,
-			        daily_tokens,   max_daily_tokens,
-			        daily_cost_estimate, max_daily_cost_usd,
-			        last_reset
-			 FROM aws_usage_limits
-			 WHERE tenant_id = $1 LIMIT 1`,
-			tenantID,
-		)
-		err := row.Scan(
-			&dailyRequests, &maxDailyRequests,
-			&dailyTokens, &maxDailyTokens,
-			&dailyCost, &maxDailyCost,
-			&lastReset,
-		)
-		if err == sql.ErrNoRows {
-			found = false
-			return nil
+	for key := range req.Header {
+		if strings.HasPrefix(strings.ToLower(key), "x-amzn-") {
+			return fmt.Errorf("Bedrock invocation overrides are not supported")
 		}
-		if err != nil {
-			return err
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+	defer cancel()
+	creds, err := bedrockCredentials(ctx, region)
+	if err != nil {
+		return fmt.Errorf("Bedrock signing credentials unavailable")
+	}
+	// Client-supplied signing headers must never be incorporated into the AWS signature.
+	for key := range req.Header {
+		if strings.HasPrefix(strings.ToLower(key), "x-amz-") {
+			req.Header.Del(key)
 		}
-		found = true
-		return nil
-	})
-
-	if err != nil {
-		// DB error: fail-safe — log and allow rather than blocking all traffic
-		log.Printf("[BEDROCK-LIMIT] DB read error for tenant %s: %v — allowing request", tenantID, err)
-		return nil
 	}
-
-	if !found {
-		// No row yet — first Bedrock call for this tenant; limits haven't been hit
-		return nil
-	}
-
-	// ── Day rollover check ────────────────────────────────────────────────────
-	now := time.Now().UTC()
-	if now.Format("2006-01-02") != lastReset.UTC().Format("2006-01-02") {
-		// New calendar day — reset counters and allow this request
-		ResetBedrockDailyCounters(ctx, tenantID)
-		return nil
-	}
-
-	// ── Hard limit checks ─────────────────────────────────────────────────────
-	if dailyRequests >= maxDailyRequests {
-		return fmt.Errorf(
-			"bedrock_limit_exceeded: daily request limit reached (%d/%d). Resets tomorrow UTC.",
-			dailyRequests, maxDailyRequests,
-		)
-	}
-	if dailyTokens >= maxDailyTokens {
-		return fmt.Errorf(
-			"bedrock_limit_exceeded: daily token limit reached (%d/%d). Resets tomorrow UTC.",
-			dailyTokens, maxDailyTokens,
-		)
-	}
-	if dailyCost >= maxDailyCost {
-		return fmt.Errorf(
-			"bedrock_limit_exceeded: daily cost ceiling reached ($%.4f/$%.4f). Resets tomorrow UTC.",
-			dailyCost, maxDailyCost,
-		)
-	}
-
-	return nil
+	req.Header.Del("Authorization")
+	req.Header.Set("X-Amzn-Bedrock-PerformanceConfig-Latency", "standard")
+	req.Header.Set("X-Amzn-Bedrock-Service-Tier", "default")
+	return v4.NewSigner().SignHTTP(ctx, creds, req, fmt.Sprintf("%x", sha256.Sum256(body)), "bedrock", region, time.Now())
 }
 
-// IncrementBedrockUsage atomically increments request and token counters.
-// Called AFTER a successful Bedrock response. Best-effort — failures are logged only.
-func IncrementBedrockUsage(ctx context.Context, tenantID string, estimatedTokens int) {
-	// Estimate cost at Claude Haiku rate: ~$0.25 per 1M input tokens
-	costEstimate := float64(estimatedTokens) * 0.00000025
+type bedrockSigningTransport struct{ http.RoundTripper }
 
-	maxReq, _ := strconv.Atoi(os.Getenv("BEDROCK_MAX_REQUESTS_PER_DAY"))
-	if maxReq == 0 {
-		maxReq = 100
+func (transport bedrockSigningTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body == nil {
+		return nil, fmt.Errorf("Bedrock request body is required")
 	}
-	maxTok, _ := strconv.Atoi(os.Getenv("BEDROCK_MAX_TOKENS_PER_DAY"))
-	if maxTok == 0 {
-		maxTok = 50000
+	body, err := io.ReadAll(io.LimitReader(req.Body, 4*1024*1024+1))
+	req.Body.Close()
+	if err != nil || len(body) > 4*1024*1024 {
+		return nil, fmt.Errorf("Bedrock signing body unavailable or too large")
 	}
-	maxCost, _ := strconv.ParseFloat(os.Getenv("BEDROCK_MAX_COST_ESTIMATE_USD"), 64)
-	if maxCost == 0 {
-		maxCost = 1.0
+	signed := req.Clone(req.Context())
+	signed.Body = io.NopCloser(bytes.NewReader(body))
+	if err = SignBedrockRequest(signed, body); err != nil {
+		return nil, err
 	}
-
-	if DB == nil {
-		return
-	}
-	_, err := DB.ExecContext(ctx,
-		`INSERT INTO aws_usage_limits
-		     (tenant_id, daily_requests, daily_tokens, daily_cost_estimate,
-		      max_daily_requests, max_daily_tokens, max_daily_cost_usd,
-		      last_reset, updated_at)
-		 VALUES ($1, 1, $2, $3, $4, $5, $6, NOW(), NOW())
-		 ON CONFLICT (tenant_id) DO UPDATE SET
-		     daily_requests      = aws_usage_limits.daily_requests + 1,
-		     daily_tokens        = aws_usage_limits.daily_tokens + $2,
-		     daily_cost_estimate = aws_usage_limits.daily_cost_estimate + $3,
-		     updated_at          = NOW()`,
-		tenantID, estimatedTokens, costEstimate, maxReq, maxTok, maxCost,
-	)
-	if err != nil {
-		log.Printf("[BEDROCK-USAGE] Failed to increment usage for tenant %s: %v", tenantID, err)
-	}
-}
-
-// ResetBedrockDailyCounters zeroes daily counters for a new UTC calendar day.
-func ResetBedrockDailyCounters(ctx context.Context, tenantID string) {
-	if DB == nil {
-		return
-	}
-	_, err := DB.ExecContext(ctx,
-		`UPDATE aws_usage_limits
-		 SET daily_requests = 0, daily_tokens = 0, daily_cost_estimate = 0,
-		     last_reset = NOW(), updated_at = NOW()
-		 WHERE tenant_id = $1`,
-		tenantID,
-	)
-	if err != nil {
-		log.Printf("[BEDROCK-USAGE] Failed to reset counters for tenant %s: %v", tenantID, err)
-	}
+	return transport.RoundTripper.RoundTrip(signed)
 }
 
 // BedrockEndpoint constructs the Bedrock runtime endpoint URL.
@@ -270,7 +222,11 @@ func BedrockEndpoint() string {
 	if region == "" {
 		region = "us-east-1"
 	}
-	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com", region)
+	endpoint := fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com", region)
+	if strings.HasPrefix(region, "cn-") {
+		endpoint += ".cn"
+	}
+	return endpoint
 }
 
 // ExtractBedrockModel extracts the model ID from a Bedrock invoke path.
@@ -282,31 +238,4 @@ func ExtractBedrockModel(path string) string {
 		return ""
 	}
 	return strings.Split(parts[1], "/")[0]
-}
-
-// BedrockTokensFromBody estimates token usage from a Claude/Bedrock JSON response.
-// Claude responses include: {"usage": {"input_tokens": N, "output_tokens": N}}
-// Returns 0 if parsing fails (non-fatal — cost estimate only).
-func BedrockTokensFromBody(body []byte) int {
-	var resp struct {
-		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return 0
-	}
-	return resp.Usage.InputTokens + resp.Usage.OutputTokens
-}
-
-// ReadAndEstimateBedrockTokens reads the full response body, estimates token count,
-// and returns the body bytes so the proxy can forward them.
-func ReadAndEstimateBedrockTokens(r io.Reader) (tokens int, body []byte, err error) {
-	body, err = io.ReadAll(r)
-	if err != nil {
-		return 0, nil, err
-	}
-	tokens = BedrockTokensFromBody(body)
-	return tokens, body, nil
 }

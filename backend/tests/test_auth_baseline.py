@@ -503,6 +503,7 @@ def test_oidc_internal_error_returns_generic_response_and_is_logged(monkeypatch,
 
 
 def test_password_reset_delivery_error_is_generic_and_logged(monkeypatch, caplog):
+    monkeypatch.setattr(auth_endpoints, "_enforce_onboarding_rate_limit", lambda *args: None)
     db = MagicMock()
     tenant = MagicMock(id="00000000-0000-4000-8000-000000000001", name="tenant")
     monkeypatch.setattr(auth_endpoints, "OwnerSessionLocal", lambda: db)
@@ -515,7 +516,7 @@ def test_password_reset_delivery_error_is_generic_and_logged(monkeypatch, caplog
 
     with caplog.at_level("ERROR", logger="api.auth"), pytest.raises(HTTPException) as exc:
         auth_endpoints.request_password_reset(
-            auth_endpoints.PasswordResetRequest(email="user@example.com", tenant_name="tenant")
+            auth_endpoints.PasswordResetRequest(email="user@example.com", tenant_name="tenant"), _request()
         )
 
     assert exc.value.status_code == 503
