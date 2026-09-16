@@ -46,12 +46,13 @@ def audit_event(
     trace: list[str] | None = None,
 ) -> dict[str, Any]:
     execution_trace = trace or []
+    occurrence_id = request_id or str(uuid.uuid4())
     return {
         "id": stable_event_id(
             event_type=event_type,
             tenant_id=tenant_id,
             subject_id=subject_id,
-            action=identity_action,
+            action=f"{identity_action}:{occurrence_id}",
             trace=execution_trace,
         ),
         "request_id": request_id,

@@ -76,6 +76,13 @@ func TestProviderPrefixesFailClosedBeforeEgress(t *testing.T) {
 			}
 			recorder := httptest.NewRecorder()
 			proxy.ServeHTTP(recorder, req)
+			// Bedrock now denies absent tenant entitlement before attempting egress.
+			if tc.name == "bedrock" {
+				if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), "BedrockNotAuthorized") {
+					t.Fatalf("Bedrock entitlement failed open: %d %s", recorder.Code, recorder.Body.String())
+				}
+				return
+			}
 			if recorder.Code != http.StatusServiceUnavailable {
 				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 			}

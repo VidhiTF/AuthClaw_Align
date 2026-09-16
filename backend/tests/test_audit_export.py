@@ -77,6 +77,7 @@ def _trusted_registry():
 
 
 def _artifact(monkeypatch, actions=("allow", "allow"), **filters):
+    monkeypatch.setenv("AUTHCLAW_ENV", "test")
     tenant_id = str(uuid4())
     records = _chain(tenant_id, actions)
     monkeypatch.setenv("AUDIT_EXPORT_DEV_SIGNING_SEED", "trusted-export-key")

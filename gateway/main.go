@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -104,8 +105,15 @@ func main() {
 		port = "8080"
 	}
 
+	server := &http.Server{
+		Addr:              ":" + port,
+		Handler:           responseWriteTimeout(r, 30*time.Second),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	log.Printf("Starting AuthClaw Gateway on port %s...", port)
-	if err := http.ListenAndServe(":"+port, r); err != nil {
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to start gateway server: %v", err)
 	}
 }

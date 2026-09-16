@@ -636,9 +636,16 @@ def current_user(request: Request, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/password-reset/request", response_model=PasswordResetRequestResponse, status_code=status.HTTP_202_ACCEPTED)
-def request_password_reset(payload: PasswordResetRequest):
+@router.post("/password-reset/request", response_model=PasswordResetRequestResponse, status_code=status.HTTP_202_ACCEPTED,
+             dependencies=[Depends(authenticate_bff_client_ip)])
+def request_password_reset(payload: PasswordResetRequest, request: Request):
     email = payload.email.strip().lower()
+    message = "Too many password reset requests. Try again later."
+    for kind, identity, limit in (("ip", request.client.host if request.client else "unknown", 20),
+                                  ("account", email, 5)):
+        _enforce_onboarding_rate_limit(
+            f"auth:password-reset:{kind}:{_rate_limit_hash(identity)}", limit, 3600, message,
+        )
     now = datetime.now(timezone.utc)
     db = OwnerSessionLocal()
     try:

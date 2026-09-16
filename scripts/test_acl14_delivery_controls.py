@@ -139,6 +139,14 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("vars.CI_ARM64_ENABLED == 'true'", CI)
         self.assertIn("description: Also build and smoke-test ARM64 runtime images", CI)
 
+    def test_terraform_plan_fixture_is_tls_enabled_and_isolated_from_tests(self):
+        self.assertNotIn("ci.auto.tfvars.json", CI)
+        self.assertIn('"internal_tls": {"enabled": true, "namespace": "internal.example.com"}', CI)
+        plans = [line for line in CI.splitlines() if "terraform -chdir=infra/terraform plan " in line]
+        self.assertEqual(len(plans), 4)
+        for plan in plans:
+            self.assertIn("-var-file=ci-plan.tfvars.json", plan)
+
     def test_required_gate_rejects_unexpected_skips_and_release_gate_is_always_run(self):
         self.assertIn("EXPECTED_JOBS: ${{ needs.changes.outputs.expected_jobs }}", CI)
         self.assertIn("NEEDS_JSON: ${{ toJSON(needs) }}", CI)

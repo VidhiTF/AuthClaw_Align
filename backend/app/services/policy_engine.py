@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Literal
-import re
+import re2 as re
 import yaml
 
 
@@ -38,6 +38,8 @@ MAX_TOPIC_RULES = 100
 MAX_PATTERN_LENGTH = 512
 MAX_REASON_LENGTH = 1000
 MAX_RPM = 100_000
+MAX_SIMULATION_PROMPTS = 100
+MAX_SIMULATION_CHARACTERS = 64 * 1024
 DEFAULT_HITL_TIMEOUT_SECONDS = 1800
 
 
@@ -185,6 +187,11 @@ def _normalize_policy(raw: dict[str, Any], errors: list[dict[str, str]], warning
             pattern = pattern.strip()
             if len(pattern) > MAX_PATTERN_LENGTH:
                 errors.append(_err(f"{path}.pattern", f"must be {MAX_PATTERN_LENGTH} characters or fewer"))
+                continue
+            # Go's regexp deliberately excludes RE2's byte-level escape.
+            if re.search(r"(?:^|[^\\])(?:\\\\)*\\C", pattern):
+                errors.append(_err(f"{path}.pattern", "\\C is not supported by the gateway"))
+                continue
             try:
                 compiled = re.compile(pattern)
                 if compiled.match(""):
@@ -318,6 +325,8 @@ def simulate_policy(policy_yaml: str, *, model: str, route: str = "", prompts: l
     report = validate_policy_yaml(policy_yaml)
     policy = report["normalized_policy"]
     prompts = prompts or []
+    if len(prompts) > MAX_SIMULATION_PROMPTS or sum(map(len, prompts)) > MAX_SIMULATION_CHARACTERS:
+        raise PolicyValidationError([_err("prompts", "simulation input exceeds the 100 prompt / 65536 character budget")])
     topics = [topic.strip().lower() for topic in (topics or []) if isinstance(topic, str) and topic.strip()]
     explanations: list[RuleExplanation] = []
     matched_rules: list[dict[str, Any]] = []

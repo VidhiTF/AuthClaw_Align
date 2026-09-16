@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -73,13 +74,14 @@ def test_auditor_otp_binds_access_to_email_and_share(monkeypatch):
         return SimpleNamespace(method="smtp")
 
     monkeypatch.setattr(trust_center, "send_otp_email", fake_send)
-    db = SimpleNamespace(commit=lambda: None)
+    db = SimpleNamespace(commit=lambda: None, refresh=lambda *_args, **_kwargs: None)
     share_token = "tc_demo_secret"
     share = SimpleNamespace(
         id=uuid4(),
         tenant_id=uuid4(),
         auditor_email="auditor@example.com",
         metadata_json={},
+        status="active", revoked_at=None, expires_at=trust_center.now_utc() + timedelta(days=1),
     )
 
     issued = trust_center.issue_auditor_otp(db, share, "Acme")

@@ -35,7 +35,7 @@ def _get_connector(db: Session, request: Request, connector_id: UUID) -> CloudCo
     connector = db.query(CloudConnector).filter(
         CloudConnector.tenant_id == request.state.tenant_id,
         CloudConnector.id == connector_id,
-    ).first()
+    ).with_for_update().first()
     if not connector:
         raise HTTPException(status_code=404, detail="Cloud connector not found")
     return connector
@@ -83,7 +83,10 @@ def revoke_cloud_connector(connector_id: UUID, request: Request, db: Session = D
 @router.post("/{connector_id}/verify", dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
 def verify_cloud_connector(connector_id: UUID, request: Request, db: Session = Depends(get_tenant_db)):
     connector = _get_connector(db, request, connector_id)
-    result = cloud_connectors.verify_connector(db, connector)
+    try:
+        result = cloud_connectors.verify_connector(db, connector)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"connector": cloud_connectors.serialize_connector(connector), "result": result}
 
 
@@ -95,6 +98,7 @@ def run_cloud_connector_action(
     request: Request,
     db: Session = Depends(get_tenant_db),
 ):
+    action = action.strip().lower()
     connector = _get_connector(db, request, connector_id)
     if action in {"remediate", "pr-remediation"}:
         user = db.query(User).filter(
