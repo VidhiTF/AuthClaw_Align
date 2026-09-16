@@ -106,7 +106,10 @@ locals {
         {
           Effect   = "Allow"
           Action   = ["kms:Decrypt"]
-          Resource = aws_kms_key.main.arn
+          Resource = distinct(concat(
+            [aws_kms_key.main.arn],
+            name == "audit_consumer" ? tolist(var.audit_consumer_secret_kms_key_arns) : []
+          ))
           Condition = {
             StringEquals = {
               "kms:ViaService"                  = "secretsmanager.${var.region}.amazonaws.com"

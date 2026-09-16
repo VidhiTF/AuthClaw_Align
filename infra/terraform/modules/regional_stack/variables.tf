@@ -490,13 +490,19 @@ variable "audit_consumer_environment" {
 }
 
 variable "audit_consumer_secret_arns" {
-  description = "Externally provisioned AUDIT_POSTGRES_URL (SELECT-only, sslmode=verify-full) and Kafka SASL credential secret ARNs."
+  description = "Externally provisioned AUDIT_POSTGRES_URL (verifier-only, sslmode=verify-full) and Kafka SASL credential secret ARNs."
   type        = map(string)
   default     = {}
   validation {
     condition = length(setsubtract(toset(keys(var.audit_consumer_secret_arns)), toset(["AUDIT_POSTGRES_URL", "KAFKA_SASL_USERNAME", "KAFKA_SASL_PASSWORD"]))) == 0
     error_message = "Only audit verifier and Kafka SASL credentials belong here."
   }
+}
+
+variable "audit_consumer_secret_kms_key_arns" {
+  description = "Customer-managed KMS key ARNs used by external audit-consumer secrets."
+  type        = set(string)
+  default     = []
 }
 
 variable "tags" {

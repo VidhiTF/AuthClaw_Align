@@ -567,9 +567,15 @@ variable "audit_consumer_environment" {
 }
 
 variable "audit_consumer_secret_arns" {
-  description = "External PostgreSQL verifier and Kafka SASL secret ARNs."
+  description = "External verifier-only PostgreSQL and Kafka SASL secret ARNs."
   type        = map(string)
   default     = {}
+}
+
+variable "audit_consumer_secret_kms_key_arns" {
+  description = "Customer-managed KMS key ARNs used by external audit-consumer secrets."
+  type        = set(string)
+  default     = []
 }
 
 variable "tags" {

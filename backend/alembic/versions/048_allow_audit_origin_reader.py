@@ -1,4 +1,4 @@
-"""Allow a read-only audit verifier to select one tenant's origin rows.
+"""Add a restricted audit-origin verification function.
 
 Revision ID: 048
 Revises: 047
@@ -15,31 +15,26 @@ depends_on = None
 
 def upgrade():
     op.execute("""
-        CREATE POLICY audit_log_metadata_origin_reader
-        ON public.audit_log_metadata
-        FOR SELECT
-        USING (
-          tenant_id = nullif(
-            current_setting('app.current_tenant_id', true), ''
-          )::uuid
-          AND has_table_privilege(
-            session_user, 'public.audit_log_metadata', 'SELECT'
+        CREATE FUNCTION public.verify_audit_origin(
+          p_tenant_id uuid, p_record_id uuid, p_canonical_payload text,
+          p_prior_hash text, p_integrity_hash text
+        ) RETURNS boolean
+        LANGUAGE sql STABLE SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        AS $$
+          SELECT EXISTS (
+            SELECT 1 FROM public.audit_log_metadata
+             WHERE tenant_id = p_tenant_id
+               AND record_id = p_record_id
+               AND canonical_payload = p_canonical_payload
+               AND prior_hash IS NOT DISTINCT FROM p_prior_hash
+               AND integrity_hash IS NOT DISTINCT FROM p_integrity_hash
           )
-          AND NOT has_table_privilege(
-            session_user, 'public.audit_log_metadata', 'INSERT'
-          )
-          AND NOT has_table_privilege(
-            session_user, 'public.audit_log_metadata', 'UPDATE'
-          )
-          AND NOT has_table_privilege(
-            session_user, 'public.audit_log_metadata', 'DELETE'
-          )
-        );
+        $$;
     """)
 
 
 def downgrade():
     op.execute(
-        "DROP POLICY IF EXISTS audit_log_metadata_origin_reader "
-        "ON public.audit_log_metadata"
+        "DROP FUNCTION IF EXISTS public.verify_audit_origin(uuid,uuid,text,text,text)"
     )

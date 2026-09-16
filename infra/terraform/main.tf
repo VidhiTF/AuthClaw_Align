@@ -106,6 +106,7 @@ module "primary" {
   enable_audit_consumer                = var.enable_audit_consumer
   audit_consumer_environment           = var.audit_consumer_environment
   audit_consumer_secret_arns           = var.audit_consumer_secret_arns
+  audit_consumer_secret_kms_key_arns   = var.audit_consumer_secret_kms_key_arns
   replica_source_db_arn                = ""
   tags                                 = local.tags
 }
@@ -195,6 +196,7 @@ module "secondary" {
   enable_audit_consumer                = var.enable_audit_consumer
   audit_consumer_environment           = var.audit_consumer_environment
   audit_consumer_secret_arns           = var.audit_consumer_secret_arns
+  audit_consumer_secret_kms_key_arns   = var.audit_consumer_secret_kms_key_arns
   replica_source_db_arn                = var.enable_cross_region_db_replica ? module.primary.rds_instance_arn : ""
   tags                                 = local.tags
 }

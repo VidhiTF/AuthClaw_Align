@@ -484,7 +484,7 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
         text(
             f"GRANT SELECT ON public.tenants, public.users, public.api_keys, "
             f"public.tenant_oidc_configs, public.onboarding_email_otps, "+
-            f"public.trust_center_shares "
+            f"public.trust_center_shares, public.audit_log_metadata "
             f"TO {definer}"
         )
     )
@@ -540,6 +540,7 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
         "resolve_api_key(text)",
         "resolve_trust_center_share(text)",
         "access_request_onboarding_started(text,timestamptz)",
+        "verify_audit_origin(uuid,uuid,text,text,text)",
     )
     for function_signature in definer_functions:
         secured_function = conn.execute(
@@ -553,8 +554,13 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
             conn.execute(
                 text(f"REVOKE ALL ON FUNCTION {secured_function} FROM PUBLIC")
             )
+            grantee = (
+                "PUBLIC"
+                if function_signature.startswith("verify_audit_origin")
+                else runtime
+            )
             conn.execute(
-                text(f"GRANT EXECUTE ON FUNCTION {secured_function} TO {runtime}")
+                text(f"GRANT EXECUTE ON FUNCTION {secured_function} TO {grantee}")
             )
 
     conn.execute(text("REVOKE ALL ON ALL TABLES IN SCHEMA authn FROM PUBLIC"))

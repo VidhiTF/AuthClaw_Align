@@ -59,16 +59,10 @@ def test_audit_origin_reader_migration_follows_platform_history(monkeypatch):
     migration = scripts.get_revision("048").module
     monkeypatch.setattr(migration.op, "execute", statements.append)
     migration.upgrade()
-    policy = statements[0]
-    assert "FOR SELECT" in policy
-    assert "current_setting('app.current_tenant_id', true)" in policy
-    for privilege in ("INSERT", "UPDATE", "DELETE"):
-        denied_privilege = (
-            "NOT has_table_privilege(\n"
-            "            session_user, 'public.audit_log_metadata', "
-            f"'{privilege}'"
-        )
-        assert denied_privilege in policy
+    function = statements[0]
+    assert "SECURITY DEFINER" in function
+    assert "RETURNS boolean" in function
+    assert "CREATE POLICY" not in function
 
 
 def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch):

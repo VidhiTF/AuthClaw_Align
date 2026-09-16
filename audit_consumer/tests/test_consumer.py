@@ -250,11 +250,7 @@ def test_authoritative_origin_is_checked_before_insertion_or_replay(monkeypatch,
     monkeypatch.setenv("AUDIT_POSTGRES_URL", "postgresql://reader@postgres/authclaw")
     connection = MagicMock()
     connection.__enter__.return_value = connection
-    proof = (payload["canonical_payload"], payload["prior_hash"], payload["integrity_hash"])
-    if proof_kind in {"missing", "cross-tenant"}:
-        proof = None
-    elif proof_kind == "forged":
-        proof = ("trusted evidence", "GENESIS", "trusted hash")
+    proof = (proof_kind in {"valid", "replay"},)
     connection.execute.return_value.fetchone.return_value = proof
     connect = MagicMock(return_value=connection)
     if proof_kind == "outage":
@@ -269,11 +265,13 @@ def test_authoritative_origin_is_checked_before_insertion_or_replay(monkeypatch,
             _process_message(MagicMock(), payload)
         insert.assert_not_called()
     if proof_kind != "outage":
-        assert connection.execute.call_args_list[1].args == (
-            "SELECT set_config('app.current_tenant_id', %s, true)",
-            (TENANT,),
+        assert connection.execute.call_args.args[1] == (
+            TENANT,
+            RECORD,
+            payload["canonical_payload"],
+            payload["prior_hash"],
+            payload["integrity_hash"],
         )
-        assert connection.execute.call_args.args[1] == (TENANT, RECORD)
 
 
 def test_shared_environment_requires_https_and_authoritative_database(monkeypatch):

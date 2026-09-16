@@ -308,21 +308,25 @@ def _process_message(ch_client, payload: dict) -> None:
     dsn = os.getenv("AUDIT_POSTGRES_URL", "")
     if dsn:
         # Read authoritative evidence before even accepting a duplicate replay.
-        # This credential must have SELECT only; no append or mutation privileges.
+        # This credential needs verifier EXECUTE only; no table privileges.
         try:
             import psycopg
 
             with psycopg.connect(dsn, connect_timeout=5) as connection:
                 connection.execute("SET TRANSACTION READ ONLY")
-                connection.execute("SELECT set_config('app.current_tenant_id', %s, true)", (tenant_id,))
                 proof = connection.execute(
-                    "SELECT canonical_payload, prior_hash, integrity_hash FROM public.audit_log_metadata "
-                    "WHERE tenant_id = %s::uuid AND record_id = %s::uuid",
-                    (tenant_id, record_id),
+                    "SELECT public.verify_audit_origin(%s::uuid, %s::uuid, %s, %s, %s)",
+                    (
+                        tenant_id,
+                        record_id,
+                        row["canonical_payload"],
+                        row["prior_hash"],
+                        row["integrity_hash"],
+                    ),
                 ).fetchone()
         except Exception as exc:
             raise RetryableMirrorError("PostgreSQL origin verification unavailable") from exc
-        if proof is None or tuple(proof) != (row["canonical_payload"], row["prior_hash"], row["integrity_hash"]):
+        if proof != (True,):
             raise InvalidAuditEvent("event does not match authoritative PostgreSQL evidence")
     try:
         exists = audit_event_exists(ch_client, record_id)
