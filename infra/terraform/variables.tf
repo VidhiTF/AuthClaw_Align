@@ -567,7 +567,7 @@ variable "audit_consumer_environment" {
 }
 
 variable "audit_consumer_secret_arns" {
-  description = "External verifier-only PostgreSQL and Kafka SASL secret ARNs."
+  description = "External PostgreSQL (authclaw_audit_verifier member) and Kafka SASL secret ARNs."
   type        = map(string)
   default     = {}
 }

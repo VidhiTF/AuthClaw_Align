@@ -178,26 +178,35 @@ def test_writer_privileges_cannot_bypass_restricted_audit_verifier(
         )
         db.commit()
 
-    with isolation.app_engine.begin() as connection:
-        connection.execute(
-            text("SELECT set_config('app.current_tenant_id', :tenant, true)"),
-            {"tenant": str(tenant.tenant_id)},
-        )
-        assert connection.execute(
-            text("SELECT count(*) FROM public.audit_log_metadata")
-        ).scalar_one() == 0
+    with isolation.owner_engine.connect() as connection:
         assert connection.execute(
             text(
-                "SELECT public.verify_audit_origin("
-                ":tenant, :record, :payload, 'GENESIS', :integrity)"
-            ),
-            {
-                "tenant": tenant.tenant_id,
-                "record": record_id,
-                "payload": canonical_payload,
-                "integrity": integrity_hash,
-            },
+                "SELECT has_function_privilege('authclaw_audit_verifier', "
+                "'public.verify_audit_origin(uuid,uuid,text,text,text)', 'EXECUTE')"
+            )
         ).scalar_one() is True
+
+    with pytest.raises(DBAPIError):
+        with isolation.app_engine.begin() as connection:
+            connection.execute(
+                text("SELECT set_config('app.current_tenant_id', :tenant, true)"),
+                {"tenant": str(tenant.tenant_id)},
+            )
+            assert connection.execute(
+                text("SELECT count(*) FROM public.audit_log_metadata")
+            ).scalar_one() == 0
+            connection.execute(
+                text(
+                    "SELECT public.verify_audit_origin("
+                    ":tenant, :record, :payload, 'GENESIS', :integrity)"
+                ),
+                {
+                    "tenant": tenant.tenant_id,
+                    "record": record_id,
+                    "payload": canonical_payload,
+                    "integrity": integrity_hash,
+                },
+            )
 
 
 def test_authenticated_sessions_only_read_their_own_tenant(isolation: IsolationHarness):

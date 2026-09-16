@@ -31,6 +31,9 @@ def upgrade():
                AND integrity_hash IS NOT DISTINCT FROM p_integrity_hash
           )
         $$;
+        REVOKE ALL ON FUNCTION public.verify_audit_origin(
+          uuid, uuid, text, text, text
+        ) FROM PUBLIC;
     """)
 
 

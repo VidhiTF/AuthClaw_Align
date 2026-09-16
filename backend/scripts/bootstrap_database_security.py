@@ -26,6 +26,7 @@ BACKEND_RUNTIME_FUNCTIONS = {
     "resolve_trust_center_share",
 }
 AUTH_DEFINER_ROLE = os.getenv("AUTH_DEFINER_ROLE", "authclaw_auth_definer")
+AUDIT_VERIFIER_ROLE = os.getenv("AUDIT_VERIFIER_ROLE", "authclaw_audit_verifier")
 AGENT_AUTH_DEFINER_ROLE = os.getenv(
     "AGENT_AUTH_DEFINER_ROLE", "authclaw_agent_auth_definer"
 )
@@ -199,6 +200,23 @@ def ensure_agent_auth_definer_role(conn) -> None:
     )
 
 
+def ensure_audit_verifier_role(conn) -> None:
+    require_identifier(AUDIT_VERIFIER_ROLE, "AUDIT_VERIFIER_ROLE")
+    role = conn.dialect.identifier_preparer.quote(AUDIT_VERIFIER_ROLE)
+    exists = conn.execute(
+        text("SELECT 1 FROM pg_roles WHERE rolname = :role"),
+        {"role": AUDIT_VERIFIER_ROLE},
+    ).fetchone()
+    if not exists:
+        conn.execute(text(f"CREATE ROLE {role} NOLOGIN"))
+    conn.execute(
+        text(
+            f"ALTER ROLE {role} NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB "
+            "NOCREATEROLE NOBYPASSRLS"
+        )
+    )
+
+
 def configure_default_privileges(conn, migrator: Role, runtime: Role) -> None:
     quote = conn.dialect.identifier_preparer.quote
     owner = quote(migrator.name)
@@ -333,6 +351,7 @@ def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> N
 
     ensure_auth_definer_role(conn)
     ensure_agent_auth_definer_role(conn)
+    ensure_audit_verifier_role(conn)
 
     for role in roles:
         ensure_login_role(conn, role)
@@ -368,6 +387,7 @@ def prepare(conn, database_name: str, roles: tuple[Role, Role, Role, Role]) -> N
         text(f"GRANT USAGE, CREATE ON SCHEMA public TO {quote(backend_migrator.name)}")
     )
     conn.execute(text(f"GRANT USAGE ON SCHEMA public TO {quote(backend_runtime.name)}"))
+    conn.execute(text(f"GRANT USAGE ON SCHEMA public TO {quote(AUDIT_VERIFIER_ROLE)}"))
     prepare_existing_schema_objects_for_migration(conn, backend_migrator)
     conn.execute(
         text(
@@ -554,11 +574,12 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
             conn.execute(
                 text(f"REVOKE ALL ON FUNCTION {secured_function} FROM PUBLIC")
             )
-            grantee = (
-                "PUBLIC"
-                if function_signature.startswith("verify_audit_origin")
-                else runtime
-            )
+            verifier = function_signature.startswith("verify_audit_origin")
+            grantee = quote(AUDIT_VERIFIER_ROLE) if verifier else runtime
+            if verifier:
+                conn.execute(
+                    text(f"REVOKE ALL ON FUNCTION {secured_function} FROM {runtime}")
+                )
             conn.execute(
                 text(f"GRANT EXECUTE ON FUNCTION {secured_function} TO {grantee}")
             )

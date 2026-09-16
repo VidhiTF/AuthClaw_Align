@@ -490,7 +490,7 @@ variable "audit_consumer_environment" {
 }
 
 variable "audit_consumer_secret_arns" {
-  description = "Externally provisioned AUDIT_POSTGRES_URL (verifier-only, sslmode=verify-full) and Kafka SASL credential secret ARNs."
+  description = "Externally provisioned AUDIT_POSTGRES_URL (member of authclaw_audit_verifier, sslmode=verify-full) and Kafka SASL credential secret ARNs."
   type        = map(string)
   default     = {}
   validation {

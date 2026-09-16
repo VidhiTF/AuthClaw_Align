@@ -25,6 +25,11 @@ def test_bootstrap_creates_roles_before_worker_schema(monkeypatch):
     monkeypatch.setattr(bootstrap, "ensure_auth_definer_role", lambda conn: None)
     monkeypatch.setattr(bootstrap, "ensure_agent_auth_definer_role", lambda conn: None)
     monkeypatch.setattr(
+        bootstrap,
+        "ensure_audit_verifier_role",
+        lambda conn: created.add("audit_verifier"),
+    )
+    monkeypatch.setattr(
         bootstrap, "ensure_login_role", lambda conn, role: created.add(role.name)
     )
 
@@ -33,6 +38,7 @@ def test_bootstrap_creates_roles_before_worker_schema(monkeypatch):
 
     def prepare_worker(conn, owner):
         assert owner in created, "worker schema owner must exist first"
+        assert "audit_verifier" in created
         raise BoundaryReached
 
     monkeypatch.setattr(
@@ -63,6 +69,7 @@ def test_audit_origin_reader_migration_follows_platform_history(monkeypatch):
     assert "SECURITY DEFINER" in function
     assert "RETURNS boolean" in function
     assert "CREATE POLICY" not in function
+    assert "FROM PUBLIC" in function
 
 
 def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch):
