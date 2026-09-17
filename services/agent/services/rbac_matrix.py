@@ -120,7 +120,7 @@ ENDPOINT_RULES: List[EndpointRule] = [
     EndpointRule("*", "/analytics/*", TENANT_READ_ROLES, "analytics:read", True, True, "Governance analytics."),
     EndpointRule("*", "/remediation/*", TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER], "remediation:manage", True, True, "Remediation runtime."),
     EndpointRule("*", "/redteam/*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "redteam:read", True, True, "Red-team probe history and reports."),
-    EndpointRule("GET", "/metrics", TENANT_READ_ROLES + [ROLE_DEVELOPER], "metrics:read", True, True, "Tenant metrics and observability."),
+    EndpointRule("GET", "/metrics", [ROLE_PLATFORM_ADMIN], "operations:metrics", False, True, "Platform operations metrics."),
     EndpointRule("POST", "/observability/*", TENANT_ADMIN_ROLES, "observability:operate", True, True, "Event pipeline operations."),
     EndpointRule("GET", "/operations/health/details", [ROLE_PLATFORM_ADMIN], "operations:diagnostics", False, True, "Platform readiness diagnostics."),
     EndpointRule("GET", "/trust/public", ALL_ROLES, "trust:public", False, False, "Public signed Trust Center state."),

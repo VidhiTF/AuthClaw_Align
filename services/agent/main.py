@@ -2306,7 +2306,7 @@ def get_public_trust_health():
 
 
 @app.get("/metrics")
-def get_metrics():
+def get_metrics(_payload: dict = Depends(require_platform_admin)):
     from database import engine
     from sqlalchemy import text
     try:

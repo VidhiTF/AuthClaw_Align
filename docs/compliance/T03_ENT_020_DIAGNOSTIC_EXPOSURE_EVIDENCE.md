@@ -12,6 +12,8 @@
   an active tenantless platform-admin session.
 - Agent readiness probes retain `200`/`503` semantics but return only `status`.
   Detailed checks moved to the platform-admin-only `/operations/health/details`.
+- Agent `/metrics` is platform-admin-only in both the central RBAC matrix and
+  the route dependency; tenant roles cannot read cross-tenant operational counts.
 - CloudFront WAF blocks legacy documentation, detailed-health, and metrics paths.
   Terraform continues to expose no public agent endpoint.
 
@@ -23,8 +25,9 @@ evidence is therefore not applicable to this route-exposure change.
 | Evidence | Result |
 |---|---|
 | T01 live activation verifier | Passed; PR 52 merged, ruleset enforcement active, zero bypass actors |
-| Agent RBAC/control-plane smoke tests | 6 passed |
+| Agent security/RBAC/control-plane regression suite | 31 passed, 23 subtests passed |
 | Authenticated agent diagnostic endpoint regression | Anonymous and tenant-admin requests denied; platform-admin request reached the handler; configuration validation names absent from the response and correlated to protected logs |
+| Authenticated agent metrics regression | All seven tenant roles denied with `403`; platform-admin remains the only allowed RBAC role |
 | Backend authorization matrix | 28 passed |
 | Backend in-process shared-environment surface | `/health` 200 with exact two-field body; docs/OpenAPI 404; operator schema 401; metrics 401 |
 | Agent in-process shared-environment surface | `/health` 200; `/health/ready` 503 with only `status` while the local database was unavailable; detailed endpoint 403 |
@@ -34,7 +37,7 @@ evidence is therefore not applicable to this route-exposure change.
 | Deployment workflow YAML and modified Bash step syntax | Passed |
 | Repository policy and ACL-14 delivery tests | 52 passed |
 | Tokei 12.1.2 repository line-budget check | Passed |
-| PR growth | 268 positive net non-prose lines by per-file `git diff --numstat`; material-growth owner approval is required |
+| PR growth | 290 positive net non-prose lines by per-file `git diff --numstat`; material-growth owner approval is required |
 | `git diff --check` | Passed |
 
 The focused backend endpoint test did not run because this checkout has no configured

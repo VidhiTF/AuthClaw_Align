@@ -10,11 +10,11 @@ import main as agent_main
 
 class DiagnosticExposureTests(unittest.TestCase):
     @staticmethod
-    def _authorization(role: str) -> dict[str, str]:
+    def _authorization(role: str, tenant_id: int | None = None) -> dict[str, str]:
         token = agent_main.create_jwt({
             "sub": "diagnostic-test",
             "role": role,
-            "tenant_id": None,
+            "tenant_id": tenant_id,
             "exp": int(time.time()) + 60,
         })
         return {"Authorization": f"Bearer {token}"}
@@ -68,6 +68,22 @@ class DiagnosticExposureTests(unittest.TestCase):
         self.assertIn(failure["correlation_id"], protected_log)
         for validation_error in validation_errors:
             self.assertIn(validation_error, protected_log)
+
+    def test_metrics_denies_every_tenant_role(self):
+        client = TestClient(agent_main.app)
+
+        for role in (
+            "Super Admin",
+            "Admin",
+            "Compliance Officer",
+            "Auditor",
+            "Developer",
+            "Operator",
+            "Viewer",
+        ):
+            with self.subTest(role=role):
+                response = client.get("/metrics", headers=self._authorization(role, tenant_id=42))
+                self.assertEqual(response.status_code, 403)
 
 
 if __name__ == "__main__":

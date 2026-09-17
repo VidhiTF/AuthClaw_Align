@@ -31,6 +31,12 @@ class RuntimeContextRegressionTests(unittest.TestCase):
         self.assertFalse(role_allowed("admin", "GET", "/operations/health/details"))
         self.assertTrue(role_allowed("platform_admin", "GET", "/operations/health/details"))
 
+    def test_metrics_requires_platform_operations_access(self):
+        for role in ("owner", "admin", "compliance_officer", "auditor", "developer", "operator", "viewer"):
+            with self.subTest(role=role):
+                self.assertFalse(role_allowed(role, "GET", "/metrics"))
+        self.assertTrue(role_allowed("platform_admin", "GET", "/metrics"))
+
     def test_approval_worker_retains_authenticated_database_context(self):
         observed = []
 
