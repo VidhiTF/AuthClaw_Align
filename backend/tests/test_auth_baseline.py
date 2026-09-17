@@ -10,7 +10,7 @@ import pyotp
 import pytest
 from fastapi import HTTPException, Request
 
-from app.core.auth import hash_key, verify_mfa_code
+from app.core.auth import hash_key, verify_mfa_code, verify_mfa_code_result
 from app.core import oidc
 from app.core.crypto import decrypt_secret
 from app.core.passwords import hash_password, verify_password
@@ -55,15 +55,17 @@ def test_mfa_disable_requires_current_code(monkeypatch):
         "verify_mfa_challenge",
         lambda _client, user, code, **_kwargs: verify_mfa_code(user, code),
     )
+    monkeypatch.setattr(user_endpoints, "_commit_mfa_audit", lambda db, *_args, **_kwargs: db.commit())
     secret = pyotp.random_base32()
     user = MagicMock(
         id="00000000-0000-4000-8000-000000000001",
         tenant_id="00000000-0000-4000-8000-000000000002",
         email="owner@example.com",
-        role="owner",
+        role="viewer",
         mfa_enabled=True,
         mfa_secret=secret,
         mfa_backup_codes=["backup01"],
+        mfa_last_totp_counter=None,
     )
     request = MagicMock()
     request.state.user_id = user.id
@@ -95,6 +97,7 @@ def test_mfa_replacement_requires_current_factor_and_protects_credentials(monkey
         "verify_mfa_challenge",
         lambda _client, user, code, **_kwargs: verify_mfa_code(user, code),
     )
+    monkeypatch.setattr(user_endpoints, "_commit_mfa_audit", lambda db, *_args, **_kwargs: db.commit())
     secret = pyotp.random_base32()
     user = MagicMock(
         id="00000000-0000-4000-8000-000000000001",
@@ -104,6 +107,7 @@ def test_mfa_replacement_requires_current_factor_and_protects_credentials(monkey
         mfa_enabled=True,
         mfa_secret=secret,
         mfa_backup_codes=["backup01"],
+        mfa_last_totp_counter=None,
     )
     request = MagicMock()
     request.state.user_id = user.id
@@ -122,10 +126,55 @@ def test_mfa_replacement_requires_current_factor_and_protects_credentials(monkey
         user_endpoints.MFASetupRequest(code=pyotp.TOTP(secret).now()),
         db,
     )
-    assert decrypt_secret(user.mfa_secret) == response.mfa_secret
-    assert all(len(code) == 64 for code in user.mfa_backup_codes)
-    assert not set(response.backup_codes).intersection(user.mfa_backup_codes)
+    assert decrypt_secret(user.mfa_secret) == secret
+    assert decrypt_secret(user.mfa_pending_secret) == response.mfa_secret
+    assert all(len(code) == 64 for code in user.mfa_pending_backup_codes)
+    assert not set(response.backup_codes).intersection(user.mfa_pending_backup_codes)
+    assert response.mfa_enabled is True
+    assert response.enrollment_pending is True
     db.commit.assert_called_once()
+
+
+def test_totp_counter_is_consumed_once():
+    secret = pyotp.random_base32()
+    user = SimpleNamespace(
+        mfa_secret=secret,
+        mfa_backup_codes=[],
+        mfa_last_totp_counter=None,
+    )
+    code = pyotp.TOTP(secret).now()
+
+    first = verify_mfa_code_result(user, code)
+    second = verify_mfa_code_result(user, code)
+
+    assert first.verified is True
+    assert first.method == "totp"
+    assert second.verified is False
+    assert second.reason == "replay"
+
+
+def test_privileged_user_cannot_self_disable_mfa(monkeypatch):
+    user = MagicMock(
+        id="00000000-0000-4000-8000-000000000001",
+        tenant_id="00000000-0000-4000-8000-000000000002",
+        email="owner@example.com",
+        role="owner",
+        mfa_enabled=True,
+        mfa_secret=pyotp.random_base32(),
+    )
+    request = MagicMock()
+    request.state.user_id = user.id
+    request.state.tenant_id = user.tenant_id
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
+
+    with pytest.raises(HTTPException, match="separate owner") as exc:
+        user_endpoints.disable_my_mfa(
+            user_endpoints.MFADisableRequest(code="123456"), request, db
+        )
+
+    assert exc.value.status_code == 403
+    assert user.mfa_enabled is True
 
 
 def test_api_key_create_rejects_unknown_scope():

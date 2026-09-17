@@ -291,6 +291,7 @@ def create_approval(
     request_id: str = None,
     reason: str = None,
     metadata: dict = None,
+    requested_by: str = None,
 ) -> dict:
     """
     Creates a new approval record, stores it, and returns it.
@@ -301,6 +302,10 @@ def create_approval(
     correlation_id = session_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=_expiry_minutes())
+
+    approval_metadata = dict(metadata or {})
+    if requested_by:
+        approval_metadata["requested_by"] = requested_by
 
     record = PersistentApprovalRecord({
         "approval_id":       approval_id,
@@ -333,7 +338,7 @@ def create_approval(
         "execution_token_used_at": None,
         "execution_expires_at": None,
         "last_action_at":    now.isoformat(),
-        "metadata":          metadata or {},
+        "metadata":          approval_metadata,
     })
     _approvals[approval_id] = record
     _persist_record(record)

@@ -53,7 +53,7 @@ from services.enterprise_identity import (
     set_provider_enabled,
     upsert_provider_config,
 )
-from services.tenant_context import get_current_tenant_id, tenant_context
+from services.tenant_context import get_current_request_id, get_current_tenant_id, tenant_context
 from services.control_plane_auth import verify_control_plane_request
 
 # Set up basic logging
@@ -749,59 +749,127 @@ def _approval_authenticated_payload(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Authorization credentials missing.")
     return payload
 
-def _approval_totp_secret(record: dict, user_payload: dict) -> Optional[str]:
+def _consume_approval_totp_counter(record: dict, user_payload: dict, mfa_code: str) -> Optional[int]:
+    """Verify and atomically consume a user's TOTP counter.
+
+    The row lock makes replay prevention global for the identity, including
+    concurrent approvals handled by different workers. Failures and lockout
+    are durable rather than process-local.
+    """
     tenant_id = record.get("tenant_id")
     if not tenant_id:
         return None
+    request_id = (
+        get_current_request_id()
+        or record.get("request_id")
+        or record.get("approval_id")
+    )
+    if not request_id:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Approval request context is unavailable",
+        )
     from database import engine
     from sqlalchemy import text
-    with engine.connect() as conn:
+    now = datetime.now(timezone.utc)
+    failure_detail = None
+    with tenant_context(
+        int(tenant_id), request_id=str(request_id), required=True
+    ), engine.begin() as conn:
         user_id = user_payload.get("user_id")
         username = user_payload.get("sub") or user_payload.get("email")
         if user_id:
-            secret = conn.execute(
+            row = conn.execute(
                 text("""
-                    SELECT totp_secret
+                    SELECT id, totp_secret, mfa_last_totp_counter,
+                           mfa_failed_attempts, mfa_locked_until
                     FROM tenant_users
                     WHERE id = :user_id
                       AND tenant_id = :tenant_id
                     LIMIT 1
+                    FOR UPDATE
                 """),
                 {"user_id": user_id, "tenant_id": tenant_id},
-            ).scalar()
-            if secret:
-                return decrypt_totp_secret(secret)
-        if username:
-            secret = conn.execute(
+            ).mappings().first()
+        elif username:
+            row = conn.execute(
                 text("""
-                    SELECT totp_secret
+                    SELECT id, totp_secret, mfa_last_totp_counter,
+                           mfa_failed_attempts, mfa_locked_until
                     FROM tenant_users
                     WHERE lower(email) = lower(:email)
                       AND tenant_id = :tenant_id
                     LIMIT 1
+                    FOR UPDATE
                 """),
                 {"email": username, "tenant_id": tenant_id},
-            ).scalar()
-            if secret:
-                return decrypt_totp_secret(secret)
-        secret = conn.execute(
-            text("SELECT totp_secret FROM tenants WHERE id = :id"),
-            {"id": tenant_id},
-        ).scalar()
-        return decrypt_totp_secret(secret)
+            ).mappings().first()
+        else:
+            row = None
+
+        if not row or not row.get("totp_secret"):
+            return None
+
+        locked_until = row.get("mfa_locked_until")
+        if locked_until and locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        if locked_until and locked_until > now:
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail="MFA verification is temporarily locked",
+            )
+
+        secret = decrypt_totp_secret(row["totp_secret"])
+        counter = verify_totp_token_with_counter(secret, mfa_code, window=1) if secret else None
+        last_counter = row.get("mfa_last_totp_counter")
+        replayed = counter is not None and last_counter is not None and int(counter) <= int(last_counter)
+        if counter is None or replayed:
+            attempts = int(row.get("mfa_failed_attempts") or 0) + 1
+            lock_until = (
+                (now + timedelta(minutes=5)).replace(tzinfo=None)
+                if attempts >= 5
+                else None
+            )
+            conn.execute(
+                text("""
+                    UPDATE tenant_users
+                    SET mfa_failed_attempts = :attempts,
+                        mfa_locked_until = :locked_until,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :id AND tenant_id = :tenant_id
+                """),
+                {
+                    "attempts": 0 if lock_until else attempts,
+                    "locked_until": lock_until,
+                    "id": row["id"],
+                    "tenant_id": tenant_id,
+                },
+            )
+            failure_detail = "Stale MFA code is not allowed" if replayed else "Invalid MFA code"
+        else:
+            conn.execute(
+                text("""
+                    UPDATE tenant_users
+                    SET mfa_last_totp_counter = :counter,
+                        mfa_failed_attempts = 0,
+                        mfa_locked_until = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :id AND tenant_id = :tenant_id
+                """),
+                {"counter": counter, "id": row["id"], "tenant_id": tenant_id},
+            )
+    if failure_detail:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=failure_detail)
+    return int(counter)
 
 def _verify_approval_stage_mfa(record: dict, user_payload: dict, payload: dict, stage: str, expiry_at: str) -> Tuple[bool, str, int]:
     mfa_code = payload.get("mfa_code") if isinstance(payload, dict) else None
     if not mfa_code:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="MFA code is required")
 
-    totp_secret = _approval_totp_secret(record, user_payload)
-    if not totp_secret:
-        return False, "", 0
-
-    counter = verify_totp_token_with_counter(totp_secret, mfa_code, window=1)
+    counter = _consume_approval_totp_counter(record, user_payload, mfa_code)
     if counter is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid MFA code")
+        return False, "", 0
 
     prior_counter_key = "approval_mfa_counter" if stage == "approval" else "execution_mfa_counter"
     prior_counter = record.get(prior_counter_key)
@@ -1423,6 +1491,20 @@ async def approve_request(approval_id: str, request: Request):
     policy = get_policy()
     approval_policy = policy.get("approval", {})
     require_mfa = approval_policy.get("require_mfa", True)
+    require_separate_approver = approval_policy.get("require_separate_approver", True)
+
+    requester = str((record.get("metadata") or {}).get("requested_by") or "").strip()
+    if require_separate_approver and requester and requester.casefold() == approver.casefold():
+        append_approval_audit(
+            record,
+            action="self_approval_rejected",
+            actor=approver,
+            metadata={"control": "separation_of_duties"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The requesting actor cannot approve this action",
+        )
 
     payload = await parse_approval_action_payload(request)
     body_present = bool(payload.pop("_body_present", False))
@@ -4908,20 +4990,6 @@ def skip_domain_verification_for_testing() -> bool:
     return env_bool("SKIP_DOMAIN_VERIFICATION")
 
 
-def disable_mfa_for_testing() -> bool:
-    # Local manual runs can bypass MFA for usability, but automated tests must
-    # keep the production MFA contract unless a test explicitly opts out. This
-    # bypass is never honored in production.
-    production = env_value("AUTHCLAW_ENV", "development").lower() in {"production", "prod"}
-    if production:
-        return False
-    if os.getenv("PYTEST_CURRENT_TEST"):
-        return os.getenv("DISABLE_MFA_FOR_TESTING", "").lower() in {"1", "true", "yes", "on"} or os.getenv(
-            "AUTHCLAW_ALLOW_TEST_MFA_BYPASS", ""
-        ).lower() in {"1", "true", "yes", "on"}
-    return env_bool("DISABLE_MFA_FOR_TESTING")
-
-
 def ensure_default_tenant_policies(conn, tenant_id: int) -> None:
     from sqlalchemy import text
     import json
@@ -4989,7 +5057,7 @@ def activate_verified_registration(conn, registration) -> int:
     full_name = registration._mapping["full_name"]
     password_hash = registration._mapping["password_hash"]
     totp_secret = encrypt_secret(decrypt_totp_secret(registration._mapping["totp_secret"]))
-    mfa_enabled = not disable_mfa_for_testing()
+    mfa_enabled = True
 
     tenant_id = conn.execute(
         text("""
@@ -5193,9 +5261,15 @@ def create_remediation_plan(finding_id: int, tenant_id: int = Depends(get_authen
 
 
 @app.post("/remediation/plans/{plan_id}/approval")
-def request_remediation_plan_approval(plan_id: int, tenant_id: int = Depends(get_authenticated_tenant)):
+def request_remediation_plan_approval(
+    plan_id: int,
+    request: Request,
+    tenant_id: int = Depends(get_authenticated_tenant),
+):
     try:
-        return _remediation_runtime().request_plan_approval(tenant_id, plan_id)
+        principal = optional_user_from_request(request)
+        requested_by = approval_actor_from_payload(principal)
+        return _remediation_runtime().request_plan_approval(tenant_id, plan_id, requested_by=requested_by)
     except Exception as exc:
         _remediation_error(exc)
 

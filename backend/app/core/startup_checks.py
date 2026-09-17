@@ -32,12 +32,12 @@ _VALID_ENVIRONMENTS = {
 logger = logging.getLogger("authclaw.backend.startup")
 
 _DB_REVISION_PATTERN = re.compile(r"^[0-9]{3}$")
-_ROLLOUT_DB_REVISIONS = frozenset({"048", "049"})
+_ROLLOUT_DB_REVISIONS = frozenset({"050"})
 
 
 def compatible_database_revisions() -> tuple[str, ...]:
     """Return the tightly bounded schema heads allowed during a rollout."""
-    raw = os.getenv("AUTHCLAW_EXPECTED_DB_REVISION") or "049"
+    raw = os.getenv("AUTHCLAW_EXPECTED_DB_REVISION") or "050"
     revisions = tuple(part.strip() for part in raw.split(",") if part.strip())
     if (
         not revisions
@@ -47,8 +47,7 @@ def compatible_database_revisions() -> tuple[str, ...]:
         or not set(revisions).issubset(_ROLLOUT_DB_REVISIONS)
     ):
         raise RuntimeError(
-            "AUTHCLAW_EXPECTED_DB_REVISION must contain one or two unique "
-            "supported revisions (048 and 049)"
+            "AUTHCLAW_EXPECTED_DB_REVISION must contain only supported revision 050"
         )
     return revisions
 

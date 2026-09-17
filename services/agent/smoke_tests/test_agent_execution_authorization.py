@@ -1,7 +1,10 @@
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
 
 from services.execution_auth import authorize_agent_operation
 from services.rbac_matrix import agent_operation_allowed, resolve_rule, role_allowed
+from services.tenant_context import get_current_request_id
 
 
 class AgentExecutionAuthorizationTests(unittest.TestCase):
@@ -55,6 +58,98 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
                 "remediation_plan",
                 42,
             )
+
+    def test_approval_mfa_database_context_retains_request_id(self):
+        import main
+
+        class Result:
+            def mappings(self):
+                return self
+
+            def first(self):
+                self.assert_request_context()
+                return {
+                    "id": 17,
+                    "totp_secret": "encrypted",
+                    "mfa_last_totp_counter": None,
+                    "mfa_failed_attempts": 0,
+                    "mfa_locked_until": None,
+                }
+
+            @staticmethod
+            def assert_request_context():
+                assert get_current_request_id() == "request-17"
+
+        class Connection:
+            def execute(self, statement, parameters):
+                if str(statement).lstrip().upper().startswith("SELECT"):
+                    return Result()
+                self.updated = parameters
+                return Result()
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield Connection()
+
+        with (
+            patch("database.engine", Engine()),
+            patch.object(main, "decrypt_totp_secret", return_value="secret"),
+            patch.object(main, "verify_totp_token_with_counter", return_value=123),
+        ):
+            counter = main._consume_approval_totp_counter(
+                {"tenant_id": "42", "request_id": "request-17"},
+                {"user_id": "17"},
+                "654321",
+            )
+
+        self.assertEqual(counter, 123)
+
+    def test_approval_mfa_lock_deadline_is_persisted_as_utc_timestamp(self):
+        import main
+
+        updates = []
+
+        class Result:
+            def mappings(self):
+                return self
+
+            def first(self):
+                return {
+                    "id": 17,
+                    "totp_secret": "encrypted",
+                    "mfa_last_totp_counter": 122,
+                    "mfa_failed_attempts": 4,
+                    "mfa_locked_until": None,
+                }
+
+        class Connection:
+            def execute(self, statement, parameters):
+                if str(statement).lstrip().upper().startswith("SELECT"):
+                    return Result()
+                updates.append(parameters)
+                return Result()
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield Connection()
+
+        with (
+            patch("database.engine", Engine()),
+            patch.object(main, "decrypt_totp_secret", return_value="secret"),
+            patch.object(main, "verify_totp_token_with_counter", return_value=None),
+            self.assertRaises(main.HTTPException),
+        ):
+            main._consume_approval_totp_counter(
+                {"tenant_id": "42", "request_id": "request-17"},
+                {"user_id": "17"},
+                "000000",
+            )
+
+        self.assertEqual(updates[0]["attempts"], 0)
+        self.assertIsNotNone(updates[0]["locked_until"])
+        self.assertIsNone(updates[0]["locked_until"].tzinfo)
 
 
 if __name__ == "__main__":

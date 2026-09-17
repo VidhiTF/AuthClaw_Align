@@ -185,9 +185,10 @@ def verify_mfa_challenge(
             headers={"Retry-After": str(max(1, (cooldown_ms + 999) // 1000))},
         )
 
-    from app.core.auth import verify_mfa_code
+    from app.core.auth import verify_mfa_code_result
 
-    if verify_mfa_code(user, code):
+    verification = verify_mfa_code_result(user, code)
+    if verification.verified:
         try:
             client.eval(MFA_RESET_LUA, 3, attempts_key, level_key, cooldown_key)
         except redis.RedisError as exc:
@@ -196,6 +197,9 @@ def verify_mfa_challenge(
             ) from exc
         _audit(tenant_id, str(user.id), operation, "reset", request_id)
         return True
+
+    if verification.reason == "replay":
+        _audit(tenant_id, str(user.id), operation, "replay_rejected", request_id)
 
     try:
         result = client.eval(

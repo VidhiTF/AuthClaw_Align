@@ -202,6 +202,9 @@ def run_startup_migrations():
         email_verified BOOLEAN DEFAULT FALSE,
         mfa_enabled BOOLEAN DEFAULT TRUE,
         totp_secret VARCHAR(32),
+        mfa_last_totp_counter BIGINT,
+        mfa_failed_attempts INTEGER NOT NULL DEFAULT 0,
+        mfa_locked_until TIMESTAMP,
         status VARCHAR(20) DEFAULT 'active',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -213,6 +216,9 @@ def run_startup_migrations():
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN DEFAULT TRUE;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS totp_secret VARCHAR(32);
+    ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_last_totp_counter BIGINT;
+    ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_failed_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_locked_until TIMESTAMP;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP;

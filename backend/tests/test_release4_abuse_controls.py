@@ -8,6 +8,7 @@ import redis
 from fastapi import HTTPException
 
 from app.services import abuse_controls
+from app.core.auth import MFAVerification
 
 
 class FakeRedis:
@@ -108,7 +109,8 @@ def test_mfa_isolated_by_user_and_operation_and_success_resets(monkeypatch):
     client = FakeRedis()
     user = SimpleNamespace(id="user-1")
     monkeypatch.setattr(
-        "app.core.auth.verify_mfa_code", lambda _user, code: code == "valid"
+        "app.core.auth.verify_mfa_code_result",
+        lambda _user, code: MFAVerification(code == "valid", method="totp" if code == "valid" else None),
     )
     for _ in range(2):
         assert not abuse_controls.verify_mfa_challenge(
@@ -126,7 +128,10 @@ def test_mfa_isolated_by_user_and_operation_and_success_resets(monkeypatch):
 def test_mfa_cooldown_escalates_but_is_bounded(monkeypatch):
     client = FakeRedis()
     user = SimpleNamespace(id="user-1")
-    monkeypatch.setattr("app.core.auth.verify_mfa_code", lambda *_args: False)
+    monkeypatch.setattr(
+        "app.core.auth.verify_mfa_code_result",
+        lambda *_args: MFAVerification(False),
+    )
     monkeypatch.setenv("MFA_FAILURE_THRESHOLD", "2")
     monkeypatch.setenv("MFA_BASE_COOLDOWN_SECONDS", "2")
     monkeypatch.setenv("MFA_MAX_COOLDOWN_SECONDS", "4")
@@ -169,7 +174,7 @@ def test_mfa_redis_failure_is_retryable_and_never_verifies(monkeypatch):
     def verify(*_args):
         pytest.fail("verification must not run without attempt state")
 
-    monkeypatch.setattr("app.core.auth.verify_mfa_code", verify)
+    monkeypatch.setattr("app.core.auth.verify_mfa_code_result", verify)
     with pytest.raises(HTTPException) as exc:
         abuse_controls.verify_mfa_challenge(
             client,
@@ -181,6 +186,31 @@ def test_mfa_redis_failure_is_retryable_and_never_verifies(monkeypatch):
     assert exc.value.status_code == 503
     assert exc.value.headers == {"Retry-After": "5"}
     assert client.calls == 1
+
+
+def test_replayed_totp_is_rejected_counted_and_audited(monkeypatch):
+    client = FakeRedis()
+    user = SimpleNamespace(id="user-1")
+    actions = []
+    monkeypatch.setattr(
+        "app.core.auth.verify_mfa_code_result",
+        lambda *_args: MFAVerification(False, method="totp", reason="replay"),
+    )
+    monkeypatch.setattr(
+        abuse_controls,
+        "_audit",
+        lambda _tenant, _user, _operation, action, _request: actions.append(action),
+    )
+
+    assert abuse_controls.verify_mfa_challenge(
+        client, user, "123456", tenant_id="tenant-1", operation="gateway_approval"
+    ) is False
+
+    attempts_key = abuse_controls._mfa_keys(
+        "tenant-1", "user-1", "gateway_approval"
+    )[0]
+    assert client.values[attempts_key] == 1
+    assert "replay_rejected" in actions
 
 
 @pytest.fixture
@@ -200,7 +230,8 @@ def test_real_mfa_scripts_expire_escalate_and_reset(real_redis, monkeypatch):
     monkeypatch.setenv("MFA_BASE_COOLDOWN_SECONDS", "1")
     monkeypatch.setenv("MFA_MAX_COOLDOWN_SECONDS", "2")
     monkeypatch.setattr(
-        "app.core.auth.verify_mfa_code", lambda _user, code: code == "valid"
+        "app.core.auth.verify_mfa_code_result",
+        lambda _user, code: MFAVerification(code == "valid", method="totp" if code == "valid" else None),
     )
     keys = abuse_controls._mfa_keys("tenant", user.id, "mfa_disable")
 

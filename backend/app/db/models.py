@@ -200,6 +200,11 @@ class User(Base):
     mfa_enabled = Column(Boolean, default=False)
     mfa_secret = Column(Text, nullable=True)  # Encrypted TOTP secret
     mfa_backup_codes = Column(ARRAY(String), nullable=True)  # Hashed one-time backup codes
+    mfa_last_totp_counter = Column(BigInteger, nullable=True)  # Globally consumed TOTP time-step
+    mfa_pending_secret = Column(Text, nullable=True)
+    mfa_pending_backup_codes = Column(ARRAY(String), nullable=True)
+    mfa_pending_expires_at = Column(DateTime(timezone=True), nullable=True)
+    mfa_enrolled_at = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True)
     last_login = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)

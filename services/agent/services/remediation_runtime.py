@@ -515,7 +515,7 @@ class RemediationRuntime:
         self._audit(tenant_id, "plan_created", f"Remediation plan {plan['id']} created.", finding_id=finding_id, plan_id=plan["id"])
         return plan
 
-    def request_plan_approval(self, tenant_id: int, plan_id: int) -> Dict[str, Any]:
+    def request_plan_approval(self, tenant_id: int, plan_id: int, requested_by: str | None = None) -> Dict[str, Any]:
         with engine.connect() as conn:
             row = conn.execute(
                 text("SELECT * FROM remediation_plans WHERE id = :id AND tenant_id = :tenant_id"),
@@ -537,6 +537,7 @@ class RemediationRuntime:
             request_id=f"remediation-{uuid.uuid4()}",
             reason="remediation_execution",
             metadata=metadata,
+            requested_by=requested_by,
         )
         with engine.connect() as conn:
             conn.execute(

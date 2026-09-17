@@ -3,7 +3,7 @@ export type BffBody = "none" | "json" | "optional-json";
 
 const ALLOWED: Record<BffMethod, RegExp> = {
   GET: /^(users(?:\/invites|\/me\/security)?|usage-limits|tenants\/current|red-team|provider-credentials|notifications|gateways|evidence(?:\/[^/]+)?|findings(?:\/summary\/dashboard|\/[^/]+)?|ephemeral-workers\/(?:tokens|connectors)|compliance-scores(?:\/history|\/[^/]+)?|api-keys|approvals|access-requests)$/,
-  POST: /^(users|users\/invite|users\/me\/mfa\/(?:setup|disable)|tenants|red-team|provider-credentials|provider-credentials\/[^/]+\/rotate|policies\/(?:validate|simulate|rollback)|policies\/[^/]+\/activate|notifications\/(?:read-all|[^/]+\/read)|gateways|ephemeral-workers\/tokens(?:\/[^/]+\/revoke)?|api-keys|api-keys\/[^/]+\/rotate|data-subject-requests(?:\/[^/]+\/(?:verify|approve|export|delete))?|workflows\/[^/]+\/(?:approve|reject|remediate)|approvals\/[^/]+\/(?:approve|reject))$/,
+  POST: /^(users|users\/invite|users\/me\/mfa\/(?:setup|confirm|disable|recovery-codes)|users\/[^/]+\/mfa\/reset|tenants|red-team|provider-credentials|provider-credentials\/[^/]+\/rotate|policies\/(?:validate|simulate|rollback)|policies\/[^/]+\/activate|notifications\/(?:read-all|[^/]+\/read)|gateways|ephemeral-workers\/tokens(?:\/[^/]+\/revoke)?|api-keys|api-keys\/[^/]+\/rotate|data-subject-requests(?:\/[^/]+\/(?:verify|approve|export|delete))?|workflows\/[^/]+\/(?:approve|reject|remediate)|approvals\/[^/]+\/(?:approve|reject))$/,
   PUT: /^gateways\/[^/]+$/,
   PATCH: /^(tenants\/current\/status|findings\/[^/]+\/status|access-requests\/[^/]+\/status)$/,
   DELETE: /^(users\/(?:invites\/[^/]+|(?!me$|invite$|invites$)[^/]+)|provider-credentials\/[^/]+|gateways\/[^/]+|api-keys\/[^/]+)$/,

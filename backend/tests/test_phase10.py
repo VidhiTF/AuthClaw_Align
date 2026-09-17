@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import pyotp
 from unittest.mock import MagicMock, patch
 from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
@@ -89,6 +90,35 @@ def _create_admin_tenant(db_session: Session, name: str, email: str, api_key_raw
     return tenant_id, user_id, {"Authorization": f"Bearer {api_key_raw}"}
 
 
+def _create_tenant_approver(db_session: Session, tenant_id, email: str, api_key_raw: str):
+    user_id = uuid.uuid4()
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+    db_session.add(User(id=user_id, tenant_id=tenant_id, email=email, role="admin", is_active=True))
+    db_session.flush()
+    db_session.add(APIKey(
+        id=uuid.uuid4(), tenant_id=tenant_id, key_hash=hash_key(api_key_raw),
+        name="Separate Approver Key", scopes=["admin", "read", "write"],
+        is_active=True, created_by=user_id,
+    ))
+    db_session.commit()
+    db_session.execute(text("SET app.current_tenant_id = ''"))
+    return user_id, {"Authorization": f"Bearer {api_key_raw}"}
+
+
+def _enroll_mfa(client: TestClient, headers: dict[str, str]):
+    setup = client.post("/v1/users/me/mfa/setup", headers=headers)
+    assert setup.status_code == status.HTTP_200_OK
+    data = setup.json()
+    confirmation = client.post(
+        "/v1/users/me/mfa/confirm",
+        headers=headers,
+        json={"code": pyotp.TOTP(data["mfa_secret"]).now()},
+    )
+    assert confirmation.status_code == status.HTTP_200_OK
+    assert confirmation.json()["mfa_enabled"] is True
+    return data
+
+
 def _create_workflow_approval(client: TestClient, headers: dict[str, str]):
     with patch("app.orchestrator.connectors.DocumentScanner.list_documents") as mock_list, \
          patch("app.orchestrator.connectors.DocumentScanner.fetch_and_extract_text") as mock_fetch, \
@@ -118,9 +148,10 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
         "system_admin_key_tenant_d",
     )
 
-    response = client.post("/v1/workflows/mfa/setup", headers=headers)
-    assert response.status_code == status.HTTP_200_OK
-    mfa_data = response.json()
+    approver_id, approver_headers = _create_tenant_approver(
+        db_session, tenant_id, "approver@tenantD.com", "approver_key_tenant_d"
+    )
+    mfa_data = _enroll_mfa(client, approver_headers)
     assert "mfa_secret" in mfa_data
     assert "provisioning_uri" in mfa_data
     assert len(mfa_data["backup_codes"]) == 5
@@ -128,13 +159,13 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
 
     workflow_id, approval_id = _create_workflow_approval(client, headers)
 
-    response_no_mfa = client.post(f"/v1/workflows/{workflow_id}/approve", headers=headers)
+    response_no_mfa = client.post(f"/v1/workflows/{workflow_id}/approve", headers=approver_headers)
     assert response_no_mfa.status_code == status.HTTP_400_BAD_REQUEST
     assert "MFA token required" in response_no_mfa.json()["detail"]
 
     response_bad_mfa = client.post(
         f"/v1/workflows/{workflow_id}/approve",
-        headers=headers,
+        headers=approver_headers,
         json={"totp_code": "000000"}
     )
     assert response_bad_mfa.status_code == status.HTTP_400_BAD_REQUEST
@@ -153,7 +184,7 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
         }
         response_backup = client.post(
             f"/v1/workflows/{workflow_id}/approve",
-            headers=headers,
+            headers=approver_headers,
             json={"totp_code": backup_code_to_use}
         )
     assert response_backup.status_code == status.HTTP_200_OK
@@ -161,7 +192,7 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
     assert response_backup.json()["current_state"] == "COMPLETE"
 
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
-    user_db = db_session.query(User).filter(User.id == user_id).first()
+    user_db = db_session.query(User).filter(User.id == approver_id).first()
     assert backup_code_to_use not in user_db.mfa_backup_codes
     assert len(user_db.mfa_backup_codes) == 4
     assert decrypt_secret(user_db.mfa_secret) == mfa_data["mfa_secret"]
@@ -172,7 +203,7 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
     assert audit is not None
     assert audit.action == "APPROVED"
     assert audit.mfa_verified is True
-    assert audit.actor_id == user_id
+    assert audit.actor_id == approver_id
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
 
@@ -209,13 +240,16 @@ def test_phase10_stale_mfa_rejected_before_approval_commit(
         "system_admin_key_stale_mfa",
     )
     workflow_id, approval_id = _create_workflow_approval(client, headers)
+    _, approver_headers = _create_tenant_approver(
+        db_session, tenant_id, "approver@stale-mfa.example", "approver_key_stale_mfa"
+    )
     stale_timestamp = datetime.now(timezone.utc) - timedelta(minutes=31)
 
     with patch(
         "app.api.v1.endpoints.workflows._verify_mfa_if_enabled",
         return_value=(True, stale_timestamp),
     ):
-        response = client.post(f"/v1/workflows/{workflow_id}/approve", headers=headers)
+        response = client.post(f"/v1/workflows/{workflow_id}/approve", headers=approver_headers)
 
     assert response.status_code == status.HTTP_403_FORBIDDEN
     assert response.json()["detail"] == "Fresh MFA is required for destructive remediation"

@@ -3,6 +3,8 @@
 import hmac
 import logging
 import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Generator, List
 import pyotp
 from fastapi import Request, Depends, HTTPException, status
@@ -43,10 +45,19 @@ def set_mfa_credentials(user, secret: str, backup_codes: list[str]) -> None:
     user.mfa_backup_codes = [
         hash_key(f"mfa-backup:{code.lower()}") for code in backup_codes
     ]
+    user.mfa_last_totp_counter = None
     user.mfa_enabled = True
 
 
-def verify_mfa_code(user, code: str) -> bool:
+@dataclass(frozen=True)
+class MFAVerification:
+    verified: bool
+    method: str | None = None
+    reason: str = "invalid"
+    counter: int | None = None
+
+
+def verify_mfa_code_result(user, code: str) -> MFAVerification:
     code = code.strip().lower()
     stored_secret = user.mfa_secret or ""
     encrypted = stored_secret.startswith(
@@ -62,8 +73,17 @@ def verify_mfa_code(user, code: str) -> bool:
         for stored in backup_codes
     ]
     user.mfa_backup_codes = normalized_codes
-    if secret and pyotp.TOTP(secret).verify(code, valid_window=1):
-        return True
+    if secret and code.isdigit() and len(code) == 6:
+        totp = pyotp.TOTP(secret)
+        current_counter = totp.timecode(datetime.now(timezone.utc))
+        for offset in (-1, 0, 1):
+            counter = current_counter + offset
+            if hmac.compare_digest(totp.generate_otp(counter), code):
+                previous = getattr(user, "mfa_last_totp_counter", None)
+                if previous is not None and counter <= int(previous):
+                    return MFAVerification(False, method="totp", reason="replay", counter=counter)
+                user.mfa_last_totp_counter = counter
+                return MFAVerification(True, method="totp", reason="verified", counter=counter)
 
     candidate = hash_key(f"mfa-backup:{code}")
     for index, stored in enumerate(normalized_codes):
@@ -71,8 +91,13 @@ def verify_mfa_code(user, code: str) -> bool:
             user.mfa_backup_codes = (
                 normalized_codes[:index] + normalized_codes[index + 1 :]
             )
-            return True
-    return False
+            return MFAVerification(True, method="recovery_code", reason="verified")
+    return MFAVerification(False)
+
+
+def verify_mfa_code(user, code: str) -> bool:
+    """Compatibility wrapper for callers that only need a boolean result."""
+    return verify_mfa_code_result(user, code).verified
 
 
 def _normalize_role(role: str | None) -> str:
