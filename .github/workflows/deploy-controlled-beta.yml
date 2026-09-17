@@ -455,6 +455,29 @@ jobs:
             curl --fail --silent --show-error --retry 5 --retry-all-errors "$endpoint" >/dev/null
           done < <(jq -r '.public_endpoints[]' <<<"$primary")
 
+          edge="$(terraform -chdir=infra/terraform output -json public_edge)"
+          api_base="$(jq -r '.runtime_url_boundary.api_url' <<<"$edge")"
+          api_origin="${api_base%/api/v1}"
+          gateway_origin="$(jq -r '.runtime_url_boundary.gateway_url' <<<"$edge")"
+          curl --fail --silent --show-error "$api_origin/health" |
+            jq -e '.status == "healthy" and (.service | type == "string") and (keys | sort) == ["service", "status"]' >/dev/null
+          curl --fail --silent --show-error "$gateway_origin/health" |
+            jq -e '.status == "healthy" and (.service | type == "string") and (keys | sort) == ["service", "status"]' >/dev/null
+          for origin in "$api_origin" "$gateway_origin"; do
+            for path in /docs /docs/ '/docs?probe=1' /redoc /redoc/ /openapi.json /openapi.json/ /health/details /health/details/ /metrics /metrics/; do
+              status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$origin$path")"
+              [[ "$status" == "403" || "$status" == "404" ]] || {
+                echo "::error::$origin$path returned $status; expected 403 or 404"
+                exit 1
+              }
+            done
+          done
+          operator_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$api_origin/api/v1/platform/openapi.json")"
+          [[ "$operator_status" == "401" ]] || {
+            echo "::error::Unauthenticated operator schema returned $operator_status; expected 401"
+            exit 1
+          }
+
       - name: Reject active deployment alarms
         shell: bash
         run: |

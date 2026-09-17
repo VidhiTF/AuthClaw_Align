@@ -25,6 +25,12 @@ class RuntimeContextRegressionTests(unittest.TestCase):
         self.assertFalse(is_public_endpoint("POST", "/api/v1/agent/executions"))
         self.assertFalse(role_allowed(None, "POST", "/api/v1/agent/executions"))
 
+    def test_detailed_health_requires_platform_operations_access(self):
+        self.assertFalse(is_public_endpoint("GET", "/health/details"))
+        self.assertFalse(role_allowed(None, "GET", "/operations/health/details"))
+        self.assertFalse(role_allowed("admin", "GET", "/operations/health/details"))
+        self.assertTrue(role_allowed("platform_admin", "GET", "/operations/health/details"))
+
     def test_approval_worker_retains_authenticated_database_context(self):
         observed = []
 

@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.bff_client_ip import validate_bff_client_ip_config
-from app.core.startup_checks import validate_database_security, validate_production_environment
+from app.core.startup_checks import is_shared_environment, validate_database_security, validate_production_environment
 from app.services.abuse_controls import validate_abuse_control_config
 from app.db.session import engine
 
@@ -31,6 +31,9 @@ app = FastAPI(
     title="AuthClaw API",
     description="AI Governance & Compliance Platform Control Plane",
     version="0.1.0",
+    docs_url=None if is_shared_environment() else "/docs",
+    redoc_url=None if is_shared_environment() else "/redoc",
+    openapi_url=None if is_shared_environment() else "/openapi.json",
 )
 
 
@@ -66,7 +69,7 @@ app.add_middleware(
 )
 
 # Register Authentication & Tenant Context Middleware
-from app.core.auth import AuthMiddleware
+from app.core.auth import AuthMiddleware, require_platform_admin
 app.add_middleware(AuthMiddleware)
 from app.core.client_ip import ClientIPConfig, TrustedProxyMiddleware
 app.add_middleware(TrustedProxyMiddleware, config=ClientIPConfig.from_environment())
@@ -159,6 +162,16 @@ _compatibility_routers = [
 ]
 for _router, _path, _tag in _compatibility_routers:
     app.include_router(_router, prefix=f"/api/v1{_path}", tags=[_tag], include_in_schema=False)
+
+
+@app.get(
+    "/api/v1/platform/openapi.json",
+    include_in_schema=False,
+    dependencies=[require_platform_admin()],
+)
+def platform_openapi_schema():
+    """Return the API contract only to the tenantless platform operator."""
+    return app.openapi()
 
 
 
