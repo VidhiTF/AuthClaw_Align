@@ -124,3 +124,9 @@ No evidence-bucket policy was available to export. The user explicitly deferred
 AWS deployment verification and policy evidence collection until deployment.
 No AWS resources were created or changed. Code/PR delivery remains in scope;
 release approval and task closure must not treat the deferred evidence as passed.
+
+PR CI exposed a migration049 regression in worker-token cleanup audit appends.
+The correction preserves the existing NOLOGIN maintenance SECURITY DEFINER role
+without allowing runtime callers to select that role or bypass authenticated tenant
+checks. The worker lifecycle privilege/atomicity tests now pass; the combined
+local suite including those tests passed 61 tests after the correction.

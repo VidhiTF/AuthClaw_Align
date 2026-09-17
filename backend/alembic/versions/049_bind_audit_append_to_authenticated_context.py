@@ -17,7 +17,11 @@ def upgrade() -> None:
         DO $$
         DECLARE
             definition text;
-            legacy constant text := 'nullif(current_setting(''app.current_tenant_id'', true), '''')::uuid';
+            legacy constant text := $guard$IF nullif(current_setting('app.current_tenant_id', true), '')::uuid
+        IS DISTINCT FROM p_tenant_id THEN
+        RAISE EXCEPTION 'audit tenant context does not match append tenant'
+            USING ERRCODE = '42501';
+    END IF;$guard$;
         BEGIN
             SELECT pg_get_functiondef(
                 'public.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)'::regprocedure
@@ -27,7 +31,15 @@ def upgrade() -> None:
                 RAISE EXCEPTION
                     'append_audit_event_v2 must contain exactly one legacy tenant check';
             END IF;
-            EXECUTE replace(definition, legacy, 'authn.current_tenant_id()');
+            -- Only the existing NOLOGIN maintenance definer may append across
+            -- tenants; runtime roles cannot SET ROLE to this identity.
+            EXECUTE replace(definition, legacy, $guard$
+                IF current_user <> 'authclaw_worker_maintenance' THEN
+                    IF authn.current_tenant_id() IS DISTINCT FROM p_tenant_id THEN
+                        RAISE EXCEPTION 'audit tenant context does not match append tenant'
+                            USING ERRCODE = '42501';
+                    END IF;
+                END IF;$guard$);
         END $$;
         """)
 
