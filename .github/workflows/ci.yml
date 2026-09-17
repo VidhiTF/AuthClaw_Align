@@ -412,12 +412,12 @@ jobs:
       - name: Run gateway tests
         working-directory: gateway
         env:
-          DATABASE_URL: postgresql://test:test@127.0.0.1:1/authclaw_gateway_ci_test
+          DATABASE_URL: postgresql://test:test@127.0.0.1:1/authclaw_gateway_ci_test?sslmode=verify-full
           REDIS_URL: redis://127.0.0.1:6379
           QUOTA_REDIS_TEST: "1"
         run: >-
           go test ./... -count=1
-          -run '^(TestQuota|TestProviderQuota|TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
+          -run '^(TestQuota|TestProviderQuota|TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestDatabaseConfig|TestInitDBRejectsUnsafeSharedDatabaseURL|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
       - name: Verify quota alert rules
         run: >-
           docker run --rm --entrypoint /bin/promtool

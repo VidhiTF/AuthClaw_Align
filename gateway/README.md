@@ -59,6 +59,13 @@ go run .
 
 The gateway will start and listen on `http://localhost:8080`.
 
+In `ci`, `shared-test`, `staging`, or `production`, `DATABASE_URL` must contain
+exactly one explicit `sslmode=verify-full` setting and use a TCP host. Configure
+a trusted CA with `sslrootcert` (or the deliberately selected system trust
+store). Missing, inherited, duplicate, or weaker SSL modes stop startup before
+the gateway connects to PostgreSQL. Local development retains its explicit
+plaintext exception.
+
 ---
 
 ## 🧪 Testing
