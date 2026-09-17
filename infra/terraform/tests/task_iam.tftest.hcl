@@ -47,6 +47,12 @@ override_resource {
   values          = { id = "sg-console" }
 }
 
+override_resource {
+  target          = module.primary.aws_iam_role.runtime["backend"]
+  override_during = plan
+  values          = { arn = "arn:aws:iam::123456789012:role/authclaw-test-backend" }
+}
+
 variables {
   authclaw_env               = "ci"
   project                    = "authclaw-test"
@@ -136,6 +142,26 @@ run "execution_roles_only_receive_their_task_secrets" {
       ]
     ]))
     error_message = "KMS decrypt must be limited to Secrets Manager and the exact task secret encryption contexts."
+  }
+}
+
+run "evidence_object_access_is_backend_only_and_exportable" {
+  command = plan
+
+  variables {
+    runtime_s3_bucket_arns = {
+      backend = ["arn:aws:s3:::authclaw-evidence-test"]
+      agent   = ["arn:aws:s3:::agent-private-test"]
+    }
+  }
+
+  assert {
+    condition = (
+      jsondecode(output.primary.evidence_object_access_policy).Principal.AWS == output.runtime_iam_review.task_role_arns.backend &&
+      jsondecode(output.primary.evidence_object_access_policy).Action == "s3:DeleteObject" &&
+      toset(jsondecode(output.primary.evidence_object_access_policy).Resource) == toset(["arn:aws:s3:::authclaw-evidence-test/tenant-*/*"])
+    )
+    error_message = "Evidence deletion must be backend-only, object-only, and included in the policy export."
   }
 }
 
@@ -255,6 +281,7 @@ run "policy_sidecars_are_task_local_when_enabled" {
 run "tls_and_direct_aws_are_scoped" {
   command = plan
   variables {
+    runtime_s3_bucket_arns = { backend = ["arn:aws:s3:::backend-evidence-test"] }
     # New writes use env v2; retained KMS v1 reads must remain independently configurable.
     secret_key_version       = "v2"
     authclaw_env             = "production"
@@ -303,6 +330,24 @@ run "tls_and_direct_aws_are_scoped" {
       [for statement in statements : !contains(tolist(statement.Resource), "*")]
     ])) && contains(output.runtime_iam_review.roles, "database_crypto_preflight")
     error_message = "Optional AWS grants must remain exact-resource, including the crypto preflight role."
+  }
+  assert {
+    condition = toset(flatten([
+      for statement in jsondecode(output.runtime_iam_review.policies.database_crypto_preflight).Statement :
+      statement.Action if statement.Effect == "Allow"
+    ])) == toset(["kms:Decrypt"])
+    error_message = "Crypto preflight must retain KMS decrypt without inheriting backend S3 access."
+  }
+  assert {
+    condition = alltrue([for role in ["backend", "database_crypto_preflight"] :
+      toset(flatten([for statement in jsondecode(output.runtime_iam_review.policies[role]).Statement :
+        statement.Resource if statement.Effect == "Allow" && contains(statement.Action, "kms:Decrypt")
+      ])) == toset(["arn:aws:kms:us-east-1:123456789012:key/backend"])
+      ]) && toset(flatten([
+        for statement in jsondecode(output.runtime_iam_review.policies.backend).Statement :
+        statement.Action if statement.Effect == "Allow"
+    ])) == toset(["kms:Decrypt", "s3:GetObject", "s3:DeleteObject"])
+    error_message = "Backend evidence access and both roles' exact KMS decrypt grants must remain intact."
   }
 }
 

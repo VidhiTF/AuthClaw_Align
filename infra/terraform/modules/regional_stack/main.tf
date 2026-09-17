@@ -1020,6 +1020,14 @@ locals {
     Condition = { Bool = { "aws:SecureTransport" = "false" } }
   }
 
+  backend_evidence_deletion_statement = {
+    Sid       = "AllowBackendEvidenceDeletion"
+    Effect    = "Allow"
+    Principal = { AWS = aws_iam_role.runtime["backend"].arn }
+    Action    = "s3:DeleteObject"
+    Resource  = [for arn in lookup(var.runtime_s3_bucket_arns, "backend", []) : "${arn}/tenant-*/*"]
+  }
+
   gateway_endpoint_policies = {
     s3 = jsonencode({
       Version = "2012-10-17"
@@ -1058,7 +1066,8 @@ locals {
             Action    = "s3:ListAllMyBuckets"
             Resource  = "*"
           }
-      ] : statement if length(local.runtime_s3_bucket_arns) > 0])
+        ] : statement if length(local.runtime_s3_bucket_arns) > 0],
+      length(local.backend_evidence_deletion_statement.Resource) > 0 ? [local.backend_evidence_deletion_statement] : [])
     })
   }
 

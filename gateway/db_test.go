@@ -54,12 +54,12 @@ func TestCompatibleDatabaseRevisions(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{name: "default", want: []string{"047"}},
-		{name: "rollout window", value: "046, 047", want: []string{"046", "047"}},
-		{name: "duplicate", value: "047,047", wantErr: true},
+		{name: "default", want: []string{"049"}},
+		{name: "rollout window", value: "048, 049", want: []string{"048", "049"}},
+		{name: "duplicate", value: "048,048", wantErr: true},
 		{name: "malformed", value: "head", wantErr: true},
-		{name: "unsupported", value: "047,048", wantErr: true},
-		{name: "too broad", value: "045,046,047", wantErr: true},
+		{name: "unsupported", value: "046,047", wantErr: true},
+		{name: "too broad", value: "046,047,048", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

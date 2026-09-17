@@ -43,10 +43,12 @@ def database_auth_context(kind: str, credential_hash: str):
 
 @event.listens_for(Session, "after_begin")
 def bind_authenticated_database_context(_session, _transaction, connection) -> None:
-    auth_context = _database_auth_context.get()
+    auth_context = _session.info.get("authclaw_database_auth_context") or _database_auth_context.get()
     if auth_context is None or connection.dialect.name != "postgresql":
         return
     kind, credential_hash = auth_context
+    if kind not in {"session", "api_key", "platform_session"}:
+        raise RuntimeError("Invalid database authentication context")
     if kind == "platform_session":
         resolver = "authn.bind_platform_session_context"
     else:

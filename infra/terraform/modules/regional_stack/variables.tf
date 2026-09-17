@@ -143,11 +143,11 @@ variable "authclaw_env" {
 
 variable "expected_db_revision" {
   type    = string
-  default = "048"
+  default = "049"
 
   validation {
-    condition     = contains(["047", "048", "047,048"], var.expected_db_revision)
-    error_message = "expected_db_revision must be 047, 048, or the temporary 047,048 rollout bridge."
+    condition     = contains(["048", "049", "048,049"], var.expected_db_revision)
+    error_message = "expected_db_revision must be 048, 049, or the temporary 048,049 rollout bridge."
   }
 }
 

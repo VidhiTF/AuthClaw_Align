@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,10 +20,11 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import APIKey, AuditLogMetadata, Policy, User
+from app.db.models import APIKey, AuditLogMetadata, EvidenceRecord, Policy, User
 from app.db.session import database_auth_context
+from app.api.v1.endpoints import evidence as evidence_endpoint
+from app.services import evidence_service
 from tests.db_safety import destructive_test_urls
-
 
 _owner_engine = None
 _app_engine = None
@@ -129,7 +131,9 @@ def dispose_test_engines():
 def isolation() -> IsolationHarness:
     owner_engine, app_engine, testing_session_local = _engines()
     with owner_engine.begin() as conn:
-        revision = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        revision = conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
         expected_revision = _migration_head()
         if revision != expected_revision:
             pytest.fail(
@@ -153,7 +157,9 @@ def test_missing_or_forged_context_reads_nothing(isolation: IsolationHarness):
         assert conn.execute(text("SELECT count(*) FROM public.users")).scalar_one() == 0
 
     with isolation.session_for(tenant_a) as db:
-        assert db.query(User).filter(User.tenant_id == tenant_b.tenant_id).first() is None
+        assert (
+            db.query(User).filter(User.tenant_id == tenant_b.tenant_id).first() is None
+        )
 
 
 def test_writer_privileges_cannot_bypass_restricted_audit_verifier(
@@ -179,12 +185,15 @@ def test_writer_privileges_cannot_bypass_restricted_audit_verifier(
         db.commit()
 
     with isolation.owner_engine.connect() as connection:
-        assert connection.execute(
-            text(
-                "SELECT has_function_privilege('authclaw_audit_verifier', "
-                "'public.verify_audit_origin(uuid,uuid,text,text,text)', 'EXECUTE')"
-            )
-        ).scalar_one() is True
+        assert (
+            connection.execute(
+                text(
+                    "SELECT has_function_privilege('authclaw_audit_verifier', "
+                    "'public.verify_audit_origin(uuid,uuid,text,text,text)', 'EXECUTE')"
+                )
+            ).scalar_one()
+            is True
+        )
 
     with pytest.raises(DBAPIError):
         with isolation.app_engine.begin() as connection:
@@ -192,9 +201,12 @@ def test_writer_privileges_cannot_bypass_restricted_audit_verifier(
                 text("SELECT set_config('app.current_tenant_id', :tenant, true)"),
                 {"tenant": str(tenant.tenant_id)},
             )
-            assert connection.execute(
-                text("SELECT count(*) FROM public.audit_log_metadata")
-            ).scalar_one() == 0
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM public.audit_log_metadata")
+                ).scalar_one()
+                == 0
+            )
             connection.execute(
                 text(
                     "SELECT public.verify_audit_origin("
@@ -224,6 +236,129 @@ def test_authenticated_sessions_only_read_their_own_tenant(isolation: IsolationH
         assert [(user.tenant_id, user.email) for user in users] == [
             (tenant_b.tenant_id, tenant_b.email)
         ]
+
+
+def test_authenticated_tenant_cannot_resolve_another_tenants_evidence(
+    isolation: IsolationHarness,
+):
+    tenant_a = isolation.create_identity("evidence-a")
+    tenant_b = isolation.create_identity("evidence-b")
+    storage = {
+        "storage": {
+            "bucket": "evidence-test-bucket",
+            "object_key": f"tenant-{tenant_a.tenant_id}/report.json",
+            "sha256": "a" * 64,
+            "retention_class": "seven_years",
+            "access_policy": {"allow_download": True},
+        }
+    }
+
+    with isolation.session_for(tenant_a) as db:
+        record = evidence_service.create_evidence(
+            db,
+            tenant_id=str(tenant_a.tenant_id),
+            workflow_id=None,
+            framework="SOC2",
+            source_type="s3_document",
+            source_reference=storage["storage"]["object_key"],
+            evidence_type="scan_result",
+            evidence_data=storage,
+        )
+        record_id = str(record.id)
+
+    with isolation.session_for(tenant_a) as db:
+        resolved = evidence_service.get_evidence(
+            db, tenant_id=str(tenant_a.tenant_id), evidence_id=record_id
+        )
+        assert resolved is not None
+        request = SimpleNamespace(
+            state=SimpleNamespace(
+                tenant_id=tenant_a.tenant_id,
+                user_id=tenant_a.user_id,
+            ),
+            headers={"x-request-id": "evidence-access-audit-test"},
+        )
+        db.info["authclaw_database_auth_context"] = (
+            "session",
+            tenant_a.session_hash,
+        )
+        evidence_endpoint._audit_access(resolved, request, "download", db)
+        audit = (
+            db.query(AuditLogMetadata)
+            .filter(
+                AuditLogMetadata.action == "evidence:download",
+                AuditLogMetadata.record_id.isnot(None),
+            )
+            .one()
+        )
+        assert audit.actor_id == tenant_a.user_id
+        assert "purpose=download" in audit.execution_trace
+
+    with isolation.session_for(tenant_b) as db:
+        assert (
+            evidence_service.get_evidence(
+                db, tenant_id=str(tenant_b.tenant_id), evidence_id=record_id
+            )
+            is None
+        )
+        # Prove RLS independently of the service's tenant filter.
+        assert db.get(EvidenceRecord, UUID(record_id)) is None
+        assert (
+            evidence_service.get_evidence(
+                db, tenant_id=str(tenant_a.tenant_id), evidence_id=record_id
+            )
+            is None
+        )
+
+
+def test_request_credential_rebinds_audit_after_commit_without_contextvar(isolation):
+    tenant = isolation.create_identity("audit-rebind")
+    with isolation.testing_session_local() as db:
+        db.info["authclaw_database_auth_context"] = ("session", tenant.session_hash)
+        record = SimpleNamespace(
+            id=uuid4(), tenant_id=tenant.tenant_id, framework="SOC2"
+        )
+        request = SimpleNamespace(
+            state=SimpleNamespace(user_id=tenant.user_id),
+            headers={"x-request-id": "repeated"},
+        )
+        for operation in ("view", "download", "export", "delete", "download"):
+            evidence_endpoint._audit_access(record, request, operation, db)
+        rows = (
+            db.query(AuditLogMetadata).order_by(AuditLogMetadata.tenant_sequence).all()
+        )
+        assert [row.action for row in rows] == [
+            "evidence:view",
+            "evidence:download",
+            "evidence:export",
+            "evidence:delete",
+            "evidence:download",
+        ]
+        assert all(
+            row.actor_id == tenant.user_id
+            and row.tenant_id == tenant.tenant_id
+            and f"purpose={row.action.split(':')[1]}" in row.execution_trace
+            for row in rows
+        )
+
+
+def test_audit_context_migration_upgrades_existing_function(isolation, monkeypatch):
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    scripts = ScriptDirectory.from_config(config)
+    migration = scripts.get_revision("049").module
+    with isolation.owner_engine.begin() as conn:
+        conn.execute(text(scripts.get_revision("028").module.APPEND_FUNCTION))
+        monkeypatch.setattr(
+            migration.op, "execute", lambda statement: conn.execute(text(statement))
+        )
+        migration.upgrade()
+        definition = conn.execute(
+            text(
+                "SELECT pg_get_functiondef(oid) FROM pg_proc WHERE proname='append_audit_event_v2'"
+            )
+        ).scalar_one()
+        assert "authn.current_tenant_id()" in definition
+        assert "app.current_tenant_id" not in definition
 
 
 def test_cross_tenant_user_insert_is_rejected(isolation: IsolationHarness):
@@ -268,7 +403,9 @@ def test_api_keys_are_isolated_by_authenticated_session(isolation: IsolationHarn
 
     with isolation.session_for(tenant_a) as db:
         keys = db.query(APIKey).all()
-        assert [(key.tenant_id, key.name) for key in keys] == [(tenant_a.tenant_id, "key-a")]
+        assert [(key.tenant_id, key.name) for key in keys] == [
+            (tenant_a.tenant_id, "key-a")
+        ]
 
 
 def test_policies_are_isolated_by_authenticated_session(isolation: IsolationHarness):
@@ -332,10 +469,13 @@ def test_p0_resource_cross_tenant_crud_is_denied(
         )
 
     with isolation.session_for(tenant_a) as db:
-        assert db.execute(
-            text(f"SELECT count(*) FROM public.{table_name} WHERE id = :id"),
-            {"id": record_id},
-        ).scalar_one() == 0
+        assert (
+            db.execute(
+                text(f"SELECT count(*) FROM public.{table_name} WHERE id = :id"),
+                {"id": record_id},
+            ).scalar_one()
+            == 0
+        )
 
         with pytest.raises(DBAPIError):
             db.execute(
@@ -346,7 +486,9 @@ def test_p0_resource_cross_tenant_crud_is_denied(
 
     with isolation.session_for(tenant_a) as db:
         updated = db.execute(
-            text(f"UPDATE public.{table_name} SET tenant_id = :tenant_id WHERE id = :id"),
+            text(
+                f"UPDATE public.{table_name} SET tenant_id = :tenant_id WHERE id = :id"
+            ),
             {"tenant_id": tenant_a.tenant_id, "id": record_id},
         )
         deleted = db.execute(

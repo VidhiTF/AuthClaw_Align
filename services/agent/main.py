@@ -544,6 +544,15 @@ async def tenant_database_context_middleware(request: Request, call_next):
             except Exception:
                 record_unavailable()
                 return JSONResponse(status_code=503, content={"error": "rate_limit_unavailable"}, headers={"Retry-After": "1"})
+        path = request.url.path
+        if path.startswith(("/evidence", "/compliance/evidence/", "/reports/")) or (path.startswith("/compliance/controls/") and path.endswith("/evidence")):
+            from services.evidence_access import audit_access
+            principal = optional_user_from_request(request)
+            purpose = "delete" if request.method == "DELETE" else "export" if "/export/" in path or path.startswith("/reports/") else "download" if "/download/" in path else "view"
+            try:
+                await run_in_threadpool(audit_access, tenant_id, principal.get("sub"), purpose, path)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
         # Downstream execution is outside authentication/admission exception handling.
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
@@ -3583,14 +3592,12 @@ Question:
     }
 
 
-from fastapi.responses import FileResponse
-@app.get("/evidence/download/{filename}")
-def download_evidence_file(filename: str):
-    import os
-    filepath = os.path.join("evidence", filename)
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="Evidence file not found")
-    return FileResponse(filepath, media_type="text/plain", filename=filename)
+@app.get("/evidence/download/{evidence_id}")
+def download_evidence_file(evidence_id: str, tenant_id: int = Depends(require_tenant_context)):
+    from database import engine
+    from services.evidence_access import download_file
+    with engine.connect() as conn:
+        return download_file(conn, tenant_id, evidence_id)
 
 @app.delete("/rag/documents/{doc_id}")
 def delete_document(
@@ -3867,8 +3874,7 @@ def export_control_evidence_csv(
     tenant_id = resolve_tenant(x_api_key, authorization)
     from services.compliance_evidence_engine import ComplianceEvidenceEngine
     data = ComplianceEvidenceEngine().evidence_csv(tenant_id, framework=framework, control_id=control_id)
-    filename = f"control_evidence_{framework or 'all'}.csv"
-    return Response(content=data, media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
+    return Response(content=data, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=control_evidence.csv"})
 
 @app.delete("/evidence/{id}")
 def delete_evidence(
@@ -3892,6 +3898,8 @@ def delete_evidence(
             raise HTTPException(status_code=404, detail="Evidence not found")
         name = row[0]
         file_path = row[1]
+        if file_path:
+            raise HTTPException(403, "Evidence file is retained; deletion is not permitted")
         
         conn.execute(
             text("DELETE FROM compliance_evidence WHERE id = :id AND tenant_id = :tenant_id"),
@@ -3899,15 +3907,8 @@ def delete_evidence(
         )
         conn.commit()
         
-        # Physical delete
-        if file_path.startswith("/evidence/"):
-            filename = file_path.replace("/evidence/", "")
-            full_path = os.path.join("evidence", filename)
-            if os.path.exists(full_path):
-                try:
-                    os.remove(full_path)
-                except Exception as ex:
-                    logger.error(f"Failed to delete evidence file {full_path}: {ex}")
+        # Registry removal must never unlink a client-supplied filesystem path.
+        # Retained files require the storage retention lifecycle for physical purge.
                     
     create_audit_block(
         query=f"Delete Compliance Evidence: {name}",
@@ -5021,6 +5022,8 @@ def get_report_endpoint(type: str, format: str):
     )
     type = type.lower()
     format = format.lower()
+    if format not in {"pdf", "csv", "json"}:
+        raise HTTPException(status_code=400, detail="Invalid report format")
     
     if type == "executive":
         content = generate_executive_summary_report(format)

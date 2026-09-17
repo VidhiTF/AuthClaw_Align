@@ -1,4 +1,5 @@
 """Authentication and tenant context middleware / dependencies"""
+
 import hmac
 import logging
 import os
@@ -19,7 +20,6 @@ from app.core.crypto import (
     get_session_key_ring,
 )
 
-
 logger = logging.getLogger("auth.middleware")
 
 
@@ -31,7 +31,9 @@ def hash_key(key: str) -> str:
         secret = session_keys.get("v1") or session_keys[active]
     if not secret:
         if os.getenv("AUTHCLAW_ENV", "").lower() == "production":
-            raise RuntimeError("API_KEY_HASH_SECRET, SESSION_SECRET, or JWT_SECRET is required in production")
+            raise RuntimeError(
+                "API_KEY_HASH_SECRET, SESSION_SECRET, or JWT_SECRET is required in production"
+            )
         secret = "authclaw-lite-dev-secret"
     return hmac.digest(secret.encode("utf-8"), key.encode("utf-8"), "sha3_256").hex()
 
@@ -81,10 +83,11 @@ def _normalize_role(role: str | None) -> str:
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """Middleware to validate API keys and inject tenant_id and scopes"""
+
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         canonical_path = path[4:] if path.startswith("/api/v1/") else path
-        
+
         # Bypass authentication for public routes
         public_paths = {
             "/health",
@@ -109,21 +112,29 @@ class AuthMiddleware(BaseHTTPMiddleware):
         public_route = canonical_path in public_paths and not (
             canonical_path == "/api/public/v1/access-requests"
         )
-        if request.method == "OPTIONS" or public_route or public_access_request or path.startswith("/static") or canonical_path.startswith("/v1/trust-center/public"):
+        if (
+            request.method == "OPTIONS"
+            or public_route
+            or public_access_request
+            or path.startswith("/static")
+            or canonical_path.startswith("/v1/trust-center/public")
+        ):
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization")
         if not auth_header:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"detail": "Missing Authorization Header"}
+                content={"detail": "Missing Authorization Header"},
             )
 
         parts = auth_header.split(" ")
         if len(parts) != 2 or parts[0].lower() != "bearer":
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"detail": "Invalid Authorization Format. Expected: Bearer <key>"}
+                content={
+                    "detail": "Invalid Authorization Format. Expected: Bearer <key>"
+                },
             )
 
         credential = parts[1]
@@ -162,32 +173,33 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if not result:
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"detail": "Unauthorized: Invalid or expired credential"}
+                    content={"detail": "Unauthorized: Invalid or expired credential"},
                 )
             if not result.user_is_active:
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"detail": "Unauthorized: User is inactive or not found"}
+                    content={"detail": "Unauthorized: User is inactive or not found"},
                 )
-            tenant_lifecycle_path = canonical_path in {"/v1/tenants/current", "/v1/tenants/current/status"}
+            tenant_lifecycle_path = canonical_path in {
+                "/v1/tenants/current",
+                "/v1/tenants/current/status",
+            }
             if result.tenant_status != "active" and not tenant_lifecycle_path:
                 return JSONResponse(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    content={"detail": "Forbidden: Tenant is not active"}
+                    content={"detail": "Forbidden: Tenant is not active"},
                 )
 
             if credential_kind == "api_key":
                 db.execute(
-                    text(
-                        """
+                    text("""
                         UPDATE api_keys
                            SET last_used = NOW(), last_used_ip = :ip,
                                last_used_user_agent = :user_agent,
                                last_used_request_id = :request_id,
                                updated_at = NOW()
                          WHERE id = :credential_id
-                        """
-                    ),
+                        """),
                     {
                         "credential_id": str(result.credential_id),
                         "ip": request.client.host if request.client else "",
@@ -218,7 +230,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             logger.exception("Authentication middleware failed")
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": "Authentication failed"}
+                content={"detail": "Authentication failed"},
             )
         finally:
             db.close()
@@ -227,7 +239,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
 
-def get_tenant_db(request: Request, db: Session = Depends(get_db)) -> Generator[Session, None, None]:
+def get_tenant_db(
+    request: Request, db: Session = Depends(get_db)
+) -> Generator[Session, None, None]:
     """Re-bind the vetted credential inside the handler transaction."""
     kind = getattr(request.state, "credential_kind", None)
     credential_hash = getattr(request.state, "credential_hash", None)
@@ -248,11 +262,16 @@ def get_tenant_db(request: Request, db: Session = Depends(get_db)) -> Generator[
     if not bound or str(bound.tenant_id) != str(expected_tenant):
         db.rollback()
         raise HTTPException(status_code=401, detail="Authentication context expired")
+    # Retain only the already-validated request credential for same-request
+    # transactions that must be re-bound after a commit (for example, audit
+    # appends).  This is cleared with the request-scoped SQLAlchemy session.
+    db.info["authclaw_database_auth_context"] = (kind, credential_hash)
     yield db
 
 
 def require_scopes(required_scopes: List[str]):
     """Enforce that the requesting client has the required scopes"""
+
     def dependency(request: Request):
         scopes = getattr(request.state, "scopes", [])
         if "admin" in scopes:
@@ -261,8 +280,9 @@ def require_scopes(required_scopes: List[str]):
             if scope not in scopes:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Forbidden: Insufficient scopes"
+                    detail="Forbidden: Insufficient scopes",
                 )
+
     return Depends(dependency)
 
 
@@ -275,8 +295,9 @@ def require_roles(required_roles: List[str]):
         if role not in allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Forbidden: Insufficient role"
+                detail="Forbidden: Insufficient role",
             )
+
     return Depends(dependency)
 
 
