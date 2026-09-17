@@ -55,6 +55,8 @@ from services.enterprise_identity import (
 )
 from services.tenant_context import get_current_tenant_id, tenant_context
 from services.control_plane_auth import verify_control_plane_request
+from services.quota_service import admit, check_available, metrics_snapshot, record_unavailable, QuotaExceeded, QuotaUnavailable
+from services.document_monitor_status import monitor_metrics_snapshot, monitor_status
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO)
@@ -71,12 +73,12 @@ async def lifespan(app: FastAPI):
     # 4. Start background compliance watcher for watched_documents folder.
     # Local smoke tests can disable this so provider/email limits do not obscure
     # the core gateway, auth, and UI startup path.
-    if env_bool("AUTHCLAW_DISABLE_BACKGROUND_MONITOR", False):
+    if env_bool("AUTHCLAW_DISABLE_BACKGROUND_MONITOR", True):
         logger.info("Background document compliance monitor disabled by AUTHCLAW_DISABLE_BACKGROUND_MONITOR.")
     else:
         from document_processing.monitoring import start_background_monitoring
         try:
-            start_background_monitoring()
+            start_background_monitoring(os.getenv("AUTHCLAW_BACKGROUND_MONITOR_TENANT_ID"))
         except Exception as ex:
             logger.error(f"Failed to start background document monitoring: {ex}")
         
@@ -90,6 +92,16 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to stop background document monitoring: {ex}")
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(QuotaExceeded)
+async def quota_exceeded_response(request: Request, exc: QuotaExceeded):
+    return JSONResponse(status_code=429, content={"error": "rate_limit_exceeded"}, headers={"Retry-After": "60"})
+
+
+@app.exception_handler(QuotaUnavailable)
+async def quota_unavailable_response(request: Request, exc: QuotaUnavailable):
+    return JSONResponse(status_code=503, content={"error": "rate_limit_unavailable"}, headers={"Retry-After": "1"})
 
 
 @app.exception_handler(HTTPException)
@@ -129,9 +141,6 @@ app.add_middleware(
 )
 
 # API_KEY removed for production security hardening
-
-_rate_limit_memory = {}
-
 
 def _feature_enabled(name: str, default: bool = False) -> bool:
     raw_value = os.getenv(name)
@@ -196,135 +205,31 @@ def _gateway_runtime_path(path: str) -> bool:
 
 
 def _tenant_tier_limit(tenant_id: int) -> int:
-    default_limits = {
-        "free": 30,
-        "starter": 60,
-        "pro": 300,
-        "enterprise": 1200,
-    }
-    tier = os.getenv("AUTHCLAW_DEFAULT_TENANT_TIER", "enterprise").strip().lower()
+    from database import engine
+    from services.tenant_plan_service import PLAN_LIMITS, resolve_tenant_plan
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT subscription_tier, plan, tier FROM tenants WHERE id = :tenant_id"),
+            {"tenant_id": tenant_id},
+        ).fetchone()
     try:
-        from database import engine
-        with engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT COALESCE(subscription_tier, plan, tier, '') FROM tenants WHERE id = :tenant_id"),
-                {"tenant_id": tenant_id},
-            ).fetchone()
-            if row and row[0]:
-                tier = str(row[0]).lower()
-    except Exception:
-        pass
-    env_limit = os.getenv(f"AUTHCLAW_RATE_LIMIT_{tier.upper()}_RPM")
-    if env_limit:
-        try:
-            return max(1, int(env_limit))
-        except ValueError:
-            pass
-    return default_limits.get(tier, default_limits["enterprise"])
-
-
-def _record_rate_limit_event(tenant_id: int, key: str, limit: int, remaining: int, backend: str, allowed: bool) -> None:
-    try:
-        from database import engine
-        with engine.connect() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO rate_limit_events (
-                        tenant_id, limiter_key, limit_count, remaining, backend,
-                        allowed, created_at
-                    )
-                    VALUES (
-                        :tenant_id, :limiter_key, :limit_count, :remaining, :backend,
-                        :allowed, NOW()
-                    )
-                """),
-                {
-                    "tenant_id": tenant_id,
-                    "limiter_key": key,
-                    "limit_count": limit,
-                    "remaining": remaining,
-                    "backend": backend,
-                    "allowed": allowed,
-                },
-            )
-            conn.commit()
-    except Exception:
-        pass
-
-
-def _consume_rate_limit_token(tenant_id: int, limit: int) -> Tuple[bool, int, str]:
-    window = int(time.time() // 60)
-    redis_url = os.getenv("REDIS_URL")
-    key = f"authclaw:rate:{tenant_id}:{window}"
-    if redis_url:
-        try:
-            import redis
-
-            client = redis.Redis.from_url(redis_url)
-            count = int(client.incr(key))
-            if count == 1:
-                client.expire(key, 90)
-            remaining = max(0, limit - count)
-            allowed = count <= limit
-            _record_rate_limit_event(tenant_id, key, limit, remaining, "redis", allowed)
-            return allowed, remaining, "redis"
-        except Exception:
-            if _is_production_env() or _feature_enabled("AUTHCLAW_REQUIRE_REDIS_RATE_LIMIT", False):
-                raise
-
-    state_key = (tenant_id, window)
-    count = _rate_limit_memory.get(state_key, 0) + 1
-    _rate_limit_memory[state_key] = count
-    for stale_key in list(_rate_limit_memory.keys()):
-        if stale_key[1] < window - 1:
-            _rate_limit_memory.pop(stale_key, None)
-    remaining = max(0, limit - count)
-    allowed = count <= limit
-    _record_rate_limit_event(tenant_id, key, limit, remaining, "memory", allowed)
-    return allowed, remaining, "memory"
+        tier = resolve_tenant_plan(*(row or ()))
+    except ValueError as exc:
+        record_unavailable()
+        raise QuotaUnavailable("Tenant plan unavailable") from exc
+    limit = int(os.getenv(f"AUTHCLAW_RATE_LIMIT_{tier.upper()}_RPM", PLAN_LIMITS[tier]["requests_per_minute"]))
+    if limit <= 0:
+        record_unavailable()
+        raise QuotaUnavailable("Invalid tenant plan limit")
+    return limit
 
 
 @app.middleware("http")
 async def enterprise_gateway_middleware(request: Request, call_next):
-    if _gateway_runtime_path(request.url.path):
-        if _feature_enabled("AUTHCLAW_REQUIRE_GO_GATEWAY", False) and request.headers.get("X-AuthClaw-Gateway") != "go":
-            return JSONResponse(
-                status_code=status.HTTP_426_UPGRADE_REQUIRED,
-                content={
-                    "error": "go_gateway_required",
-                    "message": "Route gateway traffic through the AuthClaw Go gateway.",
-                },
-            )
-
-        if _feature_enabled("AUTHCLAW_RATE_LIMIT_ENABLED", False):
-            try:
-                api_key_val = request.headers.get("X-API-Key")
-                authorization = request.headers.get("Authorization")
-                if authorization and authorization.startswith("Bearer "):
-                    api_key_val = authorization[7:]
-                tenant_id = resolve_tenant(api_key_val, authorization)
-                limit = _tenant_tier_limit(tenant_id)
-                allowed, remaining, limiter_backend = _consume_rate_limit_token(tenant_id, limit)
-                if not allowed:
-                    return JSONResponse(
-                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                        content={
-                            "error": "rate_limit_exceeded",
-                            "limit_rpm": limit,
-                            "tenant_id": tenant_id,
-                        },
-                        headers={"X-RateLimit-Limit": str(limit), "X-RateLimit-Remaining": "0", "X-RateLimit-Backend": limiter_backend},
-                    )
-                response = await call_next(request)
-                response.headers["X-RateLimit-Limit"] = str(limit)
-                response.headers["X-RateLimit-Remaining"] = str(remaining)
-                response.headers["X-RateLimit-Backend"] = limiter_backend
-                return response
-            except HTTPException as exc:
-                detail = exc.detail if exc.status_code < 500 else "Internal server error"
-                return JSONResponse(status_code=exc.status_code, content={"detail": detail})
-            except Exception as exc:
-                logger.warning("Rate limiter bypassed because fallback-safe middleware failed: %s", exc)
+    if (_gateway_runtime_path(request.url.path)
+            and _feature_enabled("AUTHCLAW_REQUIRE_GO_GATEWAY", False)
+            and request.headers.get("X-AuthClaw-Gateway") != "go"):
+        return JSONResponse(status_code=426, content={"error": "go_gateway_required"})
     return await call_next(request)
 
 
@@ -544,6 +449,7 @@ def _is_public_or_auth_path(path: str) -> bool:
         "/health/ready",
         "/api/v1/agent/health",
         "/api/v1/agent/health/ready",
+        "/internal/metrics/quota",
         "/favicon.ico",
     }
     return path in public_exact or path.startswith(("/auth/", "/static/", "/assets/"))
@@ -579,6 +485,7 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
             "sub": principal.user_id,
             "role": principal.role,
         }
+        request.state.quota_user_id = principal.user_id
         return tenant_id
 
     authorization = request.headers.get("Authorization")
@@ -588,43 +495,66 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
         token = authorization[7:] if authorization.startswith("Bearer ") else authorization
         payload = decode_jwt(token)
         if payload and payload.get("tenant_id"):
+            request.state.quota_user_id = payload.get("user_id") or payload.get("sub")
+            if not request.state.quota_user_id:
+                raise HTTPException(status_code=401, detail="Authenticated user identity required.")
             return payload["tenant_id"]
+        if token:
+            x_api_key = token
 
     if x_api_key:
-        return resolve_tenant(x_api_key=x_api_key, authorization=None)
+        tenant_id = resolve_tenant(x_api_key=x_api_key, authorization=None)
+        request.state.quota_key_id = hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
+        request.state.quota_user_id = "service:tenant"
+        return tenant_id
 
     return None
 
 
 @app.middleware("http")
 async def tenant_database_context_middleware(request: Request, call_next):
+    from starlette.concurrency import run_in_threadpool
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     tenant_id = None
-
-    if not _is_public_or_auth_path(request.url.path):
-        try:
-            tenant_id = _tenant_id_from_request_headers(request)
-        except HTTPException as exc:
-            response = JSONResponse(
-                status_code=exc.status_code,
-                content={"detail": exc.detail},
-            )
-            response.headers["X-Request-ID"] = request_id
-            return response
+    protected = not _is_public_or_auth_path(request.url.path)
+    try:
+        if protected:
+            tenant_id = await run_in_threadpool(_tenant_id_from_request_headers, request)
+            if tenant_id is None:
+                raise HTTPException(status_code=401, detail="Authentication credentials missing.")
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers={"X-Request-ID": request_id})
+    except Exception:
+        return JSONResponse(status_code=503, content={"error": "authentication_unavailable"}, headers={"Retry-After": "1"})
     request.state.correlation_id = request_id
     request.state.tenant_id = tenant_id
-
     with tenant_context(tenant_id, request_id=request_id, required=tenant_id is not None):
+        if protected:
+            try:
+                limit = await run_in_threadpool(_tenant_tier_limit, tenant_id)
+                await run_in_threadpool(
+                    admit, tenant_id,
+                    user_id=getattr(request.state, "quota_user_id", None),
+                    key_id=getattr(request.state, "quota_key_id", None),
+                    tenant_limit=limit,
+                )
+            except QuotaExceeded:
+                return JSONResponse(status_code=429, content={"error": "rate_limit_exceeded"}, headers={"Retry-After": "60"})
+            except QuotaUnavailable:
+                return JSONResponse(status_code=503, content={"error": "rate_limit_unavailable"}, headers={"Retry-After": "1"})
+            except Exception:
+                record_unavailable()
+                return JSONResponse(status_code=503, content={"error": "rate_limit_unavailable"}, headers={"Retry-After": "1"})
         path = request.url.path
         if path.startswith(("/evidence", "/compliance/evidence/", "/reports/")) or (path.startswith("/compliance/controls/") and path.endswith("/evidence")):
             from services.evidence_access import audit_access
-            from starlette.concurrency import run_in_threadpool
             principal = optional_user_from_request(request)
             purpose = "delete" if request.method == "DELETE" else "export" if "/export/" in path or path.startswith("/reports/") else "download" if "/download/" in path else "view"
             try:
                 await run_in_threadpool(audit_access, tenant_id, principal.get("sub"), purpose, path)
             except HTTPException as exc:
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        # Downstream execution is outside authentication/admission exception handling.
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         if tenant_id is not None:
@@ -648,8 +578,13 @@ async def production_rbac_enforcement_middleware(request: Request, call_next):
         method = request.method.upper()
         path = request.url.path
         if not is_public_endpoint(method, path):
-            payload = optional_user_from_request(request)
-            enforce_request_access(method, path, payload)
+            try:
+                payload = optional_user_from_request(request)
+                enforce_request_access(method, path, payload)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            except Exception:
+                return JSONResponse(status_code=503, content={"error": "authorization_unavailable"}, headers={"Retry-After": "1"})
     return await call_next(request)
 
 def approval_actor_from_payload(payload: dict) -> str:
@@ -2241,6 +2176,35 @@ def get_health():
     }
 
 
+@app.get("/internal/metrics/quota", include_in_schema=False)
+def get_quota_metrics(authorization: str = Header(None)):
+    expected = os.getenv("AUTHCLAW_QUOTA_METRICS_SECRET", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Metrics authentication unavailable.")
+    scheme, _, provided = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Metrics authentication failed.")
+    snapshot = metrics_snapshot()
+    names = {
+        "available": "authclaw_quota_available",
+        "admitted": "authclaw_quota_admitted_total",
+        "rejected": "authclaw_quota_rejected_total",
+        "unavailable": "authclaw_quota_unavailable_total",
+        "ambiguous": "authclaw_quota_ambiguous_total",
+        "latency_seconds": "authclaw_quota_latency_seconds_sum",
+        "decisions": "authclaw_quota_decisions_total",
+    }
+    lines = [f"{name} {snapshot[key]}\n" for key, name in names.items()]
+    monitor = monitor_metrics_snapshot()
+    lines.extend([
+        f"authclaw_document_monitor_enabled {monitor['enabled']}\n",
+        f"authclaw_document_monitor_healthy {monitor['healthy']}\n",
+        f"authclaw_document_monitor_failures_total {monitor['failures_total']}\n",
+        f"authclaw_document_monitor_last_success_timestamp_seconds {monitor['last_success_timestamp_seconds']}\n",
+    ])
+    return Response("".join(lines), media_type="text/plain; version=0.0.4")
+
+
 @app.get("/health/details")
 def get_health_details():
     database_status = "healthy"
@@ -2279,6 +2243,12 @@ def get_readiness():
         "rbac_enforcement": "enabled" if _rbac_enforcement_enabled() else "disabled",
     }
     http_status = 200
+    try:
+        check_available()
+        checks["rate_limiter"] = "healthy"
+    except Exception:
+        checks["rate_limiter"] = "unhealthy"
+        http_status = 503
     try:
         from database import engine
         from sqlalchemy import text
@@ -2434,6 +2404,7 @@ def get_metrics():
         "audit_chain_status": audit_chain_status,
         "event_pipeline": event_pipeline_metrics,
         "rate_limit_blocked": rate_limit_blocked,
+        "rate_limiter": metrics_snapshot(),
         "worker_throttle_blocked": worker_throttle_blocked,
         "token_consumption": token_consumption,
         "active_tenants": active_tenants,
@@ -3024,6 +2995,8 @@ async def upload_document(
     from document_processing.orchestrator import run_document_scan_pipeline
     try:
         pipeline_res = run_document_scan_pipeline(doc_id, contents, filename, source="local", tenant_id=tenant_id)
+    except (QuotaExceeded, QuotaUnavailable):
+        raise
     except Exception as ex:
         # Fallback if pipeline fails (e.g. LLM issues) so document is still indexed
         logger.error(f"Scan pipeline failed, fallback indexing document: {ex}")
@@ -3501,6 +3474,8 @@ def compliance_analyze(
         _, doc_name = get_document_text(doc_id, tenant_id=tenant_id)
         # Perform analysis
         analysis = analyze_document_compliance(doc_id, tenant_id=tenant_id)
+    except (QuotaExceeded, QuotaUnavailable):
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Compliance analysis failed: {str(e)}")
         
@@ -3581,12 +3556,16 @@ Question:
                     "parts": [{"text": prompt}]
                 }]
             }
+            from providers.base import admit_provider_call
+            admit_provider_call("gemini", model)
             res = requests.post(url, json=payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, timeout=15)
             if res.status_code == 200:
                 data = res.json()
                 answer = data["candidates"][0]["content"]["parts"][0]["text"].strip()
             else:
                 logger.warning("Gemini document chat failed: status=%s", res.status_code)
+        except (QuotaExceeded, QuotaUnavailable):
+            raise
         except Exception as e:
             logger.warning("Gemini document chat failed: error_type=%s", type(e).__name__)
             
@@ -4995,9 +4974,13 @@ def activate_verified_registration(conn, registration) -> int:
         text("""
             INSERT INTO tenants (
                 name, domain, email, email_verified, domain_verified,
-                email_verification_token, domain_verification_token, totp_secret
+                email_verification_token, domain_verification_token, totp_secret,
+                subscription_tier, plan, tier, plan_updated_at
             )
-            VALUES (:name, :domain, :email, true, true, NULL, :domain_token, :totp)
+            VALUES (
+                :name, :domain, :email, true, true, NULL, :domain_token, :totp,
+                'free', 'free', 'free', NOW()
+            )
             RETURNING id
         """),
         {
@@ -5112,7 +5095,8 @@ def get_cloud_connectors_status():
         
     return {
         "connectors": connectors,
-        "last_sync": last_sync_time
+        "last_sync": last_sync_time,
+        "background_monitor": monitor_status(),
     }
 
 @app.post("/cloud/connectors/sync")

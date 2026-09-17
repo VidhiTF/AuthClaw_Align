@@ -13,6 +13,18 @@ logger = logging.getLogger("authclaw.startup.validation")
 POLICY_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
+def background_monitor_config_errors() -> list:
+    raw = os.getenv("AUTHCLAW_DISABLE_BACKGROUND_MONITOR", "true").strip().lower()
+    if raw not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+        return ["AUTHCLAW_DISABLE_BACKGROUND_MONITOR must be boolean."]
+    if raw in {"1", "true", "yes", "on"}:
+        return []
+    tenant = os.getenv("AUTHCLAW_BACKGROUND_MONITOR_TENANT_ID", "").strip()
+    if not tenant.isascii() or not tenant.isdigit() or int(tenant or "0") <= 0:
+        return ["Enabled background monitoring requires AUTHCLAW_BACKGROUND_MONITOR_TENANT_ID as a positive tenant ID."]
+    return []
+
+
 def _is_secure_sidecar_url(value: str) -> bool:
     parsed = urlparse(value.strip())
     if parsed.scheme == "https" and parsed.hostname:
@@ -189,7 +201,9 @@ def validate_environment():
     - DATABASE_URL
     And loads/validates YAML policies.
     """
-    errors = []
+    from services.quota_service import quota_config_errors
+    errors = quota_config_errors()
+    errors.extend(background_monitor_config_errors())
     
     production = os.getenv("AUTHCLAW_ENV", "development").lower() in {"production", "prod"}
     bootstrap_local_process_secrets()

@@ -1,3 +1,5 @@
+from contextvars import copy_context
+from services.quota_service import QuotaExceeded, QuotaUnavailable
 from memory import get_history
 from providers import get_provider
 from redaction import stream_redact_sensitive_tokens
@@ -105,6 +107,8 @@ def stream_llm_node(state):
             )
         )
         token_stream = _provider_token_stream(provider, prompt)
+    except (QuotaExceeded, QuotaUnavailable):
+        raise
     except Exception as exc:
         token_stream = iter([_offline_provider_fallback()])
         state["provider_status"] = "offline_fallback"
@@ -155,7 +159,7 @@ def llm_node(state):
         
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(provider.generate, prompt)
+            future = executor.submit(copy_context().run, provider.generate, prompt)
             final_response = future.result(timeout=30.0)
         except concurrent.futures.TimeoutError as te:
             print("[Provider End] Timeout occurred", flush=True)
@@ -175,6 +179,8 @@ def llm_node(state):
         state["provider_status"] = "ok"
         state.pop("provider_error", None)
         
+    except (QuotaExceeded, QuotaUnavailable):
+        raise
     except Exception as e:
         duration = time.perf_counter() - start_time
         print(f"[Provider End] Duration: {duration:.4f}s", flush=True)

@@ -17,6 +17,32 @@ import (
 
 const budgetModel = "anthropic.claude-3-haiku-20240307-v1:0"
 
+func TestProviderQuotaPrecedesAndShortCircuitsBedrockBudget(t *testing.T) {
+	var order []string
+	allowed := admitProviderResources(func() bool {
+		order = append(order, "quota")
+		return false
+	}, func() bool {
+		order = append(order, "budget")
+		return true
+	})
+	if allowed || len(order) != 1 || order[0] != "quota" {
+		t.Fatalf("denied provider quota reached budget admission: allowed=%v order=%v", allowed, order)
+	}
+
+	order = nil
+	allowed = admitProviderResources(func() bool {
+		order = append(order, "quota")
+		return true
+	}, func() bool {
+		order = append(order, "budget")
+		return true
+	})
+	if !allowed || strings.Join(order, ",") != "quota,budget" {
+		t.Fatalf("admission order=%v allowed=%v", order, allowed)
+	}
+}
+
 func testBedrockBudget(t *testing.T, tenant string, requests, tokens int, cost float64) {
 	t.Helper()
 	t.Setenv("AWS_ENABLED", "true")

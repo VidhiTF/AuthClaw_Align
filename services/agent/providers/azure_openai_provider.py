@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 import requests
 
-from .base import BaseProvider
+from .base import BaseProvider, admit_provider_call
 
 logger = logging.getLogger("authclaw.providers.azure_openai")
 
@@ -45,6 +45,7 @@ class AzureOpenAIProvider(BaseProvider):
         if "max_tokens" in kwargs:
             payload["max_tokens"] = int(kwargs["max_tokens"])
 
+        admit_provider_call('azure_openai', self.model_name)
         response = requests.post(
             f"{self.api_url}/openai/deployments/{self.model_name}/chat/completions",
             params={"api-version": self.api_version},

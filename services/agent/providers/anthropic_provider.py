@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 import requests
 
-from .base import BaseProvider
+from .base import BaseProvider, admit_provider_call
 
 logger = logging.getLogger("authclaw.providers.anthropic")
 
@@ -37,6 +37,7 @@ class AnthropicProvider(BaseProvider):
         if "temperature" in kwargs:
             payload["temperature"] = float(kwargs["temperature"])
 
+        admit_provider_call('anthropic', self.model_name)
         response = requests.post(
             f"{self.api_url}/v1/messages",
             json=payload,

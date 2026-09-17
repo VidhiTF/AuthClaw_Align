@@ -1,3 +1,4 @@
+from services.quota_service import QuotaExceeded, QuotaUnavailable
 import json
 import logging
 import time
@@ -93,6 +94,8 @@ class GatewayService:
                     "model": model,
                 }
             )
+        except (QuotaExceeded, QuotaUnavailable):
+            raise
         except ValueError as e:
             raise GatewayProviderConfigurationError(str(e)) from e
         except Exception as e:
@@ -206,6 +209,8 @@ class GatewayService:
                     "model": model,
                 }
             )
+        except (QuotaExceeded, QuotaUnavailable):
+            raise
         except ValueError as e:
             raise GatewayProviderConfigurationError(str(e)) from e
         except Exception as e:

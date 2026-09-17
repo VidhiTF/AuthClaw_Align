@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -120,14 +121,20 @@ func TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery(t *testing.T)
 	t.Setenv("AUDIT_FAIL_CLOSED", "true")
 	outbox := t.TempDir() + "/audit-recovery.ndjson"
 	t.Setenv("AUDIT_OUTBOX_PATH", outbox)
+	streamBody := "data: {\"choices\":[{\"delta\":{\"content\":\"safe-token\"}}]}\n\n"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: safe-token\n\n")
+		_, _ = io.WriteString(w, streamBody)
 	}))
 	defer upstream.Close()
 	proxy := NewProxyServer()
 	proxy.OpenAIBaseURL = upstream.URL
 
+	req := authenticatedProxyContract(t, requestWithAuditContext(
+		http.MethodPost, "/v1/chat/completions",
+		`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		"req-stream",
+	), ProviderOpenAI, "contract-key")
 	withAuditEmitter(t, func(_ context.Context, event *AuditEvent) error {
 		if event.Action == "provider_attempt" {
 			return nil
@@ -136,14 +143,31 @@ func TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery(t *testing.T)
 	})
 	before := AuditMetricsSnapshot()["authclaw_gateway_audit_post_response_failures_total"]
 	recorder := httptest.NewRecorder()
-	req := requestWithAuditContext(
-		http.MethodPost,
-		"/v1/chat/completions",
-		`{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
-		"req-stream",
-	)
 	proxy.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK || recorder.Body.String() != "data: safe-token\n\n" {
+	var received strings.Builder
+	for _, line := range strings.Split(recorder.Body.String(), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			t.Fatalf("invalid SSE frame: %q", line)
+		}
+		var event struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+			t.Fatal(err)
+		}
+		if len(event.Choices) != 1 {
+			t.Fatal("stream lost choice structure")
+		}
+		received.WriteString(event.Choices[0].Delta.Content)
+	}
+	if recorder.Code != http.StatusOK || received.String() != "safe-token" {
 		t.Fatalf("stream changed after final audit failure: status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 	if AuditMetricsSnapshot()["authclaw_gateway_audit_post_response_failures_total"] != before+1 {

@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 import requests
 
-from .base import BaseProvider
+from .base import BaseProvider, admit_provider_call
 
 logger = logging.getLogger("authclaw.providers.openai")
 
@@ -39,6 +39,7 @@ class OpenAIProvider(BaseProvider):
         if "max_tokens" in kwargs:
             payload["max_tokens"] = int(kwargs["max_tokens"])
 
+        admit_provider_call('openai', self.model_name)
         response = requests.post(
             f"{self.api_url}/chat/completions",
             json=payload,

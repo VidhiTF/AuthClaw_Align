@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from .base import BaseProvider
+from services.quota_service import QuotaExceeded, QuotaUnavailable
 
 DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
@@ -77,6 +78,10 @@ class GatewayProvider(BaseProvider):
             },
             timeout=self.timeout,
         )
+        if response.status_code == 429:
+            raise QuotaExceeded("expensive_model")
+        if response.status_code == 503:
+            raise QuotaUnavailable("Gateway quota admission unavailable")
         if not response.ok:
             raise RuntimeError(f"AuthClaw gateway returned HTTP {response.status_code}: Provider unavailable")
 

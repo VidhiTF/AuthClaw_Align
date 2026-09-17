@@ -1,3 +1,5 @@
+from providers.base import admit_provider_call
+from services.quota_service import QuotaExceeded, QuotaUnavailable
 import os
 import time
 import json
@@ -78,6 +80,8 @@ def run_document_scan_pipeline(doc_id: int, file_bytes: bytes, filename: str, so
                 conn.commit()
                 
         save_document_chunks(k_doc_id, chunks, tenant_id=tenant_id)
+    except (QuotaExceeded, QuotaUnavailable):
+        raise
     except Exception as ex:
         logger.error(f"Failed to index chunks into RAG: {ex}")
         
@@ -181,6 +185,7 @@ Do not include markdown packaging like ```json.
                     "parts": [{"text": prompt}]
                 }]
             }
+            admit_provider_call("gemini", model)
             res = requests.post(url, json=payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, timeout=15)
             if res.status_code == 200:
                 data = res.json()
@@ -199,6 +204,8 @@ Do not include markdown packaging like ```json.
                     all_findings.extend(ai_findings)
             else:
                 logger.warning("Gemini document review failed: status=%s", res.status_code)
+        except (QuotaExceeded, QuotaUnavailable):
+            raise
         except Exception as e:
             logger.error(f"Gemini AI review call failed: {str(e)}")
             
