@@ -55,6 +55,8 @@ def plan(
         # This gateway regression runs inside the restricted-role PostgreSQL job.
         if path == "gateway/audit_context_test.go":
             affected["backend"] = True
+        if path in {"console/src/lib/control-plane-auth.ts", "console/src/lib/api-client.ts"}:
+            affected["agent"] = True  # Runs the real cross-language signing contract.
         for name, prefix in COMPONENTS.items():
             if path.startswith(prefix):
                 affected[name] = True

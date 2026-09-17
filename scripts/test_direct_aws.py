@@ -40,13 +40,16 @@ class DirectAWSChecks(unittest.TestCase):
             self.assertEqual(manager.fingerprint("synthetic-sensitive-value"), previous)
 
     def test_internal_key_coordinated_cutover_and_rollback(self):
-        headers = {"x-authclaw-timestamp": "2000000000", "x-authclaw-tenant-id": "tenant",
+        headers = {"x-authclaw-version": "2", "x-authclaw-nonce": "a" * 32,
+                   "x-authclaw-service": "console", "x-authclaw-audience": "agent", "x-authclaw-key-id": "v1",
+                   "x-authclaw-timestamp": "2000000000", "x-authclaw-tenant-id": "tenant",
                    "x-authclaw-user-id": "user", "x-authclaw-role": "owner"}
         for sender, receiver, allowed in (("old", "old", True), ("new", "old", False),
                                           ("new", "new", True), ("old", "new", False), ("old", "old", True)):
             headers["x-authclaw-signature"] = sign_control_plane_request(
-                sender, "2000000000", "POST", "/chat", "tenant", "user", "owner")
-            self.assertEqual(bool(verify_control_plane_request(headers, "POST", "/chat", receiver, now=2000000000)), allowed)
+                sender * 16, headers, "POST", "/chat")
+            ring = {"keys": {"v1": {"secret": receiver * 16, "service": "console", "audience": "agent", "endpoints": ["POST /chat"]}}}
+            self.assertEqual(bool(verify_control_plane_request(headers, "POST", "/chat", ring, lambda *_: True, now=2000000000)), allowed)
 
     def test_kms_rotation_rollback_and_denial(self):
         manager = SecretManager("ecs_injected")

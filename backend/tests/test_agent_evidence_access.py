@@ -131,11 +131,16 @@ def test_actual_agent_middleware_audits_and_fails_closed(
         if getattr(n, "name", "") == "tenant_database_context_middleware"
     )
     node.decorator_list = []
+    async def unsigned(request):
+        return None
+
     namespace = {
+        "authenticate_control_plane": unsigned,
         "Request": Request,
         "JSONResponse": JSONResponse,
         "HTTPException": HTTPException,
         "_is_public_or_auth_path": lambda p: False,
+        "_rbac_enforcement_enabled": lambda: False,
         "_tenant_id_from_request_headers": lambda r: 1,
         "tenant_context": lambda *a, **k: nullcontext(),
         "optional_user_from_request": lambda r: {"sub": "actor-1"},

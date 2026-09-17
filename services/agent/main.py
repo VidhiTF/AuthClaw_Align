@@ -54,7 +54,7 @@ from services.enterprise_identity import (
     upsert_provider_config,
 )
 from services.tenant_context import get_current_tenant_id, tenant_context
-from services.control_plane_auth import verify_control_plane_request
+from services.control_plane_auth import authenticate_control_plane
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO)
@@ -513,19 +513,6 @@ def optional_user_from_request(request: Request) -> dict:
     principal = getattr(request.state, "control_plane_principal", None)
     if principal:
         return principal
-    if request.headers.get("X-AuthClaw-Signature"):
-        verified = verify_control_plane_request(
-            request.headers,
-            request.method,
-            request.url.path,
-            os.getenv("AUTHCLAW_INTERNAL_SERVICE_SECRET", ""),
-        )
-        if verified:
-            return {
-                "external_tenant_id": verified.tenant_id,
-                "sub": verified.user_id,
-                "role": verified.role,
-            }
     auth_header = request.headers.get("Authorization")
     if not auth_header:
         return {}
@@ -550,16 +537,8 @@ def _is_public_or_auth_path(path: str) -> bool:
 
 
 def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
-    signature = request.headers.get("X-AuthClaw-Signature")
-    if signature:
-        principal = verify_control_plane_request(
-            request.headers,
-            request.method,
-            request.url.path,
-            os.getenv("AUTHCLAW_INTERNAL_SERVICE_SECRET", ""),
-        )
-        if not principal:
-            raise HTTPException(status_code=401, detail="Invalid control-plane signature.")
+    principal = getattr(request.state, "verified_service_principal", None)
+    if principal:
         from database import engine
         with engine.begin() as conn:
             tenant_id = conn.execute(
@@ -598,19 +577,20 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
 
 @app.middleware("http")
 async def tenant_database_context_middleware(request: Request, call_next):
+    from starlette.concurrency import run_in_threadpool
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     tenant_id = None
 
-    if not _is_public_or_auth_path(request.url.path):
-        try:
-            tenant_id = _tenant_id_from_request_headers(request)
-        except HTTPException as exc:
-            response = JSONResponse(
-                status_code=exc.status_code,
-                content={"detail": exc.detail},
-            )
-            response.headers["X-Request-ID"] = request_id
-            return response
+    try:
+        request.state.verified_service_principal = await authenticate_control_plane(request)
+        if not _is_public_or_auth_path(request.url.path):
+            tenant_id = await run_in_threadpool(_tenant_id_from_request_headers, request)
+        if _rbac_enforcement_enabled():
+            from services.rbac_matrix import enforce_request_access
+            enforce_request_access(request.method, request.url.path, optional_user_from_request(request))
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                            headers={"X-Request-ID": request_id})
     request.state.correlation_id = request_id
     request.state.tenant_id = tenant_id
 
@@ -618,7 +598,6 @@ async def tenant_database_context_middleware(request: Request, call_next):
         path = request.url.path
         if path.startswith(("/evidence", "/compliance/evidence/", "/reports/")) or (path.startswith("/compliance/controls/") and path.endswith("/evidence")):
             from services.evidence_access import audit_access
-            from starlette.concurrency import run_in_threadpool
             principal = optional_user_from_request(request)
             purpose = "delete" if request.method == "DELETE" else "export" if "/export/" in path or path.startswith("/reports/") else "download" if "/download/" in path else "view"
             try:
@@ -639,18 +618,6 @@ def _rbac_enforcement_enabled() -> bool:
         return explicit.strip().lower() in {"1", "true", "yes", "on"}
     return True
 
-
-@app.middleware("http")
-async def production_rbac_enforcement_middleware(request: Request, call_next):
-    if _rbac_enforcement_enabled():
-        from services.rbac_matrix import enforce_request_access, is_public_endpoint
-
-        method = request.method.upper()
-        path = request.url.path
-        if not is_public_endpoint(method, path):
-            payload = optional_user_from_request(request)
-            enforce_request_access(method, path, payload)
-    return await call_next(request)
 
 def approval_actor_from_payload(payload: dict) -> str:
     return payload.get("email") or payload.get("sub") or "System Admin"
