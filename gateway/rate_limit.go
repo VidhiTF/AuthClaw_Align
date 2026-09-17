@@ -111,6 +111,14 @@ func writeRateLimitError(w http.ResponseWriter, status int, code string, message
 	writeGatewayError(w, status, code, message)
 }
 
+func recordLegacyQuotaRejection() {
+	// Legacy burst/minute/day windows are still enforced quota decisions. Keep
+	// them in the aggregate alert numerator and denominator even though the
+	// multidimensional admission script does not run after their denial.
+	quotaRejected.Add(1)
+	quotaDecisions.Add(1)
+}
+
 func RateLimitMiddleware(next http.Handler) http.Handler {
 	config := loadGatewayRateLimitConfig()
 	configErr := ValidateGatewayRateLimitConfig()
@@ -193,6 +201,7 @@ func RateLimitMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			if exceeded {
+				recordLegacyQuotaRejection()
 				if !emitRequiredDecision(w, r, &AuditEvent{
 					ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
 					TenantID: tenantID, Action: "block", DecisionReason: "Rate limit exceeded: " + check.name,

@@ -4,4 +4,4 @@ Command: /tmp/tokei/tokei --files backend/app gateway audit_consumer console/src
 Checker: python scripts/check_line_budget.py < /evidence/tokei.json
 Exit code: 0
 Line budget OK
-Selected code counts: {"gateway/main.go": 130, "gateway/quota_admission.go": 156, "services/agent/document_processing/monitoring.py": 276, "services/agent/main.py": 4549, "services/agent/services/quota_service.py": 213}
+Selected code counts: {"gateway/main.go": 130, "gateway/quota_admission.go": 156, "services/agent/document_processing/monitoring.py": 300, "services/agent/main.py": 4559, "services/agent/services/quota_service.py": 213}

@@ -5,8 +5,9 @@ import threading
 from datetime import datetime, timezone
 from sqlalchemy import text
 from database import engine
-from services.tenant_context import get_current_tenant_id
+from services.tenant_context import get_current_tenant_id, tenant_context
 from services.quota_service import QuotaExceeded, QuotaUnavailable, record_unavailable
+from services.document_monitor_status import monitor_status, update_monitor_status
 
 from document_processing.orchestrator import run_document_scan_pipeline
 from document_processing.auditor import create_document_audit
@@ -38,22 +39,31 @@ def get_watched_directory() -> str:
             f.write("AuthClaw Real-Time Document Compliance Watched Directory.\nPlace documents here to auto-scan.\n")
     return WATCH_DIR
 
-def start_background_monitoring():
-    """Starts the folder watcher and cloud poll background thread."""
+def start_background_monitoring(tenant_id=None):
+    """Start an explicitly tenant-bound folder and cloud polling thread."""
     global _monitor_thread
     if _monitor_thread and _monitor_thread.is_alive():
         logger.warning("Background document monitor is already running.")
         return
-        
+
+    configured_tenant = str(tenant_id or os.getenv("AUTHCLAW_BACKGROUND_MONITOR_TENANT_ID", "")).strip()
+    if not configured_tenant or not configured_tenant.isascii() or not configured_tenant.isdigit() or int(configured_tenant) <= 0:
+        update_monitor_status(enabled=False, status="disabled", tenant_configured=False)
+        raise ValueError("Background document monitoring requires an explicitly authorized positive tenant ID")
+
     get_watched_directory()
     _stop_event.clear()
-    _monitor_thread = threading.Thread(target=_monitor_loop, daemon=True, name="AuthClawDocMonitor")
+    update_monitor_status(enabled=True, status="starting", tenant_configured=True, last_error_type=None)
+    _monitor_thread = threading.Thread(
+        target=_monitor_loop, args=(configured_tenant,), daemon=True, name="AuthClawDocMonitor"
+    )
     _monitor_thread.start()
-    logger.info("Background document compliance monitor started.")
+    logger.info("Tenant-scoped background document compliance monitor started.")
 
 def stop_background_monitoring():
     """Signals the monitoring loop to stop."""
     _stop_event.set()
+    update_monitor_status(enabled=False, status="stopping")
     logger.info("Signaled document monitor thread to stop.")
 
 def trigger_manual_sync() -> dict:
@@ -302,33 +312,43 @@ def sync_sources():
         except Exception as src_err:
             logger.error(f"Failed sync execution on cloud source {src}: {src_err}")
 
-def _monitor_loop():
+def _monitor_loop(tenant_id):
     """
     Main loop polling files and cloud configurations at set intervals.
     """
     global last_sync_time
     logger.info("Continuous cloud and local document monitor loop activated.")
     
-    # Perform initial sync
-    try:
-        sync_sources()
-    except (QuotaExceeded, QuotaUnavailable):
-        logger.warning("Document monitor deferred: verified tenant and quota admission required")
-        return
-    last_sync_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    
     while not _stop_event.is_set():
         try:
-            # Poll every 30 seconds
-            time.sleep(30)
-            if _stop_event.is_set():
+            with tenant_context(tenant_id, request_id="document-monitor", required=True):
+                sync_sources()
+            succeeded_at = datetime.now(timezone.utc)
+            last_sync_time = succeeded_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+            update_monitor_status(
+                enabled=True,
+                status="healthy",
+                tenant_configured=True,
+                last_error_type=None,
+                last_success_timestamp=int(succeeded_at.timestamp()),
+            )
+            if _stop_event.wait(30):
                 break
-                
-            sync_sources()
-            last_sync_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            
         except Exception as e:
-            logger.error(f"Error in document monitoring thread: {e}")
-            time.sleep(10)
-            
+            state = monitor_status()
+            update_monitor_status(
+                enabled=True,
+                status="degraded",
+                tenant_configured=True,
+                failures_total=state["failures_total"] + 1,
+                last_error_type=type(e).__name__,
+            )
+            if isinstance(e, (QuotaExceeded, QuotaUnavailable)):
+                logger.warning("Tenant-scoped document monitor deferred by quota admission")
+            else:
+                logger.error("Error in document monitoring thread: %s", type(e).__name__)
+            if _stop_event.wait(10):
+                break
+
+    update_monitor_status(enabled=False, status="stopped")
     logger.info("Background document compliance monitor thread terminated.")

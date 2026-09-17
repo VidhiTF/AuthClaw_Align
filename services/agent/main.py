@@ -56,6 +56,7 @@ from services.enterprise_identity import (
 from services.tenant_context import get_current_tenant_id, tenant_context
 from services.control_plane_auth import verify_control_plane_request
 from services.quota_service import admit, check_available, metrics_snapshot, record_unavailable, QuotaExceeded, QuotaUnavailable
+from services.document_monitor_status import monitor_metrics_snapshot, monitor_status
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO)
@@ -72,12 +73,12 @@ async def lifespan(app: FastAPI):
     # 4. Start background compliance watcher for watched_documents folder.
     # Local smoke tests can disable this so provider/email limits do not obscure
     # the core gateway, auth, and UI startup path.
-    if env_bool("AUTHCLAW_DISABLE_BACKGROUND_MONITOR", False):
+    if env_bool("AUTHCLAW_DISABLE_BACKGROUND_MONITOR", True):
         logger.info("Background document compliance monitor disabled by AUTHCLAW_DISABLE_BACKGROUND_MONITOR.")
     else:
         from document_processing.monitoring import start_background_monitoring
         try:
-            start_background_monitoring()
+            start_background_monitoring(os.getenv("AUTHCLAW_BACKGROUND_MONITOR_TENANT_ID"))
         except Exception as ex:
             logger.error(f"Failed to start background document monitoring: {ex}")
         
@@ -2171,7 +2172,15 @@ def get_health(metrics: bool = False):
             "latency_seconds": "authclaw_quota_latency_seconds_sum",
             "decisions": "authclaw_quota_decisions_total",
         }
-        return Response("".join(f"{name} {snapshot[key]}\n" for key, name in names.items()), media_type="text/plain; version=0.0.4")
+        lines = [f"{name} {snapshot[key]}\n" for key, name in names.items()]
+        monitor = monitor_metrics_snapshot()
+        lines.extend([
+            f"authclaw_document_monitor_enabled {monitor['enabled']}\n",
+            f"authclaw_document_monitor_healthy {monitor['healthy']}\n",
+            f"authclaw_document_monitor_failures_total {monitor['failures_total']}\n",
+            f"authclaw_document_monitor_last_success_timestamp_seconds {monitor['last_success_timestamp_seconds']}\n",
+        ])
+        return Response("".join(lines), media_type="text/plain; version=0.0.4")
     return {
         "status": "healthy"
     }
@@ -5069,7 +5078,8 @@ def get_cloud_connectors_status():
         
     return {
         "connectors": connectors,
-        "last_sync": last_sync_time
+        "last_sync": last_sync_time,
+        "background_monitor": monitor_status(),
     }
 
 @app.post("/cloud/connectors/sync")

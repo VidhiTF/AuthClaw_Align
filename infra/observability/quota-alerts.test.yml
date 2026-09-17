@@ -3,6 +3,16 @@ rule_files:
 evaluation_interval: 1m
 tests:
   - interval: 1m
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: QuotaLimiterUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Protected traffic is blocked by quota dependency failure
+              runbook: docs/quota-operations.md
+  - interval: 1m
     input_series:
       - series: authclaw_quota_available
         values: '1 0 0 0 1 1'

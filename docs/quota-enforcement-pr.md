@@ -29,6 +29,9 @@ aliases and fallback models. Provider retries require fresh provider admission.
 unavailable or indeterminate admission is 503. No gateway marker or internal
 prefix bypasses enforcement. Documentation, configuration, tests, and monitoring
 changes support this single contract.
+Regional Terraform installs the rules in Amazon Managed Prometheus, runs a
+private ECS scraper for every agent/gateway replica, and routes managed
+Alertmanager notifications only to approved regional SNS topics.
 
 ## Customer impact
 
@@ -98,8 +101,8 @@ access the database or Redis. No production credentials were added.
 ## Material line-growth exception
 
 This change exceeds 100 positive added lines across production, tests and tooling.
-The final worktree has 748 production lines added and 195 removed. Positive
-non-prose growth is 2,659 lines including tests, configuration, tooling and raw
+The final worktree has 855 production lines added and 217 removed. Positive
+non-prose growth is 3,270 lines including tests, configuration, tooling and raw
 evidence; deletions in other files do not offset this policy measure.
 Atomic admission, independent failure tests, and operational rehearsal require
 growth; unrelated deletion cannot offset it. Final per-file counts are recorded
@@ -134,6 +137,10 @@ They preserved quota bounds but the busy local Docker host caused substantial
 Full deployed database-backed gateway/agent load and final CI remain required.
 The alert rehearsal uses unchanged Prometheus rules and an approved local
 receiver; final firing/resolution evidence is retained separately.
+Terraform validation and a complete synthetic deployment plan verify the managed
+workspace, scrape discovery, rule installation, remote-write IAM, Alertmanager,
+exact-workspace role trust, and concrete SNS route. No shared AWS apply or
+production SNS delivery is claimed.
 
 ## Risk
 

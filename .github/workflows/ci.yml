@@ -489,6 +489,7 @@ jobs:
             "enable_cross_region_db_replica": false,
             "internal_tls": {"enabled": true, "namespace": "internal.example.com"},
             "primary_availability_zones": ["us-east-1a", "us-east-1b"],
+            "quota_alert_sns_topic_arns": {"primary": ["arn:aws:sns:us-east-1:123456789012:authclaw-ci-quota-alerts"]},
             "container_images": {
               "agent": "example.com/authclaw/agent:test",
               "backend": "example.com/authclaw/backend:test",
@@ -503,6 +504,7 @@ jobs:
           terraform -chdir=infra/terraform plan -input=false -lock=false -var-file=ci-plan.tfvars.json -out=kafka.tfplan -var=audit_stream_transport=kafka
           terraform -chdir=infra/terraform show -json kafka.tfplan > infra/terraform/kafka-plan.json
           python scripts/assert_audit_transport_plan.py kafka infra/terraform/kafka-plan.json
+          python scripts/assert_quota_observability_plan.py infra/terraform/kafka-plan.json
           terraform -chdir=infra/terraform plan -input=false -lock=false -var-file=ci-plan.tfvars.json -out=sqs.tfplan -var=audit_stream_transport=sqs_fifo
           terraform -chdir=infra/terraform show -json sqs.tfplan > infra/terraform/sqs-plan.json
           python scripts/assert_audit_transport_plan.py sqs_fifo infra/terraform/sqs-plan.json

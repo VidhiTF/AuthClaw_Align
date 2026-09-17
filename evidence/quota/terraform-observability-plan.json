@@ -1,0 +1,27 @@
+{
+  "scope": "synthetic offline deployment plan; no infrastructure was applied",
+  "terraform_version": "1.15.7",
+  "aws_provider_version": "5.100.0",
+  "command": "terraform plan -input=false -lock=false -refresh=false -var-file=.quota-alert-evidence/terraform-review.tfvars.json",
+  "result": {"applyable": true, "complete": true, "errored": false},
+  "test_receiver": "arn:aws:sns:us-east-1:123456789012:authclaw-ci-quota-alerts",
+  "planned_resources": [
+    "aws_prometheus_workspace.quota",
+    "aws_prometheus_rule_group_namespace.quota",
+    "aws_prometheus_alert_manager_definition.quota",
+    "aws_iam_role.quota_alertmanager",
+    "aws_ecs_task_definition.quota_collector",
+    "aws_ecs_service.quota_collector",
+    "aws_iam_role_policy.quota_collector",
+    "aws_iam_role_policy.quota_alertmanager",
+    "aws_cloudwatch_log_group.quota_collector"
+  ],
+  "collector_image": "public.ecr.aws/aws-observability/aws-otel-collector@sha256:8aa9ea5f67b8d318f7d6af24677e3c70f7098bc0631147cb5fa91addbe980b06",
+  "collector_behavior": "DNS discovers every gateway and agent task, scrapes /health?metrics=true every 15 seconds, and SigV4 remote-writes to the regional managed workspace",
+  "routing_behavior": "Managed Alertmanager assumes a role restricted to the exact quota workspace and source account, then may publish only to configured regional SNS topic ARNs",
+  "rule_sha256": "c50e467dd63be5ec0e758db15ba31517aa5860868f2bcadb6b09bf94c7447444",
+  "terraform_wiring_sha256": "a3299464675f1543393ae8f7fd319730da0707661949f0f691b230ec51c723d2",
+  "ci_assertion_sha256": "4cac0e220b4b7149cdf49e0e20e81f85a5dbd11e646ada1c24721b8090f03bb7",
+  "ci_assertion": "scripts/assert_quota_observability_plan.py passed against the retained local plan, verifies exact-workspace trust, and is invoked by the Terraform CI job",
+  "limitations": "This proves a complete provider-valid deployment graph and concrete test receiver. It does not claim an apply to a shared AWS account or delivery through a production SNS subscription."
+}

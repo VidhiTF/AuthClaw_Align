@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services import quota_service as quota
+from services.document_monitor_status import monitor_metrics_snapshot
 from services.tenant_context import tenant_context, get_current_tenant_id
 
 
@@ -41,6 +42,7 @@ def boundary_namespace():
         "os": os, "uuid": uuid, "hashlib": hashlib, "tenant_context": tenant_context,
         "admit": quota.admit, "check_available": quota.check_available,
         "metrics_snapshot": quota.metrics_snapshot, "QuotaExceeded": quota.QuotaExceeded,
+        "monitor_metrics_snapshot": monitor_metrics_snapshot,
         "record_unavailable": quota.record_unavailable,
         "QuotaUnavailable": quota.QuotaUnavailable,
     }

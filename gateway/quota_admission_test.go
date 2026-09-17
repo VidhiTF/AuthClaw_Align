@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -197,5 +199,50 @@ func TestQuotaTestEnvironmentCannotUseLocalDefaults(t *testing.T) {
 	t.Setenv("AUTHCLAW_RATE_LIMIT_PER_MINUTE", "")
 	if _, err := quotaLimit("AUTHCLAW_RATE_LIMIT_PER_MINUTE"); err == nil {
 		t.Fatal("shared test accepted missing mandatory limit")
+	}
+}
+
+func TestLegacyRateLimitRejectionFeedsQuotaAlertMetrics(t *testing.T) {
+	if os.Getenv("QUOTA_REDIS_TEST") != "1" {
+		t.Skip("requires isolated real Redis")
+	}
+	t.Setenv("AUTHCLAW_ENV", "development")
+	t.Setenv("GATEWAY_RATE_LIMIT_BURST_10S", "1")
+	t.Setenv("GATEWAY_RATE_LIMIT_PER_MINUTE", "100")
+	t.Setenv("GATEWAY_RATE_LIMIT_DAILY", "100")
+	for _, name := range []string{"AUTHCLAW_RATE_LIMIT_PER_MINUTE", "AUTHCLAW_RATE_LIMIT_USER_RPM", "AUTHCLAW_RATE_LIMIT_KEY_RPM", "AUTHCLAW_RATE_LIMIT_EXPENSIVE_MODEL_RPM"} {
+		t.Setenv(name, "100")
+	}
+	InitRedis()
+	defer func() { RedisClient.Close(); RedisClient = nil }()
+	withAuditEmitter(t, func(context.Context, *AuditEvent) error { return nil })
+
+	tenant := "legacy-metrics-" + generateID()
+	request := func() *http.Request {
+		ctx := context.WithValue(context.Background(), TenantIDContextKey, tenant)
+		ctx = context.WithValue(ctx, UserIDContextKey, "user")
+		ctx = context.WithValue(ctx, APIKeyHashContextKey, "key-"+tenant)
+		return httptest.NewRequest("POST", "/v1/chat/completions", nil).WithContext(ctx)
+	}
+	var downstream int
+	handler := RateLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		downstream++
+		w.WriteHeader(http.StatusOK)
+	}))
+	beforeRejected, beforeDecisions := quotaRejected.Load(), quotaDecisions.Load()
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, request())
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, request())
+	if first.Code != http.StatusOK || second.Code != http.StatusTooManyRequests || downstream != 1 {
+		t.Fatalf("first=%d second=%d downstream=%d", first.Code, second.Code, downstream)
+	}
+	if quotaRejected.Load() != beforeRejected+1 || quotaDecisions.Load() != beforeDecisions+2 {
+		t.Fatalf("rejected delta=%d decisions delta=%d", quotaRejected.Load()-beforeRejected, quotaDecisions.Load()-beforeDecisions)
+	}
+	metrics := httptest.NewRecorder()
+	HealthHandler(metrics, httptest.NewRequest("GET", "/health?metrics=true", nil))
+	if !strings.Contains(metrics.Body.String(), fmt.Sprintf("authclaw_quota_rejected_total %d", beforeRejected+1)) {
+		t.Fatal("legacy rejection was not exported to the quota alert metric")
 	}
 }

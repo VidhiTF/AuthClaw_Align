@@ -316,6 +316,35 @@ variable "edge_alarm_action_arns" {
   default = []
 }
 
+variable "quota_alert_sns_topic_arns" {
+  description = "Approved regional SNS topics for managed quota alerts. Required outside CI."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([for arn in var.quota_alert_sns_topic_arns :
+      can(regex("^arn:aws:sns:${var.region}:[0-9]{12}:[A-Za-z0-9_-]+$", arn))
+    ])
+    error_message = "Quota alert receivers must be exact SNS topic ARNs in this regional stack."
+  }
+
+  validation {
+    condition     = var.authclaw_env == "ci" || length(var.quota_alert_sns_topic_arns) > 0
+    error_message = "Shared-test, staging, and production require an approved quota alert SNS receiver."
+  }
+}
+
+variable "quota_metrics_collector_image" {
+  description = "Immutable multi-architecture AWS OpenTelemetry collector image."
+  type        = string
+  default     = "public.ecr.aws/aws-observability/aws-otel-collector@sha256:8aa9ea5f67b8d318f7d6af24677e3c70f7098bc0631147cb5fa91addbe980b06"
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.quota_metrics_collector_image))
+    error_message = "quota_metrics_collector_image must use an immutable sha256 digest."
+  }
+}
+
 variable "smtp_host" {
   type    = string
   default = ""

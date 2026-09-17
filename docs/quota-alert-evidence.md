@@ -41,8 +41,8 @@ now uses 30-second scrapes with a 25-second timeout. Production rule expressions
 hold durations and rate windows stayed unchanged. Earlier availability resolutions
 caused by missing samples are excluded from recovery acceptance; the clean repeat
 requires notification receipt after the deliberate healthy transition. Monitoring
-target disappearance needs its own deployment-level target-down alert because a
-comparison against a missing availability series is not an outage signal.
+complete target disappearance now also fires the availability alert through an
+explicit absent-series expression.
 
 ## Recorded result (2026-09-17 UTC)
 
@@ -60,6 +60,23 @@ original payloads, receiver name and hashes are retained in
 The rule file SHA256 was
 `ea92687a99f41de5130f67f085abc5dc0c5fde9949faeaeaac37eb135491047e`.
 All three containers and the isolated Docker network were removed after success.
+
+## Provisioned deployment path
+
+Review follow-up wires the checked-in rules into a regional Amazon Managed
+Prometheus workspace. A dedicated ECS OpenTelemetry collector discovers every
+gateway and agent task through private DNS, scrapes `/health?metrics=true`, and
+uses SigV4 remote write. Managed Alertmanager assumes an IAM role whose trust is
+bound to the exact quota workspace and whose policy permits only explicitly
+configured regional SNS topics.
+Staging and production plans fail when no approved receiver is configured.
+
+Terraform 1.15.7 with AWS provider 5.100.0 validated successfully. A synthetic
+offline plan with a test SNS receiver was complete and applyable, and the CI
+plan assertion verified the workspace, collector, rule namespace, remote-write
+policy, exact-workspace role trust, Alertmanager definition, and concrete SNS route. See
+`evidence/quota/terraform-observability-plan.json`. This plan was not applied;
+shared-account apply and SNS subscription delivery remain release evidence.
 
 This proves rule evaluation, sustained hold duration, local notification routing
 and resolution using controlled metric input. It does not prove production paging

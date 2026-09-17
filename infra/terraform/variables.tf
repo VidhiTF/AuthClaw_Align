@@ -380,6 +380,27 @@ variable "edge_alarm_action_arns" {
   default     = []
 }
 
+variable "quota_alert_sns_topic_arns" {
+  description = "Approved quota-alert SNS topic ARNs by regional stack key (primary/secondary)."
+  type        = map(list(string))
+  default     = {}
+
+  validation {
+    condition     = length(setsubtract(keys(var.quota_alert_sns_topic_arns), ["primary", "secondary"])) == 0
+    error_message = "quota_alert_sns_topic_arns keys must be primary or secondary."
+  }
+}
+
+variable "quota_metrics_collector_image" {
+  type    = string
+  default = "public.ecr.aws/aws-observability/aws-otel-collector@sha256:8aa9ea5f67b8d318f7d6af24677e3c70f7098bc0631147cb5fa91addbe980b06"
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.quota_metrics_collector_image))
+    error_message = "quota_metrics_collector_image must use an immutable sha256 digest."
+  }
+}
+
 variable "primary_certificate_arn" {
   description = "Optional ACM certificate ARN in the primary AWS region. Required for primary production HTTPS."
   type        = string

@@ -94,7 +94,7 @@ $env:QUOTA_TEST_REDIS_URL='redis://127.0.0.1:16379/0'
 .quota-venv/Scripts/python.exe -m unittest discover -s services/agent/smoke_tests -p 'test*quota*.py' -v
 ```
 
-The retained [agent test output](../evidence/quota/agent-tests.txt) passed 42 tests.
+The retained [agent test output](../evidence/quota/agent-tests.txt) passed 46 tests.
 It includes real Redis 7.4.7,
 atomic multidimension admission, concurrent clients, corrupt/invalid Redis state,
 expiry, socket timeout before execution, dropped response after execution,
@@ -104,7 +104,7 @@ compatibility/logging tests passed separately. Python compilation succeeded for
 changed agent paths. The 52 repository-policy, delivery-control, and Compose
 contract tests passed; Compose configuration and changed YAML parse checks passed.
 The final [Go command](../evidence/quota/gateway-command.txt) and
-[output](../evidence/quota/gateway-tests.txt) passed 42 top-level tests and 41
+[output](../evidence/quota/gateway-tests.txt) passed 43 top-level tests and 41
 subtests, with zero failures or skips. This covers actual Redis concurrency,
 independent dimensions, provider invocation counts, five authenticated protocol
 contracts, streaming recovery, routing, readiness and strict configuration.
@@ -142,6 +142,27 @@ the checked-in rule hash, receiver identity and both resolutions after deliberat
 recovery at `2026-09-17T06:03:35.638Z`. No production paging was triggered.
 Earlier scrape-drop resolutions are excluded from accepted recovery evidence.
 See [alert run record](quota-alert-evidence.md) for details and limitations.
+
+Review follow-up added the production deployment path. Terraform validation and
+an applyable synthetic plan proved regional managed Prometheus, private DNS
+scraping of every agent/gateway replica, checked-in rule installation, SigV4
+remote write, least-privilege Alertmanager SNS routing, and resolved delivery
+configuration. CI now inspects its own plan for this complete chain. The retained
+[plan summary](../evidence/quota/terraform-observability-plan.json) is deployment
+configuration evidence, not an AWS apply or production notification claim.
+
+The formal security diff scan completed with full scoped coverage and identified
+one low-severity wildcard AMP workspace trust in the new Alertmanager role. The
+trust now references the exact quota workspace ARN, and the Terraform plan
+assertion rejects a return to wildcard workspace trust. The sealed pre-fix scan
+is retained outside the repository as scan `06154c51-356c-4064-91fa-ca47c419d691`.
+
+Legacy burst/minute/day 429 responses now increment the shared quota rejection
+and decision counters before returning. A real-Redis middleware test verifies one
+downstream call followed by a legacy denial and the exported alert numerator.
+Scheduled document monitoring is disabled by default and cannot start without an
+explicit positive tenant ID; enabled polls restore required tenant context,
+retry quota failures, and export status/failure/last-success metrics.
 
 Checksum-verified Tokei 12.1.2 produced the full
 [line report](../evidence/quota/tokei.json); the root reran the repository checker

@@ -59,6 +59,25 @@ The availability gauge starts at zero and changes on admission/readiness probes.
 Scrape /ready independently to refresh health during idle periods. There is no
 new unauthenticated /metrics or internal operational exemption.
 
+Terraform provisions a regional Amazon Managed Prometheus workspace when
+`quota_alert_sns_topic_arns` contains an approved receiver. Its dedicated ECS
+collector discovers all gateway and agent replicas through private DNS, scrapes
+their exact liveness metric endpoints every 15 seconds, and remote-writes with a
+workspace-scoped IAM role. The checked-in quota rule file is installed as a rule
+group namespace. Managed Alertmanager publishes firing and resolved notices only
+to the configured region-local SNS topics, and only the exact quota workspace
+may assume its publishing role. Shared environments must provide a receiver; do
+not use cross-region topic ARNs. The collector has no application secrets or
+database access.
+
+Background document monitoring is disabled by default. Enabling it requires
+`AUTHCLAW_DISABLE_BACKGROUND_MONITOR=false` and a positive, deployment-approved
+`AUTHCLAW_BACKGROUND_MONITOR_TENANT_ID`. Each poll establishes required tenant
+context, quota failures retry after ten seconds, and status is exposed through
+the connector status response plus `authclaw_document_monitor_*` process metrics.
+One monitor instance owns one tenant-scoped watched directory; do not configure
+a shared directory for multiple tenants.
+
 The trusted agent provider-ledger mapping resolves internal tenant IDs to
 control_plane_id from the tenant database. This matches the Go authenticated
 external tenant ID for shared provider accounting. Unmapped standalone agent

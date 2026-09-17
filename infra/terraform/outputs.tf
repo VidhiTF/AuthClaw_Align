@@ -46,6 +46,7 @@ output "primary" {
     vpc_endpoint_ids                   = module.primary.vpc_endpoint_ids
     application_task_role_arns         = module.primary.application_task_role_arns
     nat_dashboard_name                 = module.primary.nat_dashboard_name
+    quota_observability                = module.primary.quota_observability
   }
 }
 
@@ -88,6 +89,7 @@ output "secondary" {
     vpc_endpoint_ids                   = module.secondary[0].vpc_endpoint_ids
     application_task_role_arns         = module.secondary[0].application_task_role_arns
     nat_dashboard_name                 = module.secondary[0].nat_dashboard_name
+    quota_observability                = module.secondary[0].quota_observability
   } : null
 }
 

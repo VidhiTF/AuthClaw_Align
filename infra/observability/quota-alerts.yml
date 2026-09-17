@@ -2,7 +2,7 @@ groups:
   - name: authclaw-quota
     rules:
       - alert: QuotaLimiterUnavailable
-        expr: authclaw_quota_available == 0
+        expr: authclaw_quota_available == 0 or absent(authclaw_quota_available)
         for: 1m
         labels:
           severity: critical
