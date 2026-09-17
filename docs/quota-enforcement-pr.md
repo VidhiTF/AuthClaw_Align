@@ -102,7 +102,7 @@ access the database or Redis. No production credentials were added.
 
 This change exceeds 100 positive added lines across production, tests and tooling.
 The final worktree has 855 production lines added and 217 removed. Positive
-non-prose growth is 3,273 lines including tests, configuration, tooling and raw
+non-prose growth is 3,297 lines including tests, configuration, tooling and raw
 evidence; deletions in other files do not offset this policy measure.
 Atomic admission, independent failure tests, and operational rehearsal require
 growth; unrelated deletion cannot offset it. Final per-file counts are recorded
@@ -127,7 +127,8 @@ See the [work record](quota-enforcement-evidence.md) and component evidence for
 commands, results, and limitations. The original HEAD middleware was executed
 with injected downstream and Redis failures to characterize the bypass. New
 ASGI tests execute the actual selected production boundary definitions with
-authentication/database seams isolated; provider tests assert zero calls on
+authentication/database seams isolated; 17 merged evidence tests pass. Provider tests
+assert zero calls on
 denial and one on success. Real Redis tests cover atomicity, expiry, corrupt
 state, timeouts, recovery, and concurrent independent clients.
 
@@ -137,7 +138,7 @@ They preserved quota bounds but the busy local Docker host caused substantial
 Full deployed database-backed gateway/agent load and final CI remain required.
 The alert rehearsal uses unchanged Prometheus rules and an approved local
 receiver; final firing/resolution evidence is retained separately.
-Terraform validation and a complete synthetic deployment plan verify the managed
+Terraform validation, all 20 native tests, and a complete synthetic deployment plan verify the managed
 workspace, scrape discovery, rule installation, remote-write IAM, Alertmanager,
 exact-workspace role trust, and concrete SNS route. No shared AWS apply or
 production SNS delivery is claimed.
