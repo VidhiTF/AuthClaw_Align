@@ -339,6 +339,18 @@ jobs:
     if: needs.changes.outputs.agent == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      redis:
+        image: redis:7.4.7-alpine@sha256:02f2cc4882f8bf87c79a220ac958f58c700bdec0dfb9b9ea61b62fb0e8f1bfcf
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      QUOTA_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -355,7 +367,10 @@ jobs:
           ../../.ci-agent/bin/python -m pytest --noconftest -p no:cacheprovider \
             tests/test_sensitive_data_detection.py tests/test_audit_transport_contract.py \
             smoke_tests/test_control_plane_auth.py smoke_tests/test_agent_execution_authorization.py \
-            smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py -q
+            smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py \
+            smoke_tests/test_quota_service.py smoke_tests/test_quota_http_boundary.py \
+            smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py \
+            smoke_tests/test_quota_redis.py -q
 
   sdk:
     name: Python SDK Tests
@@ -395,9 +410,16 @@ jobs:
         env:
           DATABASE_URL: postgresql://test:test@127.0.0.1:1/authclaw_gateway_ci_test
           REDIS_URL: redis://127.0.0.1:6379
+          QUOTA_REDIS_TEST: "1"
         run: >-
           go test ./... -count=1
-          -run '^(TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
+          -run '^(TestQuota|TestProviderQuota|TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
+      - name: Verify quota alert rules
+        run: >-
+          docker run --rm --entrypoint /bin/promtool
+          -v "${{ github.workspace }}/infra/observability:/rules:ro" -w /rules
+          prom/prometheus:v3.5.1@sha256:38c3b05c3bc744ff1b0b7b4eb82196026442845e62a1e2073795565da506d7a2
+          test rules quota-alerts.test.yml
 
   console:
     name: Console Tests and Build

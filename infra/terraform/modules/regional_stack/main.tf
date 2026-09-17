@@ -77,7 +77,7 @@ locals {
     gateway = {
       image          = var.container_images.gateway
       container_port = 8080
-      health_path    = "/health"
+      health_path    = "/ready"
       command        = null
     }
   }
@@ -211,6 +211,12 @@ locals {
     { name = "AUTHCLAW_JWT_KEY_VERSION", value = var.jwt_key_version },
     { name = "AUTHCLAW_SESSION_KEY_VERSION", value = var.session_key_version },
     { name = "REDIS_URL", value = "rediss://${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379" },
+    { name = "AUTHCLAW_RATE_LIMIT_ENABLED", value = "true" },
+    { name = "AUTHCLAW_ALLOW_MEMORY_RATE_LIMIT", value = "false" },
+    { name = "AUTHCLAW_RATE_LIMIT_PER_MINUTE", value = "30" },
+    { name = "AUTHCLAW_RATE_LIMIT_USER_RPM", value = "20" },
+    { name = "AUTHCLAW_RATE_LIMIT_KEY_RPM", value = "10" },
+    { name = "AUTHCLAW_RATE_LIMIT_EXPENSIVE_MODEL_RPM", value = "20" },
     { name = "AGENT_INTERNAL_URL", value = local.internal_agent_url },
     { name = "AUTHCLAW_GO_GATEWAY_URL", value = local.internal_urls.gateway },
     { name = "AUTHCLAW_DISABLE_BACKGROUND_MONITOR", value = "true" },

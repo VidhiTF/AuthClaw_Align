@@ -189,7 +189,8 @@ def validate_environment():
     - DATABASE_URL
     And loads/validates YAML policies.
     """
-    errors = []
+    from services.quota_service import quota_config_errors
+    errors = quota_config_errors()
     
     production = os.getenv("AUTHCLAW_ENV", "development").lower() in {"production", "prod"}
     bootstrap_local_process_secrets()

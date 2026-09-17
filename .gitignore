@@ -83,6 +83,9 @@ Thumbs.db
 
 # Semantic Merge Tool
 .venv_semantic_merge/
+.quota-venv/
+.tmp-quota-python/
+.quota-alert-evidence/
 .semantic_merge_cache.pkl
 semantic_merge_report.*
 

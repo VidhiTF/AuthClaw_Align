@@ -1,3 +1,5 @@
+from providers.base import admit_provider_call
+from services.quota_service import QuotaExceeded, QuotaUnavailable
 import os
 import json
 import re
@@ -269,6 +271,7 @@ The JSON must have this exact structure:
                     "parts": [{"text": prompt}]
                 }]
             }
+            admit_provider_call("gemini", model)
             res = requests.post(url, json=payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, timeout=20)
             if res.status_code == 200:
                 data = res.json()
@@ -291,6 +294,8 @@ The JSON must have this exact structure:
                     return ai_data
             else:
                 logger.warning("Gemini compliance analysis failed: status=%s", res.status_code)
+        except (QuotaExceeded, QuotaUnavailable):
+            raise
         except Exception as e:
             logger.warning(f"Gemini compliance analysis failed: {str(e)}. Falling back to deterministic rule engine.")
             

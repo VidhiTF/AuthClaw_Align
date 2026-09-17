@@ -1,3 +1,5 @@
+from providers.base import admit_provider_call
+from services.quota_service import QuotaExceeded, QuotaUnavailable
 import os
 import hashlib
 import random
@@ -72,6 +74,7 @@ def generate_embedding(text: str) -> list[float]:
                     "parts": [{"text": text}]
                 }
             }
+            admit_provider_call("gemini", model)
             res = requests.post(url, json=payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, timeout=10)
             if res.status_code == 200:
                 data = res.json()
@@ -94,6 +97,8 @@ def generate_embedding(text: str) -> list[float]:
                         "Using deterministic local embeddings until restart.",
                         res.status_code,
                     )
+        except (QuotaExceeded, QuotaUnavailable):
+            raise
         except Exception as e:
             logger.warning(f"Gemini embedding generation failed: {str(e)}")
             _remote_embeddings_disabled = True

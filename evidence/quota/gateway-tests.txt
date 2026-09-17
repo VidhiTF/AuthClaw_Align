@@ -1,0 +1,185 @@
+=== RUN   TestAtomicRateLimitKeysAreVersionedAndClusterSafe
+--- PASS: TestAtomicRateLimitKeysAreVersionedAndClusterSafe (0.00s)
+=== RUN   TestAtomicRateLimitClientRetriesAreDisabled
+--- PASS: TestAtomicRateLimitClientRetriesAreDisabled (0.00s)
+=== RUN   TestAtomicRateLimitScriptSetsExpiryOnlyOnCreation
+--- PASS: TestAtomicRateLimitScriptSetsExpiryOnlyOnCreation (0.00s)
+=== RUN   TestAtomicRateLimitConcurrentFirstIncrementKeepsTTL
+--- PASS: TestAtomicRateLimitConcurrentFirstIncrementKeepsTTL (0.08s)
+=== RUN   TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery
+2026/09/17 06:26:05 [AUDIT] class=provider_outcome route=/v1/chat/completions provider=openai result=post_response_failure err=final canonical append unavailable
+--- PASS: TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery (0.06s)
+=== RUN   TestValidateEnvironmentConfigRejectsUnknownEnvironment
+--- PASS: TestValidateEnvironmentConfigRejectsUnknownEnvironment (0.00s)
+=== RUN   TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching
+=== RUN   TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching/ci
+=== RUN   TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching/shared-test
+=== RUN   TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching/staging
+=== RUN   TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching/production
+--- PASS: TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching (0.01s)
+    --- PASS: TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching/ci (0.00s)
+    --- PASS: TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching/shared-test (0.00s)
+    --- PASS: TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching/staging (0.00s)
+    --- PASS: TestValidateAuthCacheConfigRejectsSharedEnvironmentCaching/production (0.00s)
+=== RUN   TestValidateAuthCacheConfigAllowsDisabledProductionCache
+--- PASS: TestValidateAuthCacheConfigAllowsDisabledProductionCache (0.00s)
+=== RUN   TestValidateAuthCacheConfigAllowsExplicitLocalBenchmark
+--- PASS: TestValidateAuthCacheConfigAllowsExplicitLocalBenchmark (0.00s)
+=== RUN   TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults
+=== RUN   TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults/#00
+=== RUN   TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults/authclaw-lite-dev-secret
+=== RUN   TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults/demo-api-key-hash-change-me
+=== RUN   TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults/authclaw-full-local-api-key-hash-secret
+--- PASS: TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults (0.00s)
+    --- PASS: TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults/#00 (0.00s)
+    --- PASS: TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults/authclaw-lite-dev-secret (0.00s)
+    --- PASS: TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults/demo-api-key-hash-change-me (0.00s)
+    --- PASS: TestValidateAuthSecretConfigRejectsSharedEnvironmentDefaults/authclaw-full-local-api-key-hash-secret (0.00s)
+=== RUN   TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks
+=== RUN   TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks/API_KEY_HASH_SECRET
+=== RUN   TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks/SESSION_SECRET_V1
+=== RUN   TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks/SESSION_SECRET
+=== RUN   TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks/JWT_SECRET
+--- PASS: TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks (0.00s)
+    --- PASS: TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks/API_KEY_HASH_SECRET (0.00s)
+    --- PASS: TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks/SESSION_SECRET_V1 (0.00s)
+    --- PASS: TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks/SESSION_SECRET (0.00s)
+    --- PASS: TestValidateAuthSecretConfigAllowsSharedEnvironmentSecretFallbacks/JWT_SECRET (0.00s)
+=== RUN   TestValidateAuthSecretConfigAllowsLocalDevelopmentDefault
+--- PASS: TestValidateAuthSecretConfigAllowsLocalDevelopmentDefault (0.00s)
+=== RUN   TestPayloadFidelityContractOpenAI
+2026/09/17 06:26:05 [AUDIT] {"id":"96d2daaf352f87270e67cc5a11c27fd1","request_id":"d95bce60591bdf59830de4490cef0a47","timestamp":"2026-09-17T06:26:05.434005879Z","tenant_id":"contract-80012825ea96fd711e6f4f06101ee171","policy_id":"contract-policy","action":"provider_attempt","reason":"Provider egress authorized","provider":"openai","model":"gpt-4","prompt_count":1,"request_size":61,"response_status":0,"duration_ms":0,"execution_trace":["stage=pre_egress","result=authorized"],"idempotency_key":"gateway:d95bce60591bdf59830de4490cef0a47:provider_attempt"}
+--- PASS: TestPayloadFidelityContractOpenAI (0.02s)
+=== RUN   TestPayloadFidelityContractAnthropic
+2026/09/17 06:26:05 [AUDIT] {"id":"d19b5e8d2a91d8169243119d60df7baa","request_id":"d95bce60591bdf59830de4490cef0a47","timestamp":"2026-09-17T06:26:05.434011981Z","tenant_id":"contract-80012825ea96fd711e6f4f06101ee171","policy_id":"contract-policy","action":"allow","reason":"Allowed","provider":"openai","model":"gpt-4","prompt_count":1,"request_size":61,"response_status":200,"duration_ms":1,"idempotency_key":"gateway:d95bce60591bdf59830de4490cef0a47:provider_outcome"}
+2026/09/17 06:26:05 [AUDIT] {"id":"8af87ce60cc4acf714c39dc16321f1e9","request_id":"0e6acf01c59e5da3f77ca27966835ade","timestamp":"2026-09-17T06:26:05.437076182Z","tenant_id":"contract-e56182eb9dffbb429412c8510cf6d884","policy_id":"contract-policy","action":"provider_attempt","reason":"Provider egress authorized","provider":"anthropic","model":"claude-3-opus","prompt_count":1,"request_size":69,"response_status":0,"duration_ms":0,"execution_trace":["stage=pre_egress","result=authorized"],"idempotency_key":"gateway:0e6acf01c59e5da3f77ca27966835ade:provider_attempt"}
+--- PASS: TestPayloadFidelityContractAnthropic (0.01s)
+=== RUN   TestPayloadFidelityContractGemini
+2026/09/17 06:26:05 [AUDIT] {"id":"6281406b56901598948a72dd498c5ee2","request_id":"0e6acf01c59e5da3f77ca27966835ade","timestamp":"2026-09-17T06:26:05.437082683Z","tenant_id":"contract-e56182eb9dffbb429412c8510cf6d884","policy_id":"contract-policy","action":"allow","reason":"Allowed","provider":"anthropic","model":"claude-3-opus","prompt_count":1,"request_size":69,"response_status":200,"duration_ms":1,"idempotency_key":"gateway:0e6acf01c59e5da3f77ca27966835ade:provider_outcome"}
+2026/09/17 06:26:05 [AUDIT] {"id":"5aa2a0c68eae1316ff329ca5f50df660","request_id":"c4463dcca083146f893d9995be9dac26","timestamp":"2026-09-17T06:26:05.479554398Z","tenant_id":"contract-2f1568aeaaafa84766f10f965af08123","policy_id":"contract-policy","action":"provider_attempt","reason":"Provider egress authorized","provider":"gemini","model":"gemini-1.5-flash","prompt_count":1,"request_size":40,"response_status":0,"duration_ms":0,"execution_trace":["stage=pre_egress","result=authorized"],"idempotency_key":"gateway:c4463dcca083146f893d9995be9dac26:provider_attempt"}
+--- PASS: TestPayloadFidelityContractGemini (0.03s)
+=== RUN   TestPayloadFidelityContractCohereV2Chat
+2026/09/17 06:26:05 [AUDIT] {"id":"af218e70c4755bb893a7f00216269b34","request_id":"c4463dcca083146f893d9995be9dac26","timestamp":"2026-09-17T06:26:05.479559999Z","tenant_id":"contract-2f1568aeaaafa84766f10f965af08123","policy_id":"contract-policy","action":"allow","reason":"Allowed","provider":"gemini","model":"gemini-1.5-flash","prompt_count":1,"request_size":40,"response_status":200,"duration_ms":0,"idempotency_key":"gateway:c4463dcca083146f893d9995be9dac26:provider_outcome"}
+2026/09/17 06:26:05 [AUDIT] {"id":"976f61963a87a62f41cc1021168e021a","request_id":"5849358a5f10ad8b5e0ae1e825f04e52","timestamp":"2026-09-17T06:26:05.484784494Z","tenant_id":"contract-66fadd8007c7678721d34bd81b0d594c","policy_id":"contract-policy","action":"provider_attempt","reason":"Provider egress authorized","provider":"cohere","model":"command-r-plus","prompt_count":1,"request_size":70,"response_status":0,"duration_ms":0,"execution_trace":["stage=pre_egress","result=authorized"],"idempotency_key":"gateway:5849358a5f10ad8b5e0ae1e825f04e52:provider_attempt"}
+--- PASS: TestPayloadFidelityContractCohereV2Chat (0.01s)
+=== RUN   TestPayloadFidelityContractAzureOpenAIChat
+2026/09/17 06:26:05 [AUDIT] {"id":"cba423d0c2980b7e4e6e5176d7ba9bf9","request_id":"5849358a5f10ad8b5e0ae1e825f04e52","timestamp":"2026-09-17T06:26:05.484790395Z","tenant_id":"contract-66fadd8007c7678721d34bd81b0d594c","policy_id":"contract-policy","action":"allow","reason":"Allowed","provider":"cohere","model":"command-r-plus","prompt_count":1,"request_size":70,"response_status":200,"duration_ms":0,"idempotency_key":"gateway:5849358a5f10ad8b5e0ae1e825f04e52:provider_outcome"}
+2026/09/17 06:26:05 [AUDIT] {"id":"3b8ad1c62578a85e2ef398f28c4f077e","request_id":"6ab1c141033ef7d7bff99545e27a7fc8","timestamp":"2026-09-17T06:26:05.487067116Z","tenant_id":"contract-55f4538e1c22f2cbbbc8eefc1c0e5b7b","policy_id":"contract-policy","action":"provider_attempt","reason":"Provider egress authorized","provider":"azure_openai","model":"gpt-4o","prompt_count":1,"request_size":62,"response_status":0,"duration_ms":0,"execution_trace":["stage=pre_egress","result=authorized"],"idempotency_key":"gateway:6ab1c141033ef7d7bff99545e27a7fc8:provider_attempt"}
+--- PASS: TestPayloadFidelityContractAzureOpenAIChat (0.00s)
+2026/09/17 06:26:05 [AUDIT] {"id":"5aab04fc14f20f581bc880b662f4caec","request_id":"6ab1c141033ef7d7bff99545e27a7fc8","timestamp":"2026-09-17T06:26:05.487071517Z","tenant_id":"contract-55f4538e1c22f2cbbbc8eefc1c0e5b7b","policy_id":"contract-policy","action":"allow","reason":"Allowed","provider":"azure_openai","model":"gpt-4o","prompt_count":1,"request_size":62,"response_status":200,"duration_ms":1,"idempotency_key":"gateway:6ab1c141033ef7d7bff99545e27a7fc8:provider_outcome"}
+=== RUN   TestStreamingPayloadFidelityContracts
+=== RUN   TestStreamingPayloadFidelityContracts/openai
+=== RUN   TestStreamingPayloadFidelityContracts/anthropic
+=== RUN   TestStreamingPayloadFidelityContracts/cohere
+=== RUN   TestStreamingPayloadFidelityContracts/azure_openai
+--- PASS: TestStreamingPayloadFidelityContracts (0.00s)
+    --- PASS: TestStreamingPayloadFidelityContracts/openai (0.00s)
+    --- PASS: TestStreamingPayloadFidelityContracts/anthropic (0.00s)
+    --- PASS: TestStreamingPayloadFidelityContracts/cohere (0.00s)
+    --- PASS: TestStreamingPayloadFidelityContracts/azure_openai (0.00s)
+=== RUN   TestHealthCheck
+--- PASS: TestHealthCheck (0.00s)
+=== RUN   TestPublicGatewayRouterDoesNotExposeMetrics
+--- PASS: TestPublicGatewayRouterDoesNotExposeMetrics (0.01s)
+=== RUN   TestConfiguredProviderRoutesReachProtectedProxy
+=== RUN   TestConfiguredProviderRoutesReachProtectedProxy//v1/chat/completions
+=== RUN   TestConfiguredProviderRoutesReachProtectedProxy//v1/messages
+=== RUN   TestConfiguredProviderRoutesReachProtectedProxy//v1/models/gemini-2.5-flash:generateContent
+=== RUN   TestConfiguredProviderRoutesReachProtectedProxy//v2/chat
+=== RUN   TestConfiguredProviderRoutesReachProtectedProxy//openai/deployments/customer-gpt/chat/completions
+=== RUN   TestConfiguredProviderRoutesReachProtectedProxy//bedrock/model/anthropic.claude-3/invoke
+--- PASS: TestConfiguredProviderRoutesReachProtectedProxy (0.00s)
+    --- PASS: TestConfiguredProviderRoutesReachProtectedProxy//v1/chat/completions (0.00s)
+    --- PASS: TestConfiguredProviderRoutesReachProtectedProxy//v1/messages (0.00s)
+    --- PASS: TestConfiguredProviderRoutesReachProtectedProxy//v1/models/gemini-2.5-flash:generateContent (0.00s)
+    --- PASS: TestConfiguredProviderRoutesReachProtectedProxy//v2/chat (0.00s)
+    --- PASS: TestConfiguredProviderRoutesReachProtectedProxy//openai/deployments/customer-gpt/chat/completions (0.00s)
+    --- PASS: TestConfiguredProviderRoutesReachProtectedProxy//bedrock/model/anthropic.claude-3/invoke (0.00s)
+=== RUN   TestProviderRouterRejectsUnsupportedPathsAndMethods
+--- PASS: TestProviderRouterRejectsUnsupportedPathsAndMethods (0.00s)
+=== RUN   TestAdvertisedNonV1RoutesRequireAuthentication
+--- PASS: TestAdvertisedNonV1RoutesRequireAuthentication (0.00s)
+=== RUN   TestValidatePolicyYAMLRejectsInvalidSRSFields
+=== RUN   TestValidatePolicyYAMLRejectsInvalidSRSFields/require_approval_timeout_above_SRS_cap
+=== RUN   TestValidatePolicyYAMLRejectsInvalidSRSFields/topic_rule_without_allowed_models
+=== RUN   TestValidatePolicyYAMLRejectsInvalidSRSFields/regex_rule_without_pattern
+--- PASS: TestValidatePolicyYAMLRejectsInvalidSRSFields (0.00s)
+    --- PASS: TestValidatePolicyYAMLRejectsInvalidSRSFields/require_approval_timeout_above_SRS_cap (0.00s)
+    --- PASS: TestValidatePolicyYAMLRejectsInvalidSRSFields/topic_rule_without_allowed_models (0.00s)
+    --- PASS: TestValidatePolicyYAMLRejectsInvalidSRSFields/regex_rule_without_pattern (0.00s)
+=== RUN   TestProxyServerRouting
+--- PASS: TestProxyServerRouting (0.00s)
+=== RUN   TestQuotaStrictConfigAndIdentity
+=== RUN   TestQuotaStrictConfigAndIdentity/bad
+=== RUN   TestQuotaStrictConfigAndIdentity/0
+=== RUN   TestQuotaStrictConfigAndIdentity/-1
+=== RUN   TestQuotaStrictConfigAndIdentity/shared-test
+=== RUN   TestQuotaStrictConfigAndIdentity/staging
+=== RUN   TestQuotaStrictConfigAndIdentity/production
+=== RUN   TestQuotaStrictConfigAndIdentity/_Test_
+--- PASS: TestQuotaStrictConfigAndIdentity (0.00s)
+    --- PASS: TestQuotaStrictConfigAndIdentity/bad (0.00s)
+    --- PASS: TestQuotaStrictConfigAndIdentity/0 (0.00s)
+    --- PASS: TestQuotaStrictConfigAndIdentity/-1 (0.00s)
+    --- PASS: TestQuotaStrictConfigAndIdentity/shared-test (0.00s)
+    --- PASS: TestQuotaStrictConfigAndIdentity/staging (0.00s)
+    --- PASS: TestQuotaStrictConfigAndIdentity/production (0.00s)
+    --- PASS: TestQuotaStrictConfigAndIdentity/_Test_ (0.00s)
+=== RUN   TestQuotaSharedRedisRequiresTLS
+--- PASS: TestQuotaSharedRedisRequiresTLS (0.00s)
+=== RUN   TestProviderQuotaRejectsUnknownIdentityAndModel
+--- PASS: TestProviderQuotaRejectsUnknownIdentityAndModel (0.00s)
+=== RUN   TestQuotaMissingConfigDeniesBeforeProvider
+--- PASS: TestQuotaMissingConfigDeniesBeforeProvider (0.00s)
+=== RUN   TestQuotaRealRedisIndependentAdmission
+=== RUN   TestQuotaRealRedisIndependentAdmission/tenant
+=== RUN   TestQuotaRealRedisIndependentAdmission/user
+=== RUN   TestQuotaRealRedisIndependentAdmission/key
+=== RUN   TestQuotaRealRedisIndependentAdmission/expensive_model
+--- PASS: TestQuotaRealRedisIndependentAdmission (0.03s)
+    --- PASS: TestQuotaRealRedisIndependentAdmission/tenant (0.02s)
+    --- PASS: TestQuotaRealRedisIndependentAdmission/user (0.00s)
+    --- PASS: TestQuotaRealRedisIndependentAdmission/key (0.00s)
+    --- PASS: TestQuotaRealRedisIndependentAdmission/expensive_model (0.00s)
+=== RUN   TestQuotaRedisRefusalNeverAdmits
+--- PASS: TestQuotaRedisRefusalNeverAdmits (0.30s)
+=== RUN   TestQuotaRealRedisProviderCallsExactlyOnce
+--- PASS: TestQuotaRealRedisProviderCallsExactlyOnce (0.00s)
+=== RUN   TestQuotaHealthAndReadinessDuringRefusal
+redis: 2026/09/17 06:26:05 pool.go:762: redis: connection pool: failed to dial after 5 attempts: dial tcp 127.0.0.1:1: connect: connection refused
+2026/09/17 06:26:06 "GET http://example.com/ready HTTP/1.1" from 192.0.2.1:1234 - 503 65B in 300.487629ms
+2026/09/17 06:26:06 "GET http://example.com/health HTTP/1.1" from 192.0.2.1:1234 - 200 50B in 19.405µs
+2026/09/17 06:26:06 "GET http://example.com/health?metrics=true HTTP/1.1" from 192.0.2.1:1234 - 200 238B in 8.602µs
+2026/09/17 06:26:06 "GET http://example.com/health/extra HTTP/1.1" from 192.0.2.1:1234 - 404 19B in 3.1µs
+--- PASS: TestQuotaHealthAndReadinessDuringRefusal (0.30s)
+=== RUN   TestQuotaTestEnvironmentCannotUseLocalDefaults
+--- PASS: TestQuotaTestEnvironmentCannotUseLocalDefaults (0.00s)
+=== RUN   TestValidateEnvelopeKeyConfigRejectsDemoProductionKey
+--- PASS: TestValidateEnvelopeKeyConfigRejectsDemoProductionKey (0.00s)
+=== RUN   TestValidateEnvelopeKeyConfigRejectsMissingRedactionSaltInProduction
+--- PASS: TestValidateEnvelopeKeyConfigRejectsMissingRedactionSaltInProduction (0.00s)
+=== RUN   TestValidateEnvelopeKeyConfigRejectsDemoStagingKey
+--- PASS: TestValidateEnvelopeKeyConfigRejectsDemoStagingKey (0.00s)
+=== RUN   TestValidateServiceTLSConfigFailsClosedInProduction
+--- PASS: TestValidateServiceTLSConfigFailsClosedInProduction (0.00s)
+=== RUN   TestValidateServiceTLSConfigAcceptsHTTPSServiceURLs
+--- PASS: TestValidateServiceTLSConfigAcceptsHTTPSServiceURLs (0.00s)
+=== RUN   TestValidateServiceTLSConfigAcceptsLoopbackHTTP
+--- PASS: TestValidateServiceTLSConfigAcceptsLoopbackHTTP (0.00s)
+=== RUN   TestValidateServiceTLSConfigRejectsNonLoopbackHTTP
+=== RUN   TestValidateServiceTLSConfigRejectsNonLoopbackHTTP/http://opa.internal:8181
+=== RUN   TestValidateServiceTLSConfigRejectsNonLoopbackHTTP/http://10.0.0.10:8181
+--- PASS: TestValidateServiceTLSConfigRejectsNonLoopbackHTTP (0.00s)
+    --- PASS: TestValidateServiceTLSConfigRejectsNonLoopbackHTTP/http://opa.internal:8181 (0.00s)
+    --- PASS: TestValidateServiceTLSConfigRejectsNonLoopbackHTTP/http://10.0.0.10:8181 (0.00s)
+=== RUN   TestValidateServiceTLSConfigRejectsMalformedHTTPSURLs
+=== RUN   TestValidateServiceTLSConfigRejectsMalformedHTTPSURLs/https://
+=== RUN   TestValidateServiceTLSConfigRejectsMalformedHTTPSURLs/https:///opa
+=== RUN   TestValidateServiceTLSConfigRejectsMalformedHTTPSURLs/not-a-url
+--- PASS: TestValidateServiceTLSConfigRejectsMalformedHTTPSURLs (0.00s)
+    --- PASS: TestValidateServiceTLSConfigRejectsMalformedHTTPSURLs/https:// (0.00s)
+    --- PASS: TestValidateServiceTLSConfigRejectsMalformedHTTPSURLs/https:///opa (0.00s)
+    --- PASS: TestValidateServiceTLSConfigRejectsMalformedHTTPSURLs/not-a-url (0.00s)
+PASS
+ok  	gateway	0.917s
+?   	gateway/cmd/healthcheck	[no test files]

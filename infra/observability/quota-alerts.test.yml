@@ -1,0 +1,61 @@
+rule_files:
+  - quota-alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: authclaw_quota_available
+        values: '1 0 0 0 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: QuotaLimiterUnavailable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: QuotaLimiterUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: Protected traffic is blocked by quota dependency failure
+              runbook: docs/quota-operations.md
+      - eval_time: 4m
+        alertname: QuotaLimiterUnavailable
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: authclaw_quota_rejected_total
+        values: '0+60x15 900+0x15'
+      - series: authclaw_quota_decisions_total
+        values: '0+120x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: QuotaSustainedRejections
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: More than twenty percent of quota decisions are rejections
+              runbook: docs/quota-operations.md
+      - eval_time: 25m
+        alertname: QuotaSustainedRejections
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: authclaw_quota_rejected_total
+        values: '0+20x20'
+      - series: authclaw_quota_decisions_total
+        values: '0+100x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: QuotaSustainedRejections
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: authclaw_quota_rejected_total
+        values: '0+0x20'
+      - series: authclaw_quota_decisions_total
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: QuotaSustainedRejections
+        exp_alerts: []

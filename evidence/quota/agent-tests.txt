@@ -1,0 +1,115 @@
+C:\Users\DELL\Desktop\AuthClaw\.quota-venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+test_cloud_quota_failure_propagates (test_monitoring_quotas.MonitoringQuotaTests.test_cloud_quota_failure_propagates) ... ok
+test_manual_passes_verified_tenant_and_scopes_queries (test_monitoring_quotas.MonitoringQuotaTests.test_manual_passes_verified_tenant_and_scopes_queries) ... ok
+test_manual_quota_failure_is_not_success (test_monitoring_quotas.MonitoringQuotaTests.test_manual_quota_failure_is_not_success) ... ok
+test_unbound_background_stops_before_io (test_monitoring_quotas.MonitoringQuotaTests.test_unbound_background_stops_before_io) ... ok
+test_each_direct_provider_denial_never_calls_http (test_provider_quotas.ProviderQuotaTests.test_each_direct_provider_denial_never_calls_http) ... Configured Gemini model gemini-3.1-flash-lite is not available for the local runtime; using gemini-2.5-flash-lite.
+
+============================================================
+=== GEMINI PROVIDER DIAGNOSTICS ===
+API KEY PRESENT : True
+API KEY (repr)  : <redacted>
+MODEL           : gemini-2.5-flash-lite
+API URL         : https://generativelanguage.googleapis.com
+ENV GOOGLE_API_KEY  : <NOT SET>
+ENV MODEL_NAME      : <NOT SET>
+ENV MODEL_PROVIDER  : <NOT SET>
+============================================================
+
+REQUEST URL (model only): /v1beta/models/gemini-2.5-flash-lite:generateContent
+
+============================================================
+=== GEMINI PROVIDER DIAGNOSTICS ===
+API KEY PRESENT : True
+API KEY (repr)  : <redacted>
+MODEL           : gemini-2.5-flash-lite
+API URL         : https://generativelanguage.googleapis.com
+ENV GOOGLE_API_KEY  : <NOT SET>
+ENV MODEL_NAME      : <NOT SET>
+ENV MODEL_PROVIDER  : <NOT SET>
+============================================================
+
+REQUEST URL (model only): /v1beta/models/gemini-2.5-flash-lite:generateContent
+ok
+test_each_success_charges_resolved_model_once (test_provider_quotas.ProviderQuotaTests.test_each_success_charges_resolved_model_once) ... Configured Gemini model gemini-3.1-flash-lite is not available for the local runtime; using gemini-2.5-flash-lite.
+
+============================================================
+=== GEMINI PROVIDER DIAGNOSTICS ===
+API KEY PRESENT : True
+API KEY (repr)  : <redacted>
+MODEL           : gemini-2.5-flash-lite
+API URL         : https://generativelanguage.googleapis.com
+ENV GOOGLE_API_KEY  : <NOT SET>
+ENV MODEL_NAME      : <NOT SET>
+ENV MODEL_PROVIDER  : <NOT SET>
+============================================================
+
+REQUEST URL (model only): /v1beta/models/gemini-2.5-flash-lite:generateContent
+[Attempt 1] Sending request to Gemini... (timeout=30.0s)
+[Attempt 1] Response status: 200
+[Gemini] Response received: 2 chars
+ok
+test_embeddings_quota_failure_does_not_disable_or_fallback (test_provider_quotas.ProviderQuotaTests.test_embeddings_quota_failure_does_not_disable_or_fallback) ... ok
+
+============================================================
+=== GEMINI PROVIDER DIAGNOSTICS ===
+API KEY PRESENT : True
+API KEY (repr)  : <redacted>
+MODEL           : gemini-2.5-flash-lite
+API URL         : https://generativelanguage.googleapis.com
+ENV GOOGLE_API_KEY  : <NOT SET>
+ENV MODEL_NAME      : <NOT SET>
+ENV MODEL_PROVIDER  : <NOT SET>
+============================================================
+
+REQUEST URL (model only): /v1beta/models/gemini-2.5-flash-lite:generateContent
+[Attempt 1] Sending request to Gemini... (timeout=30.0s)
+[Attempt 1] Response status: 503
+test_gemini_retry_requires_new_admission_and_stops_on_denial (test_provider_quotas.ProviderQuotaTests.test_gemini_retry_requires_new_admission_and_stops_on_denial) ... Gemini API request failed: status=503 category=provider_http_error retryable=True
+GEMINI API ERROR status=503 category=provider_http_error retryable=true
+GEMINI ERROR: 503 Service Unavailable � Gemini API is temporarily overloaded
+GEMINI ERROR: 503 Service Unavailable � Gemini API is temporarily overloaded
+  Retrying in 2s...
+ok
+ENTERED LLM NODE
+[Provider Start]
+test_llm_worker_preserves_context_and_propagates_quota_failure (test_provider_quotas.ProviderQuotaTests.test_llm_worker_preserves_context_and_propagates_quota_failure) ... ok
+test_missing_verified_tenant_denies (test_provider_quotas.ProviderQuotaTests.test_missing_verified_tenant_denies) ... ok
+test_trusted_database_binding_unifies_gateway_provider_ledger (test_provider_quotas.ProviderTenantBindingTests.test_trusted_database_binding_unifies_gateway_provider_ledger) ... ok
+test_auth_failures_keep_status_and_do_not_execute (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_auth_failures_keep_status_and_do_not_execute) ... ok
+test_client_identity_headers_cannot_select_subjects (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_client_identity_headers_cannot_select_subjects) ... ok
+test_downstream_failure_executes_exactly_once (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_downstream_failure_executes_exactly_once) ... ok
+test_every_protected_alias_denied_without_downstream (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_every_protected_alias_denied_without_downstream) ... ok
+test_exhaustion_returns_429_without_downstream (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_exhaustion_returns_429_without_downstream) ... ok
+test_liveness_and_metrics_do_not_depend_on_database_or_redis (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_liveness_and_metrics_do_not_depend_on_database_or_redis) ... ok
+test_multiple_service_keys_share_service_user (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_multiple_service_keys_share_service_user) ... ok
+test_outer_rbac_failures_keep_401_403_and_503 (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_outer_rbac_failures_keep_401_403_and_503) ... ok
+test_plan_service_cannot_display_fallback_enterprise_limits (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_plan_service_cannot_display_fallback_enterprise_limits) ... ok
+test_provider_quota_status_is_not_converted_to_success (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_provider_quota_status_is_not_converted_to_success) ... ok
+test_readiness_reflects_unavailability_and_recovery (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_readiness_reflects_unavailability_and_recovery) ... ok
+test_real_plan_resolver_rejects_missing_unknown_and_invalid_limits (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_real_plan_resolver_rejects_missing_unknown_and_invalid_limits) ... ok
+test_success_executes_once_and_preserves_context (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_success_executes_once_and_preserves_context) ... ok
+test_unknown_plan_never_reaches_admission_or_downstream (test_quota_http_boundary.QuotaHTTPBoundaryTests.test_unknown_plan_never_reaches_admission_or_downstream) ... ok
+test_after_write_timeout_fails_closed_without_retry (test_quota_redis.RedisQuotaTests.test_after_write_timeout_fails_closed_without_retry) ... ok
+test_concurrent_clients_share_exact_admission (test_quota_redis.RedisQuotaTests.test_concurrent_clients_share_exact_admission) ... ok
+test_corrupt_counter_blocks_all_writes (test_quota_redis.RedisQuotaTests.test_corrupt_counter_blocks_all_writes) ... ok
+test_independent_dimensions_denial_and_expiry (test_quota_redis.RedisQuotaTests.test_independent_dimensions_denial_and_expiry) ... ok
+test_real_socket_timeout_before_execution_and_recovery (test_quota_redis.RedisQuotaTests.test_real_socket_timeout_before_execution_and_recovery) ... ok
+test_cluster_keys_and_no_request_identity_metrics (test_quota_service.QuotaServiceTests.test_cluster_keys_and_no_request_identity_metrics) ... ok
+test_concurrency_admits_exact_capacity (test_quota_service.QuotaServiceTests.test_concurrency_admits_exact_capacity) ... ok
+test_dimensions_are_independently_enforced_without_denial_charge (test_quota_service.QuotaServiceTests.test_dimensions_are_independently_enforced_without_denial_charge) ... ok
+test_failed_and_ambiguous_redis_execution_never_retries (test_quota_service.QuotaServiceTests.test_failed_and_ambiguous_redis_execution_never_retries) ... ok
+test_invalid_redis_responses_and_recovery (test_quota_service.QuotaServiceTests.test_invalid_redis_responses_and_recovery) ... ok
+test_no_implicit_memory_or_identity (test_quota_service.QuotaServiceTests.test_no_implicit_memory_or_identity) ... ok
+test_provider_counter_is_aggregate_and_separate (test_quota_service.QuotaServiceTests.test_provider_counter_is_aggregate_and_separate) ... ok
+test_service_key_is_independently_enforced (test_quota_service.QuotaServiceTests.test_service_key_is_independently_enforced) ... ok
+test_shared_redis_transport_requires_tls_or_loopback (test_quota_service.QuotaServiceTests.test_shared_redis_transport_requires_tls_or_loopback) ... ok
+test_strict_config_missing_invalid_and_disabled (test_quota_service.QuotaServiceTests.test_strict_config_missing_invalid_and_disabled) ... ok
+test_users_keys_and_tenants_are_scoped (test_quota_service.QuotaServiceTests.test_users_keys_and_tenants_are_scoped) ... ok
+test_window_boundary_and_expiry (test_quota_service.QuotaServiceTests.test_window_boundary_and_expiry) ... ok
+
+----------------------------------------------------------------------
+Ran 42 tests in 19.942s
+
+OK

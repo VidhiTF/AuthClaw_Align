@@ -34,12 +34,15 @@ func InitRedis() {
 		opts, err := redis.ParseURL(redisURL)
 		if err == nil {
 			opts.MaxRetries = -1
+			opts.DialTimeout = 250 * time.Millisecond
+			opts.ReadTimeout = 250 * time.Millisecond
+			opts.WriteTimeout = 250 * time.Millisecond
 			RedisClient = redis.NewClient(opts)
 			return
 		}
-		log.Printf("Invalid REDIS_URL %q, falling back to raw address: %v", redisURL, err)
+		log.Print("Invalid Redis URL; quota configuration validation will reject requests")
 	}
-	RedisClient = redis.NewClient(&redis.Options{Addr: redisURL, MaxRetries: -1})
+	RedisClient = redis.NewClient(&redis.Options{Addr: redisURL, MaxRetries: -1, DialTimeout: 250 * time.Millisecond, ReadTimeout: 250 * time.Millisecond, WriteTimeout: 250 * time.Millisecond})
 }
 
 // Policy definitions

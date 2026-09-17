@@ -23,7 +23,7 @@ class TenantPlanService:
         with engine.connect() as conn:
             tenant = conn.execute(
                 text("""
-                    SELECT id, name, COALESCE(subscription_tier, plan, tier, 'enterprise') AS plan,
+                    SELECT id, name, COALESCE(subscription_tier, plan, tier, '') AS plan,
                            usage_count, tokens_used, plan_override, plan_updated_at
                     FROM tenants
                     WHERE id = :tenant_id
@@ -62,7 +62,7 @@ class TenantPlanService:
                 history = []
         if not tenant:
             return {}
-        plan = str(tenant.plan or "enterprise").lower()
+        plan = str(tenant.plan or "").strip().lower()
         if plan == "pro":
             plan = "professional"
         limits = self._limits(plan)
@@ -131,13 +131,15 @@ class TenantPlanService:
         return self.get_plan(tenant_id)
 
     def _limits(self, plan: str) -> Dict[str, Any]:
-        limits = dict(PLAN_LIMITS.get(plan, PLAN_LIMITS["enterprise"]))
+        if plan not in PLAN_LIMITS:
+            raise ValueError("Tenant plan unavailable")
+        limits = dict(PLAN_LIMITS[plan])
         env_limit = os.getenv(f"AUTHCLAW_RATE_LIMIT_{plan.upper()}_RPM")
         if env_limit:
-            try:
-                limits["requests_per_minute"] = max(1, int(env_limit))
-            except ValueError:
-                pass
+            limit = int(env_limit)
+            if limit <= 0:
+                raise ValueError("Tenant plan limit must be positive")
+            limits["requests_per_minute"] = limit
         return limits
 
     def _decode_override(self, raw: Any) -> Dict[str, Any]:

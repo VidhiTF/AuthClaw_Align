@@ -1,0 +1,17 @@
+{
+  "recorded_date": "2026-09-17",
+  "provenance": "Transcribed from captured quota_load.py --http stdout, completed exec session 50697, exit code 0. This is the measured run, not a new replay.",
+  "command": "QUOTA_TEST_REDIS_URL=redis://127.0.0.1:16379/0 .quota-venv/Scripts/python.exe services/agent/smoke_tests/quota_load.py --http",
+  "fixture": "Three actual uvicorn processes; extracted production middleware; verified authentication and plan lookup seams; deterministic provider callable; real Redis 7.4.7",
+  "concurrent_http_clients": 6,
+  "quota_per_dimension": 17,
+  "limitations": "Host contention caused real Redis timeout failures. This proves quota bounds and fail-closed behavior, not deployment capacity or full database-backed application behavior.",
+  "stages": {
+    "tenant": {"replica_pids": [10832, 13004, 12744], "offered": 300, "http_statuses": {"200": 17, "429": 201, "503": 82}, "downstream_invocations": 17, "provider_invocations": 17, "p50_ms": 106.127, "p95_ms": 279.643, "max_ms": 800.268},
+    "user": {"replica_pids": [13408, 17608, 14180], "offered": 300, "http_statuses": {"200": 12, "429": 10, "503": 278}, "downstream_invocations": 12, "provider_invocations": 12, "p50_ms": 263.437, "p95_ms": 488.407, "max_ms": 861.54},
+    "key": {"replica_pids": [17344, 6972, 17928], "offered": 300, "http_statuses": {"200": 17, "429": 124, "503": 159}, "downstream_invocations": 17, "provider_invocations": 17, "p50_ms": 260.662, "p95_ms": 529.031, "max_ms": 744.833},
+    "expensive_model": {"replica_pids": [13876, 13524, 14684], "offered": 300, "http_statuses": {"200": 17, "429": 250, "503": 33}, "downstream_invocations": 268, "provider_invocations": 17, "p50_ms": 152.373, "p95_ms": 563.699, "max_ms": 833.668}
+  },
+  "outage": {"replica_pids": [17812, 8652, 14656], "offered": 30, "http_statuses": {"503": 30}, "downstream_invocations": 0, "provider_invocations": 0, "p50_ms": 265.951, "p95_ms": 302.0, "max_ms": 303.229},
+  "recovery": {"replica_pids": [16984, 16876, 3288], "offered": 30, "http_statuses": {"200": 17, "429": 13}, "downstream_invocations": 17, "provider_invocations": 17, "p50_ms": 116.463, "p95_ms": 302.372, "max_ms": 387.723}
+}

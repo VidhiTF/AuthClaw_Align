@@ -714,6 +714,9 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Capture response status code
 	wrappedWriter := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+	if !gatewayProviderQuota(wrappedWriter, r, provider, model) {
+		return
+	}
 	proxy.ServeHTTP(wrappedWriter, r)
 
 	duration := time.Since(startTime).Milliseconds()
