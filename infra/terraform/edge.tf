@@ -165,6 +165,35 @@ resource "aws_wafv2_web_acl" "edge" {
   }
 
   rule {
+    name     = "block-public-diagnostics"
+    priority = 5
+    action {
+      block {}
+    }
+    statement {
+      regex_match_statement {
+        regex_string = "^/(docs(/.*)?|redoc(/.*)?|openapi\\.json|health/details|metrics)$"
+        field_to_match {
+          uri_path {}
+        }
+        text_transformation {
+          priority = 0
+          type     = "URL_DECODE"
+        }
+        text_transformation {
+          priority = 1
+          type     = "LOWERCASE"
+        }
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${local.name}-blocked-diagnostics"
+      sampled_requests_enabled   = false
+    }
+  }
+
+  rule {
     name     = "aws-common-rules"
     priority = 10
     override_action {

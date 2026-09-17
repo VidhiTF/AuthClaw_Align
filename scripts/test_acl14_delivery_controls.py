@@ -213,6 +213,22 @@ class ACL14DeliveryControlTests(unittest.TestCase):
         self.assertIn("map(.AlarmName) | sort", gate)
         self.assertNotIn("MetricAlarms[?StateValue=='ALARM']", gate)
 
+    def test_diagnostic_surface_evidence_is_retained_without_response_bodies(self):
+        health_gate = DEPLOY.split("- name: Wait for services and verify public health", 1)[1].split(
+            "- name: Reject active deployment alarms", 1
+        )[0]
+        upload = DEPLOY.split("- name: Upload deployment and rollback evidence", 1)[1]
+        self.assertIn("diagnostic-surface-probes.json", health_gate)
+        self.assertIn("trap finalize_probe_evidence EXIT", health_gate)
+        self.assertIn("cloudfront_request_id", health_gate)
+        self.assertIn("CloudFront request ID missing", health_gate)
+        self.assertIn("application_request_id", health_gate)
+        self.assertIn("diagnostic-surface-config.json", DEPLOY)
+        self.assertIn("must use an explicit shared-environment AUTHCLAW_ENV", DEPLOY)
+        self.assertIn("diagnostic-surface-probes.json", upload)
+        self.assertIn("diagnostic-surface-config.json", upload)
+        self.assertNotIn("response_body", health_gate)
+
     def test_automatic_rollback_restores_reviewed_topology(self):
         rollback = DEPLOY.split("- name: Restore previous topology and runtime configuration", 1)[1].split(
             "- name: Upload deployment and rollback evidence", 1

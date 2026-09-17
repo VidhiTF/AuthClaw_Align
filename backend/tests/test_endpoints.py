@@ -18,6 +18,7 @@ os.environ.pop("CLICKHOUSE_HOST", None)
 from app.db.dependencies import get_db
 from app.db.models import AccessRequest, AccessRequestHistory, DataSubjectRequest, Notification, Tenant, User, APIKey, Policy, GatewayConfig, RedactionToken, AuditLogMetadata
 from app.core.auth import hash_key
+from app.core.startup_checks import is_shared_environment
 from app.services import access_requests as access_request_service
 from app.services.privacy_lifecycle import purge_expired_access_requests
 from app.services import data_subject_requests as data_subject_request_service
@@ -92,13 +93,19 @@ def test_public_health(client: TestClient):
     metrics_response = client.get("/metrics")
     assert metrics_response.status_code == status.HTTP_401_UNAUTHORIZED
 
-    # Verify OpenAPI documentation loads successfully
+    # Public documentation is a local-development aid, never a shared-environment surface.
     openapi_resp = client.get("/openapi.json")
-    assert openapi_resp.status_code == status.HTTP_200_OK
-    assert "paths" in openapi_resp.json()
-
     docs_resp = client.get("/docs")
-    assert docs_resp.status_code == status.HTTP_200_OK
+    if is_shared_environment():
+        assert openapi_resp.status_code == status.HTTP_404_NOT_FOUND
+        assert docs_resp.status_code == status.HTTP_404_NOT_FOUND
+    else:
+        assert openapi_resp.status_code == status.HTTP_200_OK
+        assert "paths" in openapi_resp.json()
+        assert docs_resp.status_code == status.HTTP_200_OK
+
+    operator_schema = client.get("/api/v1/platform/openapi.json")
+    assert operator_schema.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 def test_authentication_gates(client: TestClient):
@@ -656,6 +663,9 @@ def test_platform_session_issuer_isolation(client, db_session, monkeypatch):
         profile = client.get("/v1/auth/me", headers=headers)
         assert profile.status_code == 200
         assert profile.json()["tenant_id"] is None
+        schema = client.get("/api/v1/platform/openapi.json", headers=headers)
+        assert schema.status_code == 200
+        assert "paths" in schema.json()
         assert client.post("/v1/tenants", json={"name": "Issuer test tenant", "tier": "starter"}, headers=headers).status_code == 201
         from types import SimpleNamespace
         monkeypatch.setattr(access_request_service, "send_otp_email", lambda *_a, **_kw: SimpleNamespace(method="local_outbox"))

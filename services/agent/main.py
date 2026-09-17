@@ -89,7 +89,14 @@ async def lifespan(app: FastAPI):
     except Exception as ex:
         logger.error(f"Failed to stop background document monitoring: {ex}")
 
-app = FastAPI(lifespan=lifespan)
+_SHARED_ENVIRONMENTS = {"ci", "shared-test", "staging", "stage", "production", "prod"}
+_public_docs_enabled = os.getenv("AUTHCLAW_ENV", "development").strip().lower() not in _SHARED_ENVIRONMENTS
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url="/docs" if _public_docs_enabled else None,
+    redoc_url="/redoc" if _public_docs_enabled else None,
+    openapi_url="/openapi.json" if _public_docs_enabled else None,
+)
 
 
 @app.exception_handler(HTTPException)
@@ -649,7 +656,10 @@ async def production_rbac_enforcement_middleware(request: Request, call_next):
         path = request.url.path
         if not is_public_endpoint(method, path):
             payload = optional_user_from_request(request)
-            enforce_request_access(method, path, payload)
+            try:
+                enforce_request_access(method, path, payload)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     return await call_next(request)
 
 def approval_actor_from_payload(payload: dict) -> str:
@@ -2241,37 +2251,7 @@ def get_health():
     }
 
 
-@app.get("/health/details")
-def get_health_details():
-    database_status = "healthy"
-    try:
-        from database import engine
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-    except Exception:
-        database_status = "unhealthy"
-
-    provider_status = "healthy"
-    try:
-        from providers import get_provider
-        get_provider()
-    except Exception:
-        provider_status = "unhealthy"
-
-    return {
-        "audit_chain_active": True,
-        "hitl_enabled": True,
-        "policy_enforcement_enabled": True,
-        "redaction_enabled": True,
-        "provider_status": provider_status,
-        "database_status": database_status
-    }
-
-
-@app.get("/api/v1/agent/health/ready")
-@app.get("/health/ready")
-def get_readiness():
+def _readiness_report() -> tuple[int, dict]:
     checks = {
         "database": "unknown",
         "production_validation": "not_applicable",
@@ -2292,13 +2272,38 @@ def get_readiness():
         from startup.validation import validate_production_environment
         validation_errors = validate_production_environment()
         if validation_errors:
+            correlation_id = str(uuid.uuid4())
+            logger.error(
+                "Production readiness validation failed correlation_id=%s errors=%s",
+                correlation_id,
+                json.dumps(validation_errors),
+            )
             checks["production_validation"] = "failed"
-            checks["production_errors"] = validation_errors
+            checks["production_failure"] = {
+                "code": "production_configuration_invalid",
+                "correlation_id": correlation_id,
+            }
             http_status = 503
         else:
             checks["production_validation"] = "passed"
 
-    return JSONResponse(status_code=http_status, content={"status": "ready" if http_status == 200 else "not_ready", "checks": checks})
+    return http_status, checks
+
+
+@app.get("/api/v1/agent/health/ready")
+@app.get("/health/ready")
+def get_readiness():
+    http_status, _checks = _readiness_report()
+    return JSONResponse(status_code=http_status, content={"status": "ready" if http_status == 200 else "not_ready"})
+
+
+@app.get("/operations/health/details")
+def get_health_details(_payload: dict = Depends(require_platform_admin)):
+    http_status, checks = _readiness_report()
+    return JSONResponse(
+        status_code=http_status,
+        content={"status": "ready" if http_status == 200 else "not_ready", "checks": checks},
+    )
 
 
 @app.get("/trust/public/health")
@@ -2311,7 +2316,7 @@ def get_public_trust_health():
 
 
 @app.get("/metrics")
-def get_metrics():
+def get_metrics(_payload: dict = Depends(require_platform_admin)):
     from database import engine
     from sqlalchemy import text
     try:

@@ -455,6 +455,69 @@ jobs:
             curl --fail --silent --show-error --retry 5 --retry-all-errors "$endpoint" >/dev/null
           done < <(jq -r '.public_endpoints[]' <<<"$primary")
 
+          edge="$(terraform -chdir=infra/terraform output -json public_edge)"
+          api_base="$(jq -r '.runtime_url_boundary.api_url' <<<"$edge")"
+          api_origin="${api_base%/api/v1}"
+          gateway_origin="$(jq -r '.runtime_url_boundary.gateway_url' <<<"$edge")"
+          probe_headers="$(mktemp)"
+          probe_body="$(mktemp)"
+          probe_log="diagnostic-surface-probes.jsonl"
+          : > "$probe_log"
+          finalize_probe_evidence() {
+            jq -s --arg source_sha "$SOURCE_SHA" '{source_sha:$source_sha,probes:.}' \
+              "$probe_log" > diagnostic-surface-probes.json
+            rm -f "$probe_headers" "$probe_body"
+          }
+          trap finalize_probe_evidence EXIT
+          header_value() {
+            awk -F': ' -v name="$1" 'tolower($1) == tolower(name) {sub(/\r$/, "", $2); print $2; exit}' "$probe_headers"
+          }
+          record_probe() {
+            local cloudfront_request_id application_request_id
+            cloudfront_request_id="$(header_value x-amz-cf-id)"
+            application_request_id="$(header_value x-request-id)"
+            [[ -n "$cloudfront_request_id" ]] || {
+              echo "::error::CloudFront request ID missing for $2$3"
+              exit 1
+            }
+            jq -nc \
+              --arg captured_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+              --arg kind "$1" --arg origin "$2" --arg path "$3" --arg status "$4" \
+              --arg cloudfront_request_id "$cloudfront_request_id" \
+              --arg application_request_id "$application_request_id" \
+              '{captured_at:$captured_at,kind:$kind,origin:$origin,path:$path,status:($status|tonumber),cloudfront_request_id:$cloudfront_request_id,application_request_id:$application_request_id}' \
+              >> "$probe_log"
+          }
+          probe_health() {
+            status="$(curl --silent --show-error --dump-header "$probe_headers" --output "$probe_body" --write-out '%{http_code}' "$1/health")"
+            [[ "$status" == "200" ]] || { echo "::error::$1/health returned $status; expected 200"; exit 1; }
+            jq -e '.status == "healthy" and (.service | type == "string") and (keys | sort) == ["service", "status"]' "$probe_body" >/dev/null
+            record_probe minimal_health "$1" /health "$status"
+          }
+          probe_denied() {
+            status="$(curl --silent --show-error --dump-header "$probe_headers" --output /dev/null --write-out '%{http_code}' "$1$2")"
+            [[ "$status" == "403" || "$status" == "404" ]] || {
+              echo "::error::$1$2 returned $status; expected 403 or 404"
+              exit 1
+            }
+            record_probe denied_diagnostic "$1" "$2" "$status"
+          }
+          probe_health "$api_origin"
+          probe_health "$gateway_origin"
+          for origin in "$api_origin" "$gateway_origin"; do
+            for path in /docs /docs/ '/docs?probe=1' /redoc /redoc/ /openapi.json /openapi.json/ /health/details /health/details/ /metrics /metrics/; do
+              probe_denied "$origin" "$path"
+            done
+          done
+          operator_status="$(curl --silent --show-error --dump-header "$probe_headers" --output /dev/null --write-out '%{http_code}' "$api_origin/api/v1/platform/openapi.json")"
+          [[ "$operator_status" == "401" ]] || {
+            echo "::error::Unauthenticated operator schema returned $operator_status; expected 401"
+            exit 1
+          }
+          record_probe unauthenticated_operator_schema "$api_origin" /api/v1/platform/openapi.json "$operator_status"
+          finalize_probe_evidence
+          trap - EXIT
+
       - name: Reject active deployment alarms
         shell: bash
         run: |
@@ -533,6 +596,45 @@ jobs:
               kms_key_arn,
               alarm_names
             }' primary-output.json > deployment-evidence.json
+            if [[ -s target-task-definitions.tsv ]]; then
+              : > diagnostic-runtime-config.jsonl
+              while IFS=$'\t' read -r service definition; do
+                aws ecs describe-task-definition --task-definition "$definition" |
+                  jq -c --arg service "$service" '{
+                    service:$service,
+                    task_definition:(.taskDefinition.taskDefinitionArn | split(":task-definition/")[1]),
+                    containers:[.taskDefinition.containerDefinitions[] | {
+                      name,
+                      authclaw_environment:([.environment[]? | select(.name == "AUTHCLAW_ENV") | .value][0] // "unset")
+                    }]
+                  }' >> diagnostic-runtime-config.jsonl
+              done < target-task-definitions.tsv
+              jq -se '
+                [.[] | .containers[] |
+                  select(.name == "backend" or .name == "agent") |
+                  .authclaw_environment] as $environments |
+                ($environments | length) == 2 and
+                all($environments[]; IN("ci", "shared-test", "staging", "stage", "production", "prod"))
+              ' diagnostic-runtime-config.jsonl >/dev/null || {
+                echo "::error::Backend and agent must use an explicit shared-environment AUTHCLAW_ENV"
+                exit 1
+              }
+              terraform -chdir=infra/terraform show -json |
+                jq --arg source_sha "$SOURCE_SHA" \
+                  --arg captured_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+                  --slurpfile primary primary-output.json \
+                  --slurpfile runtime diagnostic-runtime-config.jsonl '
+                  ([.. | objects | select(.type? == "aws_wafv2_web_acl" and .name? == "edge") |
+                    .values.rule[]?.name] | unique) as $waf_rules |
+                  {
+                    source_sha:$source_sha,
+                    captured_at:$captured_at,
+                    public_endpoint_names:($primary[0].public_endpoints | keys | sort),
+                    agent_public_endpoint:($primary[0].public_endpoints | has("agent")),
+                    diagnostic_waf_rule_present:($waf_rules | index("block-public-diagnostics") != null),
+                    runtime:$runtime
+                  }' > diagnostic-surface-config.json
+            fi
           fi
 
       - name: Restore previous topology and runtime configuration
@@ -589,6 +691,8 @@ jobs:
           name: acl-14-controlled-beta-${{ github.event.workflow_run.head_sha }}
           path: |
             deployment-evidence.json
+            diagnostic-surface-probes.json
+            diagnostic-surface-config.json
             iam-review.json
             previous-task-definitions.tsv
             target-task-definitions.tsv

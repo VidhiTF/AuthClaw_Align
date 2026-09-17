@@ -67,6 +67,16 @@ run "staging_has_one_documented_edge_per_public_hostname" {
   }
 
   assert {
+    condition     = toset(keys(output.primary.public_endpoints)) == toset(["console", "backend", "gateway"])
+    error_message = "The private agent must not acquire a public endpoint."
+  }
+
+  assert {
+    condition     = anytrue([for rule in aws_wafv2_web_acl.edge[0].rule : rule.name == "block-public-diagnostics"])
+    error_message = "The public edge must block documentation and diagnostic paths."
+  }
+
+  assert {
     condition     = output.public_edge.primary_origin_boundary.public_cidr_rule_count == 0
     error_message = "Private origins must not accept any public CIDR."
   }
