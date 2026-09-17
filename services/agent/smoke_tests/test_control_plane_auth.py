@@ -13,7 +13,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from services import control_plane_auth as auth
@@ -201,7 +201,7 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
         async def boundary(request, call_next):
             try:
                 request.state.principal = await auth.authenticate_control_plane(request)
-            except auth.HTTPException as error:
+            except HTTPException as error:
                 return JSONResponse({"detail": error.detail}, status_code=error.status_code)
             return await call_next(request)
 
@@ -282,7 +282,7 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
         namespace = {
             "app": app,
             "Request": Request,
-            "HTTPException": auth.HTTPException,
+            "HTTPException": HTTPException,
             "JSONResponse": JSONResponse,
             "uuid": uuid,
             "tenant_context": tenant_context,

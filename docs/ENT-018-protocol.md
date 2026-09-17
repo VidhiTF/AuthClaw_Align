@@ -151,3 +151,11 @@ policies.yaml is relative to services/agent; rerunning from CI's working directo
 passed. This was an invocation error, not a product change. Prior line counts and
 baseline references above describe the initial implementation; the PR growth map
 is regenerated against the updated master for current-head owner approval.
+
+CI follow-up: Terraform's certificate-test container has Python/cryptography but
+not FastAPI. Moved HTTP-only imports into authenticate_control_plane so the pure
+signing verifier stays framework-independent. The exact pinned nginx CI container
+passed all 9 TLS and 7 direct-AWS tests; Python -S imports the signing core without
+site packages. Seven local authentication tests passed; the real-Redis test was
+not rerun for this import-only fix. Repository Policy still requires independent
+current-head line-growth approvals; no approval gate was weakened.

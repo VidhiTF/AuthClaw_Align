@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from urllib.parse import quote, unquote_plus
 
-from fastapi import HTTPException
-from starlette.concurrency import run_in_threadpool
 from services.role_contract import normalize_role
 
 MAX_CLOCK_SKEW_SECONDS = 60
@@ -158,6 +156,9 @@ def _consume_nonce(store, nonce, timestamp):
 
 
 async def authenticate_control_plane(request):
+    from fastapi import HTTPException
+    from starlette.concurrency import run_in_threadpool
+
     if not any(f"x-authclaw-{name}" in request.headers for name in HEADER_FIELDS):
         return None
     invalid = HTTPException(401, "Invalid control-plane signature.")
