@@ -7,15 +7,18 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, Field
 from services import control_plane_auth as auth
 from services.tenant_context import tenant_context
 from services.quota_service import QuotaExceeded, QuotaUnavailable
@@ -260,8 +263,10 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
         app = FastAPI()
         names = {
             "optional_user_from_request",
+            "_tenant_id_from_request_headers",
             "tenant_database_context_middleware",
             "production_rbac_enforcement_middleware",
+            "AgentExecutionRequest",
         }
         tree = ast.parse((Path(__file__).resolve().parents[1] / "main.py").read_text())
 
@@ -270,18 +275,15 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
 
             with self.assertRaises(RuntimeError):
                 asyncio.get_running_loop()  # Blocking DB lookup must run off the event loop.
-            principal = request.state.verified_service_principal
-            if principal:
-                request.state.control_plane_principal = {
-                    "tenant_id": 42,
-                    "sub": principal.user_id,
-                    "role": principal.role,
-                }
-                return 42
+            return actual_lookup(request)
 
         namespace = {
             "app": app,
             "Request": Request,
+            "Optional": Optional,
+            "BaseModel": BaseModel,
+            "Field": Field,
+            "text": lambda sql: sql,
             "HTTPException": HTTPException,
             "JSONResponse": JSONResponse,
             "uuid": uuid,
@@ -307,6 +309,16 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
             ),
             namespace,
         )
+        actual_lookup = namespace["_tenant_id_from_request_headers"]
+        namespace["_tenant_id_from_request_headers"] = tenant_lookup
+        tenant_rows = {"disabled": "disabled"}
+        engine = MagicMock()
+
+        def upsert(sql, params):
+            tenant_rows[params["control_plane_id"]] = "active"
+            return Mock(scalar_one=lambda: 42)
+
+        engine.begin.return_value.__enter__.return_value.execute.side_effect = upsert
 
         @app.post("/chat")
         async def echo(request: Request):
@@ -315,7 +327,24 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
                 "body": (await request.body()).decode(),
             }
 
-        with patch.dict(
+        @app.post("/api/v1/agent/executions")
+        async def execute(request: Request):
+            from services.execution_auth import authorize_agent_operation
+
+            try:
+                authorize_agent_operation(
+                    namespace["optional_user_from_request"](request),
+                    namespace["AgentExecutionRequest"]
+                    .model_validate_json(await request.body())
+                    .operation.strip()
+                    .lower(),
+                    42,
+                )
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            return {"ok": True}
+
+        with patch.dict(sys.modules, {"database": Mock(engine=engine)}), patch.dict(
             os.environ, {"AUTHCLAW_INTERNAL_SERVICE_SECRET": json.dumps(RING)}
         ), patch.object(auth, "_replay_store"), patch.object(
             auth, "_consume_nonce", return_value=True
@@ -326,6 +355,7 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
             response = client.post("/chat?q=a+b", content=b'{"a":1}', headers=headers)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json(), {"actor": "user", "body": '{"a":1}'})
+            self.assertEqual(tenant_rows, {"disabled": "disabled", "tenant": "active"})
             self.assertEqual(consume.call_count, 1)
             headers["x-authclaw-role"] = "admin"
             self.assertEqual(
@@ -343,18 +373,46 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
                     client.post("/chat?q=a+b", content=b'{"a":1}', headers=headers).status_code,
                     status,
                 )
-            forbidden = dict(KEY, endpoints=["POST /policies/test"])
-            headers = signed(
-                **{"x-authclaw-timestamp": str(int(time.time())), "x-authclaw-role": "viewer"}
-            )
-            headers["x-authclaw-signature"] = auth.sign_control_plane_request(
-                SECRET, headers, "POST", "/policies/test"
+            namespace["admit"] = lambda *args, **kwargs: None
+            forbidden = dict(
+                KEY, endpoints=["POST /policies/test", "POST /api/v1/agent/executions"]
             )
             with patch.dict(
                 os.environ,
                 {"AUTHCLAW_INTERNAL_SERVICE_SECRET": json.dumps({"keys": {"v1": forbidden}})},
             ):
-                self.assertEqual(client.post("/policies/test", headers=headers).status_code, 403)
+                for tenant in ("unknown", "disabled"):
+                    for role in ("viewer", "developer"):
+                        headers.update({"x-authclaw-tenant-id": tenant, "x-authclaw-role": role})
+                        for path, body in (
+                            ("/policies/test", b""),
+                            ("/api/v1/agent/executions", b'{"operation":"rag"}'),
+                            ("/api/v1/agent/executions", b'{"operation":" REMEDIATION_PLAN "}'),
+                        ):
+                            headers["x-authclaw-signature"] = auth.sign_control_plane_request(
+                                SECRET, headers, "POST", path, body=body
+                            )
+                            before, calls = dict(tenant_rows), engine.begin.call_count
+                            self.assertEqual(
+                                client.post(path, content=body, headers=headers).status_code, 403
+                            )
+                            self.assertEqual(tenant_rows, before)
+                            self.assertEqual(engine.begin.call_count, calls)
+                for body, status in (
+                    (b'{"operation":"unknown"}', 422),
+                    (b'{"operation":null}', 422),
+                    (b"{", 422),
+                    (b"{}", 200),
+                    (b'{"operation":" CHAT "}', 200),
+                ):
+                    headers["x-authclaw-signature"] = auth.sign_control_plane_request(
+                        SECRET, headers, "POST", path, body=body
+                    )
+                    calls = engine.begin.call_count
+                    self.assertEqual(
+                        client.post(path, content=body, headers=headers).status_code, status
+                    )
+                    self.assertEqual(engine.begin.call_count, calls + (status == 200))
 
     @unittest.skipUnless(os.getenv("ENT018_REDIS_URL"), "Dedicated Redis integration URL required")
     def test_real_redis_atomic_replay_and_recovery(self):

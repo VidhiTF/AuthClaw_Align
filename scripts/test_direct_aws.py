@@ -39,17 +39,32 @@ class DirectAWSChecks(unittest.TestCase):
             os.environ["AUTHCLAW_REDACTION_SALT"] = "old-synthetic-salt" * 3
             self.assertEqual(manager.fingerprint("synthetic-sensitive-value"), previous)
 
-    def test_internal_key_coordinated_cutover_and_rollback(self):
+    def test_internal_key_receiver_first_overlap_rotation_and_rollback(self):
         headers = {"x-authclaw-version": "2", "x-authclaw-nonce": "a" * 32,
                    "x-authclaw-service": "console", "x-authclaw-audience": "agent", "x-authclaw-key-id": "v1",
                    "x-authclaw-timestamp": "2000000000", "x-authclaw-tenant-id": "tenant",
                    "x-authclaw-user-id": "user", "x-authclaw-role": "owner"}
-        for sender, receiver, allowed in (("old", "old", True), ("new", "old", False),
-                                          ("new", "new", True), ("old", "new", False), ("old", "old", True)):
+        keys = {key: {"secret": key * 16, "service": "console", "audience": "agent", "endpoints": ["POST /chat"]}
+                for key in ("old", "new")}
+        for sender, receivers, allowed in (("old", ("old",), True), ("new", ("old",), False),
+                ("old", ("old", "new"), True), ("new", ("old", "new"), True),
+                ("old", ("old", "new"), True), ("new", ("new",), True), ("old", ("new",), False)):
+            headers["x-authclaw-key-id"] = sender
             headers["x-authclaw-signature"] = sign_control_plane_request(
                 sender * 16, headers, "POST", "/chat")
-            ring = {"keys": {"v1": {"secret": receiver * 16, "service": "console", "audience": "agent", "endpoints": ["POST /chat"]}}}
+            ring = {"keys": {key: keys[key] for key in receivers}}
             self.assertEqual(bool(verify_control_plane_request(headers, "POST", "/chat", ring, lambda *_: True, now=2000000000)), allowed)
+
+    def test_internal_key_examples_are_v2_and_require_real_secret_material(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in (".env.full.example", ".env.production.example", ".env.demo.example"):
+            value = next(line.split("=", 1)[1] for line in (root / name).read_text().splitlines()
+                         if line.startswith("AUTHCLAW_INTERNAL_SERVICE_SECRET="))
+            ring = json.loads(value.strip("'"))
+            key = ring["keys"][ring["active_key_id"]]
+            self.assertEqual((key["service"], key["audience"]), ("console", "agent"))
+            self.assertEqual(set(key["endpoints"]), {"GET /api/v1/agent/health/ready", "GET /remediation/connectors", "GET /remediation/findings"})
+            self.assertEqual(key["secret"], "REPLACE_ME")  # Too short to authenticate accidentally.
 
     def test_kms_rotation_rollback_and_denial(self):
         manager = SecretManager("ecs_injected")

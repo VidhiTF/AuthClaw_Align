@@ -159,3 +159,42 @@ passed all 9 TLS and 7 direct-AWS tests; Python -S imports the signing core with
 site packages. Seven local authentication tests passed; the real-Redis test was
 not rerun for this import-only fix. Repository Policy still requires independent
 current-head line-growth approvals; no approval gate was weakened.
+
+## PR 57 security-review remediation
+
+The review of 57f2f3f correctly identified tenant creation/reactivation before a
+signed request's RBAC denial. A source-extracted actual-middleware regression
+reproduced a new active tenant despite HTTP 403. The independent candidate review
+also identified operation-level denial on the multiplexed executions endpoint;
+the expanded regression reproduced that path before its correction.
+
+The existing tenant middleware now checks the verified external tenant and role
+against existing endpoint RBAC before tenant resolution. Executions additionally
+reuse AgentExecutionRequest and agent_operation_allowed before provisioning.
+No new authorization policy, database function, dependency or helper was added.
+The extra production lines are necessary because operation authorization formerly
+ran only after the middleware's committed upsert. Signed requests enforce these
+checks even when the test-only RBAC-disable option is selected. JWT/API-key paths
+are unchanged. The existing authorized tenant lifecycle remains unchanged.
+
+Regression coverage exercises viewer/developer roles against new and disabled
+tenants, endpoint denial and both restricted operations (including normalization):
+403 leaves row state unchanged and opens no database transaction. Authorized chat
+and default-operation requests still succeed; malformed/unknown operations return
+422 without a transaction. Persistence is modeled at the engine transaction seam;
+this is not a live PostgreSQL/RLS or AWS deployment test.
+
+The three active environment examples now specify a v2 JSON ring with an invalid,
+short placeholder requiring replacement through managed secret provisioning.
+The direct-AWS rehearsal now uses distinct old/new IDs, receiver-first overlap,
+sender cutover, rollback during overlap and retirement rejection.
+
+Fresh verification: 93 smoke tests; 78 exact Agent CI tests plus 48 subtests;
+17 evidence-access tests; 27 repository-policy unit tests; 9 TLS and 8 direct-AWS
+tests in the pinned minimal CI container passed. Final authentication suite passed
+all 8 tests including disposable Redis, interoperability and malformed-body cases.
+Python compilation and targeted Black formatting passed. Initial broad invocations
+failed because the test URL required localhost and the installed driver required
+postgresql+psycopg; corrected isolated test configuration passed without weakening
+checks. Independent AI review is not human approval. Live AWS rotation/deployment
+and required current-head owner approvals remain outstanding.

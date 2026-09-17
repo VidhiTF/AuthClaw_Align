@@ -498,6 +498,20 @@ async def tenant_database_context_middleware(request: Request, call_next):
     protected = not _is_public_or_auth_path(request.url.path)
     try:
         request.state.verified_service_principal = await authenticate_control_plane(request)
+        principal = request.state.verified_service_principal
+        if principal:
+            from services.rbac_matrix import enforce_request_access, agent_operation_allowed
+            enforce_request_access(request.method, request.url.path,
+                                   {"external_tenant_id": principal.tenant_id, "role": principal.role})
+            if request.method == "POST" and request.url.path.rstrip("/") == "/api/v1/agent/executions":
+                try:
+                    operation = AgentExecutionRequest.model_validate_json(await request.body()).operation.strip().lower()
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail="Invalid agent execution request.") from exc
+                if operation not in {"chat", "rag", "remediation_plan"}:
+                    raise HTTPException(status_code=422, detail="operation must be one of: chat, rag, remediation_plan")
+                if not agent_operation_allowed(principal.role, operation):
+                    raise HTTPException(status_code=403, detail="Role is not authorized for this agent operation.")
         if protected:
             tenant_id = await run_in_threadpool(_tenant_id_from_request_headers, request)
             if tenant_id is None:
