@@ -1,0 +1,188 @@
+{
+  "result": "passed",
+  "recovered_at_utc": "2026-09-17T06:03:35.638000+00:00",
+  "rules_sha256": "ea92687a99f41de5130f67f085abc5dc0c5fde9949faeaeaac37eb135491047e",
+  "raw_notifications_sha256": "2f5e39a60dff9d1bb75015d148645a194eeee86fbadd3c8827175b8f6764324e",
+  "promtool": "SUCCESS",
+  "prometheus": "3.5.1",
+  "alertmanager": "0.28.1",
+  "receiver": "approved-local-quota-test",
+  "controlled_metrics": true,
+  "scrape_interval": "30s",
+  "scrape_timeout": "25s",
+  "production_rules_unchanged": true,
+  "notifications": [
+    {
+      "received_at": 1789624935.5669034,
+      "payload": {
+        "receiver": "approved-local-quota-test",
+        "status": "firing",
+        "alerts": [
+          {
+            "status": "firing",
+            "labels": {
+              "alertname": "QuotaLimiterUnavailable",
+              "instance": "quota-alert-1789624246-receiver:8091",
+              "job": "quota-rehearsal",
+              "severity": "critical"
+            },
+            "annotations": {
+              "runbook": "docs/quota-operations.md",
+              "summary": "Protected traffic is blocked by quota dependency failure"
+            },
+            "startsAt": "2026-09-17T06:02:13.642Z",
+            "endsAt": "0001-01-01T00:00:00Z",
+            "generatorURL": "http://8a5481e79f95:9090/graph?g0.expr=authclaw_quota_available+%3D%3D+0&g0.tab=1",
+            "fingerprint": "fe2134908452d7a1"
+          }
+        ],
+        "groupLabels": {
+          "alertname": "QuotaLimiterUnavailable"
+        },
+        "commonLabels": {
+          "alertname": "QuotaLimiterUnavailable",
+          "instance": "quota-alert-1789624246-receiver:8091",
+          "job": "quota-rehearsal",
+          "severity": "critical"
+        },
+        "commonAnnotations": {
+          "runbook": "docs/quota-operations.md",
+          "summary": "Protected traffic is blocked by quota dependency failure"
+        },
+        "externalURL": "http://054530b9e71b:9093",
+        "version": "4",
+        "groupKey": "{}:{alertname=\"QuotaLimiterUnavailable\"}",
+        "truncatedAlerts": 0
+      }
+    },
+    {
+      "received_at": 1789625027.9273124,
+      "payload": {
+        "receiver": "approved-local-quota-test",
+        "status": "resolved",
+        "alerts": [
+          {
+            "status": "resolved",
+            "labels": {
+              "alertname": "QuotaLimiterUnavailable",
+              "instance": "quota-alert-1789624246-receiver:8091",
+              "job": "quota-rehearsal",
+              "severity": "critical"
+            },
+            "annotations": {
+              "runbook": "docs/quota-operations.md",
+              "summary": "Protected traffic is blocked by quota dependency failure"
+            },
+            "startsAt": "2026-09-17T06:02:13.642Z",
+            "endsAt": "2026-09-17T06:03:43.642Z",
+            "generatorURL": "http://8a5481e79f95:9090/graph?g0.expr=authclaw_quota_available+%3D%3D+0&g0.tab=1",
+            "fingerprint": "fe2134908452d7a1"
+          }
+        ],
+        "groupLabels": {
+          "alertname": "QuotaLimiterUnavailable"
+        },
+        "commonLabels": {
+          "alertname": "QuotaLimiterUnavailable",
+          "instance": "quota-alert-1789624246-receiver:8091",
+          "job": "quota-rehearsal",
+          "severity": "critical"
+        },
+        "commonAnnotations": {
+          "runbook": "docs/quota-operations.md",
+          "summary": "Protected traffic is blocked by quota dependency failure"
+        },
+        "externalURL": "http://054530b9e71b:9093",
+        "version": "4",
+        "groupKey": "{}:{alertname=\"QuotaLimiterUnavailable\"}",
+        "truncatedAlerts": 0
+      }
+    },
+    {
+      "received_at": 1789624815.9827912,
+      "payload": {
+        "receiver": "approved-local-quota-test",
+        "status": "firing",
+        "alerts": [
+          {
+            "status": "firing",
+            "labels": {
+              "alertname": "QuotaSustainedRejections",
+              "instance": "quota-alert-1789624246-receiver:8091",
+              "job": "quota-rehearsal",
+              "severity": "warning"
+            },
+            "annotations": {
+              "runbook": "docs/quota-operations.md",
+              "summary": "More than twenty percent of quota decisions are rejections"
+            },
+            "startsAt": "2026-09-17T06:00:11.642Z",
+            "endsAt": "0001-01-01T00:00:00Z",
+            "generatorURL": "http://8a5481e79f95:9090/graph?g0.expr=rate%28authclaw_quota_rejected_total%5B5m%5D%29+%2F+clamp_min%28rate%28authclaw_quota_decisions_total%5B5m%5D%29%2C+0.001%29+%3E+0.2&g0.tab=1",
+            "fingerprint": "05382e0108b7819c"
+          }
+        ],
+        "groupLabels": {
+          "alertname": "QuotaSustainedRejections"
+        },
+        "commonLabels": {
+          "alertname": "QuotaSustainedRejections",
+          "instance": "quota-alert-1789624246-receiver:8091",
+          "job": "quota-rehearsal",
+          "severity": "warning"
+        },
+        "commonAnnotations": {
+          "runbook": "docs/quota-operations.md",
+          "summary": "More than twenty percent of quota decisions are rejections"
+        },
+        "externalURL": "http://054530b9e71b:9093",
+        "version": "4",
+        "groupKey": "{}:{alertname=\"QuotaSustainedRejections\"}",
+        "truncatedAlerts": 0
+      }
+    },
+    {
+      "received_at": 1789625176.5847907,
+      "payload": {
+        "receiver": "approved-local-quota-test",
+        "status": "resolved",
+        "alerts": [
+          {
+            "status": "resolved",
+            "labels": {
+              "alertname": "QuotaSustainedRejections",
+              "instance": "quota-alert-1789624246-receiver:8091",
+              "job": "quota-rehearsal",
+              "severity": "warning"
+            },
+            "annotations": {
+              "runbook": "docs/quota-operations.md",
+              "summary": "More than twenty percent of quota decisions are rejections"
+            },
+            "startsAt": "2026-09-17T06:00:11.642Z",
+            "endsAt": "2026-09-17T06:06:13.642Z",
+            "generatorURL": "http://8a5481e79f95:9090/graph?g0.expr=rate%28authclaw_quota_rejected_total%5B5m%5D%29+%2F+clamp_min%28rate%28authclaw_quota_decisions_total%5B5m%5D%29%2C+0.001%29+%3E+0.2&g0.tab=1",
+            "fingerprint": "05382e0108b7819c"
+          }
+        ],
+        "groupLabels": {
+          "alertname": "QuotaSustainedRejections"
+        },
+        "commonLabels": {
+          "alertname": "QuotaSustainedRejections",
+          "instance": "quota-alert-1789624246-receiver:8091",
+          "job": "quota-rehearsal",
+          "severity": "warning"
+        },
+        "commonAnnotations": {
+          "runbook": "docs/quota-operations.md",
+          "summary": "More than twenty percent of quota decisions are rejections"
+        },
+        "externalURL": "http://054530b9e71b:9093",
+        "version": "4",
+        "groupKey": "{}:{alertname=\"QuotaSustainedRejections\"}",
+        "truncatedAlerts": 0
+      }
+    }
+  ]
+}

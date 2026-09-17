@@ -134,6 +134,14 @@ def test_actual_agent_middleware_audits_and_fails_closed(
     async def unsigned(request):
         return None
 
+    admission = []
+
+    class QuotaExceeded(Exception):
+        pass
+
+    class QuotaUnavailable(Exception):
+        pass
+
     namespace = {
         "authenticate_control_plane": unsigned,
         "Request": Request,
@@ -142,6 +150,11 @@ def test_actual_agent_middleware_audits_and_fails_closed(
         "_is_public_or_auth_path": lambda p: False,
         "_rbac_enforcement_enabled": lambda: False,
         "_tenant_id_from_request_headers": lambda r: 1,
+        "_tenant_tier_limit": lambda tenant_id: 100,
+        "admit": lambda *args, **kwargs: admission.append((args, kwargs)),
+        "QuotaExceeded": QuotaExceeded,
+        "QuotaUnavailable": QuotaUnavailable,
+        "record_unavailable": lambda: None,
         "tenant_context": lambda *a, **k: nullcontext(),
         "optional_user_from_request": lambda r: {"sub": "actor-1"},
     }
@@ -172,6 +185,7 @@ def test_actual_agent_middleware_audits_and_fails_closed(
 
     middleware = namespace["tenant_database_context_middleware"]
     assert asyncio.run(middleware(request, endpoint)).status_code == 200
+    assert len(admission) == 1
     assert records[0]["username"] == "actor-1"
     assert records[0]["tenant_id"] == 1
     assert records[0]["query"] == f"evidence:{purpose} {path}"
@@ -184,6 +198,16 @@ def test_actual_agent_middleware_audits_and_fails_closed(
         sys.modules, "verify_audit", SimpleNamespace(create_audit_block=unavailable)
     )
     assert asyncio.run(middleware(request, endpoint)).status_code == 503
+    assert not delivered
+
+    records.clear()
+
+    def denied(*args, **kwargs):
+        raise QuotaExceeded
+
+    namespace["admit"] = denied
+    assert asyncio.run(middleware(request, endpoint)).status_code == 429
+    assert not records
     assert not delivered
 
 

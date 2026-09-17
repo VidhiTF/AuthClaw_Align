@@ -24,6 +24,9 @@ locals {
     contains(["console", "agent"], service) ? [
       { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn }
     ] : [],
+    local.quota_observability_enabled && contains(["gateway", "agent"], service) ? [
+      { name = "AUTHCLAW_QUOTA_METRICS_SECRET", valueFrom = aws_secretsmanager_secret.quota_metrics.arn }
+    ] : [],
     local.audit_sqs_enabled && contains(["gateway", "audit_producer"], service) ? [
       { name = "AUDIT_PRODUCER_SECRET", valueFrom = aws_secretsmanager_secret.audit_producer.arn }
     ] : [],

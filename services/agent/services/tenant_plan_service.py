@@ -15,15 +15,31 @@ PLAN_LIMITS = {
     "enterprise": {"requests_per_minute": 1200, "monthly_requests": 1000000, "background_workers": 20},
     "unlimited": {"requests_per_minute": 1000000, "monthly_requests": None, "background_workers": 1000},
 }
+PLAN_ORDER = {name: index for index, name in enumerate(PLAN_LIMITS)}
+
+
+def resolve_tenant_plan(*values: Any) -> str:
+    """Resolve legacy plan columns without granting a larger entitlement."""
+    plans = []
+    for value in values:
+        plan = str(value or "").strip().lower()
+        if not plan:
+            continue
+        plan = {"pro": "professional"}.get(plan, plan)
+        if plan not in PLAN_LIMITS:
+            raise ValueError("Tenant plan unavailable")
+        plans.append(plan)
+    if not plans:
+        raise ValueError("Tenant plan unavailable")
+    return min(plans, key=PLAN_ORDER.__getitem__)
 
 
 class TenantPlanService:
     def get_plan(self, tenant_id: int) -> Dict[str, Any]:
-        self._ensure_columns()
         with engine.connect() as conn:
             tenant = conn.execute(
                 text("""
-                    SELECT id, name, COALESCE(subscription_tier, plan, tier, 'enterprise') AS plan,
+                    SELECT id, name, subscription_tier, plan, tier,
                            usage_count, tokens_used, plan_override, plan_updated_at
                     FROM tenants
                     WHERE id = :tenant_id
@@ -62,9 +78,9 @@ class TenantPlanService:
                 history = []
         if not tenant:
             return {}
-        plan = str(tenant.plan or "enterprise").lower()
-        if plan == "pro":
-            plan = "professional"
+        plan = resolve_tenant_plan(
+            tenant.subscription_tier, tenant.plan, tenant.tier
+        )
         limits = self._limits(plan)
         monthly_limit = limits["monthly_requests"]
         requests_used = int((usage.requests if usage else 0) or tenant.usage_count or 0)
@@ -96,7 +112,6 @@ class TenantPlanService:
         }
 
     def update_plan(self, tenant_id: int, plan: str, actor: str, override_reason: str = "") -> Dict[str, Any]:
-        self._ensure_columns()
         normalized = plan.lower().strip()
         aliases = {"pro": "professional"}
         normalized = aliases.get(normalized, normalized)
@@ -131,13 +146,15 @@ class TenantPlanService:
         return self.get_plan(tenant_id)
 
     def _limits(self, plan: str) -> Dict[str, Any]:
-        limits = dict(PLAN_LIMITS.get(plan, PLAN_LIMITS["enterprise"]))
+        if plan not in PLAN_LIMITS:
+            raise ValueError("Tenant plan unavailable")
+        limits = dict(PLAN_LIMITS[plan])
         env_limit = os.getenv(f"AUTHCLAW_RATE_LIMIT_{plan.upper()}_RPM")
         if env_limit:
-            try:
-                limits["requests_per_minute"] = max(1, int(env_limit))
-            except ValueError:
-                pass
+            limit = int(env_limit)
+            if limit <= 0:
+                raise ValueError("Tenant plan limit must be positive")
+            limits["requests_per_minute"] = limit
         return limits
 
     def _decode_override(self, raw: Any) -> Dict[str, Any]:
@@ -152,12 +169,3 @@ class TenantPlanService:
             return parsed if isinstance(parsed, dict) else {"raw": raw}
         except Exception:
             return {"raw": raw}
-
-    def _ensure_columns(self) -> None:
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR(50) DEFAULT 'enterprise'"))
-            conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan VARCHAR(50) DEFAULT 'enterprise'"))
-            conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tier VARCHAR(50) DEFAULT 'enterprise'"))
-            conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_override TEXT"))
-            conn.execute(text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_updated_at TIMESTAMP"))
-            conn.commit()

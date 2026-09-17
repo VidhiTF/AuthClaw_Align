@@ -11,13 +11,14 @@ import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from services import control_plane_auth as auth
 from services.tenant_context import tenant_context
+from services.quota_service import QuotaExceeded, QuotaUnavailable
 
 SECRET = "test-only-32-byte-signing-secret!!"
 KEY = {
@@ -289,6 +290,10 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
             "_tenant_id_from_request_headers": tenant_lookup,
             "_is_public_or_auth_path": lambda _: False,
             "_rbac_enforcement_enabled": lambda: True,
+            "_tenant_tier_limit": lambda _: 100,
+            "admit": lambda *args, **kwargs: None,
+            "QuotaExceeded": QuotaExceeded,
+            "QuotaUnavailable": QuotaUnavailable,
             "decode_jwt": lambda _: None,
         }
         # Preserve source declaration/decorator order, not a hand-built substitute stack.
@@ -327,7 +332,17 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
                 client.post("/chat?q=a+b", content=b'{"a":1}', headers=headers).status_code, 401
             )
             self.assertEqual(consume.call_count, 1)
-            self.assertEqual(client.post("/chat").status_code, 403)
+            self.assertEqual(client.post("/chat").status_code, 401)
+            headers = signed(**{"x-authclaw-timestamp": str(int(time.time()))})
+            for error, status in (
+                (QuotaExceeded("tenant"), 429),
+                (QuotaUnavailable("offline"), 503),
+            ):
+                namespace["admit"] = Mock(side_effect=error)
+                self.assertEqual(
+                    client.post("/chat?q=a+b", content=b'{"a":1}', headers=headers).status_code,
+                    status,
+                )
             forbidden = dict(KEY, endpoints=["POST /policies/test"])
             headers = signed(
                 **{"x-authclaw-timestamp": str(int(time.time())), "x-authclaw-role": "viewer"}

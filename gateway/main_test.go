@@ -61,6 +61,39 @@ func TestHealthCheck(t *testing.T) {
 	if len(body) != 2 {
 		t.Fatalf("public health leaked internal fields: %#v", body)
 	}
+	metricsQuery := httptest.NewRecorder()
+	r.ServeHTTP(metricsQuery, httptest.NewRequest("GET", "/health?metrics=true", nil))
+	if metricsQuery.Header().Get("Content-Type") != "application/json" || strings.Contains(metricsQuery.Body.String(), "authclaw_quota_") {
+		t.Fatalf("public health query leaked quota telemetry: %s", metricsQuery.Body.String())
+	}
+}
+
+func TestInternalQuotaMetricsRequireDedicatedSecret(t *testing.T) {
+	t.Setenv("AUTHCLAW_QUOTA_METRICS_SECRET", "")
+	missing := httptest.NewRecorder()
+	QuotaMetricsHandler(missing, httptest.NewRequest("GET", "/internal/metrics/quota", nil))
+	if missing.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing metrics secret status=%d, want %d", missing.Code, http.StatusServiceUnavailable)
+	}
+
+	t.Setenv("AUTHCLAW_QUOTA_METRICS_SECRET", "metrics-test-secret")
+	for _, tc := range []struct {
+		token  string
+		status int
+	}{{"", http.StatusUnauthorized}, {"wrong", http.StatusUnauthorized}, {"metrics-test-secret", http.StatusOK}} {
+		request := httptest.NewRequest("GET", "/internal/metrics/quota", nil)
+		if tc.token != "" {
+			request.Header.Set("Authorization", "Bearer "+tc.token)
+		}
+		response := httptest.NewRecorder()
+		QuotaMetricsHandler(response, request)
+		if response.Code != tc.status {
+			t.Fatalf("token=%q status=%d, want %d", tc.token, response.Code, tc.status)
+		}
+		if tc.status == http.StatusOK && !strings.Contains(response.Body.String(), "authclaw_quota_available") {
+			t.Fatal("authorized metrics response omitted quota telemetry")
+		}
+	}
 }
 
 func TestPublicGatewayRouterDoesNotExposeMetrics(t *testing.T) {

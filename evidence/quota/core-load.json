@@ -1,0 +1,16 @@
+{
+  "recorded_date": "2026-09-17",
+  "provenance": "Transcribed from captured quota_load.py stdout, completed exec session 35986, exit code 0. This is the measured run, not a new replay.",
+  "command": "QUOTA_TEST_REDIS_URL=redis://127.0.0.1:16379/0 .quota-venv/Scripts/python.exe services/agent/smoke_tests/quota_load.py",
+  "replicas": 3,
+  "requests_per_replica": 100,
+  "provider": "deterministic Python callable",
+  "stages": {
+    "tenant": {"ingress_admissions": 17, "rejections": 283, "unavailable": 0, "provider_invocations": 17, "offered": 300, "limit": 17, "p50_ms": 6.233, "p95_ms": 34.643, "max_ms": 638.167},
+    "user": {"ingress_admissions": 17, "rejections": 283, "unavailable": 0, "provider_invocations": 17, "offered": 300, "limit": 17, "p50_ms": 11.207, "p95_ms": 24.648, "max_ms": 811.779},
+    "key": {"ingress_admissions": 17, "rejections": 283, "unavailable": 0, "provider_invocations": 17, "offered": 300, "limit": 17, "p50_ms": 5.062, "p95_ms": 28.309, "max_ms": 657.397},
+    "expensive_model": {"ingress_admissions": 300, "rejections": 283, "unavailable": 0, "provider_invocations": 17, "offered": 300, "limit": 17, "p50_ms": 16.509, "p95_ms": 43.324, "max_ms": 760.013}
+  },
+  "outage": {"ingress_admissions": 0, "rejections": 0, "unavailable": 10, "provider_invocations": 0},
+  "recovery": {"ingress_admissions": 10, "rejections": 0, "unavailable": 0, "provider_invocations": 10}
+}

@@ -31,6 +31,7 @@ variables {
   edge_certificate_arn           = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000010"
   primary_certificate_arn        = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000011"
   edge_alarm_action_arns         = ["arn:aws:sns:us-east-1:123456789012:authclaw-edge-alerts"]
+  quota_alert_sns_topic_arns     = { primary = ["arn:aws:sns:us-east-1:123456789012:authclaw-quota-alerts"] }
   require_immutable_images       = true
   container_images = {
     agent          = "example.invalid/authclaw/agent@sha256:0000000000000000000000000000000000000000000000000000000000000000"

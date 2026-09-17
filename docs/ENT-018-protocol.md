@@ -134,3 +134,20 @@ Final application-code diff: 238 added / 106 deleted lines (+132 versus master),
 10 fewer production lines than the pre-review implementation despite the added
 replay safeguards. Extra regression-test lines are intentional. Infrastructure
 and CI growth still require the existing material-growth review gate.
+
+## Integration with master 0103304 (quota enforcement)
+
+Merged the updated master without dropping its fail-closed tenant/user/key quota
+admission. Authentication and RBAC precede quota admission; a missing tenant is
+401, exhausted quota is 429, and unavailable authentication/quota state is 503.
+The existing signed-request regression now also exercises quota denial and outage.
+CI reuses one disposable Redis service for both suites and retains Node setup.
+
+Fresh integrated checks: 93 agent smoke tests; 78 exact Agent CI tests plus 48
+subtests; 41 focused signing/quota/evidence tests plus 13 subtests; 78 policy tests;
+45 console tests and TypeScript checking; 20 Terraform tests all passed. An initial
+Agent CI invocation from the repository root failed two policy tests because
+policies.yaml is relative to services/agent; rerunning from CI's working directory
+passed. This was an invocation error, not a product change. Prior line counts and
+baseline references above describe the initial implementation; the PR growth map
+is regenerated against the updated master for current-head owner approval.
