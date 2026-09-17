@@ -32,7 +32,7 @@ def test_publish_persists_before_kafka(monkeypatch):
     monkeypatch.setattr(
         event_backbone,
         "persist_audit_event",
-        lambda _event: order.append("postgres"),
+        lambda _event, **kwargs: order.append("postgres"),
     )
     monkeypatch.setattr(
         event_backbone,
@@ -46,6 +46,8 @@ def test_publish_persists_before_kafka(monkeypatch):
 
 def test_publish_stops_when_postgres_fails(monkeypatch):
     failure = RuntimeError("postgres unavailable")
-    monkeypatch.setattr(event_backbone, "persist_audit_event", lambda _event: failure)
+    monkeypatch.setattr(
+        event_backbone, "persist_audit_event", lambda _event, **kwargs: failure
+    )
 
     assert event_backbone.publish_audit_event(object(), "tenant-1", {}) is failure

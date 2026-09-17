@@ -12,6 +12,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -34,6 +35,7 @@ from app.services.audit_utils import (
     standardize_timestamp,
     standardize_uuid,
 )
+from app.services import event_backbone
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +150,9 @@ _GENESIS_HASH = "GENESIS"
 
 
 def _canonical_json(record: dict) -> str:
-    return json.dumps(canonical_audit_record(record), sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        canonical_audit_record(record), sort_keys=True, separators=(",", ":")
+    )
 
 
 def _verify_chain(records: List[dict]) -> List[dict]:
@@ -172,13 +176,10 @@ def _verify_chain(records: List[dict]) -> List[dict]:
         previous_hash = last_hash_by_tenant.get(tenant_id)
         sequence = int(record.get("tenant_sequence") or 0)
         previous_sequence = last_sequence_by_tenant.get(tenant_id)
-        link_valid = (
-            (previous_hash is None or prior_hash == previous_hash)
-            and (
-                previous_sequence is None
-                or not sequence
-                or sequence == previous_sequence + 1
-            )
+        link_valid = (previous_hash is None or prior_hash == previous_hash) and (
+            previous_sequence is None
+            or not sequence
+            or sequence == previous_sequence + 1
         )
         record["chain_valid"] = bool(actual) and expected == actual and link_valid
         if actual:
@@ -205,7 +206,9 @@ def get_audit_logs(
     db: Session = Depends(get_tenant_db),
     limit: int = Query(default=100, le=1000, ge=1),
     offset: int = Query(default=0, ge=0),
-    action: Optional[str] = Query(default=None, description="Filter by action: allow|block"),
+    action: Optional[str] = Query(
+        default=None, description="Filter by action: allow|block"
+    ),
     integrity_check: bool = Query(
         default=False,
         description="If true, verify SHA-256 hash chain and annotate each record with chain_valid",
@@ -225,12 +228,14 @@ def get_audit_logs(
         try:
             ch = _get_clickhouse_client()
             if ch is not None:
-                return _query_clickhouse(ch, tenant_id, limit, offset, action, integrity_check)
+                return _query_clickhouse(
+                    ch, tenant_id, limit, offset, action, integrity_check
+                )
         except Exception as exc:
             logger.error("ClickHouse connection or query failed: %s", exc)
             raise HTTPException(
                 status_code=503,
-                detail=f"ClickHouse audit storage configured but unavailable: {str(exc)}"
+                detail=f"ClickHouse audit storage configured but unavailable: {str(exc)}",
             )
 
     # ── PostgreSQL fallback ────────────────────────────────────────────────────
@@ -246,7 +251,9 @@ def get_audit_export_signing_key():
         return signing_key_metadata()
     except Exception as exc:
         logger.error("Audit export signing key metadata failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Audit export signing key is not configured") from exc
+        raise HTTPException(
+            status_code=500, detail="Audit export signing key is not configured"
+        ) from exc
 
 
 @router.post(
@@ -259,18 +266,59 @@ def create_signed_audit_export(
     db: Session = Depends(get_tenant_db),
 ):
     try:
-        return build_signed_audit_export(
+        tenant_id = str(request.state.tenant_id)
+        actor_id = str(getattr(request.state, "user_id", ""))
+        try:
+            UUID(actor_id)
+        except ValueError as exc:
+            raise HTTPException(401, "Audit export actor is unavailable") from exc
+        artifact = build_signed_audit_export(
             db,
-            tenant_id=str(request.state.tenant_id),
+            tenant_id=tenant_id,
             requested_by=str(getattr(request.state, "user_id", "")),
             action=export_request.action,
             framework=export_request.framework,
-            start=export_request.start.astimezone(timezone.utc) if export_request.start else None,
-            end=export_request.end.astimezone(timezone.utc) if export_request.end else None,
+            start=(
+                export_request.start.astimezone(timezone.utc)
+                if export_request.start
+                else None
+            ),
+            end=(
+                export_request.end.astimezone(timezone.utc)
+                if export_request.end
+                else None
+            ),
         )
+        event = event_backbone.audit_event(
+            event_type="audit_export",
+            tenant_id=tenant_id,
+            subject_id=artifact["manifest"]["export_id"],
+            identity_action=f"export:{actor_id}",
+            action="audit:export",
+            reason="Signed audit export authorized",
+            provider="audit_api",
+            request_id=request.headers.get("x-request-id", ""),
+            actor_id=actor_id,
+            actor_type="user",
+            frameworks=[export_request.framework] if export_request.framework else [],
+            trace=[
+                f"export_id={artifact['manifest']['export_id']}",
+                f"actor_id={actor_id}",
+                "purpose=export",
+            ],
+        )
+        if event_backbone.publish_audit_event(None, tenant_id, event, db=db):
+            raise HTTPException(
+                status_code=503, detail="Audit export audit unavailable"
+            )
+        return artifact
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Signed audit export failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Signed audit export failed: {str(exc)}") from exc
+        raise HTTPException(
+            status_code=500, detail="Signed audit export failed"
+        ) from exc
 
 
 @router.post(
@@ -406,7 +454,9 @@ def _query_clickhouse(
         result = ch.query(query, parameters=params)
     except Exception as exc:
         logger.error("ClickHouse query failed: %s", exc)
-        raise HTTPException(status_code=503, detail="Audit storage temporarily unavailable")
+        raise HTTPException(
+            status_code=503, detail="Audit storage temporarily unavailable"
+        )
 
     columns = result.column_names
     records = [dict(zip(columns, row)) for row in result.result_rows]
@@ -442,14 +492,17 @@ def _query_postgres(
 ) -> AuditLogsResponse:
     """Fallback: query PostgreSQL audit_log_metadata for Phase 6 compatibility."""
     try:
-        q = db.query(AuditLogMetadata).filter(
-            AuditLogMetadata.tenant_id == tenant_id
-        )
+        q = db.query(AuditLogMetadata).filter(AuditLogMetadata.tenant_id == tenant_id)
         if action:
             q = q.filter(AuditLogMetadata.action == action)
-        
+
         total_count = q.count()
-        logs = q.order_by(AuditLogMetadata.tenant_sequence.desc()).offset(offset).limit(limit).all()
+        logs = (
+            q.order_by(AuditLogMetadata.tenant_sequence.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
 
         records = [
             {

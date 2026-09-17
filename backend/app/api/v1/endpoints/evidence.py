@@ -3,6 +3,7 @@ Evidence repository API endpoints
 
 GET  /v1/evidence                          — Paginated list with optional filters
 GET  /v1/evidence/{evidence_id}            — Single evidence record + links
+GET  /v1/evidence/{evidence_id}/download   — Authorized evidence file stream
 GET  /v1/evidence/workflow/{workflow_id}   — All evidence for a workflow
 GET  /v1/evidence/framework/{framework}    — All evidence for a framework (paginated)
 
@@ -10,21 +11,30 @@ All endpoints enforce tenant_id isolation via existing auth middleware.
 All responses are read-only — evidence records are immutable once created.
 """
 
+import base64
+import binascii
 import logging
-from datetime import datetime
+import os
+import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from uuid import UUID
+from urllib.parse import quote
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_tenant_db, require_scopes
+from app.core.auth import get_tenant_db, require_roles, require_scopes
 from app.core.evidence_integrity import verify_evidence_integrity
 from app.services import evidence_service
 
 logger = logging.getLogger("api.evidence")
 router = APIRouter()
+
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_MEDIA_TYPE = re.compile(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+\Z")
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +117,105 @@ def _serialize_record(record, include_links: bool = False) -> dict:
     return data
 
 
+def _download_metadata(
+    record, tenant_id: str, operation: str = "download"
+) -> tuple[str, str, str, str]:
+    """Return the storage binding for a downloadable, tenant-owned record."""
+    data = record.evidence_data if isinstance(record.evidence_data, dict) else {}
+    storage = data.get("storage") if isinstance(data.get("storage"), dict) else {}
+    bucket = str(storage.get("bucket") or "")
+    object_key = str(storage.get("object_key") or "")
+    checksum = str(storage.get("sha256") or "").lower()
+    retention_class = str(storage.get("retention_class") or "")
+    policy = storage.get("access_policy")
+    prefix = f"tenant-{tenant_id}/"
+    invalid_key = (
+        not object_key
+        or "\\" in object_key
+        or any(part in {"", ".", ".."} for part in object_key.split("/"))
+    )
+    if (
+        str(record.tenant_id) != tenant_id
+        or not bucket
+        or invalid_key
+        or not object_key.startswith(prefix)
+        or not _SHA256.fullmatch(checksum)
+        or not retention_class
+        or not isinstance(policy, dict)
+        or policy.get(f"allow_{operation}") is not True
+    ):
+        raise HTTPException(status_code=404, detail="Evidence file not found")
+    return bucket, object_key, checksum, str(storage.get("content_type") or "")
+
+
+def _audit_access(record, request: Request, operation: str, db: Session = None) -> None:
+    """Persist an evidence-access audit event before returning protected data."""
+    from app.services import event_backbone
+
+    tenant_id = str(record.tenant_id)
+    actor_id = str(getattr(request.state, "user_id", ""))
+    try:
+        UUID(actor_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=401, detail="Evidence actor is unavailable"
+        ) from exc
+    event = event_backbone.audit_event(
+        event_type="evidence_access",
+        tenant_id=tenant_id,
+        subject_id=str(record.id),
+        identity_action=f"{operation}:{uuid4()}",
+        action=f"evidence:{operation}",
+        reason=f"Evidence {operation} authorized",
+        provider="evidence_api",
+        request_id=request.headers.get("x-request-id", ""),
+        actor_id=actor_id,
+        actor_type="user",
+        frameworks=[record.framework],
+        trace=[
+            f"evidence_id={record.id}",
+            f"actor_id={actor_id}",
+            f"purpose={operation}",
+        ],
+    )
+    if event_backbone.publish_audit_event(None, tenant_id, event, db=db):
+        raise HTTPException(status_code=503, detail="Evidence audit unavailable")
+
+
+def _s3_client():
+    import boto3
+
+    return boto3.client("s3", region_name=os.getenv("AWS_REGION") or None)
+
+
+def _stream_s3_body(body):
+    try:
+        yield from body.iter_chunks(chunk_size=64 * 1024)
+    finally:
+        body.close()
+
+
+def _deletion_allowed(record) -> bool:
+    data = record.evidence_data if isinstance(record.evidence_data, dict) else {}
+    storage = data.get("storage") if isinstance(data.get("storage"), dict) else {}
+    policy = (
+        storage.get("access_policy")
+        if isinstance(storage.get("access_policy"), dict)
+        else {}
+    )
+    try:
+        allowed_at = datetime.fromisoformat(
+            str(storage.get("deletion_allowed_at", "")).replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+    return (
+        allowed_at.tzinfo is not None
+        and policy.get("allow_delete") is True
+        and allowed_at <= datetime.now(timezone.utc)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -115,7 +224,9 @@ def _serialize_record(record, include_links: bool = False) -> dict:
 @router.get("", response_model=EvidenceListResponse)
 def list_evidence(
     request: Request,
-    framework: Optional[str] = Query(None, description="Filter by framework: GDPR, HIPAA, SOC2"),
+    framework: Optional[str] = Query(
+        None, description="Filter by framework: GDPR, HIPAA, SOC2"
+    ),
     evidence_type: Optional[str] = Query(None, description="Filter by evidence type"),
     severity: Optional[str] = Query(None, description="Filter by severity"),
     page: int = Query(1, ge=1, description="Page number"),
@@ -143,6 +254,8 @@ def list_evidence(
         page=page,
         page_size=page_size,
     )
+    for record in records:
+        _audit_access(record, request, "view", db)
 
     return EvidenceListResponse(
         total=total,
@@ -164,7 +277,11 @@ def list_evidence_by_workflow(
     Tenant-isolated — cross-tenant workflow IDs return an empty list.
     """
     tenant_id = str(request.state.tenant_id)
-    records = evidence_service.get_by_workflow(db, tenant_id=tenant_id, workflow_id=workflow_id)
+    records = evidence_service.get_by_workflow(
+        db, tenant_id=tenant_id, workflow_id=workflow_id
+    )
+    for record in records:
+        _audit_access(record, request, "view", db)
     return [_serialize_record(r, include_links=True) for r in records]
 
 
@@ -197,6 +314,8 @@ def list_evidence_by_framework(
         page=page,
         page_size=page_size,
     )
+    for record in records:
+        _audit_access(record, request, "view", db)
 
     return EvidenceListResponse(
         total=total,
@@ -219,8 +338,133 @@ def get_evidence(
     """
     tenant_id = str(request.state.tenant_id)
 
-    record = evidence_service.get_evidence(db, tenant_id=tenant_id, evidence_id=evidence_id)
+    record = evidence_service.get_evidence(
+        db, tenant_id=tenant_id, evidence_id=evidence_id
+    )
     if not record:
         raise HTTPException(status_code=404, detail="Evidence record not found")
 
+    _audit_access(record, request, "view", db)
     return _serialize_record(record, include_links=True)
+
+
+@router.get("/{evidence_id}/download")
+def download_evidence(
+    evidence_id: str,
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    _auth=require_scopes(["read"]),
+):
+    """Stream a file only after its tenant-bound evidence record authorizes it."""
+    tenant_id = str(request.state.tenant_id)
+    record = evidence_service.get_evidence(
+        db, tenant_id=tenant_id, evidence_id=evidence_id
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="Evidence record not found")
+    if not verify_evidence_integrity(record):
+        raise HTTPException(
+            status_code=409, detail="Evidence record integrity check failed"
+        )
+    bucket, object_key, checksum, content_type = _download_metadata(record, tenant_id)
+    response = None
+    try:
+        client = _s3_client()
+        response = client.get_object(
+            Bucket=bucket, Key=object_key, ChecksumMode="ENABLED"
+        )
+        actual = base64.b64decode(
+            str(response.get("ChecksumSHA256") or ""), validate=True
+        ).hex()
+        if actual != checksum:
+            raise ValueError("checksum mismatch")
+        _audit_access(record, request, "download", db)
+    except Exception as exc:
+        if response is not None:
+            response["Body"].close()
+        if isinstance(exc, HTTPException):
+            raise
+        invalid = isinstance(exc, (ValueError, TypeError, binascii.Error))
+        logger.warning(
+            "Evidence download failed evidence_id=%s: %s",
+            evidence_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=409 if invalid else 503,
+            detail=(
+                "Evidence file integrity check failed"
+                if invalid
+                else "Evidence storage unavailable"
+            ),
+        ) from exc
+
+    filename = quote(object_key.rsplit("/", 1)[-1], safe="")
+    safe_type = (
+        content_type
+        if _MEDIA_TYPE.fullmatch(content_type)
+        else "application/octet-stream"
+    )
+    return StreamingResponse(
+        _stream_s3_body(response["Body"]),
+        media_type=safe_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.delete("/{evidence_id}/file", status_code=204)
+def delete_evidence_file(
+    evidence_id: str,
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    _role=require_roles(["owner", "admin"]),
+    _auth=require_scopes(["write"]),
+):
+    """Delete an expired file while retaining its immutable evidence record."""
+    tenant_id = str(request.state.tenant_id)
+    record = evidence_service.get_evidence(
+        db, tenant_id=tenant_id, evidence_id=evidence_id
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="Evidence record not found")
+    if not verify_evidence_integrity(record):
+        raise HTTPException(
+            status_code=409, detail="Evidence record integrity check failed"
+        )
+    if not _deletion_allowed(record):
+        raise HTTPException(
+            status_code=403, detail="Evidence retention policy forbids deletion"
+        )
+    bucket, object_key, checksum, _ = _download_metadata(record, tenant_id, "delete")
+    try:
+        client = _s3_client()
+        head = client.head_object(Bucket=bucket, Key=object_key, ChecksumMode="ENABLED")
+        actual = base64.b64decode(
+            str(head.get("ChecksumSHA256") or ""), validate=True
+        ).hex()
+        if actual != checksum:
+            raise ValueError("checksum mismatch")
+        if not head.get("ETag"):
+            raise ValueError("missing object identity")
+        _audit_access(record, request, "delete", db)
+        client.delete_object(Bucket=bucket, Key=object_key, IfMatch=head["ETag"])
+    except HTTPException:
+        raise
+    except (ValueError, TypeError, binascii.Error) as exc:
+        raise HTTPException(
+            status_code=409, detail="Evidence file integrity check failed"
+        ) from exc
+    except Exception as exc:
+        logger.warning(
+            "Evidence storage unavailable evidence_id=%s: %s",
+            record.id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503, detail="Evidence storage unavailable"
+        ) from exc
+    return Response(status_code=204)

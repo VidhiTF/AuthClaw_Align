@@ -1,0 +1,72 @@
+{
+  "environment": "disposable PostgreSQL 17, authclaw_ent017_test; NOT deployed evidence",
+  "source": "backend/tests/test_tenant_isolation.py::test_request_credential_rebinds_audit_after_commit_without_contextvar",
+  "scope": "Real audit persistence using authenticated runtime-role sessions. Calls the access-audit seam; not proof of completed HTTP access or S3 operations.",
+  "records": [
+    {
+      "record_id": "8f17b46a-b6bc-5251-9a7e-a0895f40bc9f",
+      "tenant_id": "31ffd4a1-01a7-4019-8cde-33557bfef940",
+      "tenant_sequence": 1,
+      "actor_id": "6db6d616-18fe-496a-97af-bc004d618885",
+      "actor_type": "user",
+      "action": "evidence:view",
+      "request_id": "repeated",
+      "reason": "Evidence view authorized",
+      "execution_trace": "[\"evidence_id=dbb2a414-db66-46ae-851d-cf48cf05a928\", \"actor_id=6db6d616-18fe-496a-97af-bc004d618885\", \"purpose=view\"]",
+      "integrity_hash": "a0c7f57144d64718e91cf55778cb7c06dac40d8cec3c36423c7f4ec6772239bc",
+      "created_at": "2026-09-17T06:15:04.408+00:00"
+    },
+    {
+      "record_id": "e969228b-6352-5be5-8506-ad7c84634354",
+      "tenant_id": "31ffd4a1-01a7-4019-8cde-33557bfef940",
+      "tenant_sequence": 2,
+      "actor_id": "6db6d616-18fe-496a-97af-bc004d618885",
+      "actor_type": "user",
+      "action": "evidence:download",
+      "request_id": "repeated",
+      "reason": "Evidence download authorized",
+      "execution_trace": "[\"evidence_id=dbb2a414-db66-46ae-851d-cf48cf05a928\", \"actor_id=6db6d616-18fe-496a-97af-bc004d618885\", \"purpose=download\"]",
+      "integrity_hash": "61da6111665cca900eaca97e1eaa2b884e26edfb2546c23d8d3c11efbf891a63",
+      "created_at": "2026-09-17T06:15:04.492+00:00"
+    },
+    {
+      "record_id": "ff1797f8-f402-51e0-bc09-601dbcd6c2bd",
+      "tenant_id": "31ffd4a1-01a7-4019-8cde-33557bfef940",
+      "tenant_sequence": 3,
+      "actor_id": "6db6d616-18fe-496a-97af-bc004d618885",
+      "actor_type": "user",
+      "action": "evidence:export",
+      "request_id": "repeated",
+      "reason": "Evidence export authorized",
+      "execution_trace": "[\"evidence_id=dbb2a414-db66-46ae-851d-cf48cf05a928\", \"actor_id=6db6d616-18fe-496a-97af-bc004d618885\", \"purpose=export\"]",
+      "integrity_hash": "61a41a91dfb5c40ccdce3159ad8dfb473c09caef0cffb7f352cd8ee8f662d058",
+      "created_at": "2026-09-17T06:15:04.502+00:00"
+    },
+    {
+      "record_id": "dcd69647-0725-5a7d-a7cc-e459f52f47e4",
+      "tenant_id": "31ffd4a1-01a7-4019-8cde-33557bfef940",
+      "tenant_sequence": 4,
+      "actor_id": "6db6d616-18fe-496a-97af-bc004d618885",
+      "actor_type": "user",
+      "action": "evidence:delete",
+      "request_id": "repeated",
+      "reason": "Evidence delete authorized",
+      "execution_trace": "[\"evidence_id=dbb2a414-db66-46ae-851d-cf48cf05a928\", \"actor_id=6db6d616-18fe-496a-97af-bc004d618885\", \"purpose=delete\"]",
+      "integrity_hash": "462927c176042696e8f63e2a4a9501f132bbcc1e9d04e6860771fafe31f0e292",
+      "created_at": "2026-09-17T06:15:04.51+00:00"
+    },
+    {
+      "record_id": "7fafacd7-71b5-5daa-9238-66ef56b8a77e",
+      "tenant_id": "31ffd4a1-01a7-4019-8cde-33557bfef940",
+      "tenant_sequence": 5,
+      "actor_id": "6db6d616-18fe-496a-97af-bc004d618885",
+      "actor_type": "user",
+      "action": "evidence:download",
+      "request_id": "repeated",
+      "reason": "Evidence download authorized",
+      "execution_trace": "[\"evidence_id=dbb2a414-db66-46ae-851d-cf48cf05a928\", \"actor_id=6db6d616-18fe-496a-97af-bc004d618885\", \"purpose=download\"]",
+      "integrity_hash": "f8089d962b29bf88285fc480ae0ab7f018dca334a26eceff59fec125be33086e",
+      "created_at": "2026-09-17T06:15:04.519+00:00"
+    }
+  ]
+}

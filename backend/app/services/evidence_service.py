@@ -31,11 +31,14 @@ def _init_kafka_producer():
         logger.info("Kafka producer initialized for evidence audit events")
     except Exception as exc:
         logger.warning(
-            "Kafka producer unavailable — evidence audit events logged to stdout only: %s", exc
+            "Kafka producer unavailable — evidence audit events logged to stdout only: %s",
+            exc,
         )
 
 
-def _emit_evidence_audit(evidence_id: str, tenant_id: str, framework: str) -> None:
+def _emit_evidence_audit(
+    db: Session, evidence_id: str, tenant_id: str, framework: str
+) -> None:
     """Emit an EVIDENCE_CREATED Kafka audit event. Never raises."""
     event = event_backbone.audit_event(
         event_type="evidence",
@@ -50,12 +53,16 @@ def _emit_evidence_audit(evidence_id: str, tenant_id: str, framework: str) -> No
     )
 
     _init_kafka_producer()
-    if exc := event_backbone.publish_audit_event(_kafka_producer, tenant_id, event):
+    if exc := event_backbone.publish_audit_event(
+        _kafka_producer, tenant_id, event, db=db
+    ):
         logger.warning("Failed to emit EVIDENCE_CREATED audit event to Kafka: %s", exc)
 
     logger.info(
         "[EVIDENCE_CREATED] evidence_id=%s tenant=%s framework=%s",
-        evidence_id, tenant_id, framework,
+        evidence_id,
+        tenant_id,
+        framework,
     )
 
 
@@ -143,13 +150,16 @@ def create_evidence(
 
     # Emit Kafka audit (non-fatal)
     try:
-        _emit_evidence_audit(str(evidence_id), tenant_id, framework)
+        _emit_evidence_audit(db, str(evidence_id), tenant_id, framework)
     except Exception as exc:
         logger.warning("Evidence audit emission failed (non-fatal): %s", exc)
 
     logger.debug(
         "Created evidence %s type=%s severity=%s workflow=%s",
-        evidence_id, evidence_type, severity, workflow_id,
+        evidence_id,
+        evidence_type,
+        severity,
+        workflow_id,
     )
     return record
 

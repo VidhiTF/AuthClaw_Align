@@ -131,6 +131,16 @@ output "gateway_endpoint_policies" {
   value = { for service in keys(aws_vpc_endpoint.gateway) : service => true }
 }
 
+output "gateway_endpoint_policy_documents" {
+  description = "Rendered private-endpoint policies for deployment evidence and review."
+  value       = local.gateway_endpoint_policies
+}
+
+output "evidence_object_access_policy" {
+  description = "Backend-only evidence object deletion statement for policy evidence."
+  value       = jsonencode(local.backend_evidence_deletion_statement)
+}
+
 output "interface_endpoint_policies" {
   value = { for service in keys(aws_vpc_endpoint.interface) : service => true }
 }

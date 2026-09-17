@@ -20,7 +20,14 @@ _EVENT_NAMESPACE = uuid.UUID("3bd78033-64da-4a48-bd4f-9c105da706c7")
 _metrics: defaultdict[str, int] = defaultdict(int)
 
 
-def stable_event_id(*, event_type: str, tenant_id: str, subject_id: str, action: str, trace: list[str] | None = None) -> str:
+def stable_event_id(
+    *,
+    event_type: str,
+    tenant_id: str,
+    subject_id: str,
+    action: str,
+    trace: list[str] | None = None,
+) -> str:
     identity = {
         "event_type": event_type,
         "tenant_id": tenant_id,
@@ -42,6 +49,8 @@ def audit_event(
     reason: str,
     provider: str,
     request_id: str = "",
+    actor_id: str = "",
+    actor_type: str = "backend",
     frameworks: list[str] | None = None,
     trace: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -58,6 +67,8 @@ def audit_event(
         "request_id": request_id,
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
         "tenant_id": tenant_id,
+        "actor_id": actor_id,
+        "actor_type": actor_type,
         "policy_id": "",
         "action": action,
         "reason": reason,
@@ -81,8 +92,14 @@ def make_kafka_producer() -> AuditPublisher:
     return make_audit_publisher()
 
 
-def publish_audit_event(producer: AuditPublisher | None, tenant_id: str, event: dict[str, Any]) -> Exception | None:
-    if exc := persist_audit_event(event):
+def publish_audit_event(
+    producer: AuditPublisher | None,
+    tenant_id: str,
+    event: dict[str, Any],
+    *,
+    db=None,
+) -> Exception | None:
+    if exc := persist_audit_event(event, db=db):
         increment_metric("backend_audit_postgres_failures_total")
         return exc
     if not producer:
@@ -157,12 +174,14 @@ def publish_pending_audit_events(
         db.close()
 
 
-def persist_audit_event(event: dict[str, Any]) -> Exception | None:
+def persist_audit_event(event: dict[str, Any], *, db=None) -> Exception | None:
     """Append through PostgreSQL and commit its transactional outbox row."""
     from app.db.session import SessionLocal
     from app.services.audit_store import append_audit_event
 
-    db = SessionLocal()
+    owns_session = db is None
+    if owns_session:
+        db = SessionLocal()
     try:
         append_audit_event(db, event)
         db.commit()
@@ -173,7 +192,8 @@ def persist_audit_event(event: dict[str, Any]) -> Exception | None:
             increment_metric("backend_audit_idempotency_collisions_total")
         return exc
     finally:
-        db.close()
+        if owns_session:
+            db.close()
 
 
 def metrics_snapshot() -> dict[str, int]:
