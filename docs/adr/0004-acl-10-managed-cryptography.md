@@ -48,7 +48,7 @@ No new dependency, service or database migration is introduced.
 | Requirement | Evidence without AWS credentials | Status |
 | --- | --- | --- |
 | External TLS | Terraform declares HTTPS ALB listeners, ACM certificate input and the TLS 1.3/1.2 policy | Simulation proof |
-| Service traffic TLS | Production/staging boundary guards reject plaintext internal URLs; RDS uses `sslmode=require`; Redis transit encryption is enabled | Code proof; live handshake pending |
+| Service traffic TLS | Production/staging boundary guards reject plaintext internal URLs; the gateway requires explicit `sslmode=verify-full` with a trusted CA and matching database hostname; Redis transit encryption is enabled | Gateway configuration and synthetic PostgreSQL handshake proof; live RDS handshake pending |
 | Encrypted storage | RDS, Redis, Secrets Manager and log/storage resources use the environment KMS key | Terraform/static proof |
 | Field-level credential protection | Provider, connector and OIDC secrets use randomized AES-GCM; gateway compatibility remains covered | Local test proof |
 | KMS envelope encryption | Mock KMS proves `GenerateDataKey`, decrypt, key binding, encryption context and randomized ciphertext | Simulation proof |
