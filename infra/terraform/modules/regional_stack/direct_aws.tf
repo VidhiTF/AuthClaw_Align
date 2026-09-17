@@ -58,9 +58,13 @@ locals {
     { name = "AUTHCLAW_AWS_EXTERNAL_ID", value = var.direct_aws.document_external_id }
   ]
   direct_aws_statements = {
-    backend = [for statement in [{
+    backend = concat([for statement in [{
       Effect = "Allow", Action = ["kms:Decrypt"], Resource = values(var.direct_aws.backend_kms_versions)
-    }] : statement if local.backend_kms_enabled]
+      }] : statement if local.backend_kms_enabled], [for statement in [{
+      Effect    = "Allow", Action = ["s3:GetObject", "s3:DeleteObject"],
+      Resource  = local.backend_evidence_deletion_statement.Resource
+      Condition = { Bool = { "aws:SecureTransport" = "true" } }
+    }] : statement if length(local.backend_evidence_deletion_statement.Resource) > 0])
     agent = concat(
       [for statement in [{
         Effect    = "Allow", Action = ["kms:GenerateDataKey"], Resource = [var.direct_aws.agent_kms_key]

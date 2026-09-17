@@ -312,9 +312,13 @@ def generate_and_vault_reports(doc_id: int, doc_name: str, analysis: dict, tenan
     now_date = datetime.now(timezone.utc).date().isoformat()
     
     # Create evidence directory in workspace
-    evidence_dir = "evidence"
+    if not isinstance(tenant_id, int) or tenant_id <= 0:
+        raise ValueError("An authenticated tenant is required for evidence")
+    import uuid
+    report_id = uuid.uuid4().hex
+    evidence_dir = os.path.join("evidence", f"tenant-{tenant_id}")
     if not os.path.exists(evidence_dir):
-        os.makedirs(evidence_dir)
+        os.makedirs(evidence_dir, exist_ok=True)
         
     # Framework scores formatted
     scores_str = f"SOC2: {analysis['soc2_score']}%, GDPR: {analysis['gdpr_score']}%, HIPAA: {analysis['hipaa_score']}%, ISO 27001: {analysis['iso27001_score']}"
@@ -341,7 +345,7 @@ def generate_and_vault_reports(doc_id: int, doc_name: str, analysis: dict, tenan
         f"{analysis['executive_summary']}\n"
         f"=========================================\n"
     )
-    compliance_filename = f"Compliance_Report_doc_{doc_id}.txt"
+    compliance_filename = f"Compliance_Report_doc_{doc_id}_{report_id}.txt"
     compliance_filepath = os.path.join(evidence_dir, compliance_filename)
     with open(compliance_filepath, "w", encoding="utf-8") as f:
         f.write(compliance_report_content)
@@ -358,7 +362,7 @@ def generate_and_vault_reports(doc_id: int, doc_name: str, analysis: dict, tenan
         f"{findings_str}\n"
         f"=========================================\n"
     )
-    findings_filename = f"Findings_Report_doc_{doc_id}.txt"
+    findings_filename = f"Findings_Report_doc_{doc_id}_{report_id}.txt"
     findings_filepath = os.path.join(evidence_dir, findings_filename)
     with open(findings_filepath, "w", encoding="utf-8") as f:
         f.write(findings_report_content)
@@ -381,7 +385,7 @@ def generate_and_vault_reports(doc_id: int, doc_name: str, analysis: dict, tenan
         f"{findings_str}\n"
         f"=========================================\n"
     )
-    risk_filename = f"Risk_Report_doc_{doc_id}.txt"
+    risk_filename = f"Risk_Report_doc_{doc_id}_{report_id}.txt"
     risk_filepath = os.path.join(evidence_dir, risk_filename)
     with open(risk_filepath, "w", encoding="utf-8") as f:
         f.write(risk_report_content)
@@ -396,7 +400,7 @@ def generate_and_vault_reports(doc_id: int, doc_name: str, analysis: dict, tenan
     with engine.connect() as conn:
         for name_prefix, path, filename in reports:
             with open(path, "rb") as f_bytes:
-                f_hash = f"sha256-{hashlib.sha256(f_bytes.read()).hexdigest()[:16]}"
+                f_hash = f"sha256-{hashlib.sha256(f_bytes.read()).hexdigest()}"
             
             # Category selection based on findings or default to SOC2
             category = "SOC2"
@@ -408,16 +412,17 @@ def generate_and_vault_reports(doc_id: int, doc_name: str, analysis: dict, tenan
             # Insert into compliance_evidence
             conn.execute(
                 text("""
-                INSERT INTO compliance_evidence (tenant_id, name, category, file_path, collected_at, hash)
-                VALUES (:tenant_id, :name, :category, :file_path, :collected_at, :hash)
+                INSERT INTO compliance_evidence (tenant_id, name, category, file_path, collected_at, hash, metadata)
+                VALUES (:tenant_id, :name, :category, :file_path, :collected_at, :hash, :metadata)
                 """),
                 {
                     "tenant_id": tenant_id,
                     "name": f"{name_prefix} - {doc_name}",
                     "category": category,
-                    "file_path": f"/evidence/{filename}",
+                    "file_path": f"/evidence/tenant-{tenant_id}/{filename}",
                     "collected_at": now_date,
-                    "hash": f_hash
+                    "hash": f_hash,
+                    "metadata": json.dumps({"retention_class": "retain", "allow_download": True})
                 }
             )
         conn.commit()
