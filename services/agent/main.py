@@ -2262,8 +2262,17 @@ def _readiness_report() -> tuple[int, dict]:
         from startup.validation import validate_production_environment
         validation_errors = validate_production_environment()
         if validation_errors:
+            correlation_id = str(uuid.uuid4())
+            logger.error(
+                "Production readiness validation failed correlation_id=%s errors=%s",
+                correlation_id,
+                json.dumps(validation_errors),
+            )
             checks["production_validation"] = "failed"
-            checks["production_errors"] = validation_errors
+            checks["production_failure"] = {
+                "code": "production_configuration_invalid",
+                "correlation_id": correlation_id,
+            }
             http_status = 503
         else:
             checks["production_validation"] = "passed"

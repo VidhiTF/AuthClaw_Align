@@ -355,7 +355,8 @@ jobs:
           ../../.ci-agent/bin/python -m pytest --noconftest -p no:cacheprovider \
             tests/test_sensitive_data_detection.py tests/test_audit_transport_contract.py \
             smoke_tests/test_control_plane_auth.py smoke_tests/test_agent_execution_authorization.py \
-            smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py -q
+            smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py \
+            smoke_tests/test_diagnostic_exposure.py -q
 
   sdk:
     name: Python SDK Tests
