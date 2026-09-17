@@ -350,9 +350,13 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
+      ENT018_REDIS_URL: redis://localhost:6379
       QUOTA_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -408,12 +412,12 @@ jobs:
       - name: Run gateway tests
         working-directory: gateway
         env:
-          DATABASE_URL: postgresql://test:test@127.0.0.1:1/authclaw_gateway_ci_test
+          DATABASE_URL: postgresql://test:test@127.0.0.1:1/authclaw_gateway_ci_test?sslmode=verify-full
           REDIS_URL: redis://127.0.0.1:6379
           QUOTA_REDIS_TEST: "1"
         run: >-
           go test ./... -count=1
-          -run '^(TestQuota|TestProviderQuota|TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
+          -run '^(TestQuota|TestProviderQuota|TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestDatabaseConfig|TestInitDBRejectsUnsafeSharedDatabaseURL|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
       - name: Verify quota alert rules
         run: >-
           docker run --rm --entrypoint /bin/promtool

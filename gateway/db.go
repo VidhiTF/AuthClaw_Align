@@ -4,10 +4,12 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/lib/pq"
 )
@@ -143,14 +145,134 @@ func databaseConfig(raw string) (pq.Config, error) {
 	}
 	if cfg.SSLMode == "" {
 		cfg.SSLMode = pq.SSLModeDisable
-		if isSharedEnv() {
-			cfg.SSLMode = pq.SSLModeVerifyFull
-		}
 	}
-	if isSharedEnv() && cfg.SSLMode != pq.SSLModeVerifyFull {
+	if !isSharedEnv() {
+		return cfg, nil
+	}
+	sslModes, err := explicitDatabaseOptionValues(raw, "sslmode")
+	if err != nil || len(sslModes) != 1 || sslModes[0] != string(pq.SSLModeVerifyFull) || cfg.SSLMode != pq.SSLModeVerifyFull || !databaseHostsSupportTLS(cfg) {
 		return pq.Config{}, fmt.Errorf("shared DATABASE_URL must use sslmode=verify-full with a trusted CA and matching hostname")
 	}
 	return cfg, nil
+}
+
+func databaseHostsSupportTLS(cfg pq.Config) bool {
+	hosts := []string{cfg.Host}
+	for _, alternate := range cfg.Multi {
+		hosts = append(hosts, alternate.Host)
+	}
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" || strings.HasPrefix(host, "/") || strings.HasPrefix(host, "@") {
+			return false
+		}
+	}
+	return true
+}
+
+// explicitDatabaseOptionValues reads only options written in DATABASE_URL. It
+// deliberately excludes PG* variables and service-file values so shared
+// environments cannot satisfy a required connection-string control indirectly.
+func explicitDatabaseOptionValues(raw, target string) ([]string, error) {
+	if strings.HasPrefix(raw, "postgres://") || strings.HasPrefix(raw, "postgresql://") {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return nil, err
+		}
+		query, err := url.ParseQuery(parsed.RawQuery)
+		if err != nil {
+			return nil, err
+		}
+		return query[target], nil
+	}
+	return explicitKeywordOptionValues(raw, target)
+}
+
+// explicitKeywordOptionValues follows libpq's quoting and escaping rules while
+// retaining duplicate occurrences, which pq.Config intentionally collapses.
+func explicitKeywordOptionValues(raw, target string) ([]string, error) {
+	runes := []rune(raw)
+	index := 0
+	next := func() (rune, bool) {
+		if index >= len(runes) {
+			return 0, false
+		}
+		value := runes[index]
+		index++
+		return value, true
+	}
+	skipSpaces := func() (rune, bool) {
+		value, ok := next()
+		for ok && unicode.IsSpace(value) {
+			value, ok = next()
+		}
+		return value, ok
+	}
+
+	var values []string
+	for {
+		current, ok := skipSpaces()
+		if !ok {
+			return values, nil
+		}
+		var key, value []rune
+		for current != '=' && !unicode.IsSpace(current) {
+			key = append(key, current)
+			current, ok = next()
+			if !ok {
+				break
+			}
+		}
+		if current != '=' {
+			current, ok = skipSpaces()
+		}
+		if !ok || current != '=' {
+			return nil, fmt.Errorf("invalid keyword DATABASE_URL")
+		}
+
+		current, ok = skipSpaces()
+		if !ok {
+			if string(key) == target {
+				values = append(values, "")
+			}
+			return values, nil
+		}
+		if current == '\'' {
+			for {
+				current, ok = next()
+				if !ok {
+					return nil, fmt.Errorf("invalid keyword DATABASE_URL")
+				}
+				if current == '\'' {
+					break
+				}
+				if current == '\\' {
+					current, ok = next()
+					if !ok {
+						return nil, fmt.Errorf("invalid keyword DATABASE_URL")
+					}
+				}
+				value = append(value, current)
+			}
+		} else {
+			for !unicode.IsSpace(current) {
+				if current == '\\' {
+					current, ok = next()
+					if !ok {
+						return nil, fmt.Errorf("invalid keyword DATABASE_URL")
+					}
+				}
+				value = append(value, current)
+				current, ok = next()
+				if !ok {
+					break
+				}
+			}
+		}
+		if string(key) == target {
+			values = append(values, string(value))
+		}
+	}
 }
 
 // InitDB initializes the database connection

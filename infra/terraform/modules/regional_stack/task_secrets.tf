@@ -21,7 +21,7 @@ locals {
       { name = "ENVELOPE_KEY_V1", valueFrom = aws_secretsmanager_secret.envelope.arn },
       { name = "ENVELOPE_KEY_V2", valueFrom = aws_secretsmanager_secret.envelope_v2.arn }
     ] : [],
-    contains(["console", "backend", "agent"], service) ? [
+    contains(["console", "agent"], service) ? [
       { name = "AUTHCLAW_INTERNAL_SERVICE_SECRET", valueFrom = aws_secretsmanager_secret.internal_service.arn }
     ] : [],
     local.quota_observability_enabled && contains(["gateway", "agent"], service) ? [

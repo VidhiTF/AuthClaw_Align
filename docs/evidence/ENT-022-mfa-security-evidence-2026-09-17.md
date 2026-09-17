@@ -130,6 +130,32 @@ Docker Desktop started but its engine API did not become responsive. The PR's
 Linux CI jobs for Agent, Gateway, Backend PostgreSQL Integration, and Security
 Scans are therefore mandatory before reviewers approve the merged head.
 
+### Second compatibility refresh
+
+Before final review, `align/master` advanced again through `a056efd` (ENT-018
+service request signing v2) and `5ff6f4b` (verified gateway database TLS). The
+branch merged both commits. Git reported one textual conflict in
+`services/agent/main.py`: the upstream control-plane authentication import
+overlapped the request-context import used by this remediation. Resolution kept
+the upstream `authenticate_control_plane` API and retained
+`get_current_request_id`; no security behavior was dropped.
+
+Fresh combined verification after that resolution:
+
+- Agent compatibility selection: **90 passed, 6 environment-dependent skips,
+  56 subtests passed**;
+- repository and security policy suites: **130 passed**;
+- console service-signing and UI contracts: **45 passed**;
+- gateway database TLS/configuration targeted selection: **passed**;
+- Python compilation and `git diff --check`: **passed**.
+
+The complete local gateway selection could not pass without Redis: its
+Redis-backed audit recovery case failed to connect to `localhost:6379`. This is
+recorded as an environment limitation, not a test pass; the PR Gateway Redis job
+remains required. A fresh local containerized Gitleaks attempt also could not
+start because the Docker engine did not respond, so the new PR-head Security
+Scans result remains mandatory.
+
 ## Agent separation-of-duties remediation verification
 
 A post-review finding identified two agent-side fail-open paths: missing

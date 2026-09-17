@@ -1,4 +1,4 @@
-import { createHmac } from "crypto";
+import { controlPlaneHeaders } from "./control-plane-auth";
 import { cookies } from "next/headers";
 import { sessionCookieName } from "@/lib/cookie-options";
 import { NextResponse } from "next/server";
@@ -130,38 +130,34 @@ export async function agentFetch(path: string, options: AgentRequestOptions = {}
   if (!context) throw new BackendRequestError("Unauthorized: No session cookie found", 401);
   if (!context.session) throw new BackendRequestError("Unauthorized: Session expired or invalid", 401);
 
-  const secret = process.env.AUTHCLAW_INTERNAL_SERVICE_SECRET;
-  if (!secret) throw new BackendRequestError("Agent service authentication is not configured", 503);
-
   const method = (options.method || "GET").toUpperCase();
-  const timestamp = Math.floor(Date.now() / 1000).toString();
   const principal = context.session;
-  const signaturePayload = [
-    timestamp,
-    method,
-    path,
-    principal.tenantId,
-    principal.userId,
-    principal.role.toLowerCase(),
-  ].join("\n");
+  const url = new URL(`${AGENT_URL}${path}`);
+  if (!path.startsWith("/") || url.origin !== new URL(AGENT_URL).origin || url.hash
+      || (options.body != null && typeof options.body !== "string")) {
+    throw new BackendRequestError("Unsupported signed request", 400);
+  }
   const headers = new Headers(options.headers);
-  headers.set("X-AuthClaw-Timestamp", timestamp);
-  headers.set("X-AuthClaw-Tenant-ID", principal.tenantId);
-  headers.set("X-AuthClaw-User-ID", principal.userId);
-  headers.set("X-AuthClaw-Role", principal.role.toLowerCase());
-  headers.set("X-AuthClaw-Signature", createHmac("sha256", secret).update(signaturePayload).digest("hex"));
   if (options.forwardGatewayKey) headers.set("X-API-Key", principal.apiKey);
   if (options.body !== undefined) headers.set("Content-Type", "application/json");
+  try {
+    for (const [name, value] of Object.entries(controlPlaneHeaders(url, method, options.body ?? "", headers.get("Content-Type") || "", principal))) {
+      headers.set(name, value);
+    }
+  } catch {
+    throw new BackendRequestError("Agent service authentication is not configured", 503);
+  }
 
   const fetchOptions = { ...options };
   delete fetchOptions.forwardGatewayKey;
 
-  const response = await fetch(`${AGENT_URL}${path}`, {
+  const response = await fetch(url.toString(), {
     ...fetchOptions,
     method,
     headers,
     signal: options.signal || AbortSignal.timeout(AGENT_TIMEOUT_MS),
     cache: "no-store",
+    redirect: "error",
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));

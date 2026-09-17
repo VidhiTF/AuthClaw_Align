@@ -699,10 +699,21 @@ resource "aws_elasticache_subnet_group" "main" {
   tags       = var.tags
 }
 
+resource "aws_elasticache_parameter_group" "redis" {
+  name   = "${var.name}-redis"
+  family = "redis7"
+  parameter {
+    name  = "maxmemory-policy"
+    value = "noeviction"
+  }
+}
+
 resource "aws_elasticache_replication_group" "redis" {
   replication_group_id       = "${var.name}-redis"
   description                = "AuthClaw Redis cache"
   engine                     = "redis"
+  engine_version             = "7.1"
+  parameter_group_name       = aws_elasticache_parameter_group.redis.name
   node_type                  = "cache.t4g.micro"
   num_cache_clusters         = var.is_primary ? 2 : 1
   automatic_failover_enabled = var.is_primary

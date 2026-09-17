@@ -55,7 +55,7 @@ from services.enterprise_identity import (
     upsert_provider_config,
 )
 from services.tenant_context import get_current_request_id, get_current_tenant_id, tenant_context
-from services.control_plane_auth import verify_control_plane_request
+from services.control_plane_auth import authenticate_control_plane
 from services.quota_service import admit, check_available, metrics_snapshot, record_unavailable, QuotaExceeded, QuotaUnavailable
 from services.document_monitor_status import monitor_metrics_snapshot, monitor_status
 
@@ -419,19 +419,6 @@ def optional_user_from_request(request: Request) -> dict:
     principal = getattr(request.state, "control_plane_principal", None)
     if principal:
         return principal
-    if request.headers.get("X-AuthClaw-Signature"):
-        verified = verify_control_plane_request(
-            request.headers,
-            request.method,
-            request.url.path,
-            os.getenv("AUTHCLAW_INTERNAL_SERVICE_SECRET", ""),
-        )
-        if verified:
-            return {
-                "external_tenant_id": verified.tenant_id,
-                "sub": verified.user_id,
-                "role": verified.role,
-            }
     auth_header = request.headers.get("Authorization")
     if not auth_header:
         return {}
@@ -457,16 +444,8 @@ def _is_public_or_auth_path(path: str) -> bool:
 
 
 def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
-    signature = request.headers.get("X-AuthClaw-Signature")
-    if signature:
-        principal = verify_control_plane_request(
-            request.headers,
-            request.method,
-            request.url.path,
-            os.getenv("AUTHCLAW_INTERNAL_SERVICE_SECRET", ""),
-        )
-        if not principal:
-            raise HTTPException(status_code=401, detail="Invalid control-plane signature.")
+    principal = getattr(request.state, "verified_service_principal", None)
+    if principal:
         from database import engine
         with engine.begin() as conn:
             tenant_id = conn.execute(
@@ -519,12 +498,31 @@ async def tenant_database_context_middleware(request: Request, call_next):
     tenant_id = None
     protected = not _is_public_or_auth_path(request.url.path)
     try:
+        request.state.verified_service_principal = await authenticate_control_plane(request)
+        principal = request.state.verified_service_principal
+        if principal:
+            from services.rbac_matrix import enforce_request_access, agent_operation_allowed
+            enforce_request_access(request.method, request.url.path,
+                                   {"external_tenant_id": principal.tenant_id, "role": principal.role})
+            if request.method == "POST" and request.url.path.rstrip("/") == "/api/v1/agent/executions":
+                try:
+                    operation = AgentExecutionRequest.model_validate_json(await request.body()).operation.strip().lower()
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail="Invalid agent execution request.") from exc
+                if operation not in {"chat", "rag", "remediation_plan"}:
+                    raise HTTPException(status_code=422, detail="operation must be one of: chat, rag, remediation_plan")
+                if not agent_operation_allowed(principal.role, operation):
+                    raise HTTPException(status_code=403, detail="Role is not authorized for this agent operation.")
         if protected:
             tenant_id = await run_in_threadpool(_tenant_id_from_request_headers, request)
             if tenant_id is None:
                 raise HTTPException(status_code=401, detail="Authentication credentials missing.")
+        if _rbac_enforcement_enabled():
+            from services.rbac_matrix import enforce_request_access
+            enforce_request_access(request.method, request.url.path, optional_user_from_request(request))
     except HTTPException as exc:
-        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers={"X-Request-ID": request_id})
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                            headers={"X-Request-ID": request_id})
     except Exception:
         return JSONResponse(status_code=503, content={"error": "authentication_unavailable"}, headers={"Retry-After": "1"})
     request.state.correlation_id = request_id
@@ -570,23 +568,6 @@ def _rbac_enforcement_enabled() -> bool:
         return explicit.strip().lower() in {"1", "true", "yes", "on"}
     return True
 
-
-@app.middleware("http")
-async def production_rbac_enforcement_middleware(request: Request, call_next):
-    if _rbac_enforcement_enabled():
-        from services.rbac_matrix import enforce_request_access, is_public_endpoint
-
-        method = request.method.upper()
-        path = request.url.path
-        if not is_public_endpoint(method, path):
-            try:
-                payload = optional_user_from_request(request)
-                enforce_request_access(method, path, payload)
-            except HTTPException as exc:
-                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-            except Exception:
-                return JSONResponse(status_code=503, content={"error": "authorization_unavailable"}, headers={"Retry-After": "1"})
-    return await call_next(request)
 
 def approval_actor_from_payload(payload: dict) -> str:
     actor = payload.get("sub")
