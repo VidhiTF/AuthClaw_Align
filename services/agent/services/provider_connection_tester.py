@@ -1,3 +1,4 @@
+from providers.base import admit_provider_call
 from typing import Any, Dict
 
 import requests
@@ -104,6 +105,7 @@ def test_provider_connection(provider: str, payload: Dict[str, Any], live: bool 
             )
         elif normalized == "anthropic":
             api_base = str(payload.get("api_base") or "https://api.anthropic.com").rstrip("/")
+            admit_provider_call("anthropic", payload.get("model") or "claude-3-5-sonnet-20241022")
             response = requests.post(
                 f"{api_base}/v1/messages",
                 headers={

@@ -152,11 +152,55 @@ def run_startup_migrations():
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS domain_verification_token VARCHAR(255);
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS totp_secret VARCHAR(32);
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR(50) DEFAULT 'enterprise';
-    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan VARCHAR(50) DEFAULT 'enterprise';
-    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tier VARCHAR(50) DEFAULT 'enterprise';
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR(50);
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan VARCHAR(50);
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tier VARCHAR(50);
+    ALTER TABLE tenants ALTER COLUMN subscription_tier DROP DEFAULT;
+    ALTER TABLE tenants ALTER COLUMN plan DROP DEFAULT;
+    ALTER TABLE tenants ALTER COLUMN tier DROP DEFAULT;
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_override TEXT;
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan_updated_at TIMESTAMP;
+    -- Old schema defaults cannot prove an enterprise entitlement. Revoke an
+    -- untracked all-enterprise value; an administrator must re-authorize it.
+    UPDATE tenants
+    SET subscription_tier = NULL, plan = NULL, tier = NULL
+    WHERE plan_updated_at IS NULL
+      AND NULLIF(BTRIM(plan_override), '') IS NULL
+      AND LOWER(COALESCE(NULLIF(BTRIM(subscription_tier), ''), 'enterprise')) = 'enterprise'
+      AND LOWER(COALESCE(NULLIF(BTRIM(plan), ''), 'enterprise')) = 'enterprise'
+      AND LOWER(COALESCE(NULLIF(BTRIM(tier), ''), 'enterprise')) = 'enterprise'
+      AND (subscription_tier IS NOT NULL OR plan IS NOT NULL OR tier IS NOT NULL);
+    -- Reconcile valid legacy columns to the least privileged tier. Unknown
+    -- values remain untouched so runtime admission rejects them fail closed.
+    UPDATE tenants
+    SET subscription_tier = CASE
+            WHEN 'free' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'free'
+            WHEN 'starter' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'starter'
+            WHEN 'professional' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier)))
+              OR 'pro' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'professional'
+            WHEN 'enterprise' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'enterprise'
+            ELSE 'unlimited'
+        END,
+        plan = CASE
+            WHEN 'free' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'free'
+            WHEN 'starter' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'starter'
+            WHEN 'professional' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier)))
+              OR 'pro' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'professional'
+            WHEN 'enterprise' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'enterprise'
+            ELSE 'unlimited'
+        END,
+        tier = CASE
+            WHEN 'free' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'free'
+            WHEN 'starter' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'starter'
+            WHEN 'professional' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier)))
+              OR 'pro' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'professional'
+            WHEN 'enterprise' IN (LOWER(BTRIM(subscription_tier)), LOWER(BTRIM(plan)), LOWER(BTRIM(tier))) THEN 'enterprise'
+            ELSE 'unlimited'
+        END
+    WHERE COALESCE(NULLIF(BTRIM(subscription_tier), ''), NULLIF(BTRIM(plan), ''), NULLIF(BTRIM(tier), '')) IS NOT NULL
+      AND (subscription_tier IS NULL OR LOWER(BTRIM(subscription_tier)) IN ('free', 'starter', 'professional', 'pro', 'enterprise', 'unlimited'))
+      AND (plan IS NULL OR LOWER(BTRIM(plan)) IN ('free', 'starter', 'professional', 'pro', 'enterprise', 'unlimited'))
+      AND (tier IS NULL OR LOWER(BTRIM(tier)) IN ('free', 'starter', 'professional', 'pro', 'enterprise', 'unlimited'));
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS control_plane_id VARCHAR(64);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_control_plane_id ON tenants(control_plane_id);
     ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_name_key;

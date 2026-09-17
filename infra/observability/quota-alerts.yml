@@ -1,0 +1,19 @@
+groups:
+  - name: authclaw-quota
+    rules:
+      - alert: QuotaLimiterUnavailable
+        expr: authclaw_quota_available == 0 or absent(authclaw_quota_available)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Protected traffic is blocked by quota dependency failure
+          runbook: docs/quota-operations.md
+      - alert: QuotaSustainedRejections
+        expr: rate(authclaw_quota_rejected_total[5m]) / clamp_min(rate(authclaw_quota_decisions_total[5m]), 0.001) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than twenty percent of quota decisions are rejections
+          runbook: docs/quota-operations.md

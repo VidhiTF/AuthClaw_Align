@@ -6,7 +6,7 @@ load_dotenv()
 import logging
 import requests
 from typing import List, Dict, Any
-from .base import BaseProvider
+from .base import BaseProvider, admit_provider_call
 from .config import GOOGLE_API_KEY, MODEL_NAME, GOOGLE_API_URL
 
 logger = logging.getLogger("authclaw.providers.gemini")
@@ -124,6 +124,7 @@ class GeminiProvider(BaseProvider):
                 print(msg, flush=True)
                 raise RuntimeError("Provider unavailable: Timeout exceeded before request")
 
+            admit_provider_call("gemini", self.model_name)
             try:
                 # Use remaining time as the request timeout
                 remaining_time = max(1.0, self.timeout - (time.time() - start_time))

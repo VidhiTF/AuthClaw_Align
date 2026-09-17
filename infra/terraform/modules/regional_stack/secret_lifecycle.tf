@@ -12,7 +12,10 @@ resource "aws_secretsmanager_secret" "additional" {
 
 output "required_secret_arns" {
   description = "External provisioner must populate AWSCURRENT before starting database jobs or services."
-  value       = distinct(flatten(values(local.execution_secret_arns)))
+  value = distinct(concat(
+    flatten(values(local.execution_secret_arns)),
+    local.quota_observability_enabled ? [aws_secretsmanager_secret.quota_metrics.arn] : []
+  ))
 }
 
 # Retain old task definitions for explicitly reviewed rollback, without deploying them.

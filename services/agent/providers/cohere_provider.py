@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 import requests
 
-from .base import BaseProvider
+from .base import BaseProvider, admit_provider_call
 
 logger = logging.getLogger("authclaw.providers.cohere")
 
@@ -38,6 +38,7 @@ class CohereProvider(BaseProvider):
         if "max_tokens" in kwargs:
             payload["max_tokens"] = int(kwargs["max_tokens"])
 
+        admit_provider_call('cohere', self.model_name)
         response = requests.post(
             f"{self.api_url}/v2/chat",
             json=payload,

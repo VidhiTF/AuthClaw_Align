@@ -70,6 +70,7 @@ variables {
   enable_cross_region_db_replica = false
   primary_certificate_arn        = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000000"
   secondary_certificate_arn      = "arn:aws:acm:us-west-2:123456789012:certificate/00000000-0000-4000-8000-000000000001"
+  quota_alert_sns_topic_arns     = { primary = ["arn:aws:sns:us-east-1:123456789012:authclaw-quota-alerts"] }
   container_images = {
     agent          = "example.invalid/authclaw/agent:test"
     backend        = "example.invalid/authclaw/backend:test"
@@ -107,6 +108,12 @@ run "execution_roles_only_receive_their_task_secrets" {
   assert {
     condition     = contains(output.execution_iam_review.backend.secret_names, "PLATFORM_AUTH_DATABASE_URL")
     error_message = "Backend platform authentication must use its dedicated credential."
+  }
+  assert {
+    condition = alltrue([for name, review in output.execution_iam_review :
+      contains(review.secret_names, "AUTHCLAW_QUOTA_METRICS_SECRET") == contains(["gateway", "agent"], name)
+    ])
+    error_message = "Only gateway and agent may receive the dedicated quota metrics credential."
   }
 
   assert {

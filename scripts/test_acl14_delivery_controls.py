@@ -58,7 +58,7 @@ class ACL14DeliveryControlTests(unittest.TestCase):
 
     def test_all_ecs_services_enable_health_based_circuit_breaker_rollback(self):
         services = re.findall(r'resource "aws_ecs_service" "[^"]+" \{(.*?)(?=\nresource |\Z)', REGIONAL_STACK, re.S)
-        self.assertEqual(len(services), 3)
+        self.assertEqual(len(services), 4)
         for service in services:
             self.assertRegex(service, r'deployment_circuit_breaker\s*\{\s*enable\s*=\s*true\s*rollback\s*=\s*true')
         self.assertIn('.services[0].taskDefinition == $definition', DEPLOY)

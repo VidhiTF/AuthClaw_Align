@@ -83,6 +83,8 @@ module "primary" {
   public_url_environment               = var.public_url_environment
   alb_access_log_retention_days        = var.edge_log_retention_days
   edge_alarm_action_arns               = var.edge_alarm_action_arns
+  quota_alert_sns_topic_arns           = lookup(var.quota_alert_sns_topic_arns, "primary", [])
+  quota_metrics_collector_image        = var.quota_metrics_collector_image
   smtp_host                            = var.smtp_host
   smtp_from                            = var.smtp_from
   kafka_brokers                        = var.kafka_brokers
@@ -173,6 +175,8 @@ module "secondary" {
   public_url_environment               = var.public_url_environment
   alb_access_log_retention_days        = var.edge_log_retention_days
   edge_alarm_action_arns               = var.edge_alarm_action_arns
+  quota_alert_sns_topic_arns           = lookup(var.quota_alert_sns_topic_arns, "secondary", [])
+  quota_metrics_collector_image        = var.quota_metrics_collector_image
   smtp_host                            = var.smtp_host
   smtp_from                            = var.smtp_from
   kafka_brokers                        = var.kafka_brokers
