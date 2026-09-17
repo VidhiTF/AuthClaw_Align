@@ -39,7 +39,7 @@ resource "aws_iam_role_policy" "runtime" {
         Action   = ["sts:AssumeRole"]
         Resource = var.agent_customer_role_arns
       }] : statement if each.key == "agent" && length(var.agent_customer_role_arns) > 0],
-      lookup(local.direct_aws_statements, each.key == "database_crypto_preflight" ? "backend" : each.key, [])
+      lookup(local.direct_aws_statements, each.key, [])
     )
   })
 }
@@ -49,6 +49,7 @@ output "runtime_iam_review" {
     roles              = keys(aws_iam_role.runtime)
     customer_roles     = var.agent_customer_role_arns
     direct_permissions = local.direct_aws_statements
+    policies           = { for name, policy in aws_iam_role_policy.runtime : name => policy.policy }
     internal_urls = merge(local.internal_urls, {
       opa      = local.internal_opa_url
       presidio = local.internal_presidio_url

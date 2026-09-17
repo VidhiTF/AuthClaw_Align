@@ -57,10 +57,12 @@ locals {
     { name = "AUTHCLAW_AWS_ROLE_ARN", value = var.direct_aws.document_role_arn },
     { name = "AUTHCLAW_AWS_EXTERNAL_ID", value = var.direct_aws.document_external_id }
   ]
+  backend_kms_statements = [for statement in [{
+    Effect = "Allow", Action = ["kms:Decrypt"], Resource = values(var.direct_aws.backend_kms_versions)
+  }] : statement if local.backend_kms_enabled]
   direct_aws_statements = {
-    backend = concat([for statement in [{
-      Effect = "Allow", Action = ["kms:Decrypt"], Resource = values(var.direct_aws.backend_kms_versions)
-      }] : statement if local.backend_kms_enabled], [for statement in [{
+    database_crypto_preflight = local.backend_kms_statements
+    backend = concat(local.backend_kms_statements, [for statement in [{
       Effect    = "Allow", Action = ["s3:GetObject", "s3:DeleteObject"],
       Resource  = local.backend_evidence_deletion_statement.Resource
       Condition = { Bool = { "aws:SecureTransport" = "true" } }

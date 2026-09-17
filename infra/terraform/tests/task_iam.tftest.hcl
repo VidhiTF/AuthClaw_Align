@@ -280,6 +280,7 @@ run "policy_sidecars_are_task_local_when_enabled" {
 run "tls_and_direct_aws_are_scoped" {
   command = plan
   variables {
+    runtime_s3_bucket_arns = { backend = ["arn:aws:s3:::backend-evidence-test"] }
     # New writes use env v2; retained KMS v1 reads must remain independently configurable.
     secret_key_version       = "v2"
     authclaw_env             = "production"
@@ -328,6 +329,24 @@ run "tls_and_direct_aws_are_scoped" {
       [for statement in statements : !contains(tolist(statement.Resource), "*")]
     ])) && contains(output.runtime_iam_review.roles, "database_crypto_preflight")
     error_message = "Optional AWS grants must remain exact-resource, including the crypto preflight role."
+  }
+  assert {
+    condition = toset(flatten([
+      for statement in jsondecode(output.runtime_iam_review.policies.database_crypto_preflight).Statement :
+      statement.Action if statement.Effect == "Allow"
+    ])) == toset(["kms:Decrypt"])
+    error_message = "Crypto preflight must retain KMS decrypt without inheriting backend S3 access."
+  }
+  assert {
+    condition = alltrue([for role in ["backend", "database_crypto_preflight"] :
+      toset(flatten([for statement in jsondecode(output.runtime_iam_review.policies[role]).Statement :
+        statement.Resource if statement.Effect == "Allow" && contains(statement.Action, "kms:Decrypt")
+      ])) == toset(["arn:aws:kms:us-east-1:123456789012:key/backend"])
+      ]) && toset(flatten([
+        for statement in jsondecode(output.runtime_iam_review.policies.backend).Statement :
+        statement.Action if statement.Effect == "Allow"
+    ])) == toset(["kms:Decrypt", "s3:GetObject", "s3:DeleteObject"])
+    error_message = "Backend evidence access and both roles' exact KMS decrypt grants must remain intact."
   }
 }
 
