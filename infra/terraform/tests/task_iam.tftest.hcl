@@ -92,6 +92,12 @@ run "execution_roles_only_receive_their_task_secrets" {
     ])
     error_message = "Worker HMAC must be injected only into backend and worker preflight."
   }
+  assert {
+    condition = alltrue([for name, review in output.execution_iam_review :
+      contains(review.secret_names, "AUTHCLAW_INTERNAL_SERVICE_SECRET") == contains(["console", "agent"], name)
+    ])
+    error_message = "Service signing keys must only reach the console sender and agent verifier."
+  }
 
   assert {
     condition     = output.runtime_iam_review.sidecars_isolated

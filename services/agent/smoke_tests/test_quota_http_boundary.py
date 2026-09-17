@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 import unittest
 import types
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import uuid
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
@@ -49,6 +49,7 @@ def boundary_namespace():
         "monitor_metrics_snapshot": monitor_metrics_snapshot,
         "record_unavailable": quota.record_unavailable,
         "QuotaUnavailable": quota.QuotaUnavailable,
+        "authenticate_control_plane": AsyncMock(return_value=None),
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
     return namespace
@@ -74,7 +75,6 @@ class QuotaHTTPBoundaryTests(unittest.TestCase):
         self.calls = []
         self.app = FastAPI()
         self.app.middleware("http")(self.ns["tenant_database_context_middleware"])
-        self.app.middleware("http")(self.ns["production_rbac_enforcement_middleware"])
         self.app.add_exception_handler(quota.QuotaExceeded, self.ns["quota_exceeded_response"])
         self.app.add_exception_handler(quota.QuotaUnavailable, self.ns["quota_unavailable_response"])
 

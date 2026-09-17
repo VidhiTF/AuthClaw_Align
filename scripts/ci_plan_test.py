@@ -10,6 +10,10 @@ from scripts.ci_plan import HEAVY_JOBS, changed_paths, plan, verify
 
 
 class CIPlanTests(unittest.TestCase):
+    def test_console_signing_changes_run_agent_interoperability(self):
+        for path in ("console/src/lib/control-plane-auth.ts", "console/src/lib/api-client.ts"):
+            self.assertIn("agent", self.expected("pull_request", [path]))
+
     def test_review_events_recheck_the_same_pr_plan_without_release(self):
         for paths in (["README.md"], ["gateway/main.go"], ["scripts/repository_policy.py"]):
             self.assertEqual(plan("pull_request_review", paths, release_enabled=True),

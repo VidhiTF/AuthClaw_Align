@@ -131,6 +131,9 @@ def test_actual_agent_middleware_audits_and_fails_closed(
         if getattr(n, "name", "") == "tenant_database_context_middleware"
     )
     node.decorator_list = []
+    async def unsigned(request):
+        return None
+
     admission = []
 
     class QuotaExceeded(Exception):
@@ -140,10 +143,12 @@ def test_actual_agent_middleware_audits_and_fails_closed(
         pass
 
     namespace = {
+        "authenticate_control_plane": unsigned,
         "Request": Request,
         "JSONResponse": JSONResponse,
         "HTTPException": HTTPException,
         "_is_public_or_auth_path": lambda p: False,
+        "_rbac_enforcement_enabled": lambda: False,
         "_tenant_id_from_request_headers": lambda r: 1,
         "_tenant_tier_limit": lambda tenant_id: 100,
         "admit": lambda *args, **kwargs: admission.append((args, kwargs)),

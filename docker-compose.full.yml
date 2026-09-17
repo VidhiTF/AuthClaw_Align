@@ -459,7 +459,7 @@ services:
       AUTHCLAW_JWT_KEY_VERSION: ${AUTHCLAW_JWT_KEY_VERSION:-v1}
       AUTHCLAW_REDACTION_SALT: ${AGENT_REDACTION_SALT:-authclaw-full-agent-redaction-salt-change-me}
       AUTHCLAW_OPA_POLICY_URL: http://opa:8181/v1/data/authclaw/policy/decision
-      AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-full-internal-service-secret-change-me}
+      AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-}
     ports:
       - "127.0.0.1:${AGENT_PORT:-8001}:8001"
 
@@ -521,7 +521,7 @@ services:
       AGENT_INTERNAL_URL: http://agent:8001
       AGENT_TIMEOUT_MS: ${AGENT_TIMEOUT_MS:-45000}
       AUTHCLAW_ENV: ${AUTHCLAW_ENV:-local}
-      AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-authclaw-full-internal-service-secret-change-me}
+      AUTHCLAW_INTERNAL_SERVICE_SECRET: ${AUTHCLAW_INTERNAL_SERVICE_SECRET:-}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
       NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL:-http://localhost:8080}
       NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3001}

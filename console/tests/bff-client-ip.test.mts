@@ -5,6 +5,7 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import ts from "typescript";
 import { bffClientIPHeaders } from "../src/lib/bff-client-ip.ts";
+import { controlPlaneHeaders } from "../src/lib/control-plane-auth.ts";
 
 function configure(t: TestContext) {
   const values = {
@@ -69,6 +70,7 @@ function publicRoutes(fetcher: typeof fetch) {
     return exports;
   }
   const client = load("lib/api-client.ts", {
+    "./control-plane-auth": { controlPlaneHeaders },
     crypto: { createHmac }, "next/headers": {}, "@/lib/cookie-options": {}, "./errors": {},
     "next/server": { NextResponse: { json: Response.json } }, "./bff-client-ip": { bffClientIPHeaders },
   });
