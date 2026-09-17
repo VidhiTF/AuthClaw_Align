@@ -99,7 +99,34 @@ The automated audit-contract cases passed. No production audit row is attached b
 - Audit consumer: **74 passed**; Kafka and SQS FIFO local transport rehearsals passed.
 - Repository policy tests: **121 passed**; Python SDK: **2 passed**; compose contract/configuration passed.
 - Gitleaks `v8.24.3`, Tokei line-budget gate, Python compile, and `git diff --check`: **passed**.
-- Gateway Go tests compiled, but Windows Application Control blocked execution of Go's generated temporary test executable. No gateway production file changed; the Linux PR check remains required and this local result is not claimed as a pass.
+- Gateway quota/security tests that do not require live Redis passed after placing the Go build cache in the writable test sandbox. Redis-backed gateway cases could not run locally because the Docker engine did not become responsive; the Linux PR check remains required and this local result is not claimed as a pass.
+
+## Post-master compatibility verification
+
+On 2026-09-17, `origin/master` advanced to `0103304` (PR #55, fail-closed
+tenant and provider quotas). That commit was merged into this PR branch as
+`73f20d0` before compatibility testing.
+
+- Git's `ort` strategy auto-merged all files with **no textual conflicts**.
+- The meaningful overlap was limited to `.env.full.example`,
+  `services/agent/database/migrations.py`, `services/agent/main.py`, and
+  `services/agent/startup/validation.py`.
+- Inspection confirmed that quota startup/configuration and request handling were
+  retained alongside ENT-022 tenant/request context, encrypted TOTP verification,
+  replay counters, lockout, and separation-of-duties enforcement.
+- Combined agent compatibility selection: **70 passed, 35 subtests passed**.
+  This selection exercised MFA authorization, quota service/HTTP/provider/
+  monitoring behavior, graph security, control-plane authentication, and audit
+  transport contracts in one merged runtime.
+- Focused backend ENT-022 and migration-chain selection: **8 passed**.
+- Console consumer contracts: **44 passed**; TypeScript checking passed.
+- Gateway non-Redis quota/security selection: **passed**.
+- Repository policy suite: **121 passed**; `git diff --check` passed.
+
+The local Redis/PostgreSQL integration rerun remains environment-limited because
+Docker Desktop started but its engine API did not become responsive. The PR's
+Linux CI jobs for Agent, Gateway, Backend PostgreSQL Integration, and Security
+Scans are therefore mandatory before reviewers approve the merged head.
 
 ## Deployment and rollback consequences
 
