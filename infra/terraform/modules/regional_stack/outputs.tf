@@ -217,6 +217,7 @@ output "secret_arns" {
     agent_encryption               = aws_secretsmanager_secret.agent_encryption.arn
     agent_redaction                = aws_secretsmanager_secret.agent_redaction.arn
     internal_service               = aws_secretsmanager_secret.internal_service.arn
+    quota_metrics                  = aws_secretsmanager_secret.quota_metrics.arn
     audit_producer                 = aws_secretsmanager_secret.audit_producer.arn
     jwt                            = aws_secretsmanager_secret.jwt.arn
     jwt_v2                         = aws_secretsmanager_secret.jwt_v2.arn

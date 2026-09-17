@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -17,17 +19,27 @@ import (
 var buildTarget = "unknown"
 
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("metrics") == "true" {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		fmt.Fprintf(w, "authclaw_quota_available %d\nauthclaw_quota_admitted_total %d\nauthclaw_quota_rejected_total %d\nauthclaw_quota_decisions_total %d\nauthclaw_quota_latency_seconds_sum %f\nauthclaw_quota_unavailable_total %d\nauthclaw_quota_ambiguous_total %d\n", quotaAvailable.Load(), quotaAdmitted.Load(), quotaRejected.Load(), quotaDecisions.Load(), float64(quotaLatencyMicros.Load())/1e6, rateLimitUnavailableTotal.Load(), rateLimitAmbiguousTotal.Load())
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "healthy",
 		"service": "authclaw-gateway",
 	})
+}
+
+func QuotaMetricsHandler(w http.ResponseWriter, r *http.Request) {
+	expected := strings.TrimSpace(os.Getenv("AUTHCLAW_QUOTA_METRICS_SECRET"))
+	if expected == "" {
+		writeGatewayError(w, http.StatusServiceUnavailable, "MetricsUnavailable", "Metrics authentication is unavailable.")
+		return
+	}
+	provided, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		writeGatewayError(w, http.StatusUnauthorized, "Unauthorized", "Metrics authentication failed.")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprintf(w, "authclaw_quota_available %d\nauthclaw_quota_admitted_total %d\nauthclaw_quota_rejected_total %d\nauthclaw_quota_decisions_total %d\nauthclaw_quota_latency_seconds_sum %f\nauthclaw_quota_unavailable_total %d\nauthclaw_quota_ambiguous_total %d\n", quotaAvailable.Load(), quotaAdmitted.Load(), quotaRejected.Load(), quotaDecisions.Load(), float64(quotaLatencyMicros.Load())/1e6, rateLimitUnavailableTotal.Load(), rateLimitAmbiguousTotal.Load())
 }
 
 func NewGatewayRouter(proxy http.Handler) http.Handler {
@@ -43,6 +55,7 @@ func newGatewayRouter(proxy http.Handler, auth, rateLimit gatewayMiddleware) htt
 	}
 	r.Use(middleware.Recoverer)
 	r.Get("/health", HealthHandler)
+	r.Get("/internal/metrics/quota", QuotaMetricsHandler)
 	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
 		if ValidateGatewayRateLimitConfig() != nil {
 			quotaAvailable.Store(0)

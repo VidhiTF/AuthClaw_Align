@@ -13,9 +13,11 @@ def main(path: str) -> int:
         "aws_prometheus_rule_group_namespace.quota": "aws_prometheus_rule_group_namespace",
         "aws_prometheus_alert_manager_definition.quota": "aws_prometheus_alert_manager_definition",
         "aws_iam_role.quota_alertmanager": "aws_iam_role",
+        "aws_secretsmanager_secret.quota_metrics": "aws_secretsmanager_secret",
         "aws_ecs_task_definition.quota_collector": "aws_ecs_task_definition",
         "aws_ecs_service.quota_collector": "aws_ecs_service",
         "aws_iam_role_policy.quota_collector": "aws_iam_role_policy",
+        "aws_iam_role_policy.quota_collector_execution": "aws_iam_role_policy",
         "aws_iam_role_policy.quota_alertmanager": "aws_iam_role_policy",
     }
     errors = [f"missing {address}" for address, kind in required.items()
@@ -29,6 +31,8 @@ def main(path: str) -> int:
     task_refs = references("aws_ecs_task_definition.quota_collector", "container_definitions")
     if "local.quota_collector_config" not in task_refs:
         errors.append("collector task does not use the quota scrape/remote-write configuration")
+    if "aws_secretsmanager_secret.quota_metrics.arn" not in task_refs:
+        errors.append("collector task does not inject the dedicated metrics credential")
     alert_refs = references("aws_prometheus_alert_manager_definition.quota", "definition")
     if not {"var.quota_alert_sns_topic_arns", "aws_iam_role.quota_alertmanager[0].arn"} <= alert_refs:
         errors.append("Alertmanager does not route through the approved SNS role and topics")
@@ -38,11 +42,23 @@ def main(path: str) -> int:
     remote_refs = references("aws_iam_role_policy.quota_collector", "policy")
     if "aws_prometheus_workspace.quota[0].arn" not in remote_refs:
         errors.append("collector remote-write IAM policy is not scoped to the quota workspace")
+    execution_refs = references("aws_iam_role_policy.quota_collector_execution", "policy")
+    if not {"aws_secretsmanager_secret.quota_metrics.arn", "aws_kms_key.main.arn"} <= execution_refs:
+        errors.append("collector execution policy cannot read only the KMS-protected metrics secret")
 
     changes = {change["address"]: change for change in plan.get("resource_changes", [])}
     alert_policy = changes.get("module.primary.aws_iam_role_policy.quota_alertmanager[0]", {}).get("change", {}).get("after", {}).get("policy", "")
     if "arn:aws:sns:" not in alert_policy or "sns:Publish" not in alert_policy:
         errors.append("planned Alertmanager role has no concrete SNS publish receiver")
+    # The collector definition is unknown in a real plan because it embeds
+    # resource ARNs. Verify its plan references above and its concrete scrape
+    # contract here; Terraform validate covers the surrounding HCL structure.
+    source = (Path(__file__).resolve().parents[1] / "infra" / "terraform" /
+              "modules" / "regional_stack" / "quota_observability.tf").read_text(encoding="utf-8")
+    if ("metrics_path    = \"/internal/metrics/quota\"" not in source or
+            'credentials = "$${env:AUTHCLAW_QUOTA_METRICS_SECRET}"' not in source or
+            '{ name = "AUTHCLAW_QUOTA_METRICS_SECRET", valueFrom = aws_secretsmanager_secret.quota_metrics.arn }' not in source):
+        errors.append("collector scrape is not authenticated against the internal quota metrics route")
 
     if errors:
         print("Quota observability plan invalid: " + "; ".join(errors), file=sys.stderr)

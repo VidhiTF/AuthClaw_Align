@@ -109,6 +109,12 @@ run "execution_roles_only_receive_their_task_secrets" {
     condition     = contains(output.execution_iam_review.backend.secret_names, "PLATFORM_AUTH_DATABASE_URL")
     error_message = "Backend platform authentication must use its dedicated credential."
   }
+  assert {
+    condition = alltrue([for name, review in output.execution_iam_review :
+      contains(review.secret_names, "AUTHCLAW_QUOTA_METRICS_SECRET") == contains(["gateway", "agent"], name)
+    ])
+    error_message = "Only gateway and agent may receive the dedicated quota metrics credential."
+  }
 
   assert {
     condition = toset(flatten([for statement in jsondecode(output.execution_iam_review.console.policy).Statement :

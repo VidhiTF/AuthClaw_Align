@@ -36,6 +36,13 @@ var providerProxyTransport = providerReadTimeout(func() http.RoundTripper {
 	return configureProviderTransport(clone)
 }(), 30*time.Second)
 
+func admitProviderResources(quotaAdmission, budgetAdmission func() bool) bool {
+	if !quotaAdmission() {
+		return false
+	}
+	return budgetAdmission()
+}
+
 func NewProxyServer() *ProxyServer {
 	openAIBase := os.Getenv("OPENAI_BASE_URL")
 	if openAIBase == "" {
@@ -564,30 +571,6 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeGatewayError(w, http.StatusForbidden, "Forbidden", reason)
 		return
 	}
-	// Runs AFTER OPA (which can also block on model whitelist).
-	// Checked here to prevent any AWS request when daily cap is exceeded.
-	if provider == ProviderBedrock {
-		body, bodyErr := io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		if bodyErr != nil {
-			writeGatewayError(w, http.StatusBadRequest, "InvalidBody", "Unable to reserve request budget.")
-			return
-		}
-		if limitErr := ReserveBedrockUsage(r.Context(), tenantID, model, body); limitErr != nil {
-			if !emitRequiredDecision(w, r, &AuditEvent{
-				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
-				TenantID: tenantID, PolicyID: policyID, Action: "block",
-				DecisionReason: "Bedrock budget unavailable or exhausted", Provider: provider, Model: model,
-				PromptCount: promptCount, RequestSize: int(r.ContentLength),
-				ResponseStatus: http.StatusTooManyRequests, DurationMs: 0,
-			}, "bedrock_limit_exceeded") {
-				return
-			}
-			writeGatewayError(w, http.StatusTooManyRequests, "BedrockLimitExceeded", "Bedrock budget unavailable or exhausted.")
-			return
-		}
-	}
-
 	target, err := url.Parse(targetURLStr)
 	if err != nil {
 		if !emitRequiredDecision(w, r, &AuditEvent{
@@ -714,7 +697,33 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Capture response status code
 	wrappedWriter := &responseWriter{ResponseWriter: w, status: http.StatusOK}
-	if !gatewayProviderQuota(wrappedWriter, r, provider, model) {
+	if !admitProviderResources(func() bool {
+		return gatewayProviderQuota(wrappedWriter, r, provider, model)
+	}, func() bool {
+		if provider != ProviderBedrock {
+			return true
+		}
+		body, bodyErr := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if bodyErr != nil {
+			writeGatewayError(wrappedWriter, http.StatusBadRequest, "InvalidBody", "Unable to reserve request budget.")
+			return false
+		}
+		if limitErr := ReserveBedrockUsage(r.Context(), tenantID, model, body); limitErr != nil {
+			if !emitRequiredDecision(wrappedWriter, r, &AuditEvent{
+				ID: generateID(), RequestID: requestID, Timestamp: time.Now(),
+				TenantID: tenantID, PolicyID: policyID, Action: "block",
+				DecisionReason: "Bedrock budget unavailable or exhausted", Provider: provider, Model: model,
+				PromptCount: promptCount, RequestSize: int(r.ContentLength),
+				ResponseStatus: http.StatusTooManyRequests, DurationMs: 0,
+			}, "bedrock_limit_exceeded") {
+				return false
+			}
+			writeGatewayError(wrappedWriter, http.StatusTooManyRequests, "BedrockLimitExceeded", "Bedrock budget unavailable or exhausted.")
+			return false
+		}
+		return true
+	}) {
 		return
 	}
 	proxy.ServeHTTP(wrappedWriter, r)

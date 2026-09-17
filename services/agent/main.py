@@ -206,17 +206,17 @@ def _gateway_runtime_path(path: str) -> bool:
 
 def _tenant_tier_limit(tenant_id: int) -> int:
     from database import engine
-    from services.tenant_plan_service import PLAN_LIMITS
+    from services.tenant_plan_service import PLAN_LIMITS, resolve_tenant_plan
     with engine.connect() as conn:
         row = conn.execute(
-            text("SELECT COALESCE(subscription_tier, plan, tier, '') FROM tenants WHERE id = :tenant_id"),
+            text("SELECT subscription_tier, plan, tier FROM tenants WHERE id = :tenant_id"),
             {"tenant_id": tenant_id},
         ).fetchone()
-    tier = str(row[0]).strip().lower() if row else ""
-    tier = {"pro": "professional"}.get(tier, tier)
-    if tier not in PLAN_LIMITS:
+    try:
+        tier = resolve_tenant_plan(*(row or ()))
+    except ValueError as exc:
         record_unavailable()
-        raise QuotaUnavailable("Tenant plan unavailable")
+        raise QuotaUnavailable("Tenant plan unavailable") from exc
     limit = int(os.getenv(f"AUTHCLAW_RATE_LIMIT_{tier.upper()}_RPM", PLAN_LIMITS[tier]["requests_per_minute"]))
     if limit <= 0:
         record_unavailable()
@@ -449,6 +449,7 @@ def _is_public_or_auth_path(path: str) -> bool:
         "/health/ready",
         "/api/v1/agent/health",
         "/api/v1/agent/health/ready",
+        "/internal/metrics/quota",
         "/favicon.ico",
     }
     return path in public_exact or path.startswith(("/auth/", "/static/", "/assets/"))
@@ -2169,30 +2170,39 @@ def reload_policies_endpoint():
 
 @app.get("/api/v1/agent/health")
 @app.get("/health")
-def get_health(metrics: bool = False):
-    if metrics:
-        snapshot = metrics_snapshot()
-        names = {
-            "available": "authclaw_quota_available",
-            "admitted": "authclaw_quota_admitted_total",
-            "rejected": "authclaw_quota_rejected_total",
-            "unavailable": "authclaw_quota_unavailable_total",
-            "ambiguous": "authclaw_quota_ambiguous_total",
-            "latency_seconds": "authclaw_quota_latency_seconds_sum",
-            "decisions": "authclaw_quota_decisions_total",
-        }
-        lines = [f"{name} {snapshot[key]}\n" for key, name in names.items()]
-        monitor = monitor_metrics_snapshot()
-        lines.extend([
-            f"authclaw_document_monitor_enabled {monitor['enabled']}\n",
-            f"authclaw_document_monitor_healthy {monitor['healthy']}\n",
-            f"authclaw_document_monitor_failures_total {monitor['failures_total']}\n",
-            f"authclaw_document_monitor_last_success_timestamp_seconds {monitor['last_success_timestamp_seconds']}\n",
-        ])
-        return Response("".join(lines), media_type="text/plain; version=0.0.4")
+def get_health():
     return {
         "status": "healthy"
     }
+
+
+@app.get("/internal/metrics/quota", include_in_schema=False)
+def get_quota_metrics(authorization: str = Header(None)):
+    expected = os.getenv("AUTHCLAW_QUOTA_METRICS_SECRET", "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="Metrics authentication unavailable.")
+    scheme, _, provided = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Metrics authentication failed.")
+    snapshot = metrics_snapshot()
+    names = {
+        "available": "authclaw_quota_available",
+        "admitted": "authclaw_quota_admitted_total",
+        "rejected": "authclaw_quota_rejected_total",
+        "unavailable": "authclaw_quota_unavailable_total",
+        "ambiguous": "authclaw_quota_ambiguous_total",
+        "latency_seconds": "authclaw_quota_latency_seconds_sum",
+        "decisions": "authclaw_quota_decisions_total",
+    }
+    lines = [f"{name} {snapshot[key]}\n" for key, name in names.items()]
+    monitor = monitor_metrics_snapshot()
+    lines.extend([
+        f"authclaw_document_monitor_enabled {monitor['enabled']}\n",
+        f"authclaw_document_monitor_healthy {monitor['healthy']}\n",
+        f"authclaw_document_monitor_failures_total {monitor['failures_total']}\n",
+        f"authclaw_document_monitor_last_success_timestamp_seconds {monitor['last_success_timestamp_seconds']}\n",
+    ])
+    return Response("".join(lines), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/health/details")
@@ -4964,9 +4974,13 @@ def activate_verified_registration(conn, registration) -> int:
         text("""
             INSERT INTO tenants (
                 name, domain, email, email_verified, domain_verified,
-                email_verification_token, domain_verification_token, totp_secret
+                email_verification_token, domain_verification_token, totp_secret,
+                subscription_tier, plan, tier, plan_updated_at
             )
-            VALUES (:name, :domain, :email, true, true, NULL, :domain_token, :totp)
+            VALUES (
+                :name, :domain, :email, true, true, NULL, :domain_token, :totp,
+                'free', 'free', 'free', NOW()
+            )
             RETURNING id
         """),
         {

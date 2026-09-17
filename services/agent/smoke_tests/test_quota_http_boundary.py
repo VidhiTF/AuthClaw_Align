@@ -7,6 +7,7 @@ import ast
 import hashlib
 import importlib.util
 import os
+import secrets
 from pathlib import Path
 import sys
 import unittest
@@ -14,7 +15,7 @@ import types
 from unittest.mock import MagicMock, Mock, patch
 import uuid
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
@@ -28,6 +29,7 @@ def boundary_namespace():
     names = {
         "_is_public_or_auth_path", "_tenant_id_from_request_headers",
         "tenant_database_context_middleware", "get_health", "get_readiness",
+        "get_quota_metrics",
         "_tenant_tier_limit", "quota_exceeded_response", "quota_unavailable_response",
         "production_rbac_enforcement_middleware",
     }
@@ -37,9 +39,11 @@ def boundary_namespace():
     for node in nodes:
         node.decorator_list = []
     namespace = {
-        "Request": Request, "Response": Response, "HTTPException": HTTPException,
+        "Request": Request, "Response": Response, "Header": Header,
+        "HTTPException": HTTPException,
         "JSONResponse": JSONResponse, "Optional": __import__("typing").Optional,
-        "os": os, "uuid": uuid, "hashlib": hashlib, "tenant_context": tenant_context,
+        "os": os, "secrets": secrets, "uuid": uuid, "hashlib": hashlib,
+        "tenant_context": tenant_context,
         "admit": quota.admit, "check_available": quota.check_available,
         "metrics_snapshot": quota.metrics_snapshot, "QuotaExceeded": quota.QuotaExceeded,
         "monitor_metrics_snapshot": monitor_metrics_snapshot,
@@ -87,6 +91,7 @@ class QuotaHTTPBoundaryTests(unittest.TestCase):
             self.app.add_api_route(path, handler, methods=["POST"])
         self.app.add_api_route("/health", self.ns["get_health"])
         self.app.add_api_route("/health/ready", self.ns["get_readiness"])
+        self.app.add_api_route("/internal/metrics/quota", self.ns["get_quota_metrics"])
         self.client = TestClient(self.app, raise_server_exceptions=False)
         self.headers = {"Authorization": "Bearer valid"}
 
@@ -154,14 +159,24 @@ class QuotaHTTPBoundaryTests(unittest.TestCase):
         self.assertIn("Retry-After", response.headers)
         self.assertEqual(self.calls, [])
 
-    def test_liveness_and_metrics_do_not_depend_on_database_or_redis(self):
+    def test_liveness_is_coarse_and_does_not_depend_on_database_or_redis(self):
         self.ns["admit"] = Mock(side_effect=RuntimeError("down"))
         self.ns["check_available"] = Mock(side_effect=RuntimeError("down"))
         self.assertEqual(self.client.get("/health").json(), {"status": "healthy"})
         response = self.client.get("/health?metrics=true")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("authclaw_quota_available", response.text)
+        self.assertEqual(response.json(), {"status": "healthy"})
         self.ns["check_available"].assert_not_called()
+
+    def test_quota_metrics_require_dedicated_service_secret(self):
+        self.assertEqual(self.client.get("/internal/metrics/quota").status_code, 503)
+        with patch.dict(os.environ, {"AUTHCLAW_QUOTA_METRICS_SECRET": "metrics-secret"}):
+            for token, status_code in ((None, 401), ("wrong", 401), ("metrics-secret", 200)):
+                headers = {} if token is None else {"Authorization": f"Bearer {token}"}
+                response = self.client.get("/internal/metrics/quota", headers=headers)
+                self.assertEqual(response.status_code, status_code)
+                if status_code == 200:
+                    self.assertIn("authclaw_quota_available", response.text)
 
     def test_provider_quota_status_is_not_converted_to_success(self):
         with patch.dict(os.environ, {quota.LIMITS["expensive_model"]: "1"}):
@@ -183,19 +198,26 @@ class QuotaHTTPBoundaryTests(unittest.TestCase):
         engine = MagicMock()
         conn = engine.connect.return_value.__enter__.return_value
         self.ns["text"] = lambda sql: sql
+        path = Path(__file__).resolve().parents[1] / "services/tenant_plan_service.py"
+        spec = importlib.util.spec_from_file_location("quota_plan_lookup_fixture", path)
+        plans = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"database": types.SimpleNamespace(engine=engine)}):
+            spec.loader.exec_module(plans)
         modules = {
             "database": types.SimpleNamespace(engine=engine),
-            "services.tenant_plan_service": types.SimpleNamespace(PLAN_LIMITS={
-                "free": {"requests_per_minute": 30}, "professional": {"requests_per_minute": 300},
-                "enterprise": {"requests_per_minute": 1200}}),
+            "services.tenant_plan_service": plans,
         }
         with patch.dict(sys.modules, modules):
-            for row in (None, (None,), ("unknown",), ("",)):
+            for row in (None, (None, None, None), ("unknown", None, None), ("", "", "")):
                 conn.execute.return_value.fetchone.return_value = row
                 with self.assertRaises(quota.QuotaUnavailable):
                     self.plan_lookup(7)
-            conn.execute.return_value.fetchone.return_value = ("free",)
+            conn.execute.return_value.fetchone.return_value = ("free", None, None)
             self.assertEqual(self.plan_lookup(7), 30)
+            conn.execute.return_value.fetchone.return_value = ("enterprise", "starter", "starter")
+            with patch.dict(os.environ, {"AUTHCLAW_RATE_LIMIT_PER_MINUTE": "1200"}):
+                self.assertEqual(self.plan_lookup(7), 60)
+            conn.execute.return_value.fetchone.return_value = ("free", None, None)
             for value in ("0", "-1", "bad"):
                 with patch.dict(os.environ, {"AUTHCLAW_RATE_LIMIT_FREE_RPM": value}):
                     with self.assertRaises((quota.QuotaUnavailable, ValueError)):
@@ -214,10 +236,32 @@ class QuotaHTTPBoundaryTests(unittest.TestCase):
         for plan in ("", "unknown"):
             with self.assertRaises(ValueError):
                 service._limits(plan)
+        with self.assertRaises(ValueError):
+            plans.resolve_tenant_plan(None, "", None)
+        self.assertEqual(
+            plans.resolve_tenant_plan("enterprise", "starter", "starter"),
+            "starter",
+        )
         self.assertEqual(service._limits("free")["requests_per_minute"], 30)
         for limit in ("0", "-1", "not-a-limit"):
             with patch.dict(os.environ, {"AUTHCLAW_RATE_LIMIT_FREE_RPM": limit}), self.assertRaises(ValueError):
                 service._limits("free")
+
+    def test_plan_schema_has_no_implicit_enterprise_and_registration_is_explicit(self):
+        migrations = (
+            Path(__file__).resolve().parents[1] / "database/migrations.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("VARCHAR(50) DEFAULT 'enterprise'", migrations)
+        for column in ("subscription_tier", "plan", "tier"):
+            self.assertIn(f"ALTER COLUMN {column} DROP DEFAULT", migrations)
+
+        main = (Path(__file__).resolve().parents[1] / "main.py").read_text(
+            encoding="utf-8"
+        )
+        registration = main[main.index("def activate_verified_registration"):]
+        registration = registration[:registration.index("def ", 10)]
+        self.assertIn("subscription_tier, plan, tier, plan_updated_at", registration)
+        self.assertIn("'free', 'free', 'free', NOW()", registration)
 
 
 if __name__ == "__main__":

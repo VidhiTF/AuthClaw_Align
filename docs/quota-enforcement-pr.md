@@ -51,12 +51,17 @@ budget. Independent human release acceptance is still required.
 
 ## Schema and rolling-deployment compatibility
 
-No database schema migration. Reuse the existing tenant `control_plane_id` binding
-to share the provider ledger across agent and Go. Unmapped agent-local tenants
-use `agent:<id>` to prevent identifier collisions. New multi-counter Redis keys
-use a SHA256 tenant hash tag and expire 60 seconds after first admission.
-Denials do not increment the new ledger. Legacy Go edge attempt counters remain
-separate and retain their original denied-attempt accounting.
+The startup migration removes legacy enterprise defaults from all tenant plan
+columns. It reconciles valid conflicting values to the least privileged plan and
+revokes untracked all-enterprise values that cannot prove an entitlement. New
+registrations explicitly receive the free plan. Operators must re-authorize
+revoked enterprise tenants through the audited plan update before reopening
+traffic. Reuse the existing tenant `control_plane_id` binding to share the
+provider ledger across agent and Go. Unmapped agent-local tenants use `agent:<id>`
+to prevent identifier collisions. New multi-counter Redis keys use a SHA256
+tenant hash tag and expire 60 seconds after first admission. Denials do not
+increment the new ledger. Legacy Go edge attempt counters remain separate and
+retain their original denied-attempt accounting.
 
 Drain protected traffic, replace all old replicas, verify readiness, wait out
 the former window, then reopen gradually. Mixed versions can bypass or disagree
@@ -96,13 +101,15 @@ Shared environments require distributed limiting, valid positive limits and
 Redis TLS except loopback sidecars; memory fallback is explicit isolated use.
 250 ms socket/connect limits and disabled Redis retries bound ambiguous writes.
 Metrics have no tenant, user, key, or model labels and health scrapes do not
-access the database or Redis. No production credentials were added.
+access the database or Redis. Quota telemetry moved off public health routes to
+an exact internal endpoint authenticated with a dedicated KMS-protected scrape
+credential.
 
 ## Material line-growth exception
 
 This change exceeds 100 positive added lines across production, tests and tooling.
-The final worktree has 855 production lines added and 217 removed. Positive
-non-prose growth is 3,297 lines including tests, configuration, tooling and raw
+The final worktree has 982 production lines added and 258 removed. Positive
+non-prose growth is 3,532 lines including tests, configuration, tooling and raw
 evidence; deletions in other files do not offset this policy measure.
 Atomic admission, independent failure tests, and operational rehearsal require
 growth; unrelated deletion cannot offset it. Final per-file counts are recorded
@@ -127,8 +134,8 @@ See the [work record](quota-enforcement-evidence.md) and component evidence for
 commands, results, and limitations. The original HEAD middleware was executed
 with injected downstream and Redis failures to characterize the bypass. New
 ASGI tests execute the actual selected production boundary definitions with
-authentication/database seams isolated; 17 merged evidence tests pass. Provider tests
-assert zero calls on
+authentication/database seams isolated; 48 focused agent quota tests pass.
+Provider tests assert zero calls on
 denial and one on success. Real Redis tests cover atomicity, expiry, corrupt
 state, timeouts, recovery, and concurrent independent clients.
 
@@ -138,10 +145,11 @@ They preserved quota bounds but the busy local Docker host caused substantial
 Full deployed database-backed gateway/agent load and final CI remain required.
 The alert rehearsal uses unchanged Prometheus rules and an approved local
 receiver; final firing/resolution evidence is retained separately.
-Terraform validation, all 20 native tests, and a complete synthetic deployment plan verify the managed
-workspace, scrape discovery, rule installation, remote-write IAM, Alertmanager,
-exact-workspace role trust, and concrete SNS route. No shared AWS apply or
-production SNS delivery is claimed.
+Terraform validation, all 20 native tests, and a complete synthetic deployment
+plan verify the managed workspace, scrape discovery, rule installation,
+remote-write IAM, Alertmanager, exact-workspace role trust, authenticated
+scrape-secret isolation, and concrete SNS route. No shared AWS apply or production
+SNS delivery is claimed.
 
 ## Risk
 

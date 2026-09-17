@@ -53,6 +53,7 @@ PUBLIC_PATHS = [
     "GET /health/ready",
     "GET /api/v1/agent/health",
     "GET /api/v1/agent/health/ready",
+    "GET /internal/metrics/quota",
     "POST /audit/export/verify",
     "GET /trust/public",
     "GET /trust/public/health",

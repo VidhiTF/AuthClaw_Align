@@ -31,9 +31,10 @@ Containers and their private network are removed on normal completion/failure.
 
 Rule tests include unavailability pending/firing/recovery, sustained rejection
 firing/recovery, exact 20% threshold without firing, and idle zero-denominator
-traffic without firing. The production scrape target must configure the existing
-`/health?metrics=true` endpoint; this rehearsal intentionally uses controlled
-metrics and does not install a production receiver or scrape configuration.
+traffic without firing. The production scrape target uses the exact
+`/internal/metrics/quota` endpoint with its dedicated bearer credential; this
+rehearsal intentionally uses controlled metrics and does not install a production
+receiver or scrape configuration.
 
 Observed rehearsal adjustment: Docker Desktop filesystem/scheduling delays caused
 missed 2-second and 10-second scrapes during concurrent test load. The rehearsal
@@ -65,10 +66,11 @@ All three containers and the isolated Docker network were removed after success.
 
 Review follow-up wires the checked-in rules into a regional Amazon Managed
 Prometheus workspace. A dedicated ECS OpenTelemetry collector discovers every
-gateway and agent task through private DNS, scrapes `/health?metrics=true`, and
-uses SigV4 remote write. Managed Alertmanager assumes an IAM role whose trust is
-bound to the exact quota workspace and whose policy permits only explicitly
-configured regional SNS topics.
+gateway and agent task through private DNS, scrapes the authenticated
+`/internal/metrics/quota` endpoint, and uses SigV4 remote write. Its execution
+role can read only the KMS-protected scrape credential. Managed Alertmanager
+assumes an IAM role whose trust is bound to the exact quota workspace and whose
+policy permits only explicitly configured regional SNS topics.
 Staging and production plans fail when no approved receiver is configured.
 
 Terraform 1.15.7 with AWS provider 5.100.0 validated successfully. A synthetic

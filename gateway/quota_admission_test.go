@@ -241,7 +241,10 @@ func TestLegacyRateLimitRejectionFeedsQuotaAlertMetrics(t *testing.T) {
 		t.Fatalf("rejected delta=%d decisions delta=%d", quotaRejected.Load()-beforeRejected, quotaDecisions.Load()-beforeDecisions)
 	}
 	metrics := httptest.NewRecorder()
-	HealthHandler(metrics, httptest.NewRequest("GET", "/health?metrics=true", nil))
+	t.Setenv("AUTHCLAW_QUOTA_METRICS_SECRET", "metrics-test-secret")
+	metricsRequest := httptest.NewRequest("GET", "/internal/metrics/quota", nil)
+	metricsRequest.Header.Set("Authorization", "Bearer metrics-test-secret")
+	QuotaMetricsHandler(metrics, metricsRequest)
 	if !strings.Contains(metrics.Body.String(), fmt.Sprintf("authclaw_quota_rejected_total %d", beforeRejected+1)) {
 		t.Fatal("legacy rejection was not exported to the quota alert metric")
 	}

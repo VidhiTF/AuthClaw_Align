@@ -53,12 +53,17 @@ Gateway counters remain separate edge-abuse controls, not canonical ingress.
 
 ## Schema and rolling-deployment compatibility
 
-No database schema changes. Atomic multidimension admission requires a new
-Redis tenant hash tag and key namespace; old tenant counters lack a Cluster hash
-tag and cannot safely join the script. Drain protected traffic, replace all old
-replicas, verify readiness, wait at least the old quota window before reopening.
-Do not run a mixed fleet or claim preserved windows. Quota outages return 503;
-clients should use bounded exponential backoff with jitter and Retry-After.
+The tenant-plan migration removes implicit enterprise defaults, reconciles valid
+legacy columns to their least privileged value, and revokes untracked
+all-enterprise rows whose entitlement cannot be proven. New registrations set an
+explicit free plan. Operators must review and explicitly re-authorize revoked
+enterprise tenants before reopening traffic. Atomic multidimension admission
+requires a new Redis tenant hash tag and key namespace; old tenant counters lack
+a Cluster hash tag and cannot safely join the script. Drain protected traffic,
+replace all old replicas, verify readiness, wait at least the old quota window
+before reopening. Do not run a mixed fleet or claim preserved windows. Quota
+outages return 503; clients should use bounded exponential backoff with jitter
+and Retry-After.
 
 ## Risk
 
@@ -94,7 +99,7 @@ $env:QUOTA_TEST_REDIS_URL='redis://127.0.0.1:16379/0'
 .quota-venv/Scripts/python.exe -m unittest discover -s services/agent/smoke_tests -p 'test*quota*.py' -v
 ```
 
-The retained [agent test output](../evidence/quota/agent-tests.txt) passed 46 tests.
+The original retained [agent test output](../evidence/quota/agent-tests.txt) passed 46 tests.
 It includes real Redis 7.4.7,
 atomic multidimension admission, concurrent clients, corrupt/invalid Redis state,
 expiry, socket timeout before execution, dropped response after execution,
@@ -150,8 +155,12 @@ remote write, least-privilege Alertmanager SNS routing, and resolved delivery
 configuration. CI now inspects its own plan for this complete chain. The retained
 [plan summary](../evidence/quota/terraform-observability-plan.json) is deployment
 configuration evidence, not an AWS apply or production notification claim.
-The native Terraform test suite passed 19 tests with zero failures after adding
-explicit receivers to production-like fixtures and a safe disabled-resource path.
+The current focused agent run passed 48 tests after adding missing/unknown plan,
+least-privilege conflict, explicit registration, coarse liveness, and metrics
+authentication regressions. The native Terraform test suite passed 20 tests with
+zero failures, including exact scrape-secret isolation, production-like receiver
+fixtures, and the safe disabled-resource path. The rendered CI plan passed the
+repository observability assertion.
 
 The formal security diff scan completed with full scoped coverage and identified
 one low-severity wildcard AMP workspace trust in the new Alertmanager role. The
@@ -165,6 +174,19 @@ downstream call followed by a legacy denial and the exported alert numerator.
 Scheduled document monitoring is disabled by default and cannot start without an
 explicit positive tenant ID; enabled polls restore required tenant context,
 retry quota failures, and export status/failure/last-success metrics.
+
+The current review remediation rejects missing and unknown tenant plans instead
+of inheriting enterprise limits, resolves conflicting valid legacy columns to the
+least privileged value, and explicitly provisions new tenants as free. Provider
+quota admission now precedes Bedrock budget reservation, with a short-circuit
+test proving denial never reaches the budget admission seam. Public health routes
+remain coarse; quota telemetry requires the dedicated metrics bearer credential,
+and the rendered Terraform plan proves that only the collector, gateway, and
+agent receive the credential needed for scraping.
+The exact tenant-plan migration block also passed against disposable PostgreSQL
+17 fixtures: implicit enterprise was revoked, explicit timestamped enterprise was
+preserved, free and conflicting starter rows normalized to the least privileged
+plan, and missing or unknown plans received no entitlement.
 
 Checksum-verified Tokei 12.1.2 produced the full
 [line report](../evidence/quota/tokei.json); the root reran the repository checker

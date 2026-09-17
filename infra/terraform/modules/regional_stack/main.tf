@@ -873,6 +873,12 @@ resource "aws_secretsmanager_secret" "internal_service" {
   tags       = var.tags
 }
 
+resource "aws_secretsmanager_secret" "quota_metrics" {
+  name       = "${var.name}/quota-metrics-secret"
+  kms_key_id = aws_kms_key.main.arn
+  tags       = var.tags
+}
+
 removed {
   from = aws_secretsmanager_secret_version.internal_service
   lifecycle {
@@ -997,6 +1003,7 @@ locals {
     aws_secretsmanager_secret.agent_migration_database_url.arn,
     aws_secretsmanager_secret.agent_database_url.arn,
     aws_secretsmanager_secret.internal_service.arn,
+    aws_secretsmanager_secret.quota_metrics.arn,
     aws_secretsmanager_secret.audit_producer.arn,
     aws_secretsmanager_secret.bff_client_ip.arn,
     aws_secretsmanager_secret.oidc_bff_exchange.arn,

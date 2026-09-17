@@ -7,9 +7,12 @@ locals {
           scrape_configs = [for service in ["gateway", "agent"] : {
             job_name        = "authclaw-${service}-quota"
             scrape_interval = "15s"
-            metrics_path    = "/health"
-            params          = { metrics = ["true"] }
+            metrics_path    = "/internal/metrics/quota"
             scheme          = contains(local.tls_services, service) ? "https" : "http"
+            authorization = {
+              type        = "Bearer"
+              credentials = "$${env:AUTHCLAW_QUOTA_METRICS_SECRET}"
+            }
             dns_sd_configs = [{
               names = ["${service}.${local.namespace_name}"]
               type  = "A"
@@ -156,6 +159,20 @@ resource "aws_iam_role_policy" "quota_collector_execution" {
       Effect   = "Allow"
       Action   = ["ecr-public:GetAuthorizationToken", "sts:GetServiceBearerToken"]
       Resource = "*"
+      }, {
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = aws_secretsmanager_secret.quota_metrics.arn
+      }, {
+      Effect   = "Allow"
+      Action   = ["kms:Decrypt"]
+      Resource = aws_kms_key.main.arn
+      Condition = {
+        StringEquals = {
+          "kms:ViaService"                  = "secretsmanager.${var.region}.amazonaws.com"
+          "kms:EncryptionContext:SecretARN" = aws_secretsmanager_secret.quota_metrics.arn
+        }
+      }
     }]
   })
 }
@@ -208,6 +225,7 @@ resource "aws_ecs_task_definition" "quota_collector" {
     readonlyRootFilesystem = true
     privileged             = false
     environment            = [{ name = "AOT_CONFIG_CONTENT", value = local.quota_collector_config }]
+    secrets                = [{ name = "AUTHCLAW_QUOTA_METRICS_SECRET", valueFrom = aws_secretsmanager_secret.quota_metrics.arn }]
     mountPoints            = [{ sourceVolume = "collector-tmp", containerPath = "/tmp", readOnly = false }]
     linuxParameters = {
       initProcessEnabled = true

@@ -53,22 +53,27 @@ admission, rather than at wall-clock minute boundaries. Service principals share
 the tenant service-user dimension and must retain a verified key. Egress admission is independent
 of ingress consumption and happens immediately before proxy execution.
 
-The gateway additionally exposes process-local Prometheus counters at
-GET /health?metrics=true; this scrape performs no database or Redis request.
-The availability gauge starts at zero and changes on admission/readiness probes.
-Scrape /ready independently to refresh health during idle periods. There is no
-new unauthenticated /metrics or internal operational exemption.
+The gateway and agent expose process-local Prometheus counters only at exact
+GET /internal/metrics/quota. The route requires the dedicated
+AUTHCLAW_QUOTA_METRICS_SECRET bearer credential and performs no database or
+Redis request. Public health responses remain coarse even when a caller adds a
+metrics query parameter. The availability gauge starts at zero and changes on
+admission/readiness probes. Scrape /ready independently to refresh health during
+idle periods. The metrics credential grants no access to protected application
+work and must be populated before starting the collector or either service.
 
 Terraform provisions a regional Amazon Managed Prometheus workspace when
 `quota_alert_sns_topic_arns` contains an approved receiver. Its dedicated ECS
 collector discovers all gateway and agent replicas through private DNS, scrapes
-their exact liveness metric endpoints every 15 seconds, and remote-writes with a
-workspace-scoped IAM role. The checked-in quota rule file is installed as a rule
-group namespace. Managed Alertmanager publishes firing and resolved notices only
-to the configured region-local SNS topics, and only the exact quota workspace
-may assume its publishing role. Shared environments must provide a receiver; do
-not use cross-region topic ARNs. The collector has no application secrets or
-database access.
+their authenticated quota metric endpoints every 15 seconds, and remote-writes
+with a workspace-scoped IAM role. Terraform creates a KMS-protected metadata-only
+secret for the shared scrape credential; the external secret provisioner must
+populate AWSCURRENT. The checked-in quota rule file is installed as a rule group
+namespace. Managed Alertmanager publishes firing and resolved notices only to
+the configured region-local SNS topics, and only the exact quota workspace may
+assume its publishing role. Shared environments must provide a receiver; do not
+use cross-region topic ARNs. The collector receives only the scrape credential
+and has no application or database secret.
 
 Background document monitoring is disabled by default. Enabling it requires
 `AUTHCLAW_DISABLE_BACKGROUND_MONITOR=false` and a positive, deployment-approved
