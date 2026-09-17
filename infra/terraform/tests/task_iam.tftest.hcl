@@ -64,6 +64,7 @@ variables {
   enable_cross_region_db_replica = false
   primary_certificate_arn        = "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-4000-8000-000000000000"
   secondary_certificate_arn      = "arn:aws:acm:us-west-2:123456789012:certificate/00000000-0000-4000-8000-000000000001"
+  quota_alert_sns_topic_arns     = { primary = ["arn:aws:sns:us-east-1:123456789012:authclaw-quota-alerts"] }
   container_images = {
     agent          = "example.invalid/authclaw/agent:test"
     backend        = "example.invalid/authclaw/backend:test"

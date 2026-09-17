@@ -22,7 +22,7 @@ locals {
     processors = { batch = {} }
     exporters = {
       prometheusremotewrite = {
-        endpoint = "${aws_prometheus_workspace.quota[0].prometheus_endpoint}api/v1/remote_write"
+        endpoint = try("${aws_prometheus_workspace.quota[0].prometheus_endpoint}api/v1/remote_write", "")
         auth     = { authenticator = "sigv4auth" }
       }
     }

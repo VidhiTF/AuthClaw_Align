@@ -20,8 +20,9 @@
   "collector_behavior": "DNS discovers every gateway and agent task, scrapes /health?metrics=true every 15 seconds, and SigV4 remote-writes to the regional managed workspace",
   "routing_behavior": "Managed Alertmanager assumes a role restricted to the exact quota workspace and source account, then may publish only to configured regional SNS topic ARNs",
   "rule_sha256": "c50e467dd63be5ec0e758db15ba31517aa5860868f2bcadb6b09bf94c7447444",
-  "terraform_wiring_sha256": "a3299464675f1543393ae8f7fd319730da0707661949f0f691b230ec51c723d2",
+  "terraform_wiring_sha256": "bf5840e09bfe9b6b8cc3e53cf4d90eac24bc60daff6e2db1f10d8c2ff10bbe9f",
   "ci_assertion_sha256": "4cac0e220b4b7149cdf49e0e20e81f85a5dbd11e646ada1c24721b8090f03bb7",
   "ci_assertion": "scripts/assert_quota_observability_plan.py passed against the retained local plan, verifies exact-workspace trust, and is invoked by the Terraform CI job",
+  "native_tests": "terraform test: 19 passed, 0 failed, including production-like alert receiver fixtures and the disabled-observability path",
   "limitations": "This proves a complete provider-valid deployment graph and concrete test receiver. It does not claim an apply to a shared AWS account or delivery through a production SNS subscription."
 }

@@ -150,6 +150,8 @@ remote write, least-privilege Alertmanager SNS routing, and resolved delivery
 configuration. CI now inspects its own plan for this complete chain. The retained
 [plan summary](../evidence/quota/terraform-observability-plan.json) is deployment
 configuration evidence, not an AWS apply or production notification claim.
+The native Terraform test suite passed 19 tests with zero failures after adding
+explicit receivers to production-like fixtures and a safe disabled-resource path.
 
 The formal security diff scan completed with full scoped coverage and identified
 one low-severity wildcard AMP workspace trust in the new Alertmanager role. The

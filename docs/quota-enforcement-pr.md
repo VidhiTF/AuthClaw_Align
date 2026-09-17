@@ -102,7 +102,7 @@ access the database or Redis. No production credentials were added.
 
 This change exceeds 100 positive added lines across production, tests and tooling.
 The final worktree has 855 production lines added and 217 removed. Positive
-non-prose growth is 3,270 lines including tests, configuration, tooling and raw
+non-prose growth is 3,273 lines including tests, configuration, tooling and raw
 evidence; deletions in other files do not offset this policy measure.
 Atomic admission, independent failure tests, and operational rehearsal require
 growth; unrelated deletion cannot offset it. Final per-file counts are recorded

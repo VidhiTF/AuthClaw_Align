@@ -74,7 +74,9 @@ Staging and production plans fail when no approved receiver is configured.
 Terraform 1.15.7 with AWS provider 5.100.0 validated successfully. A synthetic
 offline plan with a test SNS receiver was complete and applyable, and the CI
 plan assertion verified the workspace, collector, rule namespace, remote-write
-policy, exact-workspace role trust, Alertmanager definition, and concrete SNS route. See
+policy, exact-workspace role trust, Alertmanager definition, and concrete SNS route.
+The native Terraform suite passed all 19 tests, including disabled-observability
+and production-like receiver fixtures. See
 `evidence/quota/terraform-observability-plan.json`. This plan was not applied;
 shared-account apply and SNS subscription delivery remain release evidence.
 
