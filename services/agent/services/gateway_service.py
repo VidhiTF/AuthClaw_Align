@@ -79,6 +79,7 @@ class GatewayService:
         )
         resolved_session_id = execution_context["session_id"]
         resolved_username = username or self._username_from_authorization(authorization)
+        requester_id = username or self._requester_id_from_authorization(authorization)
 
         start = time.perf_counter()
         token = set_agent_event_context(request_id)
@@ -87,6 +88,7 @@ class GatewayService:
                 {
                     "message": message,
                     "username": resolved_username,
+                    "requester_id": requester_id,
                     **execution_context,
                     "gateway_api_key": x_api_key,
                     "route_id": route_id,
@@ -395,3 +397,16 @@ class GatewayService:
         except Exception:
             pass
         return "admin_user"
+
+    def _requester_id_from_authorization(self, authorization: Optional[str]) -> Optional[str]:
+        if not authorization:
+            return None
+        token = authorization[7:] if authorization.startswith("Bearer ") else authorization
+        try:
+            payload = self.decode_jwt(token)
+            subject = payload.get("sub") if payload else None
+            if isinstance(subject, str) and subject.strip():
+                return subject.strip()
+        except Exception:
+            pass
+        return None

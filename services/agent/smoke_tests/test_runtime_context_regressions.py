@@ -29,7 +29,12 @@ class RuntimeContextRegressionTests(unittest.TestCase):
         observed = []
 
         def create_approval(**kwargs):
-            observed.append((get_current_tenant_id(), get_current_request_id(), is_tenant_context_required()))
+            observed.append((
+                get_current_tenant_id(),
+                get_current_request_id(),
+                is_tenant_context_required(),
+                kwargs["requested_by"],
+            ))
             return {"approval_id": "approval-test"}
 
         store = types.ModuleType("approval_store")
@@ -45,9 +50,13 @@ class RuntimeContextRegressionTests(unittest.TestCase):
                 result = module.approval_node({
                     "message": "Delete sensitive records", "risk_level": "HIGH",
                     "tenant_id": tenant_id, "request_id": f"req-{tenant_id}",
+                    "requester_id": f"oidc|requester-{tenant_id}",
                 })
                 self.assertEqual(result["approval_status"], "PENDING_APPROVAL")
-        self.assertEqual(observed, [("41", "req-41", True), ("82", "req-82", True)])
+        self.assertEqual(observed, [
+            ("41", "req-41", True, "oidc|requester-41"),
+            ("82", "req-82", True, "oidc|requester-82"),
+        ])
         self.assertIsNone(get_current_tenant_id())
 
 

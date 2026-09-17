@@ -33,9 +33,42 @@ class PersistentApprovalRecord(dict):
         self._persist_enabled = persist_enabled
 
     def __setitem__(self, key, value):
+        if key == "requested_by" and key in self and self[key] != value:
+            raise ValueError("Approval requester identity is immutable.")
         super().__setitem__(key, value)
         if getattr(self, "_persist_enabled", False):
             _persist_record(self)
+
+    def __delitem__(self, key):
+        if key == "requested_by":
+            raise ValueError("Approval requester identity is immutable.")
+        super().__delitem__(key)
+
+    def update(self, *args, **kwargs):
+        changes = dict(*args, **kwargs)
+        if "requested_by" in changes and self.get("requested_by") != changes["requested_by"]:
+            raise ValueError("Approval requester identity is immutable.")
+        for key, value in changes.items():
+            self[key] = value
+
+    def pop(self, key, *args):
+        if key == "requested_by":
+            raise ValueError("Approval requester identity is immutable.")
+        return super().pop(key, *args)
+
+    def popitem(self):
+        if self and next(reversed(self)) == "requested_by":
+            raise ValueError("Approval requester identity is immutable.")
+        return super().popitem()
+
+    def clear(self):
+        if "requested_by" in self:
+            raise ValueError("Approval requester identity is immutable.")
+        super().clear()
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -113,6 +146,7 @@ def _persist_record(record: dict) -> None:
                     """
                     INSERT INTO gateway_approvals (
                         approval_id, request_id, correlation_id, tenant_id, status,
+                        requested_by,
                         created_at, expires_at, approved_at, rejected_at, executed_at,
                         requested_action, query, risk_level, audit_id, reason, comments,
                         approved_by, rejected_by, executed_by, mfa_verified, last_action_at,
@@ -123,6 +157,7 @@ def _persist_record(record: dict) -> None:
                     )
                     VALUES (
                         :approval_id, :request_id, :correlation_id, :tenant_id, :status,
+                        :requested_by,
                         :created_at, :expires_at, :approved_at, :rejected_at, :executed_at,
                         :requested_action, :query, :risk_level, :audit_id, :reason, :comments,
                         :approved_by, :rejected_by, :executed_by, :mfa_verified, :last_action_at,
@@ -169,6 +204,7 @@ def _persist_record(record: dict) -> None:
                     "correlation_id": record.get("correlation_id"),
                     "tenant_id": record.get("tenant_id"),
                     "status": record.get("status"),
+                    "requested_by": record.get("requested_by"),
                     "created_at": _parse_optional_dt(record.get("created_at")),
                     "expires_at": _parse_optional_dt(record.get("expires_at")),
                     "approved_at": _parse_optional_dt(record.get("approved_at")),
@@ -222,6 +258,7 @@ def _row_to_record(row) -> PersistentApprovalRecord:
             "correlation_id": mapping.get("correlation_id"),
             "tenant_id": mapping.get("tenant_id"),
             "status": mapping.get("status"),
+            "requested_by": mapping.get("requested_by"),
             "created_at": as_iso(mapping.get("created_at")),
             "expires_at": as_iso(mapping.get("expires_at")),
             "approved_at": as_iso(mapping.get("approved_at")),
@@ -283,6 +320,10 @@ def _load_all_records(tenant_id: int = None) -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+class ApprovalCreationError(ValueError):
+    """Raised when an approval cannot be bound to an authenticated request."""
+
+
 def create_approval(
     query: str,
     risk_level: str,
@@ -297,15 +338,23 @@ def create_approval(
     Creates a new approval record, stores it, and returns it.
     Emits an approval_created audit event.
     """
+    requester_id = str(requested_by or "").strip()
+    request_context = str(request_id or "").strip()
+    if not requester_id:
+        raise ApprovalCreationError("Approval requester identity is required.")
+    if tenant_id is None:
+        raise ApprovalCreationError("Approval tenant context is required.")
+    if not request_context:
+        raise ApprovalCreationError("Approval request context is required.")
+
     approval_id = str(uuid.uuid4())
-    request_id = request_id or str(uuid.uuid4())
+    request_id = request_context
     correlation_id = session_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=_expiry_minutes())
 
     approval_metadata = dict(metadata or {})
-    if requested_by:
-        approval_metadata["requested_by"] = requested_by
+    approval_metadata["requested_by"] = requester_id
 
     record = PersistentApprovalRecord({
         "approval_id":       approval_id,
@@ -313,6 +362,7 @@ def create_approval(
         "correlation_id":    correlation_id,
         "tenant_id":         tenant_id,
         "status":            "pending",
+        "requested_by":      requester_id,
         "created_at":        now.isoformat(),
         "expires_at":        expires_at.isoformat(),
         "approved_at":       None,
@@ -345,7 +395,7 @@ def create_approval(
     append_approval_audit(
         record,
         action="created",
-        actor="system",
+        actor=requester_id,
         comment=f"Approval created for reason: {record['reason']}",
         metadata={"risk_level": risk_level, "expires_at": expires_at.isoformat()},
     )

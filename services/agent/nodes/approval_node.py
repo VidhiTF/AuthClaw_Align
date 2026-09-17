@@ -43,7 +43,7 @@ def approval_node(state: AuthState):
                 tenant_id=state.get("tenant_id"),
                 request_id=state.get("request_id"),
                 reason=reason,
-                requested_by=state.get("username"),
+                requested_by=state.get("requester_id"),
                 metadata={
                     "policy_decision": state.get("policy_decision"),
                     "security_policy_action": state.get("security_policy_action"),

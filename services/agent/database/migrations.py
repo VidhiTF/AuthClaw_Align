@@ -473,6 +473,7 @@ def run_startup_migrations():
         correlation_id VARCHAR(100),
         tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
         status VARCHAR(50) NOT NULL,
+        requested_by VARCHAR(255),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         expires_at TIMESTAMP,
         approved_at TIMESTAMP,
@@ -506,6 +507,7 @@ def run_startup_migrations():
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(100);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS status VARCHAR(50);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS requested_by VARCHAR(255);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP;

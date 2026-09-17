@@ -21,6 +21,7 @@ from sqlalchemy import text
 
 from graph import graph
 from approval_store import (
+    ApprovalCreationError,
     pending_approvals,
     approved_results,
     get_approval,
@@ -588,11 +589,22 @@ async def production_rbac_enforcement_middleware(request: Request, call_next):
     return await call_next(request)
 
 def approval_actor_from_payload(payload: dict) -> str:
-    return payload.get("email") or payload.get("sub") or "System Admin"
+    actor = payload.get("sub")
+    if not isinstance(actor, str) or not actor.strip():
+        raise HTTPException(status_code=401, detail="Immutable authenticated identity is required.")
+    return actor.strip()
+
+def approval_identity_aliases(payload: dict) -> set[str]:
+    aliases = set()
+    for claim in ("sub", "user_id", "email"):
+        value = payload.get(claim)
+        if isinstance(value, str) and value.strip():
+            aliases.add(value.strip().casefold())
+    return aliases
 
 def ensure_approval_tenant_access(record: dict, payload: dict) -> None:
     tenant_id = payload.get("tenant_id")
-    if tenant_id is not None and record.get("tenant_id") is not None and record.get("tenant_id") != tenant_id:
+    if tenant_id is None or record.get("tenant_id") is None or record.get("tenant_id") != tenant_id:
         raise HTTPException(status_code=404, detail="Approval ID not found")
 
 def approval_response_record(record: dict, tenant_id: int = None) -> dict:
@@ -1428,8 +1440,23 @@ async def approve_request(approval_id: str, request: Request):
     require_mfa = approval_policy.get("require_mfa", True)
     require_separate_approver = approval_policy.get("require_separate_approver", True)
 
-    requester = str((record.get("metadata") or {}).get("requested_by") or "").strip()
-    if require_separate_approver and requester and requester.casefold() == approver.casefold():
+    requester = str(
+        record.get("requested_by")
+        or (record.get("metadata") or {}).get("requested_by")
+        or ""
+    ).strip()
+    if not requester:
+        append_approval_audit(
+            record,
+            action="approval_identity_missing",
+            actor=approver,
+            metadata={"control": "requester_identity_required"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Approval requester identity is unavailable",
+        )
+    if require_separate_approver and requester.casefold() in approval_identity_aliases(user_payload):
         append_approval_audit(
             record,
             action="self_approval_rejected",
@@ -3042,6 +3069,7 @@ def resolve_document_record(conn, doc_id: int, tenant_id: int):
 
 @app.post("/documents/upload")
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     x_api_key: Optional[str] = Header(None),
     authorization: Optional[str] = Header(None)
@@ -3076,9 +3104,20 @@ async def upload_document(
     # 2. Run compliance scanning pipeline
     from document_processing.orchestrator import run_document_scan_pipeline
     try:
-        pipeline_res = run_document_scan_pipeline(doc_id, contents, filename, source="local", tenant_id=tenant_id)
+        principal = optional_user_from_request(request)
+        pipeline_res = run_document_scan_pipeline(
+            doc_id,
+            contents,
+            filename,
+            source="local",
+            tenant_id=tenant_id,
+            request_id=get_current_request_id() or f"document-{uuid.uuid4()}",
+            requested_by=principal.get("sub"),
+        )
     except (QuotaExceeded, QuotaUnavailable):
         raise
+    except ApprovalCreationError as ex:
+        raise HTTPException(status_code=401, detail=str(ex)) from ex
     except Exception as ex:
         # Fallback if pipeline fails (e.g. LLM issues) so document is still indexed
         logger.error(f"Scan pipeline failed, fallback indexing document: {ex}")
@@ -3362,6 +3401,7 @@ class DocumentScanRequest(BaseModel):
 @app.post("/documents/scan")
 def scan_document(
     req: DocumentScanRequest,
+    request: Request,
     x_api_key: Optional[str] = Header(None),
     authorization: Optional[str] = Header(None)
 ):
@@ -3409,7 +3449,19 @@ def scan_document(
             conn.commit()
             
     from document_processing.orchestrator import run_document_scan_pipeline
-    pipeline_res = run_document_scan_pipeline(d_id, text_content.encode("utf-8"), filename, source="local", tenant_id=tenant_id)
+    principal = optional_user_from_request(request)
+    try:
+        pipeline_res = run_document_scan_pipeline(
+            d_id,
+            text_content.encode("utf-8"),
+            filename,
+            source="local",
+            tenant_id=tenant_id,
+            request_id=get_current_request_id() or f"document-{uuid.uuid4()}",
+            requested_by=principal.get("sub"),
+        )
+    except ApprovalCreationError as ex:
+        raise HTTPException(status_code=401, detail=str(ex)) from ex
     return pipeline_res
 
 @app.get("/documents")
@@ -5168,9 +5220,10 @@ def get_cloud_connectors_status():
     }
 
 @app.post("/cloud/connectors/sync")
-def sync_cloud_connectors():
+def sync_cloud_connectors(request: Request):
     from document_processing.monitoring import trigger_manual_sync
-    res = trigger_manual_sync()
+    requested_by = approval_actor_from_payload(optional_user_from_request(request))
+    res = trigger_manual_sync(requested_by)
     return res
 
 # 10. ONBOARDING & TENANT MANAGEMENT ENDPOINTS

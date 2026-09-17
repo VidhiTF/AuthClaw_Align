@@ -35,7 +35,7 @@ class GraphMetadataContractTests(unittest.TestCase):
         inventoried = set().union(*GRAPH_STATE_CONTRACT.values())
         self.assertEqual(set(), inventoried - declared)
         for required in {
-            "username", "approval_reason", "policy_versions", "audit_record_id",
+            "username", "requester_id", "approval_reason", "policy_versions", "audit_record_id",
             "original_request_id", "provider_status", "provider_error",
         }:
             self.assertIn(required, declared)
@@ -86,6 +86,7 @@ class GraphMetadataContractTests(unittest.TestCase):
         result = workflow.compile().invoke({
             "message": "hello",
             "username": "signed-user@example.com",
+            "requester_id": "oidc|signed-user",
             "tenant_id": 42,
             "original_request_id": "req-original",
         })
@@ -108,10 +109,14 @@ class GraphMetadataContractTests(unittest.TestCase):
         sensitive = graph.invoke({
             "message": "sensitive", "risk_level": "HIGH",
             "security_policy_action": "require_approval",
+            "tenant_id": 42, "request_id": "request-sensitive",
+            "requester_id": "oidc|requester",
         })
         policy = graph.invoke({
             "message": "policy", "risk_level": "HIGH",
             "policy_decision": "REQUIRE_APPROVAL",
+            "tenant_id": 42, "request_id": "request-policy",
+            "requester_id": "oidc|requester",
         })
         self.assertEqual("sensitive_data", sensitive["approval_reason"])
         self.assertEqual("policy_violation", policy["approval_reason"])

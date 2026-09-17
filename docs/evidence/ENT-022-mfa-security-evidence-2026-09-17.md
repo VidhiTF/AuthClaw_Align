@@ -85,6 +85,8 @@ Implemented event paths:
 | `SELF_APPROVAL_REJECTED` | requesting actor | approval | `mfa_verified=false` | approval audit table |
 | `APPROVED` | separate approver | approval | verified flag and timestamp | approval audit table |
 | `mfa:replay_rejected` / cooldown / Redis failure | challenged user | challenged user | failure only | immutable audit outbox |
+| `approval_identity_missing` | authenticated approver | malformed/historical approval | not reached | approval audit table |
+| `self_approval_rejected` | canonical OIDC `sub` | approval requester | not reached | approval audit table |
 
 The automated audit-contract cases passed. No production audit row is attached because this branch was not deployed and no production action was performed.
 
@@ -128,10 +130,51 @@ Docker Desktop started but its engine API did not become responsive. The PR's
 Linux CI jobs for Agent, Gateway, Backend PostgreSQL Integration, and Security
 Scans are therefore mandatory before reviewers approve the merged head.
 
+## Agent separation-of-duties remediation verification
+
+A post-review finding identified two agent-side fail-open paths: missing
+requester context on document approvals and mismatched OIDC `email`/`sub`
+identity comparison. The remediation adds these controls:
+
+- approval creation rejects missing requester, tenant, or request context before
+  persistence;
+- new approvals persist canonical `requested_by` in a dedicated, non-updatable
+  field, while the metadata copy is retained only for historical compatibility;
+- approval decisions require a canonical OIDC `sub`, require exact non-null
+  tenant binding, reject requester-less historical records before MFA, and
+  compare the requester against authenticated `sub`, `user_id`, and `email`
+  aliases;
+- document upload/scan, remediation, and graph callers propagate authenticated
+  requester context; autonomous monitoring uses `service:document-monitor`;
+- a human-triggered connector sync propagates that human's `sub` and cannot be
+  attributed to the autonomous monitor service.
+
+Fresh pre-fix characterization produced **8 failures** covering canonical actor
+selection, missing-requester behavior, required creation context, and document
+override propagation. After remediation:
+
+- focused agent separation-of-duties and caller compatibility selection:
+  **39 passed, 19 subtests passed**;
+- exact Agent CI selection: **84 passed, 5 Redis-dependent tests skipped,
+  41 subtests passed**;
+- repository policy suite: **121 passed**;
+- targeted Python compilation and `git diff --check`: **passed**.
+
+The focused cases cover distinct opaque `sub` and email values, historical
+email aliases, missing requester before MFA, a valid distinct approver, missing
+and cross-tenant context, immutable requester mutation attempts, graph state,
+manual and autonomous monitor attribution, and document approval linkage.
+
+The legacy `tests/test_document_intelligence.py` database selection was not
+claimed as passing locally: its two pure tests passed, while two database cases
+stopped during fixture setup because the local database lacked the document
+tables. The PR's PostgreSQL integration and migration checks remain required.
+
 ## Deployment and rollback consequences
 
 1. Apply backend migration `050` before deploying backend code. The backend startup gate intentionally accepts only revision `050`; new code reads the added columns and must not run against `049`.
-2. Agent startup migration adds global counter and lockout columns before serving approval traffic.
+2. Agent startup migration adds global counter and lockout columns plus the additive
+   `gateway_approvals.requested_by` column before serving approval traffic.
 3. The old `/v1/workflows/mfa/setup` path now returns HTTP 410. Clients must use `/v1/users/me/mfa/setup`, then `/v1/users/me/mfa/confirm`.
 4. Deploy backend, agent, and console together so enrollment state and BFF routes remain compatible.
 5. Roll back application code without downgrading `050`; the columns are additive. Downgrade only after confirming no pending enrollments or replay counters must be retained.
