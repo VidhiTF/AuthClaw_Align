@@ -12,7 +12,7 @@ import {
   Upload,
 } from "lucide-react";
 import { TrustSummary } from "@/components/trust-summary";
-import type { TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
+import { calculationVersion, evidenceAssessmentLabel, type ActivityDiagnostics, type EvidenceAssessment, type TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
 
 interface ControlScore {
   id: string;
@@ -22,9 +22,12 @@ interface ControlScore {
   status: "compliant" | "partial" | "non_compliant";
   evidence: string[];
   gaps: string[];
+  evidence_assessment?: EvidenceAssessment;
+  activity_diagnostics?: ActivityDiagnostics;
 }
 
 interface FrameworkScore {
+  calculation_version?: string;
   framework: string;
   score: number;
   readiness_level: string;
@@ -50,6 +53,7 @@ interface TrustCenterPackage {
     access_count: number;
   };
   scores: {
+    calculation_version?: string;
     overall_score: number;
     readiness_level: string;
     frameworks: FrameworkScore[];
@@ -103,9 +107,11 @@ export default function TrustCenterPage() {
   const loadPackage = useCallback(async (verifiedAccess: string) => {
     setLoading(true);
     setError(null);
+    setData(null);
     try {
       const res = await fetch(`/api/trust-center/public/${encodeURIComponent(token)}`, {
         headers: { "X-Trust-Center-Access": verifiedAccess },
+        cache: "no-store",
       });
       const payload = await res.json();
       if (!res.ok) throw new Error(payload.detail || payload.error || "Trust Center link is unavailable");
@@ -296,9 +302,11 @@ export default function TrustCenterPage() {
             <p className="mt-2 max-w-3xl text-sm text-slate-400">
               {data.share.label} - Expires {new Date(data.share.expires_at).toLocaleString()} - Generated {new Date(data.generated_at).toLocaleString()}
             </p>
+            <p className="mt-2 text-xs text-slate-400">Calculation version: {calculationVersion(data.scores.calculation_version)} · Scores show weighted coverage of qualified control assessments. 0% means required reviewed evidence or control conditions are unmet; activity counts alone cannot establish compliance.</p>
+            {calculationVersion(data.scores.calculation_version) === "legacy_unversioned" && <p className="mt-1 text-xs text-amber-200">Legacy results do not establish current evidence qualification.</p>}
           </div>
           <div className="rounded-2xl border border-slate-800 bg-[#09090d] p-5 min-w-[220px]">
-            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Overall Readiness</div>
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Qualified evidence coverage</div>
             <div className="mt-2 text-4xl font-black text-white">{data.scores.overall_score}%</div>
             <div className="mt-1 text-xs font-semibold text-indigo-200">{readinessLabel(data.scores.readiness_level)}</div>
           </div>
@@ -332,8 +340,9 @@ export default function TrustCenterPage() {
                 <div className="h-full rounded-full bg-indigo-500" style={{ width: `${framework.score}%` }} />
               </div>
               <div className="mt-3 text-xs text-slate-500">
-                {framework.metrics.evidence_count} evidence - {framework.metrics.audit_event_count} audit events - {framework.metrics.open_findings} open findings
+                Activity diagnostics: {framework.metrics.evidence_count} records - {framework.metrics.audit_event_count} audit events - {framework.metrics.open_findings} open findings
               </div>
+              <div className="mt-2 text-[10px] text-slate-400">Calculation version: {calculationVersion(framework.calculation_version)}</div>
             </button>
           ))}
         </section>
@@ -360,9 +369,18 @@ export default function TrustCenterPage() {
                       </span>
                     </div>
                     <p className="mt-2 text-xs leading-relaxed text-slate-400">{control.description}</p>
+                    <div className="mt-3 text-xs text-slate-300">
+                      <p>{evidenceAssessmentLabel(control.evidence_assessment)}</p>
+                      {control.evidence_assessment && <><p className="mt-1">As of {new Date(control.evidence_assessment.as_of).toLocaleString()}{control.evidence_assessment.valid_until && ` · Valid until ${new Date(control.evidence_assessment.valid_until).toLocaleString()}`}</p><p className="mt-1">{control.evidence_assessment.reason_codes.join(", ")}</p></>}
+                    </div>
+                    {control.activity_diagnostics?.authoritative === false && <div className="mt-3 text-xs text-slate-400">
+                      <p>Activity diagnostic score: {control.activity_diagnostics.score}% (not readiness)</p>
+                      <p>{control.activity_diagnostics.evidence.join(" · ")}</p>
+                      <p>{control.activity_diagnostics.gaps.join(" · ")}</p>
+                    </div>}
                     <div className="mt-4 grid gap-3 md:grid-cols-2">
                       <div>
-                        <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Evidence</div>
+                        <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Evidence references</div>
                         {(control.evidence.length ? control.evidence : ["No evidence signal yet"]).map((item) => (
                           <div key={item} className="mb-1 rounded-lg border border-slate-800 bg-[#07070a] px-3 py-2 text-xs text-slate-300">
                             {item}

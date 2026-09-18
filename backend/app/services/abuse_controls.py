@@ -163,6 +163,7 @@ def verify_mfa_challenge(
     tenant_id: str,
     operation: str,
     request_id: str = "",
+    pending_enrollment: bool = False,
 ) -> bool:
     """Verify MFA with an atomic, per-user/per-operation bounded cooldown."""
     attempts_key, level_key, cooldown_key = _mfa_keys(
@@ -187,7 +188,11 @@ def verify_mfa_challenge(
 
     from app.core.auth import verify_mfa_code_result
 
-    verification = verify_mfa_code_result(user, code)
+    verification = (
+        verify_mfa_code_result(user, code, pending_enrollment=True)
+        if pending_enrollment
+        else verify_mfa_code_result(user, code)
+    )
     if verification.verified:
         try:
             client.eval(MFA_RESET_LUA, 3, attempts_key, level_key, cooldown_key)

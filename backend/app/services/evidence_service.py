@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.models import EvidenceRecord, EvidenceLink
+from app.core.config import settings
 from app.core.evidence_integrity import (
     INTEGRITY_ALGORITHM,
     INTEGRITY_VERSION,
@@ -97,6 +98,10 @@ def create_evidence(
     severity         : critical | high | medium | low | info  (default: info).
     linked_workflow_id : When provided, an EvidenceLink of type "workflow" is also created.
     """
+    if "control_assessment" in evidence_data or evidence_type == "control_assessment":
+        raise ValueError("Control assessments require the independent governance review path")
+    # The producer deployment supplies scope; untrusted payloads cannot choose it.
+    evidence_data = {**evidence_data, "environment": settings.COMPLIANCE_ENVIRONMENT}
     evidence_id = uuid.uuid4()
     created_at = datetime.now(tz=timezone.utc)
     record = EvidenceRecord(

@@ -94,7 +94,7 @@ The automated audit-contract cases passed. No production audit row is attached b
 
 - Backend security/compliance selection with PostgreSQL and Redis: **394 passed**.
 - Backend PostgreSQL integration: **108 passed**, including concurrent review OTP, tenant isolation, migrations, invitation lifecycle, session revocation, and advisory locks.
-- Backend migration chain: Alembic head `050` applied successfully over `049`.
+- Backend migration chain: the original ENT-022 `050` rehearsal passed over `049`. After compatibility integration with T10, master owns `050`/`051`; ENT-022 pending-enrollment state is revision `052` over the shared durable replay column from `051`.
 - Agent CI selection: **27 passed, 7 subtests passed**; Python compile passed.
 - Agent live database rehearsal: startup migration, encrypted TOTP, replay rejection, durable lockout, and tenant-context binding **passed**.
 - Console: lint **0 errors / 15 warnings**, **44 unit tests passed**, dependency audit **0 vulnerabilities**, TypeScript **passed**, production build **passed**.
@@ -279,12 +279,12 @@ the test removed afterward.
 
 ## Deployment and rollback consequences
 
-1. Apply backend migration `050` before deploying backend code. The backend startup gate intentionally accepts only revision `050`; new code reads the added columns and must not run against `049`.
+1. Apply backend migrations through `052` before deploying backend code. The backend startup gate intentionally accepts only revision `052`; T10 owns `050`, durable MFA replay state is `051`, and ENT-022 pending-enrollment state is `052`.
 2. Agent startup migration adds global counter and lockout columns plus the additive
    `gateway_approvals.requested_by` column before serving approval traffic.
 3. The old `/v1/workflows/mfa/setup` path now returns HTTP 410. Clients must use `/v1/users/me/mfa/setup`, then `/v1/users/me/mfa/confirm`.
 4. Deploy backend, agent, and console together so enrollment state and BFF routes remain compatible.
-5. Roll back application code without downgrading `050`; the columns are additive. Downgrade only after confirming no pending enrollments or replay counters must be retained.
+5. Roll back application code without downgrading `051`/`052`; the columns are additive. Downgrade only after confirming no pending enrollments or replay state must be retained.
 
 ## Review obligations
 

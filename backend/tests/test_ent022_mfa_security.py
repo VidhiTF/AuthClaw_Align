@@ -289,8 +289,9 @@ def test_pending_factor_requires_confirmation_before_activation(monkeypatch):
         mfa_enabled=False,
         mfa_secret=None,
         mfa_backup_codes=None,
-        mfa_last_totp_counter=None,
+        mfa_last_totp_step=None,
         mfa_pending_secret=encrypt_secret(pending_secret),
+        mfa_pending_last_totp_step=None,
         mfa_pending_backup_codes=[hash_key("mfa-backup:recovery")],
         mfa_pending_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         mfa_enrolled_at=None,
@@ -302,7 +303,7 @@ def test_pending_factor_requires_confirmation_before_activation(monkeypatch):
     db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
 
     def verify(_client, pending, _code, **_kwargs):
-        pending.mfa_last_totp_counter = 42
+        pending.mfa_pending_last_totp_step = 42
         return True
 
     monkeypatch.setattr(users, "verify_mfa_challenge", verify)
@@ -314,7 +315,7 @@ def test_pending_factor_requires_confirmation_before_activation(monkeypatch):
 
     assert response.mfa_enabled is True
     assert decrypt_secret(user.mfa_secret) == pending_secret
-    assert user.mfa_last_totp_counter == 42
+    assert user.mfa_last_totp_step == 42
     assert user.mfa_pending_secret is None
     assert user.mfa_pending_backup_codes is None
     db.commit.assert_called_once()
@@ -331,8 +332,9 @@ def test_separate_owner_recovery_revokes_sessions(monkeypatch):
     target = SimpleNamespace(
         id=target_id, tenant_id=tenant_id, email="admin@example.com", role="admin",
         mfa_enabled=True, mfa_secret=encrypt_secret("KRSXG5DSNFXGOIDB"),
-        mfa_backup_codes=["hash"], mfa_last_totp_counter=10,
-        mfa_pending_secret=None, mfa_pending_backup_codes=None,
+        mfa_backup_codes=["hash"], mfa_last_totp_step=10,
+        mfa_pending_secret=None, mfa_pending_last_totp_step=None,
+        mfa_pending_backup_codes=None,
         mfa_pending_expires_at=None, mfa_enrolled_at=datetime.now(timezone.utc),
     )
     request = MagicMock(headers={"x-request-id": "req-recovery"})

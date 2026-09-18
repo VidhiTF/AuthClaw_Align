@@ -170,6 +170,7 @@ def setup_my_mfa(
     secret = pyotp.random_base32()
     backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(5)]
     user.mfa_pending_secret = encrypt_secret(secret)
+    user.mfa_pending_last_totp_step = None
     user.mfa_pending_backup_codes = [
         hash_key(f"mfa-backup:{code.lower()}") for code in backup_codes
     ]
@@ -221,6 +222,7 @@ def confirm_my_mfa(
     expires_at = user.mfa_pending_expires_at
     if not user.mfa_pending_secret or not expires_at or expires_at <= now:
         user.mfa_pending_secret = None
+        user.mfa_pending_last_totp_step = None
         user.mfa_pending_backup_codes = None
         user.mfa_pending_expires_at = None
         db.commit()
@@ -229,24 +231,21 @@ def confirm_my_mfa(
             detail="MFA enrollment is missing or expired",
         )
 
-    pending_factor = type("PendingFactor", (), {})()
-    pending_factor.mfa_secret = user.mfa_pending_secret
-    pending_factor.mfa_backup_codes = []
-    pending_factor.mfa_last_totp_counter = None
-    pending_factor.id = user.id
     if not verify_mfa_challenge(
-        _get_redis(), pending_factor, body.code,
+        _get_redis(), user, body.code,
         tenant_id=str(user.tenant_id), operation="mfa_enrollment_confirm",
         request_id=request.headers.get("x-request-id", ""),
+        pending_enrollment=True,
     ):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid MFA token")
 
     user.mfa_secret = user.mfa_pending_secret
     user.mfa_backup_codes = list(user.mfa_pending_backup_codes or [])
-    user.mfa_last_totp_counter = pending_factor.mfa_last_totp_counter
+    user.mfa_last_totp_step = user.mfa_pending_last_totp_step
     user.mfa_enabled = True
     user.mfa_enrolled_at = now
     user.mfa_pending_secret = None
+    user.mfa_pending_last_totp_step = None
     user.mfa_pending_backup_codes = None
     user.mfa_pending_expires_at = None
     _commit_mfa_audit(
@@ -290,8 +289,9 @@ def disable_my_mfa(body: MFADisableRequest, request: Request, db: Session = Depe
     user.mfa_enabled = False
     user.mfa_secret = None
     user.mfa_backup_codes = None
-    user.mfa_last_totp_counter = None
+    user.mfa_last_totp_step = None
     user.mfa_pending_secret = None
+    user.mfa_pending_last_totp_step = None
     user.mfa_pending_backup_codes = None
     user.mfa_pending_expires_at = None
     user.mfa_enrolled_at = None
@@ -378,8 +378,9 @@ def reset_user_mfa(
     target.mfa_enabled = False
     target.mfa_secret = None
     target.mfa_backup_codes = None
-    target.mfa_last_totp_counter = None
+    target.mfa_last_totp_step = None
     target.mfa_pending_secret = None
+    target.mfa_pending_last_totp_step = None
     target.mfa_pending_backup_codes = None
     target.mfa_pending_expires_at = None
     target.mfa_enrolled_at = None

@@ -4,16 +4,16 @@ import hmac
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+import time
 from typing import Generator, List
 import pyotp
 from fastapi import Request, Depends, HTTPException, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy import inspect, text
+from sqlalchemy.orm import Session, object_session
 from app.db.session import SessionLocal, database_auth_context
-from app.db.dependencies import get_db
+from app.db.dependencies import get_db, get_score_db
 from app.core.crypto import (
     SECRET_ENVELOPE_PREFIX,
     SECRET_ENVELOPE_V2_PREFIX,
@@ -41,11 +41,16 @@ def hash_key(key: str) -> str:
 
 
 def set_mfa_credentials(user, secret: str, backup_codes: list[str]) -> None:
+    previous = user.mfa_secret or ""
+    if previous.startswith((SECRET_ENVELOPE_PREFIX, SECRET_ENVELOPE_V2_PREFIX)):
+        previous = decrypt_secret(previous)
+    # Re-encrypting the same credential must not make consumed codes valid again.
+    if not hmac.compare_digest(previous.upper(), secret.upper()):
+        user.mfa_last_totp_step = None
     user.mfa_secret = encrypt_secret(secret)
     user.mfa_backup_codes = [
         hash_key(f"mfa-backup:{code.lower()}") for code in backup_codes
     ]
-    user.mfa_last_totp_counter = None
     user.mfa_enabled = True
 
 
@@ -57,42 +62,98 @@ class MFAVerification:
     counter: int | None = None
 
 
-def verify_mfa_code_result(user, code: str) -> MFAVerification:
+def verify_mfa_code_result(
+    user, code: str, *, pending_enrollment: bool = False
+) -> MFAVerification:
+    """Consume a database-attached factor; the caller owns commit or rollback."""
+    from app.db.models import User
+
+    if not isinstance(user, User) or not isinstance(code, str):
+        return MFAVerification(False, reason="invalid_identity")
+    db = object_session(user)
+    state = inspect(user)
+    if db is None or not state.persistent:
+        return MFAVerification(False, reason="invalid_identity")
+    with db.no_autoflush:
+        if (
+            state.attrs.id.history.has_changes()
+            or state.attrs.tenant_id.history.has_changes()
+            or user.tenant_id is None
+        ):
+            return MFAVerification(False, reason="invalid_identity")
+        # Refresh credentials and replay state after acquiring the same-tenant lock.
+        # Never authorize against a stale identity-map copy or flush local changes first.
+        query = db.query(User).filter(
+            User.id == state.identity[0], User.tenant_id == user.tenant_id,
+            User.is_active.is_(True),
+        )
+        if not pending_enrollment:
+            query = query.filter(User.mfa_enabled.is_(True))
+        user = query.populate_existing().with_for_update().first()
+    stored_secret = (
+        user.mfa_pending_secret if user is not None and pending_enrollment
+        else user.mfa_secret if user is not None
+        else ""
+    ) or ""
+    if not stored_secret:
+        return MFAVerification(False, reason="not_configured")
     code = code.strip().lower()
-    stored_secret = user.mfa_secret or ""
     encrypted = stored_secret.startswith(
         (SECRET_ENVELOPE_PREFIX, SECRET_ENVELOPE_V2_PREFIX)
     )
     secret = decrypt_secret(stored_secret) if encrypted else stored_secret
-    if stored_secret and not encrypted:
-        user.mfa_secret = encrypt_secret(stored_secret)
-
-    backup_codes = list(user.mfa_backup_codes or [])
+    backup_codes = [] if pending_enrollment else list(user.mfa_backup_codes or [])
     normalized_codes = [
         stored if len(stored) == 64 else hash_key(f"mfa-backup:{stored.lower()}")
         for stored in backup_codes
     ]
-    user.mfa_backup_codes = normalized_codes
-    if secret and code.isdigit() and len(code) == 6:
-        totp = pyotp.TOTP(secret)
-        current_counter = totp.timecode(datetime.now(timezone.utc))
-        for offset in (-1, 0, 1):
-            counter = current_counter + offset
-            if hmac.compare_digest(totp.generate_otp(counter), code):
-                previous = getattr(user, "mfa_last_totp_counter", None)
-                if previous is not None and counter <= int(previous):
-                    return MFAVerification(False, method="totp", reason="replay", counter=counter)
-                user.mfa_last_totp_counter = counter
-                return MFAVerification(True, method="totp", reason="verified", counter=counter)
-
-    candidate = hash_key(f"mfa-backup:{code}")
-    for index, stored in enumerate(normalized_codes):
-        if hmac.compare_digest(candidate, stored):
-            user.mfa_backup_codes = (
-                normalized_codes[:index] + normalized_codes[index + 1 :]
+    totp = pyotp.TOTP(secret)
+    current_step = int(time.time()) // totp.interval
+    matched_step = max(
+        (step for step in range(max(0, current_step - 1), current_step + 2)
+         if code.isascii() and hmac.compare_digest(totp.generate_otp(step), code)),
+        default=None,
+    )
+    if matched_step is not None:
+        last_step = (
+            user.mfa_pending_last_totp_step
+            if pending_enrollment else user.mfa_last_totp_step
+        )
+        if last_step is not None and matched_step <= last_step:
+            return MFAVerification(
+                False, method="totp", reason="replay", counter=matched_step
             )
-            return MFAVerification(True, method="recovery_code", reason="verified")
-    return MFAVerification(False)
+        if pending_enrollment:
+            user.mfa_pending_last_totp_step = matched_step
+        else:
+            user.mfa_last_totp_step = matched_step
+        method = "totp"
+    else:
+        if pending_enrollment:
+            return MFAVerification(False)
+        candidate = hash_key(f"mfa-backup:{code}")
+        remaining_codes = [
+            stored for stored in normalized_codes
+            if not hmac.compare_digest(candidate, stored)
+        ]
+        if len(remaining_codes) == len(normalized_codes):
+            return MFAVerification(False)
+        normalized_codes = remaining_codes
+        method = "recovery_code"
+    if not encrypted:
+        if pending_enrollment:
+            user.mfa_pending_secret = encrypt_secret(secret)
+        else:
+            user.mfa_secret = encrypt_secret(secret)
+    if not pending_enrollment:
+        user.mfa_backup_codes = normalized_codes
+    # Later authorization refreshes must see consumption; success is durable only
+    # when the protected action commits, so a rolled-back action can retry safely.
+    db.flush()
+    return MFAVerification(
+        True, method=method, reason="verified",
+        counter=matched_step if method == "totp" else None,
+    )
 
 
 def verify_mfa_code(user, code: str) -> bool:
@@ -292,6 +353,11 @@ def get_tenant_db(
     # appends).  This is cleared with the request-scoped SQLAlchemy session.
     db.info["authclaw_database_auth_context"] = (kind, credential_hash)
     yield db
+
+
+def get_tenant_score_db(request: Request, db: Session = Depends(get_score_db)) -> Generator[Session, None, None]:
+    """Authenticate inside the same consistent view used by compliance scoring."""
+    yield from get_tenant_db(request, db)
 
 
 def require_scopes(required_scopes: List[str]):

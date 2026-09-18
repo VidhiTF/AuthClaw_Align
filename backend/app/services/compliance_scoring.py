@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, or_
+from sqlalchemy import or_, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -21,10 +23,11 @@ from app.db.models import (
     Policy,
     RedactionToken,
 )
-from app.services.notifications import create_notification
+from app.services.notifications import add_notification
+from app.services import control_assessments
 
 FRAMEWORKS = ("SOC2", "GDPR", "HIPAA")
-RESOLVED_STATUSES = ("RESOLVED", "FALSE_POSITIVE", "ACCEPTED_RISK")
+RESOLVED_STATUSES = ("RESOLVED", "FALSE_POSITIVE")
 
 
 @dataclass(frozen=True)
@@ -57,8 +60,8 @@ CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
             "description": "Access to gateway configuration, policies, and audit evidence is restricted and traceable.",
             "weight": 0.125,
             "signals": ("active_api_keys", "active_policies", "active_gateways", "audit_hashes"),
-            "product_owners": ["Kunal"],
-            "operational_owners": ["Kunal"],
+            "product_roles": ["platform_security"],
+            "operational_roles": ["platform_security"],
             "implementation_status": "built_in",
             "evidence_sources": [
                 "backend/app/services/compliance_scoring.py",
@@ -73,8 +76,8 @@ CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
             "description": "PII/PHI is redacted or tokenized before model-provider egress.",
             "weight": 0.125,
             "signals": ("redactions", "pii_evidence", "active_policies"),
-            "product_owners": ["Kunal", "Vidhi"],
-            "operational_owners": ["Kunal"],
+            "product_roles": ["platform_security", "agent_engineering"],
+            "operational_roles": ["platform_security"],
             "implementation_status": "built_in",
             "evidence_sources": ["gateway/", "services/agent/redaction.py", "gateway contract tests", "redaction evidence records"],
             "collection_frequency": "Per request; aggregate evidence per release",
@@ -85,8 +88,8 @@ CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
             "description": "Vulnerabilities, secrets, and insecure infrastructure are detected before release.",
             "weight": 0.125,
             "signals": ("framework_evidence", "findings", "hash_chain"),
-            "product_owners": ["Kunal"],
-            "operational_owners": ["Kunal"],
+            "product_roles": ["platform_security"],
+            "operational_roles": ["platform_security"],
             "implementation_status": "built_in",
             "evidence_sources": [".github/workflows/ci.yml", "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#vulnerability-management", "release CI evidence"],
             "collection_frequency": "Every pull request and release",
@@ -97,8 +100,8 @@ CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
             "description": "Security-relevant activity is monitored, triaged, and retained as integrity-protected evidence.",
             "weight": 0.125,
             "signals": ("audit_events", "hash_chain", "framework_evidence"),
-            "product_owners": ["Kunal"],
-            "operational_owners": ["Kunal", "Authorized governance reviewer"],
+            "product_roles": ["platform_security"],
+            "operational_roles": ["platform_security", "governance"],
             "implementation_status": "built_in",
             "evidence_sources": ["audit_consumer/", "backend/app/services/compliance_scoring.py", "incident record", "signed audit export"],
             "collection_frequency": "Continuous collection; daily alert review; per incident",
@@ -109,8 +112,8 @@ CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
             "description": "Findings, approvals, remediation, retest, and closure are tracked without hiding open exceptions.",
             "weight": 0.125,
             "signals": ("findings", "remediation_audit", "approvals"),
-            "product_owners": ["Kunal"],
-            "operational_owners": ["Kunal"],
+            "product_roles": ["platform_security"],
+            "operational_roles": ["platform_security"],
             "implementation_status": "partial",
             "evidence_sources": ["findings and remediation records", "signed audit export", "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#vulnerability-management"],
             "collection_frequency": "Per finding; weekly open-finding review; per release",
@@ -121,8 +124,8 @@ CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
             "description": "Production changes are authorized, tested, reviewed, and traceable to release evidence.",
             "weight": 0.125,
             "signals": ("approvals", "framework_evidence", "hash_chain"),
-            "product_owners": ["Kunal"],
-            "operational_owners": ["Authorized release governance reviewer"],
+            "product_roles": ["platform_security"],
+            "operational_roles": ["release_governance"],
             "implementation_status": "partial",
             "evidence_sources": ["docs/BRANCH_GOVERNANCE.md", ".github/workflows/ci.yml", "pull request, approval, CI, and rollback evidence"],
             "collection_frequency": "Every change and release",
@@ -133,8 +136,8 @@ CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
             "description": "Backups, restore tests, failover, and rollback evidence demonstrate recoverability.",
             "weight": 0.125,
             "signals": ("framework_evidence", "hash_chain", "findings"),
-            "product_owners": ["Kunal"],
-            "operational_owners": ["Kunal"],
+            "product_roles": ["platform_security"],
+            "operational_roles": ["platform_security"],
             "implementation_status": "partial",
             "evidence_sources": ["infra/terraform/DR_RUNBOOK.md", "infra/security/COMPLIANCE_HARDENING_RUNBOOK.md#backup-and-restore", "release rollback record"],
             "collection_frequency": "Daily backup checks; quarterly restore/failover; after material changes",
@@ -145,8 +148,8 @@ CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
             "description": "Tenant and provider data is protected through isolation, encryption, and controlled disclosure.",
             "weight": 0.125,
             "signals": ("active_api_keys", "active_policies", "hash_chain", "pii_evidence"),
-            "product_owners": ["Kunal", "Vidhi"],
-            "operational_owners": ["Kunal"],
+            "product_roles": ["platform_security", "agent_engineering"],
+            "operational_roles": ["platform_security"],
             "implementation_status": "built_in",
             "evidence_sources": ["docs/COMPLIANCE_BOUNDARY.md", "tenant-isolation evidence", "encryption configuration", "redaction evidence"],
             "collection_frequency": "Continuous controls; tenant-isolation test per release; quarterly key review",
@@ -466,27 +469,46 @@ def _control_traceability(db: Session, tenant_id: str, framework: str, control: 
         raise
 
 
-def score_control(control: dict[str, Any], metrics: FrameworkMetrics) -> dict[str, Any]:
-    scores: list[float] = []
-    evidence: list[str] = []
-    gaps: list[str] = []
+def score_control(
+    control: dict[str, Any], metrics: FrameworkMetrics,
+    assessment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    activity_scores: list[float] = []
+    activity_evidence: list[str] = []
+    activity_gaps: list[str] = []
     for signal in control["signals"]:
         score, evidence_item, gap = _signal_score(signal, metrics)
-        scores.append(score)
+        activity_scores.append(score)
         if evidence_item:
-            evidence.append(evidence_item)
+            activity_evidence.append(evidence_item)
         if gap:
-            gaps.append(gap)
+            activity_gaps.append(gap)
+    assessment = dict(assessment) if assessment is not None else {
+        "state": "blocked", "reason_codes": ["missing_assessment"],
+        "required_count": 1, "qualified_count": 0, "as_of": "", "valid_until": None,
+        "gaps": ["No qualified control assessment"], "evidence_ids": [],
+    }
+    gaps = list(assessment.get("gaps", []))
+    qualified = (assessment["state"] == "qualified" and not assessment["reason_codes"]
+                 and assessment["required_count"] > 0
+                 and assessment["qualified_count"] == assessment["required_count"])
+    if not qualified and not gaps:
+        gaps.append("No qualified control assessment")
+    if metrics.open_findings:
+        gaps.append("Open findings or accepted risks require disposition")
+        assessment["reason_codes"] = sorted(set(assessment["reason_codes"]) | {"open_finding"})
     unique_gaps = sorted(set(gaps))
     implementation_status = control.get("implementation_status", "not_mapped")
     if implementation_status != "built_in":
         unique_gaps.append(f"Control implementation status is {implementation_status.replace('_', ' ')}")
         unique_gaps = sorted(set(unique_gaps))
-    control_score = round(sum(scores) / max(1, len(scores)), 1)
+        assessment["reason_codes"] = sorted(set(assessment["reason_codes"]) | {"implementation_incomplete"})
+    if unique_gaps:
+        assessment["state"] = "blocked"
+    # Canonical points represent qualified controls, never product usage. Keep
+    # the entire denominator: missing/incomplete controls cannot inflate coverage.
+    control_score = 100.0 if qualified and not unique_gaps else 0.0
     status = control_status(control_score)
-    if unique_gaps and status == "compliant":
-        control_score = min(control_score, 84.9)
-        status = "partial"
     return {
         "id": control["id"],
         "name": control["name"],
@@ -494,52 +516,44 @@ def score_control(control: dict[str, Any], metrics: FrameworkMetrics) -> dict[st
         "weight": control["weight"],
         "score": control_score,
         "status": status,
-        "evidence": sorted(set(evidence)),
+        "evidence": [f"{assessment['qualified_count']} of {assessment['required_count']} reviewed evidence requirements qualified"],
+        "activity_diagnostics": {
+            "authoritative": False,
+            "score": round(sum(activity_scores) / max(1, len(activity_scores)), 1),
+            "evidence": sorted(set(activity_evidence)), "gaps": sorted(set(activity_gaps)),
+        },
         "gaps": unique_gaps,
         "exceptions": [
             {"status": "open", "type": "evidence_gap", "message": gap}
             for gap in unique_gaps
         ],
-        "product_owners": list(control.get("product_owners", [])),
-        "operational_owners": list(control.get("operational_owners", [])),
+        "product_owners": control_assessments.resolve_owners(control.get("product_roles", ["platform_security"])),
+        "operational_owners": control_assessments.resolve_owners(control.get("operational_roles", ["governance"])),
+        "evidence_assessment": assessment,
+        "calculation_version": control_assessments.CALCULATION_VERSION,
         "implementation_status": implementation_status,
         "evidence_sources": list(control.get("evidence_sources", [])),
         "collection_frequency": control.get("collection_frequency", "Not mapped"),
     }
 
 
-def score_framework(
+def _calculate_framework(
     db: Session,
     tenant_id: str,
     framework: str,
     *,
     include_traceability: bool = True,
+    as_of: datetime,
 ) -> dict[str, Any]:
     framework = framework.upper()
     if framework not in CONTROL_CATALOG:
         raise ValueError(f"Unsupported framework: {framework}")
     metrics = collect_metrics(db, tenant_id, framework)
-    controls = [score_control(control, metrics) for control in CONTROL_CATALOG[framework]]
+    assessments = control_assessments.assess_framework(db, tenant_id, framework, as_of)
+    controls = [score_control(control, metrics, assessments.get(control["id"])) for control in CONTROL_CATALOG[framework]]
     if include_traceability:
         for control, catalog_control in zip(controls, CONTROL_CATALOG[framework]):
             control["traceability"] = _control_traceability(db, tenant_id, framework, catalog_control)
-            traceability = control["traceability"]
-            if (
-                traceability["evidence_total"]
-                + traceability["finding_total"]
-                + traceability["audit_event_total"]
-                == 0
-            ):
-                gap = "No control-specific operating evidence"
-                if gap not in control["gaps"]:
-                    control["gaps"].append(gap)
-                    control["gaps"].sort()
-                    control["exceptions"].append(
-                        {"status": "open", "type": "missing_evidence", "message": gap}
-                    )
-                control["score"] = min(control["score"], 84.9)
-                if control["status"] == "compliant":
-                    control["status"] = "partial"
     overall = round(sum(control["score"] * control["weight"] for control in controls), 1)
     framework_readiness = readiness_level(overall)
     if framework_readiness == "audit_ready" and any(control["status"] != "compliant" for control in controls):
@@ -563,67 +577,100 @@ def score_framework(
             "high_findings": metrics.high_findings,
             "resolved_findings": metrics.resolved_findings,
         },
-        "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "generated_at": as_of.isoformat(),
+        "calculation_version": control_assessments.CALCULATION_VERSION,
     }
 
 
-def upsert_score_snapshot(db: Session, tenant_id: str, framework_score: dict[str, Any]) -> ComplianceScoreSnapshot:
+@contextmanager
+def _consistent_read(db: Session):
+    """Require one request transaction for qualification, metrics and display."""
+    if isinstance(db, Session) and db.get_bind().dialect.name == "postgresql":
+        if db.connection().get_isolation_level() not in {"REPEATABLE READ", "SERIALIZABLE"}:
+            raise RuntimeError("Compliance scoring requires a consistent database transaction")
+    yield db
+
+
+def finish_score_read(db: Session) -> None:
+    # Release the owned read view before advisory-locked writes. Waiting on a
+    # lock inside REPEATABLE READ would retain a stale snapshot of other writers.
+    if isinstance(db, Session) and db.info.pop("compliance_read_transaction", False):
+        db.commit()
+
+
+def score_framework(db: Session, tenant_id: str, framework: str, *, include_traceability: bool = True) -> dict[str, Any]:
+    with _consistent_read(db) as reader:
+        return _calculate_framework(reader, tenant_id, framework, include_traceability=include_traceability, as_of=datetime.now(timezone.utc))
+
+
+def aggregate_readiness(frameworks: list[dict[str, Any]]) -> tuple[float, str]:
+    if not frameworks:
+        return 0.0, "insufficient_evidence"
+    score = round(sum(item["score"] for item in frameworks) / len(frameworks), 1)
+    readiness = readiness_level(score)
+    if readiness == "audit_ready" and any(item.get("readiness_level") != "audit_ready" for item in frameworks):
+        readiness = "monitor"
+    return score, readiness
+
+
+def upsert_score_snapshot(
+    db: Session, tenant_id: str, framework_score: dict[str, Any], *, commit: bool = True,
+) -> ComplianceScoreSnapshot:
+    """Serialize one version's transitions and commit its notification atomically."""
     tid = _tenant_uuid(tenant_id)
     framework = framework_score["framework"]
-    snapshot_date = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-    existing = (
-        db.query(ComplianceScoreSnapshot)
-        .filter(
-            ComplianceScoreSnapshot.tenant_id == tid,
-            ComplianceScoreSnapshot.framework == framework,
-            ComplianceScoreSnapshot.snapshot_date == snapshot_date,
-        )
-        .first()
+    version = framework_score["calculation_version"]
+    if version != control_assessments.CALCULATION_VERSION or framework not in FRAMEWORKS:
+        raise ValueError("Unsupported score calculation")
+    as_of = datetime.fromisoformat(framework_score["generated_at"])
+    if as_of.tzinfo is None:
+        raise ValueError("Score timestamp must include a timezone")
+    snapshot_date = as_of.astimezone(timezone.utc).date().isoformat()
+    finish_score_read(db)
+    db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"), {
+        "scope": f"compliance:{tid}:{framework}:{version}",
+    })
+    scope = db.query(ComplianceScoreSnapshot).filter(
+        ComplianceScoreSnapshot.tenant_id == tid,
+        ComplianceScoreSnapshot.framework == framework,
+        ComplianceScoreSnapshot.calculation_version == version,
     )
-    previous_score = existing.overall_score if existing else None
-    if previous_score is None:
-        previous = (
-            db.query(ComplianceScoreSnapshot)
-            .filter(
-                ComplianceScoreSnapshot.tenant_id == tid,
-                ComplianceScoreSnapshot.framework == framework,
-                ComplianceScoreSnapshot.snapshot_date != snapshot_date,
-            )
-            .order_by(ComplianceScoreSnapshot.snapshot_date.desc())
-            .first()
-        )
-        previous_score = previous.overall_score if previous else None
+    existing = scope.filter(ComplianceScoreSnapshot.snapshot_date == snapshot_date).first()
+    if existing and existing.generated_at >= as_of:
+        if commit:
+            db.commit()
+        return existing
+    previous = existing or scope.order_by(ComplianceScoreSnapshot.generated_at.desc()).first()
+    # Capture before RETURNING refreshes an existing identity-map object.
+    previous_score = previous.overall_score if previous else None
+    previous_time = previous.generated_at if previous else None
+    previous_environment = (previous.assessment_metadata or {}).get("environment") if previous else None
+    environment = control_assessments.settings.COMPLIANCE_ENVIRONMENT
     metrics = framework_score["metrics"]
-    if existing:
-        snapshot = existing
-    else:
-        snapshot = ComplianceScoreSnapshot(
-            tenant_id=tid,
-            framework=framework,
-            snapshot_date=snapshot_date,
+    values = dict(
+        tenant_id=tid, framework=framework, snapshot_date=snapshot_date,
+        calculation_version=version, overall_score=float(framework_score["score"]),
+        readiness_level=framework_score["readiness_level"],
+        control_scores={control["id"]: control for control in framework_score["controls"]},
+        assessment_metadata={"as_of": as_of.isoformat(), "environment": environment, "policy_version": version},
+        evidence_count=int(metrics["evidence_count"]), audit_event_count=int(metrics["audit_event_count"]),
+        open_findings=int(metrics["open_findings"]), critical_findings=int(metrics["critical_findings"]),
+        generated_at=as_of,
+    )
+    statement = insert(ComplianceScoreSnapshot).values(**values).on_conflict_do_update(
+        constraint="uq_compliance_score_tenant_framework_date_version", set_=values,
+    ).returning(ComplianceScoreSnapshot)
+    snapshot = db.execute(statement, execution_options={"populate_existing": True}).scalar_one()
+    drop = previous_score - snapshot.overall_score if previous_score is not None else 0
+    if drop >= 5 and previous_time <= as_of and previous_environment == environment:
+        add_notification(
+            db, tenant_id=tid, type="compliance_score_drop",
+            severity="warning" if drop < 15 else "critical", title=f"{framework} score dropped",
+            body=f"{framework} dropped from {previous_score:.1f}% to {snapshot.overall_score:.1f}% ({version}).",
+            link="/compliance",
         )
-        db.add(snapshot)
-    snapshot.overall_score = float(framework_score["score"])
-    snapshot.readiness_level = framework_score["readiness_level"]
-    snapshot.control_scores = {control["id"]: control for control in framework_score["controls"]}
-    snapshot.evidence_count = int(metrics["evidence_count"])
-    snapshot.audit_event_count = int(metrics["audit_event_count"])
-    snapshot.open_findings = int(metrics["open_findings"])
-    snapshot.critical_findings = int(metrics["critical_findings"])
-    snapshot.generated_at = datetime.now(tz=timezone.utc)
-    db.commit()
-    db.refresh(snapshot)
-    score_drop = (previous_score or 0) - snapshot.overall_score
-    if previous_score is not None and score_drop >= 5:
-        create_notification(
-            db,
-            tenant_id=tid,
-            type="compliance_score_drop",
-            severity="warning" if score_drop < 15 else "critical",
-            title=f"{framework} score dropped",
-            body=f"{framework} dropped from {previous_score:.1f}% to {snapshot.overall_score:.1f}%.",
-            link="/frameworks",
-        )
+    if commit:
+        db.commit()
     return snapshot
 
 
@@ -634,22 +681,22 @@ def score_all_frameworks(
     persist: bool = True,
     include_traceability: bool = True,
 ) -> dict[str, Any]:
-    frameworks = [
-        score_framework(db, tenant_id, framework, include_traceability=include_traceability)
-        for framework in FRAMEWORKS
-    ]
+    as_of = datetime.now(timezone.utc)
+    with _consistent_read(db) as reader:
+        frameworks = [
+            _calculate_framework(reader, tenant_id, framework, include_traceability=include_traceability, as_of=as_of)
+            for framework in FRAMEWORKS
+        ]
     if persist:
-        for framework_score in frameworks:
-            upsert_score_snapshot(db, tenant_id, framework_score)
-    overall = round(sum(item["score"] for item in frameworks) / len(frameworks), 1)
-    overall_readiness = readiness_level(overall)
-    if overall_readiness == "audit_ready" and any(
-        framework["readiness_level"] != "audit_ready" for framework in frameworks
-    ):
-        overall_readiness = "monitor"
-    generated_at = datetime.now(tz=timezone.utc).isoformat()
-    for framework in frameworks:
-        framework["generated_at"] = generated_at
+        try:
+            for framework_score in frameworks:
+                upsert_score_snapshot(db, tenant_id, framework_score, commit=False)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    overall, overall_readiness = aggregate_readiness(frameworks)
+    generated_at = as_of.isoformat()
     trust_summary = _build_trust_summary(frameworks)
     trust_summary["generated_at"] = generated_at
     return {
@@ -658,6 +705,7 @@ def score_all_frameworks(
         "frameworks": frameworks,
         "trust_summary": trust_summary,
         "generated_at": generated_at,
+        "calculation_version": control_assessments.CALCULATION_VERSION,
     }
 
 
@@ -675,6 +723,7 @@ def _build_trust_summary(frameworks: list[dict[str, Any]]) -> dict[str, Any]:
     for framework in frameworks:
         for control in framework["controls"]:
             bucket = status_to_bucket[control["status"]]
+            assessment = control.get("evidence_assessment")
             buckets[bucket].append(
                 {
                     "framework": framework["framework"],
@@ -682,10 +731,15 @@ def _build_trust_summary(frameworks: list[dict[str, Any]]) -> dict[str, Any]:
                     "name": control["name"],
                     "score": control["score"],
                     "status": control["status"],
+                    "evidence_assessment": {key: assessment[key] for key in (
+                        "state", "reason_codes", "required_count", "qualified_count", "as_of", "valid_until"
+                    ) if key in assessment} if assessment else None,
+                    "gaps": list(control.get("gaps", [])),
                 }
             )
     return {
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "calculation_version": control_assessments.CALCULATION_VERSION,
         "counts": {name: len(controls) for name, controls in buckets.items()},
         **buckets,
     }
@@ -693,18 +747,25 @@ def _build_trust_summary(frameworks: list[dict[str, Any]]) -> dict[str, Any]:
 
 def score_history(db: Session, tenant_id: str, framework: str | None = None, days: int = 30) -> list[dict[str, Any]]:
     tid = _tenant_uuid(tenant_id)
-    q = db.query(ComplianceScoreSnapshot).filter(ComplianceScoreSnapshot.tenant_id == tid)
+    today = datetime.now(timezone.utc).date()
+    first_day = today - timedelta(days=max(1, min(days, 365)) - 1)
+    q = db.query(ComplianceScoreSnapshot).filter(
+        ComplianceScoreSnapshot.tenant_id == tid,
+        ComplianceScoreSnapshot.snapshot_date >= first_day.isoformat(),
+        ComplianceScoreSnapshot.snapshot_date <= today.isoformat(),
+    )
     if framework:
         q = q.filter(ComplianceScoreSnapshot.framework == framework.upper())
     rows = (
-        q.order_by(ComplianceScoreSnapshot.snapshot_date.desc(), ComplianceScoreSnapshot.framework.asc())
-        .limit(max(1, min(days * len(FRAMEWORKS), 365)))
+        q.order_by(ComplianceScoreSnapshot.snapshot_date.desc(), ComplianceScoreSnapshot.framework.asc(), ComplianceScoreSnapshot.generated_at.desc(), ComplianceScoreSnapshot.calculation_version.asc())
         .all()
     )
     return [
         {
+            "id": str(row.id),
             "framework": row.framework,
             "snapshot_date": row.snapshot_date,
+            "calculation_version": row.calculation_version,
             "overall_score": row.overall_score,
             "readiness_level": row.readiness_level,
             "evidence_count": row.evidence_count,

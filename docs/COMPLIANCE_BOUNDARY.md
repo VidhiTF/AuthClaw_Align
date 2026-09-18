@@ -11,9 +11,12 @@ operation over a defined period.
 ## Trust Summary
 
 The Trust Summary groups existing control scores for presentation. **Verified** represents
-controls currently meeting AuthClaw's automated framework-scoring criteria. **In Progress**
-represents controls with the existing `partial` status, and **Planned** represents controls
-with the existing `non_compliant` status.
+controls supported by qualified, independently reviewed evidence and complete implementation.
+**In Progress** represents controls with the existing `partial` status, and **Not qualified**
+represents controls with the existing `non_compliant` status (the API bucket remains `planned`).
+Canonical percentages measure weighted qualified evidence coverage: an unqualified control
+earns zero points. Internal product activity is separately labeled diagnostic information
+and cannot contribute to these percentages or readiness decisions.
 
 These labels do not change the underlying control status or evidence lifecycle. The Trust
 Summary is not an independent SOC 2 Type II report or a SOC 3 report, and it does not imply

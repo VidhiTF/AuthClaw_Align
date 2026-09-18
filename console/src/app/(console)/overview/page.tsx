@@ -7,10 +7,11 @@ import {
   Clock,
   ArrowUpRight,
   RefreshCw,
-  CheckCircle2,
   UserRound,
 } from "lucide-react";
 import Link from "next/link";
+import { calculationVersion } from "@/lib/trust-summary";
+import { readinessLabel } from "@/lib/ui-format";
 
 interface DashboardMetrics {
   openApprovals: number;
@@ -21,6 +22,7 @@ interface DashboardMetrics {
 }
 
 interface FrameworkScore {
+  calculation_version?: string;
   framework: "SOC2" | "GDPR" | "HIPAA";
   score: number;
   readiness_level: string;
@@ -33,6 +35,8 @@ interface FrameworkScore {
 }
 
 interface ComplianceScoreState {
+  calculation_version?: string;
+  generated_at: string;
   overall_score: number;
   readiness_level: string;
   frameworks: FrameworkScore[];
@@ -50,31 +54,43 @@ interface RecentAuditRecord {
 export default function OverviewPage() {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [complianceScores, setComplianceScores] = useState<ComplianceScoreState | null>(null);
+  const [scoresError, setScoresError] = useState<string | null>(null);
+  const metricsRequest = useRef(0);
   const [recentActivity, setRecentActivity] = useState<RecentAuditRecord[]>([]);
   const [loading, setLoading] = useState(true); const [trafficRange, setTrafficRange] = useState(24); const trafficRangeRef = useRef(24);
 
   const fetchMetrics = useCallback(async (full = true, hours = trafficRangeRef.current) => {
+    const request = ++metricsRequest.current;
+    setComplianceScores(null);
+    setScoresError(null);
     try {
       if (full) setLoading(true);
-      const scoresPromise = full ? fetch("/api/compliance-scores?persist_snapshot=false") : Promise.resolve(null);
-      const dashboardRes = await fetch(`/api/dashboard?hours=${hours}`);
-      if (dashboardRes.status === 401) {
-        window.location.href = "/login";
-        return;
+      const results = await Promise.allSettled([
+        fetch(`/api/dashboard?hours=${hours}`),
+        fetch("/api/compliance-scores?persist_snapshot=false", { cache: "no-store" }),
+      ].map(async (pending) => {
+        const response = await pending;
+        if (response.status === 401) { window.location.href = "/login"; throw new Error("Session expired"); }
+        if (!response.ok) throw new Error("Data unavailable");
+        return response.json();
+      }));
+      if (request !== metricsRequest.current) return;
+      const [dashboard, scores] = results;
+      if (dashboard.status === "fulfilled") {
+        setMetrics(dashboard.value);
+        setRecentActivity(dashboard.value.recentActivity || []);
       }
-      if (!dashboardRes.ok) throw new Error("Failed to load metrics");
-      const data = await dashboardRes.json();
-      setMetrics(data); setRecentActivity(data.recentActivity || []); if (full) setLoading(false);
-      const scoresRes = await scoresPromise;
-      if (scoresRes?.status === 401) { window.location.href = "/login"; return; }
-      if (scoresRes?.ok) {
-        setComplianceScores(await scoresRes.json());
-      }
+      if (scores.status === "fulfilled") setComplianceScores(scores.value);
+      else setScoresError("Current compliance assessment unavailable. Refresh to try again.");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Could not retrieve real-time metrics";
       console.warn("Overview fetch metrics failed:", message);
+      if (request === metricsRequest.current) {
+        setComplianceScores(null);
+        setScoresError("Current compliance assessment unavailable. Refresh to try again.");
+      }
     } finally {
-      if (full) setLoading(false);
+      if (request === metricsRequest.current) setLoading(false);
     }
   }, []);
 
@@ -86,6 +102,7 @@ export default function OverviewPage() {
     return () => {
       window.clearTimeout(initialFetch);
       clearInterval(interval);
+      metricsRequest.current += 1;
     };
   }, [fetchMetrics]);
 
@@ -231,8 +248,9 @@ export default function OverviewPage() {
           </section>
 
           <section className="overflow-hidden rounded-md border border-[#DCE1E9] bg-white">
-            <div className="flex items-center justify-between px-5 py-4"><div><h3 className="text-lg font-bold">Compliance readiness</h3><p className="text-xs text-[#6B7488]">Policy coverage and control status across key frameworks.</p></div><Link href="/compliance" className="text-xs font-semibold text-[#6D28D9]">View details →</Link></div>
-            <table className="w-full text-left text-xs"><thead><tr><th className="px-5 py-2">Framework</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Coverage</th><th className="px-4 py-2">Evidence</th><th className="px-5 py-2">Open issues</th></tr></thead><tbody>{complianceReadiness.length === 0 ? <tr><td colSpan={5} className="px-5 py-8 text-center text-[#6B7488]">Compliance scores will appear after the live scoring endpoint responds.</td></tr> : complianceReadiness.map((framework) => { const meta = frameworkLabels[framework.framework]; return <tr key={framework.framework} className="border-t border-[#EEF1F6]"><td className="px-5 py-3 font-semibold">{meta.name}</td><td className="px-4 py-3 text-emerald-700"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5"/>{framework.readiness_level}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><span>{framework.score}%</span><span className="h-1.5 w-20 overflow-hidden rounded-full bg-[#EEF1F6]"><span className="block h-full bg-[#6D28D9]" style={{width:`${framework.score}%`}}/></span></div></td><td className="px-4 py-3">{framework.metrics.evidence_count}</td><td className="px-5 py-3">{framework.metrics.open_findings}</td></tr>; })}</tbody></table>
+            <div className="flex items-center justify-between px-5 py-4"><div><h3 className="text-lg font-bold">Compliance readiness</h3><p className="text-xs text-[#6B7488]">Scores show qualified evidence coverage. 0% means required reviewed evidence or control conditions are unmet. Activity counts cannot establish compliance.</p></div><Link href="/compliance" className="text-xs font-semibold text-[#6D28D9]">View details →</Link></div>
+            {complianceScores && <p className="px-5 pb-3 text-[10px] text-[#6B7488]">As of {new Date(complianceScores.generated_at).toLocaleString()} · Calculation version: {calculationVersion(complianceScores.calculation_version)}{calculationVersion(complianceScores.calculation_version) === "legacy_unversioned" && " · Legacy results do not establish current evidence qualification."}</p>}
+            <table className="w-full text-left text-xs"><thead><tr><th className="px-5 py-2">Framework</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Qualified evidence coverage</th><th className="px-4 py-2">Activity records</th><th className="px-5 py-2">Open issues</th></tr></thead><tbody>{complianceReadiness.length === 0 ? <tr><td colSpan={5} className="px-5 py-8 text-center text-[#6B7488]" role={scoresError ? "alert" : "status"}>{scoresError || "Loading current compliance assessment…"}</td></tr> : complianceReadiness.map((framework) => { const meta = frameworkLabels[framework.framework]; return <tr key={framework.framework} className="border-t border-[#EEF1F6]"><td className="px-5 py-3 font-semibold">{meta.name}<span className="mt-1 block text-[10px] font-normal text-[#6B7488]">{calculationVersion(framework.calculation_version)}</span></td><td className="px-4 py-3 text-[#475069]">{readinessLabel(framework.readiness_level)}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><span>{framework.score}%</span><span className="h-1.5 w-20 overflow-hidden rounded-full bg-[#EEF1F6]"><span className="block h-full bg-[#6D28D9]" style={{width:`${framework.score}%`}}/></span></div></td><td className="px-4 py-3">{framework.metrics.evidence_count}</td><td className="px-5 py-3">{framework.metrics.open_findings}</td></tr>; })}</tbody></table>
           </section>
         </div>
 
