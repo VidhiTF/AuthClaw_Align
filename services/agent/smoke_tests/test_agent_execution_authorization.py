@@ -250,7 +250,11 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
     def test_created_approval_requester_is_immutable_and_authoritative(self):
         import approval_store
 
+        engine = Mock()
+        engine.begin.return_value.__enter__ = Mock(return_value=Mock())
+        engine.begin.return_value.__exit__ = Mock(return_value=False)
         with (
+            patch.object(approval_store, "engine", engine),
             patch.object(approval_store, "_persist_record"),
             patch.object(approval_store, "append_approval_audit"),
         ):

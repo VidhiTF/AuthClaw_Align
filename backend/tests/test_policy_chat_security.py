@@ -53,7 +53,11 @@ def test_simulation_route_returns_client_error_for_input_budget(prompts):
 def test_chat_uses_workflow_throttle_and_propagates_429(monkeypatch, message):
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
-        tier="starter", execution_status="COMPLETED", remediation_plan=[{"action": "redact"}],
+        title="Test",
+        tier="starter",
+        execution_status="COMPLETED",
+        remediation_plan=[{"action": "redact"}],
+        state_data={"requester_id": str(uuid4())},
     )
     request = SimpleNamespace(state=SimpleNamespace(tenant_id=uuid4(), user_id=uuid4()))
     calls = []
