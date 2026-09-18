@@ -22,6 +22,13 @@ from sqlalchemy import text
 from graph import graph
 from approval_store import (
     ApprovalCreationError,
+    ApprovalPersistenceError,
+    ApprovalStateConflict,
+    approve_approval_atomic,
+    begin_approval_execution_atomic,
+    expire_approved_execution_atomic,
+    finish_approval_execution_atomic,
+    reject_approval_atomic,
     pending_approvals,
     approved_results,
     get_approval,
@@ -1376,7 +1383,7 @@ def get_approval_history_by_id(approval_id: str, authorization: Optional[str] = 
 
 @app.post("/approve/{approval_id}")
 async def approve_request(approval_id: str, request: Request):
-    record = get_approval(approval_id)
+    record = get_approval(approval_id, fresh=True)
     if record is None:
         # For backward compatibility, return JSON dict rather than raising 404
         return JSONResponse(
@@ -1388,31 +1395,12 @@ async def approve_request(approval_id: str, request: Request):
     ensure_approval_tenant_access(record, user_payload)
     approver = approval_actor_from_payload(user_payload)
 
-    # Expiry check is handled by get_approval() lazily updating to 'expired'
-    if record["status"] == "expired":
+    # Approval is a single-use pending-to-approved transition. The database
+    # compare-and-swap below enforces this again for concurrent workers.
+    if record["status"] != "pending":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Approval request has expired"
-        )
-    if record["status"] == "rejected":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Approval request has already been rejected"
-        )
-    if record["status"] == "executed":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Approval request has already been executed"
-        )
-    if record["status"] == "executing":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Approval request is already executing"
-        )
-    if record["status"] == "execution_failed":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Approval execution already failed. Create a new approval to retry."
+            detail=f"Approval request is already resolved (status={record['status']})",
         )
 
     # Policy checks for MFA configuration
@@ -1500,29 +1488,29 @@ async def approve_request(approval_id: str, request: Request):
                 }
             )
 
-    # Transition status to approved
-    record["status"] = "approved"
-    record["approved_at"] = datetime.now(timezone.utc).isoformat()
-    record["approved_by"] = approver
-    record["mfa_verified"] = mfa_verified
-    record["approval_mfa_verified"] = mfa_verified
-    record["approval_mfa_binding_hash"] = mfa_binding_hash
-    record["approval_mfa_counter"] = mfa_counter
+    approved_at = datetime.now(timezone.utc)
     execution_expires_at = datetime.now(timezone.utc) + timedelta(minutes=_approval_execution_expiry_minutes())
-    record["execution_expires_at"] = execution_expires_at.isoformat()
-    record["last_action_at"] = record["approved_at"]
-    append_approval_audit(
-        record,
-        action="approved",
-        actor=approver,
-        comment=comment,
-        mfa_verified=mfa_verified,
-        metadata={
-            "action_payload_hash": _approval_action_payload_hash(record),
-            "mfa_binding_hash": mfa_binding_hash,
-            "execution_expires_at": record["execution_expires_at"],
-        },
-    )
+    try:
+        record = approve_approval_atomic(
+            record,
+            approver=approver,
+            approved_at=approved_at,
+            mfa_verified=mfa_verified,
+            mfa_binding_hash=mfa_binding_hash,
+            mfa_counter=mfa_counter,
+            execution_expires_at=execution_expires_at,
+            comment=comment,
+            audit_metadata={
+                "action_payload_hash": _approval_action_payload_hash(record),
+                "mfa_binding_hash": mfa_binding_hash,
+                "execution_expires_at": execution_expires_at.isoformat(),
+            },
+        )
+    except ApprovalStateConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Approval request is already resolved (status={exc.current_status})",
+        ) from exc
 
     log_approval_event(
         event="approval_approved",
@@ -1565,7 +1553,7 @@ async def approve_request(approval_id: str, request: Request):
 
 @app.post("/reject/{approval_id}")
 async def reject_request(approval_id: str, request: Request):
-    record = get_approval(approval_id)
+    record = get_approval(approval_id, fresh=True)
     if record is None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1579,33 +1567,26 @@ async def reject_request(approval_id: str, request: Request):
     payload.pop("_body_present", None)
     comment = (payload.get("comment") or "").strip() or None
 
-    if record["status"] == "expired":
+    if record["status"] != "pending":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Approval request has expired"
-        )
-    if record["status"] == "approved":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Approval request is already approved"
-        )
-    if record["status"] == "executed":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Approval request is already executed"
+            detail=f"Approval request is already resolved (status={record['status']})",
         )
 
-    record["status"] = "rejected"
-    record["rejected_at"] = datetime.now(timezone.utc).isoformat()
-    record["rejected_by"] = approver
-    record["last_action_at"] = record["rejected_at"]
-    append_approval_audit(
-        record,
-        action="rejected",
-        actor=approver,
-        comment=comment,
-        metadata={"reason": record.get("reason")},
-    )
+    rejected_at = datetime.now(timezone.utc)
+    try:
+        record = reject_approval_atomic(
+            record,
+            actor=approver,
+            rejected_at=rejected_at,
+            comment=comment,
+            audit_metadata={"reason": record.get("reason")},
+        )
+    except ApprovalStateConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Approval request is already resolved (status={exc.current_status})",
+        ) from exc
 
     from startup.audit import log_approval_event
     log_approval_event(
@@ -1647,7 +1628,7 @@ async def reject_request(approval_id: str, request: Request):
 
 @app.post("/execute/{approval_id}")
 async def execute_request(approval_id: str, request: Request):
-    record = get_approval(approval_id)
+    record = get_approval(approval_id, fresh=True)
     if record is None:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1683,29 +1664,17 @@ async def execute_request(approval_id: str, request: Request):
         )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Approval execution is bound to the approving actor.")
 
-    if _approval_is_expired(record):
-        record["status"] = "expired"
-        record["last_action_at"] = datetime.now(timezone.utc).isoformat()
-        append_approval_audit(
-            record,
-            action="expired",
-            actor="system",
-            comment="Approval expired before execution.",
-            metadata={"expires_at": record.get("expires_at")},
+    now = datetime.now(timezone.utc)
+    execution_window_expired = (
+        not record.get("execution_expires_at")
+        or now >= _utc_from_iso(record["execution_expires_at"])
+    )
+    if _approval_is_expired(record) or execution_window_expired:
+        record, _ = expire_approved_execution_atomic(record, expired_at=now)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Approval request is already resolved (status={record['status']})",
         )
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Approval request has expired")
-
-    if record.get("execution_expires_at") and datetime.now(timezone.utc) >= _utc_from_iso(record["execution_expires_at"]):
-        record["status"] = "expired"
-        record["last_action_at"] = datetime.now(timezone.utc).isoformat()
-        append_approval_audit(
-            record,
-            action="expired",
-            actor="system",
-            comment="Approval execution window expired.",
-            metadata={"execution_expires_at": record.get("execution_expires_at")},
-        )
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Approval execution window has expired")
 
     if not body_present:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="MFA code is required")
@@ -1743,34 +1712,35 @@ async def execute_request(approval_id: str, request: Request):
         )
 
     execution_token_hash = hashlib.sha256(secrets.token_urlsafe(32).encode("utf-8")).hexdigest()
-    from database import engine
-    with engine.connect() as conn:
-        locked = conn.execute(
-            text("""
-                UPDATE gateway_approvals
-                SET status = 'executing',
-                    execution_token_hash = :token_hash,
-                    execution_token_used_at = NOW(),
-                    execution_mfa_verified = TRUE,
-                    execution_mfa_binding_hash = :binding_hash,
-                    execution_mfa_counter = :counter,
-                    executed_by = :actor,
-                    last_action_at = NOW()
-                WHERE approval_id = :approval_id
-                  AND status = 'approved'
-                  AND execution_token_used_at IS NULL
-                RETURNING approval_id
-            """),
-            {
-                "token_hash": execution_token_hash,
-                "binding_hash": execution_mfa_binding_hash,
-                "counter": execution_mfa_counter,
-                "actor": approver,
-                "approval_id": approval_id,
+    transition_at = datetime.now(timezone.utc)
+    try:
+        record = begin_approval_execution_atomic(
+            record,
+            actor=approver,
+            transition_at=transition_at,
+            execution_token_hash=execution_token_hash,
+            mfa_binding_hash=execution_mfa_binding_hash,
+            mfa_counter=execution_mfa_counter,
+            comment=comment,
+            audit_metadata={
+                "action_payload_hash": _approval_action_payload_hash(record),
+                "mfa_binding_hash": execution_mfa_binding_hash,
             },
-        ).fetchone()
-        conn.commit()
-    if not locked:
+        )
+    except ApprovalStateConflict as exc:
+        if exc.current_status != "expired":
+            append_approval_audit(
+                record,
+                action="replay_rejected",
+                actor=approver,
+                metadata={"reason": "single_use_token_already_consumed"},
+            )
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Approval execution is already resolved (status={exc.current_status})."},
+        )
+
+    if record["status"] != "executing":
         append_approval_audit(
             record,
             action="replay_rejected",
@@ -1780,26 +1750,6 @@ async def execute_request(approval_id: str, request: Request):
         return JSONResponse(status_code=400, content={"error": "Approval execution token already used."})
 
     query = record["query"]
-
-    record["status"] = "executing"
-    record["executed_by"] = approver
-    record["execution_mfa_verified"] = True
-    record["execution_mfa_binding_hash"] = execution_mfa_binding_hash
-    record["execution_mfa_counter"] = execution_mfa_counter
-    record["execution_token_hash"] = execution_token_hash
-    record["execution_token_used_at"] = datetime.now(timezone.utc).isoformat()
-    record["last_action_at"] = record["execution_token_used_at"]
-    append_approval_audit(
-        record,
-        action="executing",
-        actor=approver,
-        comment=comment,
-        mfa_verified=True,
-        metadata={
-            "action_payload_hash": _approval_action_payload_hash(record),
-            "mfa_binding_hash": execution_mfa_binding_hash,
-        },
-    )
 
     # Execute the approved query through the canonical gateway lifecycle.
     try:
@@ -1825,18 +1775,26 @@ async def execute_request(approval_id: str, request: Request):
             result = execution.result
     except GatewayProviderConfigurationError as e:
         logger.error(f"Provider configuration error in execute: {e}", exc_info=True)
-        record["status"] = "execution_failed"
-        record["last_action_at"] = datetime.now(timezone.utc).isoformat()
-        append_approval_audit(record, action="execution_failed", actor=approver, metadata={"error": "provider_not_configured"})
+        record = finish_approval_execution_atomic(
+            record,
+            actor=approver,
+            final_status="execution_failed",
+            transition_at=datetime.now(timezone.utc),
+            audit_metadata={"error": "provider_not_configured"},
+        )
         return JSONResponse(
             status_code=500,
             content={"error": "provider_not_configured"}
         )
     except GatewayProviderUnavailableError as e:
         logger.error(f"Provider invocation error in execute: {e}", exc_info=True)
-        record["status"] = "execution_failed"
-        record["last_action_at"] = datetime.now(timezone.utc).isoformat()
-        append_approval_audit(record, action="execution_failed", actor=approver, metadata={"error": "provider_unavailable", "request_id": e.request_id})
+        record = finish_approval_execution_atomic(
+            record,
+            actor=approver,
+            final_status="execution_failed",
+            transition_at=datetime.now(timezone.utc),
+            audit_metadata={"error": "provider_unavailable", "request_id": e.request_id},
+        )
         return JSONResponse(
             status_code=503,
             content={
@@ -1849,21 +1807,23 @@ async def execute_request(approval_id: str, request: Request):
         )
     except Exception as e:
         logger.error(f"Execution failed: {e}", exc_info=True)
-        record["status"] = "execution_failed"
-        record["last_action_at"] = datetime.now(timezone.utc).isoformat()
-        append_approval_audit(record, action="execution_failed", actor=approver, metadata={"error": type(e).__name__})
+        record = finish_approval_execution_atomic(
+            record,
+            actor=approver,
+            final_status="execution_failed",
+            transition_at=datetime.now(timezone.utc),
+            audit_metadata={"error": type(e).__name__},
+        )
         raise
 
-    record["status"] = "executed"
-    record["executed_at"] = datetime.now(timezone.utc).isoformat()
-    record["last_action_at"] = record["executed_at"]
-    append_approval_audit(
+    record = finish_approval_execution_atomic(
         record,
-        action="executed",
         actor=approver,
+        final_status="executed",
+        transition_at=datetime.now(timezone.utc),
         comment=comment,
         mfa_verified=True,
-        metadata={
+        audit_metadata={
             "execution_request_id": execution.request_id,
             "provider": execution.provider,
             "model": execution.model,
@@ -3099,6 +3059,8 @@ async def upload_document(
         raise
     except ApprovalCreationError as ex:
         raise HTTPException(status_code=401, detail=str(ex)) from ex
+    except ApprovalPersistenceError as ex:
+        raise HTTPException(status_code=503, detail="Approval persistence is unavailable") from ex
     except Exception as ex:
         # Fallback if pipeline fails (e.g. LLM issues) so document is still indexed
         logger.error(f"Scan pipeline failed, fallback indexing document: {ex}")
@@ -3443,6 +3405,8 @@ def scan_document(
         )
     except ApprovalCreationError as ex:
         raise HTTPException(status_code=401, detail=str(ex)) from ex
+    except ApprovalPersistenceError as ex:
+        raise HTTPException(status_code=503, detail="Approval persistence is unavailable") from ex
     return pipeline_res
 
 @app.get("/documents")

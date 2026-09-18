@@ -139,20 +139,13 @@ def _create_approval_in_db(
     tenant_id: str,
     workflow_id: str,
     plan: list,
-    requester_id: Optional[str] = None,
+    requester_id: str,
 ) -> str:
     """Create a pending_approvals record for HITL review."""
     approval_id = str(uuid.uuid4())
-
-    if requester_id:
-        resolved_requester_id = uuid.UUID(str(requester_id))
-    else:
-        # Legacy graph-created approvals do not carry an HTTP user context.
-        result = db.execute(
-            text("SELECT id FROM users WHERE tenant_id = :tid AND is_active = true LIMIT 1"),
-            {"tid": tenant_id},
-        ).first()
-        resolved_requester_id = result[0] if result else uuid.UUID(tenant_id)
+    if not str(requester_id or "").strip():
+        raise ValueError("Authenticated workflow requester identity is required")
+    resolved_requester_id = uuid.UUID(str(requester_id))
 
     expires_at = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
     action_payload = build_action_payload(workflow_id, plan)
@@ -361,9 +354,13 @@ class ComplianceWorkflowRunner:
         self,
         tenant_id: str,
         framework: str,
+        requester_id: str,
         request_id: Optional[str] = None,
     ) -> dict:
         """Start a new compliance workflow."""
+        if not str(requester_id or "").strip():
+            raise ValueError("Authenticated workflow requester identity is required")
+        requester_id = str(uuid.UUID(str(requester_id)))
         workflow_id = str(uuid.uuid4())
         now = datetime.now(tz=timezone.utc)
 
@@ -374,6 +371,10 @@ class ComplianceWorkflowRunner:
             workflow_id=workflow_id,
             request_id=request_id or "",
             framework=framework,
+            state_data={
+                "request_id": request_id or "",
+                "requester_id": requester_id,
+            },
             current_state=WorkflowState.GATHER_EVIDENCE.value,
             execution_status=ExecutionStatus.RUNNING.value,
             started_at=now,
@@ -391,6 +392,7 @@ class ComplianceWorkflowRunner:
             "workflow_id": workflow_id,
             "tenant_id": tenant_id,
             "request_id": request_id or "",
+            "requester_id": requester_id,
             "framework": framework,
             "current_state": WorkflowState.GATHER_EVIDENCE.value,
             "findings": [],
@@ -410,7 +412,9 @@ class ComplianceWorkflowRunner:
             "completed_at": "",
             "_emit_audit": emit_audit_event,
             "_persist_state": lambda s: _persist_state_to_db(self.db, s),
-            "_create_approval": lambda tid, wid, plan: _create_approval_in_db(self.db, tid, wid, plan),
+            "_create_approval": lambda tid, wid, plan: _create_approval_in_db(
+                self.db, tid, wid, plan, requester_id
+            ),
             "_check_approval": lambda aid: _check_approval_in_db(self.db, aid),
             "_store_evidence": _make_store_evidence_fn(self.db),
             "_store_finding": _make_store_finding_fn(self.db),
@@ -458,9 +462,11 @@ class ComplianceWorkflowRunner:
         self,
         workflow_id: str,
         tenant_id: str,
-        actor_id: Optional[str] = None,
+        actor_id: str,
     ) -> dict:
         """Resume a paused workflow (e.g., after approval)."""
+        if not str(actor_id or "").strip():
+            raise ValueError("Authenticated workflow actor identity is required")
         lock_key = int(uuid.UUID(workflow_id).int & 0x7fffffffffffffff)
         with workflow_advisory_lock(self.db, lock_key, workflow_id):
             wf = self.db.query(ComplianceWorkflow).filter(
@@ -478,17 +484,22 @@ class ComplianceWorkflowRunner:
 
             # Restore state from snapshot
             state_data = wf.state_data or {}
+            requester_id = str(state_data.get("requester_id") or "").strip()
+            if not requester_id:
+                raise ValueError("Workflow requester identity is unavailable")
             state: ComplianceState = {
                 **state_data,
                 "execution_status": ExecutionStatus.RUNNING.value,
                 "_emit_audit": emit_audit_event,
                 "_persist_state": lambda s: _persist_state_to_db(self.db, s),
-                "_create_approval": lambda tid, wid, plan: _create_approval_in_db(self.db, tid, wid, plan),
+                "_create_approval": lambda tid, wid, plan: _create_approval_in_db(
+                    self.db, tid, wid, plan, requester_id
+                ),
                 "_check_approval": lambda aid: _check_approval_in_db(
                     self.db,
                     aid,
                     tenant_id,
-                    actor_id or "",
+                    actor_id,
                     workflow_id,
                     wf.remediation_plan or [],
                 ),
@@ -565,8 +576,10 @@ class ComplianceWorkflowRunner:
             "completed_at": wf.completed_at.isoformat() if wf.completed_at else None,
         }
 
-    def recover_interrupted(self, tenant_id: str) -> list[dict]:
+    def recover_interrupted(self, tenant_id: str, actor_id: str) -> list[dict]:
         """Find and recover workflows that were interrupted (RUNNING but not completed)."""
+        if not str(actor_id or "").strip():
+            raise ValueError("Authenticated workflow actor identity is required")
         interrupted = self.db.query(ComplianceWorkflow).filter(
             ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
             ComplianceWorkflow.execution_status.in_(["RUNNING"]),
@@ -576,7 +589,7 @@ class ComplianceWorkflowRunner:
         results = []
         for wf in interrupted:
             try:
-                result = self.resume(wf.workflow_id, tenant_id)
+                result = self.resume(wf.workflow_id, tenant_id, actor_id)
                 results.append({"workflow_id": wf.workflow_id, "status": "recovered", "state": result})
             except Exception as exc:
                 results.append({"workflow_id": wf.workflow_id, "status": "failed", "error": str(exc)})

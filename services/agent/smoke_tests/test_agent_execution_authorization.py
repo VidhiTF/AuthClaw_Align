@@ -1,5 +1,7 @@
 import asyncio
+import copy
 import os
+import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -274,8 +276,8 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
 
         connection = Mock()
         engine = Mock()
-        engine.connect.return_value.__enter__ = Mock(return_value=connection)
-        engine.connect.return_value.__exit__ = Mock(return_value=False)
+        engine.begin.return_value.__enter__ = Mock(return_value=connection)
+        engine.begin.return_value.__exit__ = Mock(return_value=False)
         with patch.object(approval_store, "engine", engine):
             approval_store._persist_record({"requested_by": "oidc|requester-17"})
 
@@ -291,6 +293,449 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             "ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS requested_by VARCHAR(255)",
             migrations,
         )
+
+    def test_already_approved_request_is_rejected_before_mfa_or_mutation(self):
+        import main
+
+        record = {
+            "approval_id": "approval-resolved",
+            "tenant_id": 42,
+            "status": "approved",
+        }
+        with (
+            patch.object(main, "get_approval", return_value=record),
+            patch.object(
+                main,
+                "_approval_authenticated_payload",
+                return_value={"tenant_id": 42, "sub": "oidc|checker-2"},
+            ),
+            patch.object(main, "_verify_approval_stage_mfa") as verify_mfa,
+            patch.object(main, "approve_approval_atomic") as approve_atomic,
+            self.assertRaises(main.HTTPException) as raised,
+        ):
+            asyncio.run(main.approve_request("approval-resolved", object()))
+
+        self.assertEqual(raised.exception.status_code, 400)
+        verify_mfa.assert_not_called()
+        approve_atomic.assert_not_called()
+
+    def test_atomic_approval_allows_exactly_one_concurrent_winner(self):
+        import approval_store
+
+        shared = {
+            "approval_id": "approval-race",
+            "request_id": "request-race",
+            "correlation_id": "correlation-race",
+            "tenant_id": 42,
+            "status": "pending",
+            "requested_by": "oidc|requester",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "comments": "[]",
+            "metadata": "{}",
+            "reason": "high_risk",
+        }
+        audit_rows = []
+        transaction_lock = threading.Lock()
+
+        class Row:
+            def __init__(self, mapping):
+                self._mapping = mapping
+
+        class Result:
+            def __init__(self, row=None, scalar_value=None, rowcount=0):
+                self._row = row
+                self._scalar = scalar_value
+                self.rowcount = rowcount
+
+            def fetchone(self):
+                return self._row
+
+            def scalar(self):
+                return self._scalar
+
+        class Connection:
+            def execute(self, statement, parameters):
+                sql = " ".join(str(statement).split()).upper()
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = 'APPROVED'"):
+                    if shared["status"] != "pending":
+                        return Result(rowcount=0)
+                    shared.update({
+                        "status": "approved",
+                        "approved_at": parameters["approved_at"],
+                        "approved_by": parameters["approved_by"],
+                        "mfa_verified": parameters["mfa_verified"],
+                        "approval_mfa_verified": parameters["mfa_verified"],
+                        "approval_mfa_binding_hash": parameters["binding_hash"],
+                        "approval_mfa_counter": parameters["counter"],
+                        "execution_expires_at": parameters["execution_expires_at"],
+                        "last_action_at": parameters["approved_at"],
+                    })
+                    return Result(Row(copy.deepcopy(shared)), rowcount=1)
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = 'EXPIRED'"):
+                    return Result(rowcount=0)
+                if sql.startswith("SELECT STATUS FROM GATEWAY_APPROVALS"):
+                    return Result(scalar_value=shared["status"])
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET COMMENTS"):
+                    shared["comments"] = parameters["comments"]
+                    return Result(rowcount=1)
+                if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
+                    audit_rows.append(dict(parameters))
+                    return Result(rowcount=1)
+                raise AssertionError(sql)
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                with transaction_lock:
+                    yield Connection()
+
+        winners = []
+        conflicts = []
+
+        def decide(approver, counter):
+            try:
+                winners.append(approval_store.approve_approval_atomic(
+                    dict(shared),
+                    approver=approver,
+                    approved_at=approval_store.datetime.now(approval_store.timezone.utc),
+                    mfa_verified=True,
+                    mfa_binding_hash=f"binding-{counter}",
+                    mfa_counter=counter,
+                    execution_expires_at=approval_store.datetime.now(approval_store.timezone.utc),
+                ))
+            except approval_store.ApprovalStateConflict as exc:
+                conflicts.append(exc)
+
+        with (
+            patch.object(approval_store, "engine", Engine()),
+            patch.dict(approval_store._approvals, {}, clear=True),
+        ):
+            first = threading.Thread(target=decide, args=("oidc|checker-1", 101))
+            second = threading.Thread(target=decide, args=("oidc|checker-2", 202))
+            first.start()
+            second.start()
+            first.join()
+            second.join()
+
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(len(audit_rows), 1)
+        self.assertEqual(shared["approved_by"], winners[0]["approved_by"])
+
+    def test_audit_failure_rolls_back_atomic_approval_and_does_not_cache(self):
+        import approval_store
+
+        shared = {
+            "approval_id": "approval-audit-failure",
+            "request_id": "request-audit-failure",
+            "correlation_id": "correlation-audit-failure",
+            "tenant_id": 42,
+            "status": "pending",
+            "requested_by": "oidc|requester",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "comments": "[]",
+            "metadata": "{}",
+            "reason": "high_risk",
+        }
+
+        class Row:
+            _mapping = shared
+
+        class Result:
+            rowcount = 1
+
+            def fetchone(self):
+                return Row()
+
+        class Connection:
+            def execute(self, statement, parameters):
+                sql = " ".join(str(statement).split()).upper()
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = 'APPROVED'"):
+                    shared["status"] = "approved"
+                    return Result()
+                if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
+                    raise RuntimeError("audit denied by RLS")
+                return Result()
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                before = copy.deepcopy(shared)
+                try:
+                    yield Connection()
+                except Exception:
+                    shared.clear()
+                    shared.update(before)
+                    raise
+
+        with (
+            patch.object(approval_store, "engine", Engine()),
+            patch.dict(approval_store._approvals, {}, clear=True),
+            self.assertRaises(approval_store.ApprovalPersistenceError),
+        ):
+            approval_store.approve_approval_atomic(
+                dict(shared),
+                approver="oidc|checker",
+                approved_at=approval_store.datetime.now(approval_store.timezone.utc),
+                mfa_verified=True,
+                mfa_binding_hash="binding",
+                mfa_counter=303,
+                execution_expires_at=approval_store.datetime.now(approval_store.timezone.utc),
+            )
+
+        self.assertEqual(shared["status"], "pending")
+        self.assertNotIn("approval-audit-failure", approval_store._approvals)
+
+    def test_approval_expiring_during_mfa_is_atomically_expired_and_audited(self):
+        import approval_store
+
+        shared = {
+            "approval_id": "approval-expired-during-mfa",
+            "request_id": "request-expired-during-mfa",
+            "correlation_id": "correlation-expired-during-mfa",
+            "tenant_id": 42,
+            "status": "pending",
+            "requested_by": "oidc|requester",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2026-01-01T00:01:00+00:00",
+            "comments": "[]",
+            "metadata": "{}",
+            "reason": "high_risk",
+        }
+        audit_rows = []
+
+        class Row:
+            @property
+            def _mapping(self):
+                return copy.deepcopy(shared)
+
+        class Result:
+            def __init__(self, row=None, rowcount=0):
+                self._row = row
+                self.rowcount = rowcount
+
+            def fetchone(self):
+                return self._row
+
+        class Connection:
+            def execute(self, statement, parameters):
+                sql = " ".join(str(statement).split()).upper()
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = 'APPROVED'"):
+                    return Result()
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = 'EXPIRED'"):
+                    shared["status"] = "expired"
+                    shared["last_action_at"] = parameters["approved_at"]
+                    return Result(Row(), rowcount=1)
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET COMMENTS"):
+                    shared["comments"] = parameters["comments"]
+                    return Result(rowcount=1)
+                if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
+                    audit_rows.append(dict(parameters))
+                    return Result(rowcount=1)
+                raise AssertionError(sql)
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield Connection()
+
+        with (
+            patch.object(approval_store, "engine", Engine()),
+            patch.dict(approval_store._approvals, {}, clear=True),
+            self.assertRaises(approval_store.ApprovalStateConflict) as raised,
+        ):
+            approval_store.approve_approval_atomic(
+                dict(shared),
+                approver="oidc|checker",
+                approved_at=approval_store.datetime(2026, 1, 1, 0, 2, tzinfo=approval_store.timezone.utc),
+                mfa_verified=True,
+                mfa_binding_hash="binding",
+                mfa_counter=404,
+                execution_expires_at=approval_store.datetime(2026, 1, 1, 0, 12, tzinfo=approval_store.timezone.utc),
+            )
+
+        self.assertEqual(raised.exception.current_status, "expired")
+        self.assertEqual(shared["status"], "expired")
+        self.assertEqual([row["action"] for row in audit_rows], ["expired"])
+
+    def test_execution_audit_failure_rolls_back_single_use_transition(self):
+        import approval_store
+
+        shared = {
+            "approval_id": "approval-execution-audit-failure",
+            "request_id": "request-execution-audit-failure",
+            "correlation_id": "correlation-execution-audit-failure",
+            "tenant_id": 42,
+            "status": "approved",
+            "requested_by": "oidc|requester",
+            "approved_by": "oidc|checker",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "execution_expires_at": "2099-01-01T00:10:00+00:00",
+            "execution_token_used_at": None,
+            "comments": "[]",
+            "metadata": "{}",
+            "reason": "high_risk",
+        }
+
+        class Row:
+            @property
+            def _mapping(self):
+                return copy.deepcopy(shared)
+
+        class Result:
+            rowcount = 1
+
+            def fetchone(self):
+                return Row()
+
+        class Connection:
+            def execute(self, statement, parameters):
+                sql = " ".join(str(statement).split()).upper()
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = 'EXECUTING'"):
+                    shared.update({
+                        "status": "executing",
+                        "execution_token_hash": parameters["token_hash"],
+                        "execution_token_used_at": parameters["transition_at"],
+                        "execution_mfa_verified": True,
+                        "execution_mfa_binding_hash": parameters["binding_hash"],
+                        "execution_mfa_counter": parameters["counter"],
+                        "executed_by": parameters["actor"],
+                    })
+                    return Result()
+                if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
+                    raise RuntimeError("audit denied by RLS")
+                return Result()
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                before = copy.deepcopy(shared)
+                try:
+                    yield Connection()
+                except Exception:
+                    shared.clear()
+                    shared.update(before)
+                    raise
+
+        with (
+            patch.object(approval_store, "engine", Engine()),
+            patch.dict(approval_store._approvals, {}, clear=True),
+            self.assertRaises(approval_store.ApprovalPersistenceError),
+        ):
+            approval_store.begin_approval_execution_atomic(
+                dict(shared),
+                actor="oidc|checker",
+                transition_at=approval_store.datetime.now(approval_store.timezone.utc),
+                execution_token_hash="token-hash",
+                mfa_binding_hash="binding",
+                mfa_counter=505,
+            )
+
+        self.assertEqual(shared["status"], "approved")
+        self.assertIsNone(shared["execution_token_used_at"])
+        self.assertNotIn("approval-execution-audit-failure", approval_store._approvals)
+
+    def test_terminal_audit_failure_rolls_back_success_and_failure_states(self):
+        import approval_store
+
+        for final_status in ("executed", "execution_failed"):
+            with self.subTest(final_status=final_status):
+                shared = {
+                    "approval_id": f"approval-terminal-{final_status}",
+                    "request_id": f"request-terminal-{final_status}",
+                    "correlation_id": f"correlation-terminal-{final_status}",
+                    "tenant_id": 42,
+                    "status": "executing",
+                    "requested_by": "oidc|requester",
+                    "approved_by": "oidc|checker",
+                    "executed_by": "oidc|checker",
+                    "execution_token_hash": "token-hash",
+                    "execution_token_used_at": "2026-01-01T00:05:00+00:00",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                    "comments": "[]",
+                    "metadata": "{}",
+                    "reason": "high_risk",
+                }
+
+                class Row:
+                    @property
+                    def _mapping(self):
+                        return copy.deepcopy(shared)
+
+                class Result:
+                    rowcount = 1
+
+                    def fetchone(self):
+                        return Row()
+
+                class Connection:
+                    def execute(self, statement, parameters):
+                        sql = " ".join(str(statement).split()).upper()
+                        if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = :FINAL_STATUS"):
+                            shared["status"] = parameters["final_status"]
+                            shared["last_action_at"] = parameters["transition_at"]
+                            if parameters["final_status"] == "executed":
+                                shared["executed_at"] = parameters["transition_at"]
+                            return Result()
+                        if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
+                            raise RuntimeError("audit denied by RLS")
+                        return Result()
+
+                class Engine:
+                    @contextmanager
+                    def begin(self):
+                        before = copy.deepcopy(shared)
+                        try:
+                            yield Connection()
+                        except Exception:
+                            shared.clear()
+                            shared.update(before)
+                            raise
+
+                with (
+                    patch.object(approval_store, "engine", Engine()),
+                    patch.dict(approval_store._approvals, {}, clear=True),
+                    self.assertRaises(approval_store.ApprovalPersistenceError),
+                ):
+                    approval_store.finish_approval_execution_atomic(
+                        dict(shared),
+                        actor="oidc|checker",
+                        final_status=final_status,
+                        transition_at=approval_store.datetime.now(approval_store.timezone.utc),
+                    )
+
+                self.assertEqual(shared["status"], "executing")
+                self.assertNotIn(shared["approval_id"], approval_store._approvals)
+
+    def test_create_approval_failure_never_enters_process_cache(self):
+        import approval_store
+
+        class Connection:
+            def execute(self, _statement, _parameters):
+                raise RuntimeError("approval table unavailable")
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield Connection()
+
+        with (
+            patch.object(approval_store, "engine", Engine()),
+            patch.dict(approval_store._approvals, {}, clear=True),
+        ):
+            with self.assertRaises(approval_store.ApprovalPersistenceError):
+                approval_store.create_approval(
+                    query="Delete sensitive records",
+                    risk_level="HIGH",
+                    tenant_id=42,
+                    request_id="request-persistence-failure",
+                    requested_by="oidc|requester",
+                )
+            self.assertEqual(approval_store._approvals, {})
 
     def test_document_override_propagates_requester_tenant_and_request_context(self):
         from document_processing import orchestrator

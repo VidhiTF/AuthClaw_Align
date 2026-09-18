@@ -196,6 +196,53 @@ claimed as passing locally: its two pure tests passed, while two database cases
 stopped during fixture setup because the local database lacked the document
 tables. The PR's PostgreSQL integration and migration checks remain required.
 
+## Approval atomicity and audit durability remediation (2026-09-18)
+
+The final candidate working tree based on `b0b33c429f62e5cb59078ffb63e3c50cf446bf69`
+closes the follow-up approval-integrity findings:
+
+- graph workflow creation persists the authenticated requester and start,
+  resume, recovery, and remediation fail closed when immutable requester
+  provenance is unavailable;
+- remediation preserves the original workflow requester and records the
+  current remediation initiator separately;
+- approval and rejection are tenant-scoped pending-only database
+  compare-and-swap transitions; approval expiry is rechecked in the same
+  transaction after MFA;
+- approval creation, expiry, execution start, and both terminal execution
+  outcomes commit canonical approval audit evidence in the same transaction as
+  their state transition; process cache entries update only after commit;
+- approval persistence failures propagate. Document scanning returns an
+  unavailable response rather than converting a failed high-risk approval into
+  a low-risk completed fallback.
+
+Fresh local verification:
+
+```text
+backend ENT-022 security: 10 passed
+backend workflow/remediation regression: 24 passed, 1 unrelated pre-existing test deselected
+agent authorization/atomicity: 26 passed
+exact Agent CI selection: 95 passed, 6 environment-dependent skips, 56 subtests passed
+targeted Python compilation: passed
+git diff --check: passed
+focused forbidden-MFA-default scan: no matches
+```
+
+The agent transaction tests cover duplicate approval, expiry during MFA,
+creation persistence failure, approval-audit rollback, execution-start audit
+rollback, and successful/failed terminal-state audit rollback. They use a
+deterministic transactional fake to exercise the application contract. A live
+PostgreSQL/RLS concurrency rerun is **not** claimed: Docker was unavailable and
+the repository's destructive agent pytest database bootstrap could not create
+its database under the available local role. The PR's PostgreSQL integration
+job remains mandatory.
+
+The focused production/configuration scan found no static MFA default, test MFA
+bypass flag, quoted `123456`, or non-empty lite-demo TOTP assignment. Gitleaks
+was not available locally and Docker was not running, so the earlier full-tree
+Gitleaks result is not asserted against this final candidate diff. The current
+PR-head Security Scans job must pass before merge.
+
 ## Deployment and rollback consequences
 
 1. Apply backend migration `050` before deploying backend code. The backend startup gate intentionally accepts only revision `050`; new code reads the added columns and must not run against `049`.

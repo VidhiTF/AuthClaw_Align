@@ -168,6 +168,7 @@ def create_workflow(
         result = runner.start(
             tenant_id=tenant_id,
             framework=framework,
+            requester_id=str(request.state.user_id),
             request_id=body.request_id,
         )
         return WorkflowResponse(**result)
@@ -773,6 +774,26 @@ def remediate_workflow(
             status_code=400,
             detail="No remediation plan is available for this workflow",
         )
+
+    state_data = dict(wf.state_data or {})
+    workflow_requester_id = str(state_data.get("requester_id") or "").strip()
+    try:
+        uuid.UUID(workflow_requester_id)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(
+            status_code=409,
+            detail="Workflow requester identity is unavailable; remediation is denied",
+        )
+
+    remediation_requester_id = str(request.state.user_id)
+    existing_remediation_requester = str(
+        state_data.get("remediation_requester_id") or ""
+    ).strip()
+    if existing_remediation_requester and existing_remediation_requester != remediation_requester_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Workflow remediation requester identity is immutable",
+        )
     allowed, retry_after = check_worker_throttle(tenant_id, "remediation", tier=_tenant_tier(db, tenant_id))
     if not allowed:
         raise HTTPException(status_code=429, detail=f"Remediation worker throttle exceeded. Retry after {retry_after:.0f}s.")
@@ -784,7 +805,7 @@ def remediate_workflow(
         tenant_id,
         workflow_id,
         wf.remediation_plan,
-        requester_id=str(request.state.user_id),
+        requester_id=remediation_requester_id,
     )
 
     # Transition workflow to PAUSED/AWAITING_APPROVAL
@@ -794,9 +815,9 @@ def remediate_workflow(
     wf.approval_id = uuid.UUID(approval_id)
 
     # Update state_data
-    state_data = wf.state_data or {}
     state_data.update({
         "current_state": "AWAITING_APPROVAL",
+        "remediation_requester_id": remediation_requester_id,
         "execution_status": "PAUSED",
         "remediation_state": "NOT_STARTED",
         "remediation_actions": [],
@@ -839,7 +860,7 @@ def recover_workflows(
     tenant_id = str(request.state.tenant_id)
 
     runner = ComplianceWorkflowRunner(db)
-    results = runner.recover_interrupted(tenant_id)
+    results = runner.recover_interrupted(tenant_id, actor_id=str(request.state.user_id))
 
     return RecoveryResponse(
         recovered=len([r for r in results if r["status"] == "recovered"]),

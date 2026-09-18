@@ -10,6 +10,8 @@ from fastapi import HTTPException
 from app.api.v1.endpoints import users, workflows
 from app.core.auth import hash_key
 from app.core.crypto import decrypt_secret, encrypt_secret
+from app.db.models import PendingApproval
+from app.orchestrator.runner import ComplianceWorkflowRunner, _create_approval_in_db
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -53,6 +55,153 @@ def test_self_approval_is_rejected_and_audited():
     assert audit.action == "SELF_APPROVAL_REJECTED"
     assert audit.mfa_verified is False
     db.commit.assert_called_once()
+
+
+def test_graph_workflow_records_authenticated_requester_and_rejects_self_approval():
+    tenant_id = uuid.uuid4()
+    requester_id = uuid.uuid4()
+    db = MagicMock()
+    runner = ComplianceWorkflowRunner.__new__(ComplianceWorkflowRunner)
+    runner.db = db
+
+    class ApprovalGraph:
+        @staticmethod
+        def invoke(state):
+            state["_create_approval"](
+                state["tenant_id"], state["workflow_id"], [{"action": "redact"}]
+            )
+            return state
+
+    runner.graph = ApprovalGraph()
+    result = runner.start(
+        tenant_id=str(tenant_id),
+        framework="HIPAA",
+        requester_id=str(requester_id),
+        request_id="request-graph-maker",
+    )
+
+    approval = next(
+        call.args[0]
+        for call in db.add.call_args_list
+        if isinstance(call.args[0], PendingApproval)
+    )
+    assert result["requester_id"] == str(requester_id)
+    assert approval.requester_id == requester_id
+    assert "SELECT id FROM users" not in " ".join(str(call) for call in db.execute.call_args_list)
+
+    with pytest.raises(HTTPException) as exc:
+        workflows._enforce_separate_approver(
+            db, approval, str(tenant_id), requester_id
+        )
+    assert exc.value.status_code == 403
+
+
+def test_graph_approval_creation_fails_closed_without_requester():
+    db = MagicMock()
+
+    with pytest.raises(ValueError, match="requester identity is required"):
+        _create_approval_in_db(
+            db,
+            str(uuid.uuid4()),
+            str(uuid.uuid4()),
+            [{"action": "redact"}],
+            requester_id="",
+        )
+
+    db.add.assert_not_called()
+    db.execute.assert_not_called()
+
+
+def test_historical_workflow_without_requester_cannot_resume():
+    tenant_id = uuid.uuid4()
+    workflow_id = uuid.uuid4()
+    workflow = SimpleNamespace(
+        execution_status="PAUSED",
+        state_data={},
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = workflow
+    connection = db.get_bind.return_value.engine.connect.return_value
+    connection.execute.return_value.scalar.return_value = True
+    runner = ComplianceWorkflowRunner.__new__(ComplianceWorkflowRunner)
+    runner.db = db
+
+    with pytest.raises(ValueError, match="requester identity is unavailable"):
+        runner.resume(str(workflow_id), str(tenant_id), actor_id=str(uuid.uuid4()))
+
+    assert workflow.execution_status == "PAUSED"
+    db.commit.assert_not_called()
+
+
+def test_remediation_preserves_workflow_requester_and_binds_current_initiator(monkeypatch):
+    from app.orchestrator import runner as workflow_runner
+
+    tenant_id = uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
+    original_requester = uuid.uuid4()
+    remediation_requester = uuid.uuid4()
+    approval_id = uuid.uuid4()
+    workflow = SimpleNamespace(
+        workflow_id=workflow_id,
+        execution_status="COMPLETED",
+        remediation_plan=[{"action": "redact"}],
+        state_data={"requester_id": str(original_requester)},
+        current_state="COMPLETED",
+        approval_status=None,
+        approval_id=None,
+        updated_at=None,
+        request_id="request-original",
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = workflow
+    request = MagicMock()
+    request.state.tenant_id = tenant_id
+    request.state.user_id = remediation_requester
+    create_approval = MagicMock(return_value=str(approval_id))
+    monkeypatch.setattr(workflow_runner, "_create_approval_in_db", create_approval)
+    monkeypatch.setattr(workflow_runner, "emit_audit_event", MagicMock())
+    monkeypatch.setattr(workflows, "check_worker_throttle", lambda *_args, **_kwargs: (True, 0))
+    monkeypatch.setattr(workflows, "_tenant_tier", lambda *_args: "enterprise")
+    monkeypatch.setattr(workflows, "create_notification", MagicMock())
+    monkeypatch.setattr(workflows, "flag_modified", MagicMock())
+
+    status_payload = {
+        "workflow_id": workflow_id,
+        "tenant_id": str(tenant_id),
+        "framework": "HIPAA",
+        "current_state": "AWAITING_APPROVAL",
+        "execution_status": "PAUSED",
+    }
+    fake_runner = MagicMock()
+    fake_runner.get_status.return_value = status_payload
+    monkeypatch.setattr(workflows, "ComplianceWorkflowRunner", MagicMock(return_value=fake_runner))
+
+    workflows.remediate_workflow(workflow_id, request, db, _auth=None)
+
+    assert workflow.state_data["requester_id"] == str(original_requester)
+    assert workflow.state_data["remediation_requester_id"] == str(remediation_requester)
+    assert create_approval.call_args.kwargs["requester_id"] == str(remediation_requester)
+
+
+def test_remediation_denies_historical_workflow_without_requester():
+    tenant_id = uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
+    workflow = SimpleNamespace(
+        execution_status="COMPLETED",
+        remediation_plan=[{"action": "redact"}],
+        state_data={},
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = workflow
+    request = MagicMock()
+    request.state.tenant_id = tenant_id
+    request.state.user_id = uuid.uuid4()
+
+    with pytest.raises(HTTPException, match="requester identity is unavailable") as exc:
+        workflows.remediate_workflow(workflow_id, request, db, _auth=None)
+
+    assert exc.value.status_code == 409
+    db.commit.assert_not_called()
 
 
 def test_mfa_lifecycle_audit_contains_identifiers_but_no_secret(monkeypatch):

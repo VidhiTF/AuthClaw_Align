@@ -11,6 +11,7 @@ kept so existing imports in main.py continue to work during the transition.
 
 import json
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -35,9 +36,18 @@ class PersistentApprovalRecord(dict):
     def __setitem__(self, key, value):
         if key == "requested_by" and key in self and self[key] != value:
             raise ValueError("Approval requester identity is immutable.")
+        existed = key in self
+        previous = self.get(key)
         super().__setitem__(key, value)
         if getattr(self, "_persist_enabled", False):
-            _persist_record(self)
+            try:
+                _persist_record(self)
+            except Exception:
+                if existed:
+                    super().__setitem__(key, previous)
+                else:
+                    super().__delitem__(key)
+                raise
 
     def __delitem__(self, key):
         if key == "requested_by":
@@ -112,35 +122,41 @@ def _check_expiry(record: dict) -> dict:
             expires_at = datetime.fromisoformat(str(raw_expires_at))
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) >= expires_at:
-            record["status"] = "expired"
-            record["last_action_at"] = _now_iso()
-            _persist_record(record)
-            append_approval_audit(
-                record,
-                action="expired",
-                actor="system",
-                comment="Approval expired before a human decision.",
-                metadata={"expires_at": record["expires_at"]},
-            )
+        now = datetime.now(timezone.utc)
+        if now >= expires_at:
+            record, transitioned = expire_approval_atomic(record, expired_at=now)
             # Emit audit event lazily — import here to avoid circular deps
-            try:
-                from startup.audit import log_approval_event
-                log_approval_event(
-                    event="approval_expired",
-                    approval_id=record["approval_id"],
-                    request_id=record["request_id"],
-                    correlation_id=record["correlation_id"],
-                    extra={"expires_at": record["expires_at"]},
-                )
-            except Exception:
-                pass
+            if transitioned:
+                try:
+                    from startup.audit import log_approval_event
+                    log_approval_event(
+                        event="approval_expired",
+                        approval_id=record["approval_id"],
+                        request_id=record["request_id"],
+                        correlation_id=record["correlation_id"],
+                        extra={"expires_at": record["expires_at"]},
+                    )
+                except Exception:
+                    pass
     return record
 
 
-def _persist_record(record: dict) -> None:
+class ApprovalPersistenceError(RuntimeError):
+    """Raised when required approval state or audit evidence is not durable."""
+
+
+class ApprovalStateConflict(RuntimeError):
+    """Raised when a single-use approval transition loses its state race."""
+
+    def __init__(self, current_status: str):
+        self.current_status = current_status
+        super().__init__(f"Approval is not pending (status={current_status})")
+
+
+def _persist_record(record: dict, connection=None) -> None:
     try:
-        with engine.connect() as conn:
+        context = nullcontext(connection) if connection is not None else engine.begin()
+        with context as conn:
             conn.execute(
                 text(
                     """
@@ -233,9 +249,10 @@ def _persist_record(record: dict) -> None:
                     "execution_expires_at": _parse_optional_dt(record.get("execution_expires_at")),
                 },
             )
-            conn.commit()
-    except Exception:
-        pass
+    except ApprovalPersistenceError:
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Approval state persistence failed") from exc
 
 
 def _row_to_record(row) -> PersistentApprovalRecord:
@@ -297,8 +314,8 @@ def _load_record(approval_id: str) -> Optional[PersistentApprovalRecord]:
                 {"approval_id": approval_id},
             ).fetchone()
         return _row_to_record(row) if row else None
-    except Exception:
-        return None
+    except Exception as exc:
+        raise ApprovalPersistenceError("Approval state read failed") from exc
 
 
 def _load_all_records(tenant_id: int = None) -> None:
@@ -389,16 +406,24 @@ def create_approval(
         "execution_expires_at": None,
         "last_action_at":    now.isoformat(),
         "metadata":          approval_metadata,
-    })
+    }, persist_enabled=False)
+    try:
+        with engine.begin() as conn:
+            _persist_record(record, connection=conn)
+            append_approval_audit(
+                record,
+                action="created",
+                actor=requester_id,
+                comment=f"Approval created for reason: {record['reason']}",
+                metadata={"risk_level": risk_level, "expires_at": expires_at.isoformat()},
+                connection=conn,
+            )
+    except ApprovalPersistenceError:
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Approval creation persistence failed") from exc
+    record._persist_enabled = True
     _approvals[approval_id] = record
-    _persist_record(record)
-    append_approval_audit(
-        record,
-        action="created",
-        actor=requester_id,
-        comment=f"Approval created for reason: {record['reason']}",
-        metadata={"risk_level": risk_level, "expires_at": expires_at.isoformat()},
-    )
 
     try:
         from startup.audit import log_approval_event
@@ -417,15 +442,17 @@ def create_approval(
     return record
 
 
-def get_approval(approval_id: str) -> Optional[dict]:
+def get_approval(approval_id: str, *, fresh: bool = False) -> Optional[dict]:
     """
     Returns the approval record (or None if not found).
     Lazily marks pending records as expired.
     """
-    record = _approvals.get(approval_id)
+    record = None if fresh else _approvals.get(approval_id)
     if record is None:
         record = _load_record(approval_id)
         if record is None:
+            if fresh:
+                _approvals.pop(approval_id, None)
             return None
         _approvals[approval_id] = record
     return _check_expiry(record)
@@ -454,6 +481,7 @@ def append_approval_audit(
     comment: str = None,
     mfa_verified: bool = False,
     metadata: dict = None,
+    connection=None,
 ) -> None:
     event = {
         "action": action,
@@ -464,16 +492,29 @@ def append_approval_audit(
         "created_at": _now_iso(),
         "metadata": metadata or {},
     }
+    comments = list(record.get("comments") or [])
+    if comment:
+        comments.append(event)
     try:
-        if comment:
-            comments = record.get("comments") or []
-            comments.append(event)
-            record["comments"] = comments
-    except Exception:
-        pass
-
-    try:
-        with engine.connect() as conn:
+        context = nullcontext(connection) if connection is not None else engine.begin()
+        with context as conn:
+            if comment:
+                updated = conn.execute(
+                    text(
+                        """
+                        UPDATE gateway_approvals
+                        SET comments = :comments
+                        WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                        """
+                    ),
+                    {
+                        "comments": json.dumps(comments),
+                        "approval_id": record.get("approval_id"),
+                        "tenant_id": record.get("tenant_id"),
+                    },
+                )
+                if updated.rowcount != 1:
+                    raise ApprovalPersistenceError("Approval audit target is not durable")
             conn.execute(
                 text(
                     """
@@ -500,9 +541,522 @@ def append_approval_audit(
                     "created_at": _parse_optional_dt(event["created_at"]),
                 },
             )
-            conn.commit()
-    except Exception:
-        pass
+    except ApprovalPersistenceError:
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Approval audit persistence failed") from exc
+    if comment:
+        dict.__setitem__(record, "comments", comments)
+
+
+def expire_approval_atomic(
+    record: dict,
+    *,
+    expired_at: datetime,
+) -> tuple[PersistentApprovalRecord, bool]:
+    """Expire one pending approval and write its canonical audit in one transaction."""
+    approval_id = record.get("approval_id")
+    tenant_id = record.get("tenant_id")
+    transitioned = False
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE gateway_approvals
+                    SET status = 'expired',
+                        last_action_at = :expired_at
+                    WHERE approval_id = :approval_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'pending'
+                      AND expires_at <= :expired_at
+                    RETURNING *
+                    """
+                ),
+                {
+                    "approval_id": approval_id,
+                    "tenant_id": tenant_id,
+                    "expired_at": expired_at,
+                },
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT * FROM gateway_approvals
+                        WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                        """
+                    ),
+                    {"approval_id": approval_id, "tenant_id": tenant_id},
+                ).fetchone()
+                if row is None:
+                    raise ApprovalStateConflict("missing")
+            else:
+                transitioned = True
+
+            updated_record = _row_to_record(row)
+            if transitioned:
+                append_approval_audit(
+                    updated_record,
+                    action="expired",
+                    actor="system",
+                    comment="Approval expired before a human decision.",
+                    metadata={"expires_at": updated_record.get("expires_at")},
+                    connection=conn,
+                )
+    except (ApprovalPersistenceError, ApprovalStateConflict):
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Atomic approval expiry failed") from exc
+
+    _approvals[approval_id] = updated_record
+    return updated_record, transitioned
+
+
+def expire_approved_execution_atomic(
+    record: dict,
+    *,
+    expired_at: datetime,
+) -> tuple[PersistentApprovalRecord, bool]:
+    """Expire an approved execution window and its audit atomically."""
+    approval_id = record.get("approval_id")
+    tenant_id = record.get("tenant_id")
+    transitioned = False
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE gateway_approvals
+                    SET status = 'expired',
+                        last_action_at = :expired_at
+                    WHERE approval_id = :approval_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'approved'
+                      AND (
+                          expires_at <= :expired_at
+                          OR execution_expires_at IS NULL
+                          OR execution_expires_at <= :expired_at
+                      )
+                    RETURNING *
+                    """
+                ),
+                {
+                    "approval_id": approval_id,
+                    "tenant_id": tenant_id,
+                    "expired_at": expired_at,
+                },
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT * FROM gateway_approvals
+                        WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                        """
+                    ),
+                    {"approval_id": approval_id, "tenant_id": tenant_id},
+                ).fetchone()
+                if row is None:
+                    raise ApprovalStateConflict("missing")
+            else:
+                transitioned = True
+
+            updated_record = _row_to_record(row)
+            if transitioned:
+                append_approval_audit(
+                    updated_record,
+                    action="expired",
+                    actor="system",
+                    comment="Approval execution window expired.",
+                    metadata={
+                        "expires_at": updated_record.get("expires_at"),
+                        "execution_expires_at": updated_record.get("execution_expires_at"),
+                    },
+                    connection=conn,
+                )
+    except (ApprovalPersistenceError, ApprovalStateConflict):
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Atomic approval execution expiry failed") from exc
+
+    _approvals[approval_id] = updated_record
+    return updated_record, transitioned
+
+
+def approve_approval_atomic(
+    record: dict,
+    *,
+    approver: str,
+    approved_at: datetime,
+    mfa_verified: bool,
+    mfa_binding_hash: str,
+    mfa_counter: int,
+    execution_expires_at: datetime,
+    comment: str = None,
+    audit_metadata: dict = None,
+) -> PersistentApprovalRecord:
+    """Commit the single-use pending-to-approved decision and audit atomically."""
+    approval_id = record.get("approval_id")
+    tenant_id = record.get("tenant_id")
+    conflict_status = None
+    updated_record = None
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE gateway_approvals
+                    SET status = 'approved',
+                        approved_at = :approved_at,
+                        approved_by = :approved_by,
+                        mfa_verified = :mfa_verified,
+                        approval_mfa_verified = :mfa_verified,
+                        approval_mfa_binding_hash = :binding_hash,
+                        approval_mfa_counter = :counter,
+                        execution_expires_at = :execution_expires_at,
+                        last_action_at = :approved_at
+                    WHERE approval_id = :approval_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'pending'
+                      AND expires_at > :approved_at
+                    RETURNING *
+                    """
+                ),
+                {
+                    "approval_id": approval_id,
+                    "tenant_id": tenant_id,
+                    "approved_at": approved_at,
+                    "approved_by": approver,
+                    "mfa_verified": bool(mfa_verified),
+                    "binding_hash": mfa_binding_hash,
+                    "counter": mfa_counter,
+                    "execution_expires_at": execution_expires_at,
+                },
+            ).fetchone()
+            if row is None:
+                expired_row = conn.execute(
+                    text(
+                        """
+                        UPDATE gateway_approvals
+                        SET status = 'expired',
+                            last_action_at = :approved_at
+                        WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                          AND status = 'pending'
+                          AND expires_at <= :approved_at
+                        RETURNING *
+                        """
+                    ),
+                    {
+                        "approval_id": approval_id,
+                        "tenant_id": tenant_id,
+                        "approved_at": approved_at,
+                    },
+                ).fetchone()
+                if expired_row is not None:
+                    updated_record = _row_to_record(expired_row)
+                    append_approval_audit(
+                        updated_record,
+                        action="expired",
+                        actor="system",
+                        comment="Approval expired before the approval decision completed.",
+                        metadata={"expires_at": updated_record.get("expires_at")},
+                        connection=conn,
+                    )
+                    conflict_status = "expired"
+                else:
+                    current_status = conn.execute(
+                        text(
+                            """
+                            SELECT status FROM gateway_approvals
+                            WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                            """
+                        ),
+                        {"approval_id": approval_id, "tenant_id": tenant_id},
+                    ).scalar()
+                    conflict_status = str(current_status or "missing")
+            else:
+                updated_record = _row_to_record(row)
+                append_approval_audit(
+                    updated_record,
+                    action="approved",
+                    actor=approver,
+                    comment=comment,
+                    mfa_verified=mfa_verified,
+                    metadata=audit_metadata,
+                    connection=conn,
+                )
+    except (ApprovalPersistenceError, ApprovalStateConflict):
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Atomic approval transition failed") from exc
+
+    if updated_record is not None:
+        _approvals[approval_id] = updated_record
+    if conflict_status is not None:
+        raise ApprovalStateConflict(conflict_status)
+    return updated_record
+
+
+def reject_approval_atomic(
+    record: dict,
+    *,
+    actor: str,
+    rejected_at: datetime,
+    comment: str = None,
+    audit_metadata: dict = None,
+) -> PersistentApprovalRecord:
+    """Commit the single-use pending-to-rejected decision and audit atomically."""
+    approval_id = record.get("approval_id")
+    tenant_id = record.get("tenant_id")
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE gateway_approvals
+                    SET status = 'rejected',
+                        rejected_at = :rejected_at,
+                        rejected_by = :rejected_by,
+                        last_action_at = :rejected_at
+                    WHERE approval_id = :approval_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'pending'
+                    RETURNING *
+                    """
+                ),
+                {
+                    "approval_id": approval_id,
+                    "tenant_id": tenant_id,
+                    "rejected_at": rejected_at,
+                    "rejected_by": actor,
+                },
+            ).fetchone()
+            if row is None:
+                current_status = conn.execute(
+                    text(
+                        """
+                        SELECT status FROM gateway_approvals
+                        WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                        """
+                    ),
+                    {"approval_id": approval_id, "tenant_id": tenant_id},
+                ).scalar()
+                raise ApprovalStateConflict(str(current_status or "missing"))
+
+            updated_record = _row_to_record(row)
+            append_approval_audit(
+                updated_record,
+                action="rejected",
+                actor=actor,
+                comment=comment,
+                metadata=audit_metadata,
+                connection=conn,
+            )
+    except (ApprovalPersistenceError, ApprovalStateConflict):
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Atomic rejection transition failed") from exc
+
+    _approvals[approval_id] = updated_record
+    return updated_record
+
+
+def begin_approval_execution_atomic(
+    record: dict,
+    *,
+    actor: str,
+    transition_at: datetime,
+    execution_token_hash: str,
+    mfa_binding_hash: str,
+    mfa_counter: int,
+    comment: str = None,
+    audit_metadata: dict = None,
+) -> PersistentApprovalRecord:
+    """Consume one approved execution and persist its audit in one transaction."""
+    approval_id = record.get("approval_id")
+    tenant_id = record.get("tenant_id")
+    conflict_status = None
+    updated_record = None
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE gateway_approvals
+                    SET status = 'executing',
+                        execution_token_hash = :token_hash,
+                        execution_token_used_at = :transition_at,
+                        execution_mfa_verified = TRUE,
+                        execution_mfa_binding_hash = :binding_hash,
+                        execution_mfa_counter = :counter,
+                        executed_by = :actor,
+                        last_action_at = :transition_at
+                    WHERE approval_id = :approval_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'approved'
+                      AND approved_by = :actor
+                      AND execution_token_used_at IS NULL
+                      AND expires_at > :transition_at
+                      AND execution_expires_at > :transition_at
+                    RETURNING *
+                    """
+                ),
+                {
+                    "approval_id": approval_id,
+                    "tenant_id": tenant_id,
+                    "actor": actor,
+                    "transition_at": transition_at,
+                    "token_hash": execution_token_hash,
+                    "binding_hash": mfa_binding_hash,
+                    "counter": mfa_counter,
+                },
+            ).fetchone()
+            if row is None:
+                expired_row = conn.execute(
+                    text(
+                        """
+                        UPDATE gateway_approvals
+                        SET status = 'expired',
+                            last_action_at = :transition_at
+                        WHERE approval_id = :approval_id
+                          AND tenant_id = :tenant_id
+                          AND status = 'approved'
+                          AND (
+                              expires_at <= :transition_at
+                              OR execution_expires_at IS NULL
+                              OR execution_expires_at <= :transition_at
+                          )
+                        RETURNING *
+                        """
+                    ),
+                    {
+                        "approval_id": approval_id,
+                        "tenant_id": tenant_id,
+                        "transition_at": transition_at,
+                    },
+                ).fetchone()
+                if expired_row is not None:
+                    updated_record = _row_to_record(expired_row)
+                    append_approval_audit(
+                        updated_record,
+                        action="expired",
+                        actor="system",
+                        comment="Approval execution window expired.",
+                        metadata={
+                            "expires_at": updated_record.get("expires_at"),
+                            "execution_expires_at": updated_record.get("execution_expires_at"),
+                        },
+                        connection=conn,
+                    )
+                    conflict_status = "expired"
+                else:
+                    current_status = conn.execute(
+                        text(
+                            """
+                            SELECT status FROM gateway_approvals
+                            WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                            """
+                        ),
+                        {"approval_id": approval_id, "tenant_id": tenant_id},
+                    ).scalar()
+                    conflict_status = str(current_status or "missing")
+            else:
+                updated_record = _row_to_record(row)
+                append_approval_audit(
+                    updated_record,
+                    action="executing",
+                    actor=actor,
+                    comment=comment,
+                    mfa_verified=True,
+                    metadata=audit_metadata,
+                    connection=conn,
+                )
+    except (ApprovalPersistenceError, ApprovalStateConflict):
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Atomic approval execution transition failed") from exc
+
+    if updated_record is not None:
+        _approvals[approval_id] = updated_record
+    if conflict_status is not None:
+        raise ApprovalStateConflict(conflict_status)
+    return updated_record
+
+
+def finish_approval_execution_atomic(
+    record: dict,
+    *,
+    actor: str,
+    final_status: str,
+    transition_at: datetime,
+    comment: str = None,
+    mfa_verified: bool = False,
+    audit_metadata: dict = None,
+) -> PersistentApprovalRecord:
+    """Finalize an executing approval and its canonical audit atomically."""
+    if final_status not in {"executed", "execution_failed"}:
+        raise ValueError("Unsupported approval execution terminal status")
+    approval_id = record.get("approval_id")
+    tenant_id = record.get("tenant_id")
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE gateway_approvals
+                    SET status = :final_status,
+                        executed_at = CASE
+                            WHEN :final_status = 'executed' THEN :transition_at
+                            ELSE executed_at
+                        END,
+                        last_action_at = :transition_at
+                    WHERE approval_id = :approval_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'executing'
+                      AND executed_by = :actor
+                      AND execution_token_hash = :execution_token_hash
+                    RETURNING *
+                    """
+                ),
+                {
+                    "approval_id": approval_id,
+                    "tenant_id": tenant_id,
+                    "actor": actor,
+                    "final_status": final_status,
+                    "transition_at": transition_at,
+                    "execution_token_hash": record.get("execution_token_hash"),
+                },
+            ).fetchone()
+            if row is None:
+                current_status = conn.execute(
+                    text(
+                        """
+                        SELECT status FROM gateway_approvals
+                        WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                        """
+                    ),
+                    {"approval_id": approval_id, "tenant_id": tenant_id},
+                ).scalar()
+                raise ApprovalStateConflict(str(current_status or "missing"))
+
+            updated_record = _row_to_record(row)
+            append_approval_audit(
+                updated_record,
+                action=final_status,
+                actor=actor,
+                comment=comment,
+                mfa_verified=mfa_verified,
+                metadata=audit_metadata,
+                connection=conn,
+            )
+    except (ApprovalPersistenceError, ApprovalStateConflict):
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Atomic approval execution finalization failed") from exc
+
+    _approvals[approval_id] = updated_record
+    return updated_record
 
 
 def get_approval_history(approval_id: str, tenant_id: int = None) -> List[dict]:
