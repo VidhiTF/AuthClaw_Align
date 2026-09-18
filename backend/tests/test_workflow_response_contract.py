@@ -1,7 +1,9 @@
 """Workflow wire contracts; fake S3 exercises the real graph/connector producers."""
 
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -84,6 +86,24 @@ def test_sparse_null_and_empty_payloads_preserve_wire_shape(values):
 def test_legacy_mutation_state_remains_readable(status):
     state = upgrade_mutation_state("workflow-1", "action-1", {"status": status})
     assert_round_trip(workflow(remediation_actions=[{"status": status, "mutation_state": state}]))
+
+
+@pytest.fixture
+def historical_verification_failure():
+    # Captured from e483d13's DocumentScanner.execute_remediation with the existing
+    # VerificationReadFailureS3 fake, authclaw-test bucket, workflow-1/action-1,
+    # and build_remediation_plan('tenant-a/doc.txt', 'Entities: EMAIL_ADDRESS, PHONE_NUMBER').
+    return json.loads(
+        (Path(__file__).parent / "fixtures/workflow_verification_failure_e483d13.json").read_text(encoding="utf-8")
+    )
+
+
+def test_historical_verification_failure_preserves_wire_shape(historical_verification_failure):
+    result = historical_verification_failure
+    action = {"id": "action-1", "status": "FAILED", "result": result}
+    assert_round_trip(
+        workflow(remediation_actions=[action], execution_result={"details": [result], "actions": [action]})
+    )
 
 
 @pytest.fixture
@@ -216,6 +236,9 @@ def test_registered_openapi_has_concrete_nested_contracts():
     app = FastAPI()
     app.include_router(workflows.router, prefix="/v1/workflows")
     assert_workflow_openapi(app.openapi())
+    summary = app.openapi()["components"]["schemas"]["VerificationSummary"]
+    assert summary["additionalProperties"] is False
+    assert summary["properties"]["error"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
 
 
 def assert_workflow_openapi(spec):
@@ -273,6 +296,8 @@ def assert_workflow_openapi(spec):
         ("remediation_actions", [{"attempts": True}]),
         ("execution_result", {"actions_failed": "private-marker"}),
         ("execution_result", {"details": [{"before_verification": {"entity_counts": {"PERSON": "2"}}}]}),
+        ("execution_result", {"details": [{"after_verification": {"error": 42}}]}),
+        ("execution_result", {"details": [{"after_verification": {"error": "failed", "unknown": True}}]}),
         ("rollback_result", {"details": [5]}),
     ],
 )

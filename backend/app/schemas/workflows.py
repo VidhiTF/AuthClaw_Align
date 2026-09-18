@@ -82,6 +82,8 @@ class WorkflowRemediationPlan(WorkflowPayload):
 class VerificationSummary(WorkflowPayload):
     entity_counts: dict[str, int] | None = None
     total: int | None = None
+    # Historical S3 verification-read failures persisted an error-only summary.
+    error: str | None = None
 
 
 class MutationTarget(WorkflowPayload):

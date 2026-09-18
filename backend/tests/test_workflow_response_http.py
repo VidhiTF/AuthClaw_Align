@@ -24,7 +24,7 @@ from app.core.auth import get_tenant_db
 from app.db.models import ApprovalAudit, ComplianceWorkflow, PendingApproval, Tenant, User
 from app.orchestrator import runner
 from tests.test_acl18_remediation_approval import _plan
-from tests.test_workflow_response_contract import FIELDS, workflow
+from tests.test_workflow_response_contract import FIELDS, historical_verification_failure, workflow
 
 
 @compiles(ARRAY, "sqlite")
@@ -153,6 +153,31 @@ def test_route_contract_and_sanitized_post_commit_errors(
                 == {"approve": "APPROVED", "reject": "REJECTED", "remediate": "PENDING"}[operation]
             )
             assert db.query(ApprovalAudit).count() == (0 if operation == "remediate" else 1)
+
+
+@pytest.mark.parametrize("prefix", ["/v1", "/api/v1"])
+@pytest.mark.parametrize("snapshot_actions", [False, True])
+def test_persisted_historical_verification_failure_is_readable(
+    api, historical_verification_failure, prefix, snapshot_actions, caplog
+):
+    actions = [{"id": "action-1", "status": "FAILED", "result": historical_verification_failure}]
+    execution_result = {"details": [historical_verification_failure], "actions": actions}
+    state_data = {"remediation_actions": actions} if snapshot_actions else {}
+    with Session(api.engine) as db:
+        row = db.query(ComplianceWorkflow).one()
+        row.execution_result, row.state_data = execution_result, state_data
+        db.commit()
+    for operation in ("get", "list"):
+        response = request_operation(api, prefix, operation)
+        assert response.status_code == 200, response.text
+        body = response.json()[0] if operation == "list" else response.json()
+        assert body["execution_result"] == execution_result
+        assert body["remediation_actions"] == actions
+    with Session(api.engine) as db:
+        row = db.query(ComplianceWorkflow).one()
+        assert row.execution_result == execution_result
+        assert row.state_data == state_data
+    assert "verification read unavailable" not in caplog.text
 
 
 def test_status_snapshot_fallback_and_malformed_list_row(api):

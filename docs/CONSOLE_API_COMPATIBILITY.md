@@ -75,7 +75,9 @@ null, and empty arrays/objects remain empty. Top-level defaults are unchanged.
 Current connector payloads, partial results and legacy mutation snapshots are
 supported. Unknown nested properties and incorrect primitive types now fail
 response validation instead of being accepted or silently discarded. The
-`diff.terraform` member is reserved for an empty list until a producer defines
+historical `after_verification: {"error": "..."}` failure payload from connector
+version `e483d13` remains readable, with the error text and sparse shape preserved.
+The `diff.terraform` member is reserved for an empty list until a producer defines
 a nonempty contract. No new enum, UUID or timestamp restrictions are introduced.
 
 Models are used only for responses. Stored JSON, graph execution, recovery state,
