@@ -1,5 +1,37 @@
 # ENT-019: truthful telemetry
 
+## Enabled ClickHouse outage follow-up
+
+Reuse decision before implementation: keep `governance_analytics`, the existing
+ClickHouse probe/aggregate loaders, PostgreSQL summary and five-state classifier.
+Skip the aggregate query after a failed probe; also handle failure between probe
+and aggregate. PostgreSQL must be queried successfully, never replaced with empty
+success. Preserve ClickHouse `unavailable` at source and aggregate levels and label
+the gateway summary's actual source. The small selection/error branch is necessary
+because the current combined `_safe` expression aborts before fallback. Extend the
+existing real PostgreSQL/HTTP integration test with an enabled loopback ClickHouse
+outage, partial failure and recovery; no new dependency or health abstraction.
+
+Verification on 2026-09-18: the enabled, unreachable source reproduced generic HTTP
+503 before the fix. Real endpoint tests now return a structured `unavailable`
+response with measured PostgreSQL values for two isolated tenants. Loopback HTTP
+fixtures cover failed probes (no aggregate retry), successful probe followed by
+query failure, malformed aggregates, healthy empty aggregates and disabled mode.
+An injected SQL division-by-zero in the actual fallback query confirms both-source
+failure remains sanitized HTTP 503; this does not fail earlier in admission.
+The fixture's initially missing required gateway timestamp was corrected.
+
+Agent smoke: 116 passed; final CI-equivalent selection: 101 passed plus 67 subtests.
+Console: 48 passed and TypeScript passed; policy: 31 passed; Tokei budgets passed.
+Rebuilt agent image and ran 18 focused tests inside it with no network. Independent
+read-only re-review identified a test injection gap, which was corrected; no
+production defect remained confirmed. Production change is 10 added / 3 deleted
+physical lines (`git diff --numstat`), net +7; no safe additional consolidation was
+identified. The additive `gateway.source` field identifies measured provenance.
+No schema change; rollback only this selection branch if necessary, acknowledging
+that it restores outage HTTP 503 behavior. Deployment, human approvals and remote
+CI for this local follow-up are not claimed complete; running containers unchanged.
+
 ## Final review corrections (2026-09-18)
 
 The final candidate additionally serializes evidence refreshes per tenant and

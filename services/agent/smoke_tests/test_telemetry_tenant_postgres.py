@@ -6,6 +6,8 @@ ENT019_TEST_DATABASE_URL must point to a loopback PostgreSQL test database.
 import json
 import io
 import os
+import socket
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import sys
@@ -14,7 +16,7 @@ import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, Thread
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -178,9 +180,7 @@ def run_integration():
                         for endpoint in ("/metrics", "/analytics/governance"):
                             response = client.get(endpoint, headers=tokens[7])
                             assert response.status_code == 200 and response.json()["status"] == expected, response.text
-                with patch.object(observability_service.ObservabilityService, "_clickhouse_status", return_value={"status": "unavailable"}):
-                    response = client.get("/analytics/governance", headers=tokens[7])
-                    assert response.status_code == 200 and response.json()["status"] == "unavailable", response.text
+                verify_clickhouse_outages(client, tokens, engine, tenant_context)
                 for tenant in (7, 8):
                     for kind in ("executive", "technical", "auditor"):
                         for fmt in ("json", "csv", "pdf"):
@@ -240,6 +240,93 @@ def run_integration():
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+def verify_clickhouse_outages(client, tokens, engine, tenant_context):
+    for tenant in (7, 8):
+        with tenant_context(tenant, request_id="gateway-fixture", required=True), engine.begin() as conn:
+            for number in range(tenant - 6):
+                conn.execute(text("INSERT INTO gateway_requests(tenant_id,request_id,timestamp,allowed,duration_ms) VALUES (:tenant,:request,NOW(),true,17)"),
+                             {"tenant": str(tenant), "request": f"clickhouse-{tenant}-{number}"})
+
+    def check_fallback():
+        for tenant in (7, 8):
+            response = client.get("/analytics/governance", headers=tokens[tenant])
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert payload["status"] == payload["clickhouse_pipeline"]["status"] == "unavailable", payload
+            assert payload["clickhouse_pipeline"]["enabled"] is True
+            assert payload["gateway"]["source"] == "postgresql"
+            assert payload["gateway"]["total_requests"] == tenant - 6
+            assert payload["gateway"]["avg_duration_ms"] == 17
+            assert "private-source-error" not in response.text
+
+    # A bound, non-listening socket reserves a closed port without a port-reuse race.
+    with socket.socket() as unavailable:
+        unavailable.bind(("127.0.0.1", 0))
+        with patch.dict(os.environ, AUTHCLAW_CLICKHOUSE_ENABLED="true", CLICKHOUSE_HTTP_URL=f"http://127.0.0.1:{unavailable.getsockname()[1]}"):
+            check_fallback()
+
+    class ClickHouseStub(BaseHTTPRequestHandler):
+        mode = "probe_failure"
+        queries = []
+
+        def do_GET(self):
+            health = "SELECT%201%20AS%20ok" in self.path
+            self.queries.append("probe" if health else "aggregate")
+            status, body = 200, {"ok": 1}
+            if self.mode == "probe_failure" or (not health and self.mode == "query_failure"):
+                status, body = 503, {"error": "private-source-error"}
+            elif not health:
+                body = {} if self.mode == "malformed" else dict(total_requests=0, allowed_requests=0,
+                    blocked_requests=0, pending_requests=0, tokens_in=0, tokens_out=0, avg_duration_ms=None)
+            self.send_response(status)
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), ClickHouseStub) as server:
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with patch.dict(os.environ, AUTHCLAW_CLICKHOUSE_ENABLED="true", CLICKHOUSE_HTTP_URL=f"http://127.0.0.1:{server.server_port}"):
+                for mode in ("probe_failure", "query_failure", "malformed"):
+                    ClickHouseStub.mode, ClickHouseStub.queries = mode, []
+                    check_fallback()
+                    assert ClickHouseStub.queries == (["probe"] if mode == "probe_failure" else ["probe", "aggregate"]) * 2
+                ClickHouseStub.mode = "healthy"
+                response = client.get("/analytics/governance", headers=tokens[7])
+                assert response.status_code == 200, response.text
+                payload = response.json()
+                assert payload["clickhouse_pipeline"]["status"] == "healthy"
+                assert payload["gateway"]["source"] == "clickhouse" and payload["gateway"]["total_requests"] == 0
+                assert payload["gateway"]["avg_duration_ms"] is None
+                ClickHouseStub.mode, ClickHouseStub.queries = "probe_failure", []
+                failed_summary = Event()
+
+                def fail_summary(conn, cursor, statement, parameters, context, executemany):
+                    if "COUNT(*) AS total_requests" in statement and "FROM gateway_requests" in statement:
+                        failed_summary.set()
+                        cursor.execute("SELECT 1/0")
+
+                event.listen(engine, "before_cursor_execute", fail_summary)
+                try:
+                    response = client.get("/analytics/governance", headers=tokens[7])
+                    assert response.status_code == 503 and "division by zero" not in response.text
+                    assert failed_summary.is_set() and ClickHouseStub.queries == ["probe"]
+                finally:
+                    event.remove(engine, "before_cursor_execute", fail_summary)
+                with patch.dict(os.environ, AUTHCLAW_CLICKHOUSE_ENABLED="false"):
+                    response = client.get("/analytics/governance", headers=tokens[7])
+                    assert response.status_code == 200, response.text
+                    assert response.json()["clickhouse_pipeline"]["status"] == "not_applicable"
+                    assert response.json()["gateway"]["source"] == "postgresql"
+                    assert ClickHouseStub.queries == ["probe"]
+        finally:
+            server.shutdown()
+            worker.join(timeout=5)
 
 
 def verify_atomic_scoring(engine, drift, tenant_context):

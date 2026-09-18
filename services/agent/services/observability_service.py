@@ -37,11 +37,18 @@ class ObservabilityService:
     def governance_analytics(self, tenant_id: int) -> Dict[str, Any]:
         tenant_id_text = str(tenant_id)
         clickhouse_status = self._clickhouse_status()
+        gateway = None
+        if clickhouse_status["status"] == "healthy":
+            try:
+                gateway = self._clickhouse_gateway_summary(tenant_id_text)
+            except HTTPException:
+                clickhouse_status.update(status="unavailable", message="ClickHouse analytics query failed; PostgreSQL analytics must be checked independently.")
 
         with self._safe(engine.connect) as conn:
-            gateway = self._safe(
-                lambda: self._clickhouse_gateway_summary(tenant_id_text) or self._gateway_summary(conn, tenant_id_text),
-            )
+            gateway_source = "clickhouse" if gateway is not None else "postgresql"
+            if gateway is None:
+                gateway = self._safe(lambda: self._gateway_summary(conn, tenant_id_text))
+            gateway["source"] = gateway_source
             providers = self._safe(lambda: self._provider_usage(conn, tenant_id_text))
             blocked = self._safe(lambda: self._blocked_requests(conn, tenant_id_text))
             redactions = self._safe(lambda: self._redaction_summary(conn, tenant_id, tenant_id_text))
