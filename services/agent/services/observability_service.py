@@ -26,6 +26,13 @@ def _float(value: Any) -> float | None:
     return round(float(value), 2) if value is not None else None
 
 
+def aggregate_health(*states: str) -> str:
+    """Failure wins over missing observation; disabled checks cannot imply health."""
+    precedence = ("unavailable", "degraded", "unknown", "healthy", "not_applicable")
+    observed = {state if state in precedence else "unknown" for state in states}
+    return next((state for state in precedence if state in observed), "unknown")
+
+
 class ObservabilityService:
     def governance_analytics(self, tenant_id: int) -> Dict[str, Any]:
         tenant_id_text = str(tenant_id)
@@ -66,7 +73,7 @@ class ObservabilityService:
         }
 
         return {
-            "status": "healthy" if audit["status"] == "healthy" and queue["status"] == "healthy" and clickhouse_status["status"] in {"healthy", "not_applicable"} else "degraded",
+            "status": aggregate_health(audit["status"], queue["status"], clickhouse_status["status"]),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "tenant_id": tenant_id,
             "gateway": gateway,
@@ -453,7 +460,20 @@ class ObservabilityService:
         unknown = {"status": "unknown", "max_lag_seconds": None, "pending_events": None,
                    "dead_letter_count": None, "alertable": True}
         streams = pipeline.get("streams")
-        if not checkpoints or not isinstance(streams, dict) or set(streams) - {cp.get("stream") for cp in checkpoints}:
+        if not isinstance(streams, dict):
+            return unknown
+        try:
+            live_counts = [(counts.get("queued", 0), counts.get("dead_letter", 0)) for counts in streams.values()]
+            if any(type(value) is not int or value < 0 for counts in live_counts for value in counts):
+                return unknown
+            # Current delivery failures remain measured even when checkpoint lag is unknown.
+            unknown["pending_events"] = sum(queued + dead for queued, dead in live_counts)
+            unknown["dead_letter_count"] = sum(dead for _, dead in live_counts)
+            if unknown["dead_letter_count"]:
+                unknown["status"] = "degraded"
+        except AttributeError:
+            return unknown
+        if not checkpoints or set(streams) - {cp.get("stream") for cp in checkpoints}:
             return unknown
         threshold = int(os.getenv("AUTHCLAW_QUEUE_LAG_ALERT_SECONDS", "300"))
         max_lag = dead_letters = pending = 0

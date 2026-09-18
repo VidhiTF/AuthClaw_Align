@@ -168,7 +168,7 @@ def build_public_trust_state(*, force_refresh: bool = False) -> Dict[str, Any]:
 
 def trust_runtime_health() -> Dict[str, Any]:
     try:
-        from services.observability_service import ObservabilityService
+        from services.observability_service import ObservabilityService, aggregate_health
 
         state = build_public_trust_state(force_refresh=True)
         runtime = state.get("payload", {}).get("runtime", {})
@@ -181,7 +181,7 @@ def trust_runtime_health() -> Dict[str, Any]:
             "queue": ObservabilityService()._queue_lag(runtime.get("event_pipeline", {}))["status"],
         }
         return {
-            "status": next((status for status in ("unavailable", "degraded", "unknown") if status in checks.values()), "healthy"),
+            "status": aggregate_health(*checks.values()),
             "scope": "trust_evidence",
             "checks": checks,
             "trust_center": {

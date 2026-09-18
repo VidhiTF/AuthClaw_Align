@@ -5,53 +5,46 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 from fastapi import HTTPException
 from database import engine
+from services.tenant_context import validate_tenant_id
 
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
-def get_live_stats() -> dict:
+def get_live_stats(tenant_id: int) -> dict:
     """Helper to query live stats for reports."""
     from document_processing.drift import get_current_framework_scores
-    scores = get_current_framework_scores()
+    scores = get_current_framework_scores(tenant_id)
     frameworks = {key: scores[key.lower()] for key in ("SOC2", "GDPR", "HIPAA")}
     if any(score is None for score in frameworks.values()):
         raise HTTPException(status_code=503, detail="Compliance telemetry unknown: missing evidence")
     stats = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "total_documents": 0,
-        "scanned_today": 0,
-        "critical_findings": 0,
-        "open_approvals": 0,
         "compliance_score": sum(frameworks.values()) // len(frameworks),
-        "drift_alerts": 0,
-        "secret_leaks": 0,
-        "pii_violations": 0,
         "frameworks": frameworks,
         **{key: scores[key] for key in ("calculation_version", "evidence_timestamp", "missing_control_treatment")},
     }
     try:
         with engine.connect() as conn:
-            stats["total_documents"] = conn.execute(text("SELECT COUNT(*) FROM documents")).scalar() or 0
+            stats["total_documents"] = conn.execute(text("SELECT COUNT(*) FROM documents WHERE tenant_id = :tenant_id"), {"tenant_id": tenant_id}).scalar() or 0
             stats["scanned_today"] = conn.execute(
-                text("SELECT COUNT(*) FROM documents WHERE created_at >= CURRENT_DATE")
+                text("SELECT COUNT(*) FROM documents WHERE tenant_id = :tenant_id AND created_at >= CURRENT_DATE"), {"tenant_id": tenant_id}
             ).scalar() or 0
             stats["critical_findings"] = conn.execute(
-                text("SELECT COUNT(*) FROM document_findings WHERE risk_level = 'CRITICAL'")
+                text("SELECT COUNT(*) FROM document_findings WHERE tenant_id = :tenant_id AND risk_level = 'CRITICAL'"), {"tenant_id": tenant_id}
             ).scalar() or 0
             stats["secret_leaks"] = conn.execute(
-                text("SELECT COUNT(*) FROM document_findings WHERE finding_type = 'Secret'")
+                text("SELECT COUNT(*) FROM document_findings WHERE tenant_id = :tenant_id AND finding_type = 'Secret'"), {"tenant_id": tenant_id}
             ).scalar() or 0
             stats["pii_violations"] = conn.execute(
-                text("SELECT COUNT(*) FROM document_findings WHERE finding_type = 'PII'")
+                text("SELECT COUNT(*) FROM document_findings WHERE tenant_id = :tenant_id AND finding_type = 'PII'"), {"tenant_id": tenant_id}
             ).scalar() or 0
             stats["drift_alerts"] = conn.execute(
-                text("SELECT COUNT(*) FROM compliance_drift_alerts")
+                text("SELECT COUNT(*) FROM compliance_drift_alerts WHERE tenant_id = :tenant_id"), {"tenant_id": tenant_id}
             ).scalar() or 0
             
-            # Open approvals
-            stats["open_approvals"] = conn.execute(text("SELECT COUNT(*) FROM gateway_approvals WHERE lower(status) = 'pending'")).scalar()
+            stats["open_approvals"] = conn.execute(text("SELECT COUNT(*) FROM gateway_approvals WHERE tenant_id = :tenant_id AND lower(status) = 'pending'"), {"tenant_id": tenant_id}).scalar()
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Report telemetry unavailable") from exc
     return stats
@@ -59,8 +52,8 @@ def get_live_stats() -> dict:
 # -------------------------------------------------------------------------
 # EXECUTIVE SUMMARY REPORTS
 # -------------------------------------------------------------------------
-def generate_executive_summary_report(fmt: str) -> bytes:
-    stats = get_live_stats()
+def generate_executive_summary_report(fmt: str, tenant_id: int) -> bytes:
+    stats = get_live_stats(tenant_id)
     
     if fmt == "json":
         return json.dumps(stats, indent=2).encode("utf-8")
@@ -74,7 +67,7 @@ def generate_executive_summary_report(fmt: str) -> bytes:
             writer.writerow([key, stats[key]])
         writer.writerow([])
         writer.writerow(["Metric", "Value"])
-        writer.writerow(["Global Compliance Score", f"{stats['compliance_score']}%"])
+        writer.writerow(["Tenant Compliance Score", f"{stats['compliance_score']}%"])
         writer.writerow(["Total Documents", stats["total_documents"]])
         writer.writerow(["Scanned Today", stats["scanned_today"]])
         writer.writerow(["Critical Findings", stats["critical_findings"]])
@@ -120,7 +113,7 @@ def generate_executive_summary_report(fmt: str) -> bytes:
         
         intro_text = (
             f"This compliance report summarizes the overall data security and framework compliance status "
-            f"from recorded evidence. The organization's global compliance "
+            f"from recorded evidence. The tenant's compliance "
             f"index is currently assessed at {stats['compliance_score']}%. There are {stats['critical_findings']} critical "
             f"vulnerabilities and {stats['open_approvals']} actions awaiting human override approval."
         )
@@ -133,7 +126,7 @@ def generate_executive_summary_report(fmt: str) -> bytes:
         
         metric_data = [
             [Paragraph("KPI Metric Description", header_style), Paragraph("Current Value", header_style)],
-            [Paragraph("Global Compliance Index Score", cell_style), Paragraph(f"{stats['compliance_score']}%", cell_style)],
+            [Paragraph("Tenant Compliance Index Score", cell_style), Paragraph(f"{stats['compliance_score']}%", cell_style)],
             [Paragraph("Total Ingested Documents", cell_style), Paragraph(str(stats["total_documents"]), cell_style)],
             [Paragraph("Documents Scanned Today", cell_style), Paragraph(str(stats["scanned_today"]), cell_style)],
             [Paragraph("Critical Severity Gaps", cell_style), Paragraph(str(stats["critical_findings"]), cell_style)],
@@ -182,7 +175,8 @@ def generate_executive_summary_report(fmt: str) -> bytes:
 # -------------------------------------------------------------------------
 # TECHNICAL FINDINGS REPORTS
 # -------------------------------------------------------------------------
-def generate_technical_findings_report(fmt: str) -> bytes:
+def generate_technical_findings_report(fmt: str, tenant_id: int) -> bytes:
+    validate_tenant_id(tenant_id)
     findings = []
     try:
         with engine.connect() as conn:
@@ -190,10 +184,10 @@ def generate_technical_findings_report(fmt: str) -> bytes:
                 SELECT d.filename, df.finding_type, df.matched_pattern, df.risk_level, 
                        df.location_evidence, df.impact, df.recommendation
                 FROM document_findings df
-                JOIN documents d ON df.document_id = d.id
-                WHERE d.status NOT IN ('deleted', 's3_deleted')
+                JOIN documents d ON df.document_id = d.id AND df.tenant_id = d.tenant_id
+                WHERE d.tenant_id = :tenant_id AND d.status NOT IN ('deleted', 's3_deleted')
                 ORDER BY df.id DESC
-            """)).fetchall()
+            """), {"tenant_id": tenant_id}).fetchall()
             for r in rows:
                 findings.append({
                     "filename": r[0],
@@ -287,19 +281,21 @@ def generate_technical_findings_report(fmt: str) -> bytes:
 # -------------------------------------------------------------------------
 # AUDITOR EVIDENCE REPORTS
 # -------------------------------------------------------------------------
-def generate_auditor_evidence_report(fmt: str) -> bytes:
+def generate_auditor_evidence_report(fmt: str, tenant_id: int) -> bytes:
+    validate_tenant_id(tenant_id)
     audits = []
     try:
         from verify_audit import verify_audit_chain
-        res_verify = verify_audit_chain()
+        res_verify = verify_audit_chain(tenant_id=tenant_id)
         verification_passed = res_verify.get("valid")
         
         with engine.connect() as conn:
             rows = conn.execute(text("""
                 SELECT id, created_at, user_query, risk_level, approval_status, integrity_hash, previous_hash
                 FROM audit_logs
+                WHERE tenant_id = :tenant_id
                 ORDER BY id ASC
-            """)).fetchall()
+            """), {"tenant_id": tenant_id}).fetchall()
             for r in rows:
                 audits.append({
                     "id": r[0],

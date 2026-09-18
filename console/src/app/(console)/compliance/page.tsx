@@ -464,13 +464,13 @@ export default function FrameworksPage() {
                 {activeFramework} Live Control Scores
               </h3>
               <span className="text-[10px] text-[#6B7488] font-bold">
-                {activeScore?.controls.length || 0} controls
+                {activeScore?.controls.length ?? "Unknown"} controls
               </span>
             </div>
 
             {loading || !activeScore ? (
               <div className="p-8 flex justify-center">
-                <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500" />
+                {loading ? <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500" /> : <p className="text-xs text-[#6B7488]">Control scores unavailable</p>}
               </div>
             ) : (
               <div className="divide-y divide-[#E6E9F0]/60">
@@ -629,7 +629,7 @@ export default function FrameworksPage() {
               ].map(([label, value]) => (
                 <div key={label} className="flex justify-between py-1.5 border-b border-[#E6E9F0] last:border-b-0">
                   <span className="text-[#6B7488]">{label}</span>
-                  <span className="font-bold text-[#0E1726] font-mono">{loading ? "-" : value ?? 0}</span>
+                  <span className="font-bold text-[#0E1726] font-mono">{loading ? "-" : value ?? "Unknown"}</span>
                 </div>
               ))}
             </div>
@@ -639,7 +639,7 @@ export default function FrameworksPage() {
             <h3 className="text-xs font-bold uppercase tracking-wider text-[#6B7488]">30-Day Score History</h3>
             <div className="space-y-2">
               {history.length === 0 ? (
-                <div className="text-xs text-[#6B7488]">No score snapshots yet.</div>
+                <div className="text-xs text-[#6B7488]">{loading ? "Loading score history..." : error ? "Score history unavailable" : "No score snapshots yet."}</div>
               ) : (
                 history.map((item) => (
                   <div key={`${item.framework}-${item.snapshot_date}`} className="rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] p-3">

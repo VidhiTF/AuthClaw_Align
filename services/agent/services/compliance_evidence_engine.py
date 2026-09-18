@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -158,6 +159,13 @@ class ComplianceEvidenceEngine:
     calculation_version = "evidence-impact-v2"
     missing_control_treatment = "Missing controls are unknown and contribute zero to the full weighted denominator; frameworks without evidence have no score."
 
+    @contextmanager
+    def transaction(self, tenant_id: int):
+        with engine.begin() as conn:
+            conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('authclaw.compliance:' || CAST(:tenant_id AS text), 0))"), {"tenant_id": tenant_id})
+            yield conn
+
     def ensure_catalog(self) -> None:
         with engine.connect() as conn:
             conn.execute(
@@ -220,11 +228,13 @@ class ComplianceEvidenceEngine:
             controls = [item for item in controls if item["framework"].lower() == framework.lower()]
         return controls
 
-    def map_evidence(self, tenant_id: int) -> int:
-        self.ensure_catalog()
-        rows = self._collect_source_events(tenant_id)
+    def map_evidence(self, tenant_id: int, connection=None) -> int:
+        if connection is None:
+            with self.transaction(tenant_id) as conn:
+                return self.map_evidence(tenant_id, conn)
+        rows = self._collect_source_events(tenant_id, connection)
         mapped = 0
-        with engine.connect() as conn:
+        with nullcontext(connection) as conn:
             conn.execute(text("DELETE FROM compliance_control_evidence WHERE tenant_id = :tenant_id"), {"tenant_id": tenant_id})
             for event in rows:
                 for control in self._matching_controls(event):
@@ -254,13 +264,15 @@ class ComplianceEvidenceEngine:
                         },
                     )
                     mapped += 1
-            conn.commit()
         return mapped
 
-    def calculate_scores(self, tenant_id: int) -> Dict[str, Any]:
-        self.map_evidence(tenant_id)
-        controls = self.catalog()
-        with engine.connect() as conn:
+    def calculate_scores(self, tenant_id: int, connection=None) -> Dict[str, Any]:
+        if connection is None:
+            with self.transaction(tenant_id) as conn:
+                return self.calculate_scores(tenant_id, conn)
+        self.map_evidence(tenant_id, connection)
+        controls = [dict(item) for item in CONTROL_CATALOG]
+        with nullcontext(connection) as conn:
             evidence_rows = conn.execute(
                 text("""
                     SELECT framework, control_id, source_type, source_id, reason, impact, created_at, metadata
@@ -312,7 +324,7 @@ class ComplianceEvidenceEngine:
                 "evidence": items,
                 "calculated_at": datetime.now(timezone.utc).isoformat(),
             })
-            self._persist_control_score(tenant_id, control, score, status, len(items), len(negative), reason, source_event, previous, evidence_timestamp)
+            self._persist_control_score(tenant_id, control, score, status, len(items), len(negative), reason, source_event, previous, evidence_timestamp, connection)
 
         frameworks = {}
         for framework in sorted({item["framework"] for item in controls}):
@@ -408,14 +420,14 @@ class ComplianceEvidenceEngine:
         payload["production_vector_backend"] = os.getenv("AUTHCLAW_VECTOR_BACKEND", "postgres_json")
         return payload
 
-    def _persist_control_score(self, tenant_id: int, control: Dict[str, Any], score: int, status: str, evidence_count: int, negative_findings: int, reason: str, source_event: str, previous: Dict[tuple, int], evidence_timestamp: str = None) -> None:
+    def _persist_control_score(self, tenant_id: int, control: Dict[str, Any], score: int, status: str, evidence_count: int, negative_findings: int, reason: str, source_event: str, previous: Dict[tuple, int], evidence_timestamp: str = None, connection=None) -> None:
         key = (control["framework"], control["control_id"])
         previous_score = previous.get(key)
         metadata = {"title": control["title"], "corpus_version": self.corpus_version,
                     "calculation_version": self.calculation_version, "evidence_timestamp": evidence_timestamp,
                     "missing_control_treatment": self.missing_control_treatment, "status": status}
         observed_score = score if evidence_count else None
-        with engine.connect() as conn:
+        with nullcontext(connection) if connection is not None else engine.begin() as conn:
             conn.execute(
                 text("""
                     INSERT INTO compliance_control_scores (
@@ -472,11 +484,10 @@ class ComplianceEvidenceEngine:
                         "metadata": json.dumps(metadata),
                     },
                 )
-            conn.commit()
 
-    def _collect_source_events(self, tenant_id: int) -> List[Dict[str, Any]]:
+    def _collect_source_events(self, tenant_id: int, connection=None) -> List[Dict[str, Any]]:
         events: List[Dict[str, Any]] = []
-        with engine.connect() as conn:
+        with nullcontext(connection) if connection is not None else engine.connect() as conn:
             evidence = conn.execute(
                 text("SELECT id, name, category, file_path, hash, control_id, framework, collected_at AS evidence_timestamp FROM compliance_evidence WHERE tenant_id = :tenant_id"),
                 {"tenant_id": tenant_id},

@@ -2280,7 +2280,7 @@ def get_metrics():
             evidence_count = conn.execute(text("SELECT COUNT(*) FROM compliance_evidence")).scalar() or 0
 
             scanned_today = conn.execute(text("SELECT COUNT(*) FROM documents WHERE created_at >= CURRENT_DATE")).scalar() or 0
-            drift_alerts = conn.execute(text("SELECT COUNT(*) FROM compliance_drift_alerts")).scalar() or 0
+            drift_alerts = conn.execute(text("SELECT COUNT(*) FROM compliance_drift_alerts WHERE tenant_id = :tenant_id"), {"tenant_id": get_current_tenant_id()}).scalar() or 0
             secret_leaks = conn.execute(text("SELECT COUNT(*) FROM document_findings WHERE finding_type IN ('Secret', 'Credentials')")).scalar() or 0
             pii_violations = conn.execute(text("SELECT COUNT(*) FROM document_findings WHERE finding_type = 'PII'")).scalar() or 0
             provider_errors = conn.execute(text("""
@@ -2311,7 +2311,7 @@ def get_metrics():
             from services.event_pipeline import EventPipeline
             from verify_audit import verify_audit_chain
             event_pipeline_metrics = EventPipeline().delivery_metrics()
-            audit_chain_status = verify_audit_chain()
+            audit_chain_status = verify_audit_chain(tenant_id=get_current_tenant_id())
             approval_counts = dict(conn.execute(text("SELECT lower(status), COUNT(*) FROM gateway_approvals GROUP BY lower(status)")).fetchall())
             
     except Exception as e:
@@ -2322,13 +2322,16 @@ def get_metrics():
             "audit_chain_status": {"status": "unavailable", "valid": None, "records_checked": None},
         })
 
-    from services.observability_service import ObservabilityService
+    from services.observability_service import ObservabilityService, aggregate_health
     queue = ObservabilityService()._queue_lag(event_pipeline_metrics)
     redaction_rate = round((pii_violations + secret_leaks) / total_requests, 4) if total_requests else None
 
     return {
         "total_requests": total_requests,
-        "status": "degraded" if audit_chain_status.get("valid") is not True or queue["status"] != "healthy" else "healthy",
+        "status": aggregate_health(
+            "unknown" if audit_chain_status.get("valid") is None else "healthy" if audit_chain_status["valid"] else "degraded",
+            queue["status"],
+        ),
         "compliance_status": "unknown",
         "blocked_requests": blocked_requests,
         "pending_approvals": approval_counts.get("pending", 0),
@@ -4962,7 +4965,7 @@ def activate_verified_registration(conn, registration) -> int:
 
 
 @app.get("/reports/{type}/{format}")
-def get_report_endpoint(type: str, format: str):
+def get_report_endpoint(type: str, format: str, tenant_id: int = Depends(require_tenant_context)):
     from document_processing.reports import (
         generate_executive_summary_report,
         generate_technical_findings_report,
@@ -4974,11 +4977,11 @@ def get_report_endpoint(type: str, format: str):
         raise HTTPException(status_code=400, detail="Invalid report format")
     
     if type == "executive":
-        content = generate_executive_summary_report(format)
+        content = generate_executive_summary_report(format, tenant_id)
     elif type == "technical":
-        content = generate_technical_findings_report(format)
+        content = generate_technical_findings_report(format, tenant_id)
     elif type == "auditor":
-        content = generate_auditor_evidence_report(format)
+        content = generate_auditor_evidence_report(format, tenant_id)
     else:
         raise HTTPException(status_code=400, detail="Invalid report type")
 

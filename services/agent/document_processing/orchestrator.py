@@ -360,7 +360,7 @@ Do not include markdown packaging like ```json.
     # 10. Record Snapshot in Score History & Calculate Drift
     try:
         from document_processing.drift import record_compliance_snapshot
-        record_compliance_snapshot()
+        record_compliance_snapshot(tenant_id)
     except Exception as drift_err:
         logger.error(f"Failed to log compliance snapshot: {drift_err}")
 

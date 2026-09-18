@@ -9,6 +9,7 @@ import re
 import smtplib
 import socketserver
 import threading
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -29,8 +30,14 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from services.tenant_context import tenant_context, validate_tenant_id
+
 
 def load_functions(path, names, **namespace):
+    namespace.setdefault("validate_tenant_id", validate_tenant_id)
+    namespace.setdefault("contextmanager", contextmanager)
+    namespace.setdefault("nullcontext", nullcontext)
     tree = ast.parse(path.read_text(encoding="utf-8"))
     exec(
         compile(
@@ -47,6 +54,22 @@ def load_functions(path, names, **namespace):
 
 
 class TruthfulTelemetryTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(tenant_context(7, request_id="telemetry-test", required=True))
+
+    def test_health_precedence_preserves_all_five_states(self):
+        aggregate = load_functions(
+            Path(__file__).resolve().parents[1] / "services/observability_service.py", {"aggregate_health"}
+        )["aggregate_health"]
+        cases = (((), "unknown"), (("not_applicable",), "not_applicable"),
+                 (("healthy", "not_applicable"), "healthy"), (("unknown", "healthy"), "unknown"),
+                 (("degraded", "unknown"), "degraded"), (("unavailable", "degraded"), "unavailable"),
+                 ((None, "healthy"), "unknown"), (("unexpected",), "unknown"))
+        for states, expected in cases:
+            with self.subTest(states=states):
+                self.assertEqual(aggregate(*states), expected)
+                self.assertEqual(aggregate(*reversed(states)), expected)
+
     def test_alert_transport_does_not_swallow_delivery_failures(self):
         smtp, files = MagicMock(), MagicMock()
         scope = load_functions(
@@ -122,6 +145,8 @@ class TruthfulTelemetryTests(unittest.TestCase):
         service = scope["ComplianceEvidenceEngine"]()
         service.map_evidence = MagicMock()
         service.catalog = lambda: [{"control_id": "one", "framework": "SOC2", "title": "Control"}]
+        scope["CONTROL_CATALOG"] = service.catalog()
+        engine.begin = engine.connect
         service._control_weight = lambda _: 1
         service._persist_control_score = MagicMock()
         execute = engine.connect.return_value.__enter__.return_value.execute
@@ -142,6 +167,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
 
     def test_control_change_history_preserves_unknown_and_recovery_to_zero(self):
         engine = MagicMock()
+        engine.begin = engine.connect
         scope = load_functions(
             Path(__file__).resolve().parents[1] / "services/compliance_evidence_engine.py",
             {"ComplianceEvidenceEngine"}, Dict=dict, Any=object, List=list, Optional=Optional,
@@ -190,10 +216,12 @@ class TruthfulTelemetryTests(unittest.TestCase):
         )
         tenant = MagicMock()
         tenant.get_current_tenant_id.return_value = "7"
-        with patch.dict(sys.modules, {"document_processing.auditor": audit, "document_processing.alerts": alert, "services.tenant_context": tenant}):
+        scoring_module = MagicMock()
+        scoring_module.ComplianceEvidenceEngine.return_value.transaction.side_effect = lambda _: engine.begin()
+        with patch.dict(sys.modules, {"document_processing.auditor": audit, "document_processing.alerts": alert, "services.tenant_context": tenant, "services.compliance_evidence_engine": scoring_module}):
             for score, expected_alerts in ((90, 0), (None, 3), (80, 3), (0, 6)):
                 calculator.return_value = dict.fromkeys(("soc2", "gdpr", "hipaa"), score)
-                scope["record_compliance_snapshot"]()
+                scope["record_compliance_snapshot"](7)
                 with engine.connect() as conn:
                     rows = conn.execute(text("SELECT score, details FROM compliance_score_history ORDER BY id DESC LIMIT 3")).all()
                 self.assertEqual(len(rows), 3)
@@ -202,7 +230,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
                 self.assertEqual(alert.trigger_security_alert.call_count, expected_alerts)
             calculator.side_effect = HTTPException(503, "source unavailable")
             with self.assertRaises(HTTPException):
-                scope["record_compliance_snapshot"]()
+                scope["record_compliance_snapshot"](7)
             with engine.connect() as conn:
                 latest = conn.execute(text("SELECT score, details FROM compliance_score_history ORDER BY id DESC LIMIT 3")).all()
                 loss = conn.execute(text("SELECT score_drop, current_score FROM compliance_drift_alerts WHERE current_score IS NULL")).all()
@@ -212,27 +240,27 @@ class TruthfulTelemetryTests(unittest.TestCase):
             self.assertEqual(alert.trigger_security_alert.call_count, 9)
             calculator.side_effect = None
             calculator.return_value = dict.fromkeys(("soc2", "gdpr", "hipaa"), 70)
-            scope["record_compliance_snapshot"]()
+            scope["record_compliance_snapshot"](7)
             self.assertEqual(alert.trigger_security_alert.call_count, 9)
             calculator.return_value = dict.fromkeys(("soc2", "gdpr", "hipaa"), None)
             audit.create_document_audit.side_effect = RuntimeError("audit unavailable")
             with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
-                scope["record_compliance_snapshot"]()
+                scope["record_compliance_snapshot"](7)
             self.assertEqual(alert.trigger_security_alert.call_count, 12)
-            self.assertTrue(all(call.kwargs["tenant_id"] == "7" for call in audit.create_document_audit.call_args_list))
+            self.assertTrue(all(call.kwargs["tenant_id"] == 7 for call in audit.create_document_audit.call_args_list))
             audit.create_document_audit.side_effect = None
-            scope["record_compliance_snapshot"]()
+            scope["record_compliance_snapshot"](7)
             self.assertEqual(alert.trigger_security_alert.call_count, 15)
             alert.trigger_security_alert.side_effect = RuntimeError("notification unavailable")
             with self.assertRaisesRegex(RuntimeError, "notification unavailable"):
-                scope["record_compliance_snapshot"]()
+                scope["record_compliance_snapshot"](7)
             self.assertEqual(alert.trigger_security_alert.call_count, 18)
             alert.trigger_security_alert.side_effect = None
-            scope["record_compliance_snapshot"]()
+            scope["record_compliance_snapshot"](7)
             self.assertEqual(alert.trigger_security_alert.call_count, 21)
             with patch.object(engine, "connect", side_effect=RuntimeError("database down")):
                 with self.assertRaisesRegex(RuntimeError, "database down"):
-                    scope["record_compliance_snapshot"]()
+                    scope["record_compliance_snapshot"](7)
             self.assertEqual(alert.trigger_security_alert.call_args.args[0]["matched_pattern"], "COMPLIANCE_SNAPSHOT_UNAVAILABLE")
 
         scoring = load_functions(
@@ -263,10 +291,11 @@ class TruthfulTelemetryTests(unittest.TestCase):
             logger=MagicMock(),
             get_all_approvals=lambda: {},
             metrics_snapshot=lambda: {},
+            get_current_tenant_id=lambda: "7",
         )
         analytics = load_functions(
             Path(__file__).resolve().parents[1] / "services/observability_service.py",
-            {"ObservabilityService"},
+            {"ObservabilityService", "aggregate_health"},
             Dict=dict,
             Any=object,
             List=list,
@@ -285,7 +314,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
         ):
             for latency in (None, 0):
                 engine.connect.return_value.__enter__.return_value.execute.side_effect = (
-                    lambda sql: (
+                    lambda sql, *params: (
                         MagicMock(scalar=lambda: latency) if "AVG(latency)" in str(sql) else result
                     )
                 )
@@ -294,6 +323,9 @@ class TruthfulTelemetryTests(unittest.TestCase):
                 self.assertEqual(payload["status"], "degraded")
                 self.assertIs(payload["audit_chain_status"]["valid"], False)
                 self.assertIsNone(payload["queue_lag_seconds"])
+            verifier.verify_audit_chain.return_value = {"valid": None, "status": "unknown", "records_checked": 0}
+            client = TestClient(scope["app"])
+            self.assertEqual(client.get("/metrics").json()["status"], "unknown")
             verifier.verify_audit_chain.side_effect = RuntimeError("audit unavailable")
             self.assertEqual(scope["get_metrics"]().status_code, 503)
 
@@ -402,6 +434,8 @@ class TruthfulTelemetryTests(unittest.TestCase):
         service.catalog = lambda: [
             {"control_id": "one", "framework": "SOC2", "title": "Synthetic control"}
         ]
+        scope["CONTROL_CATALOG"] = service.catalog()
+        engine.begin = engine.connect
         service._control_weight = lambda _: 1
         service._persist_control_score = MagicMock()
         payload = service.calculate_scores(7)
@@ -445,9 +479,9 @@ class TruthfulTelemetryTests(unittest.TestCase):
                 self.assertEqual(service._queue_lag({"streams": {}, "checkpoints": [{**checkpoint, field: invalid}]})["status"], "unknown")
         self.assertEqual(service._queue_lag({"streams": {"audit": {"dead_letter": 1}}, "checkpoints": [{**checkpoint, "dead_letter_count": 1, "pending_events": 1}]})["status"], "degraded")
         self.assertEqual(service._queue_lag({"checkpoints": [checkpoint]})["status"], "unknown")
-        for streams in ({"analytics": {"queued": 1}}, {"audit": {"dead_letter": 1}}):
+        for streams, status in (({"analytics": {"queued": 1}}, "unknown"), ({"audit": {"dead_letter": 1}}, "degraded")):
             result = service._queue_lag({"streams": streams, "checkpoints": [checkpoint]})
-            self.assertEqual(result["status"], "unknown")
+            self.assertEqual(result["status"], status)
             self.assertTrue(result["alertable"])
 
     def test_legacy_report_and_drift_consumers_do_not_invent_scores(self):
@@ -465,6 +499,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
         }
         calculator = MagicMock()
         calculator.ComplianceEvidenceEngine.return_value.calculate_scores.return_value = scores
+        calculator.ComplianceEvidenceEngine.return_value.transaction.side_effect = lambda _: engine.connect()
         scope = load_functions(
             Path(__file__).resolve().parents[1] / "document_processing/drift.py",
             {"get_current_framework_scores", "record_compliance_snapshot"},
@@ -507,7 +542,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
                 "services.tenant_context": MagicMock(get_current_tenant_id=lambda: "7"),
             },
         ):
-            scope["record_compliance_snapshot"]()
+            scope["record_compliance_snapshot"](7)
             snapshots = [call.args[1] for call in conn.execute.call_args_list if "INSERT INTO compliance_score_history" in str(call)]
             self.assertEqual(len(snapshots), 3)
             self.assertTrue(all(row["score"] is None and json.loads(row["details"])["status"] == "unknown" for row in snapshots))
@@ -516,24 +551,24 @@ class TruthfulTelemetryTests(unittest.TestCase):
             self.assertTrue(all(row["curr"] is None and row["drop"] is None for row in alerts))
             self.assertEqual(sys.modules["document_processing.alerts"].trigger_security_alert.call_count, 3)
             with self.assertRaises(HTTPException):
-                report["get_live_stats"]()
+                report["get_live_stats"](7)
             scores.update(soc2=0, gdpr=60, hipaa=90)
             conn.execute.return_value.scalar.return_value = 0
-            payload = json.loads(report["generate_executive_summary_report"]("json"))
+            payload = json.loads(report["generate_executive_summary_report"]("json", 7))
             self.assertEqual(payload["compliance_score"], 50)
             self.assertEqual(payload["calculation_version"], "evidence-impact-v2")
-            self.assertTrue(report["generate_executive_summary_report"]("pdf").startswith(b"%PDF"))
-            self.assertIn(b"evidence-impact-v2", report["generate_executive_summary_report"]("csv"))
+            self.assertTrue(report["generate_executive_summary_report"]("pdf", 7).startswith(b"%PDF"))
+            self.assertIn(b"evidence-impact-v2", report["generate_executive_summary_report"]("csv", 7))
             conn.execute.return_value.fetchone.return_value = (None, '{"status":"unknown"}')
-            scope["record_compliance_snapshot"]()
-            self.assertTrue(conn.commit.called)
-            conn.execute.return_value.fetchall.return_value = []
+            scope["record_compliance_snapshot"](7)
+            self.assertTrue(conn.begin_nested.called)
             with self.assertRaises(HTTPException):
-                scope["get_current_framework_scores"]()
+                scope["get_current_framework_scores"](8)
             engine.connect.side_effect = RuntimeError("secret database outage")
+            calculator.ComplianceEvidenceEngine.return_value.calculate_scores.side_effect = RuntimeError("secret database outage")
             for loader in (scope["get_current_framework_scores"], report["get_live_stats"]):
                 with self.assertRaises(HTTPException) as caught:
-                    loader()
+                    loader(7)
                 self.assertEqual(caught.exception.status_code, 503)
                 self.assertNotIn("secret", caught.exception.detail)
 
@@ -574,21 +609,21 @@ class TruthfulTelemetryTests(unittest.TestCase):
         with patch.dict(sys.modules, {"verify_audit": verifier}):
             self.assertIsNone(summary["verify_audit_summary"]()["valid"])
             self.assertEqual(summary["verify_audit_summary"]()["status"], "unknown")
-            self.assertTrue(report["generate_auditor_evidence_report"]("pdf").startswith(b"%PDF"))
+            self.assertTrue(report["generate_auditor_evidence_report"]("pdf", 7).startswith(b"%PDF"))
             for valid, expected in ((None, "UNKNOWN"), (False, "CORRUPTED"), (True, "VALID")):
                 verifier.verify_audit_chain.return_value["valid"] = valid
                 self.assertEqual(
-                    json.loads(report["generate_auditor_evidence_report"]("json"))[
+                    json.loads(report["generate_auditor_evidence_report"]("json", 7))[
                         "chain_verification"
                     ],
                     expected,
                 )
             verifier.verify_audit_chain.side_effect = RuntimeError("outage")
             with self.assertRaises(HTTPException):
-                report["generate_auditor_evidence_report"]("json")
+                report["generate_auditor_evidence_report"]("json", 7)
             engine.connect.side_effect = RuntimeError("source outage")
             with self.assertRaises(HTTPException) as caught:
-                report["generate_technical_findings_report"]("json")
+                report["generate_technical_findings_report"]("json", 7)
             self.assertEqual(caught.exception.status_code, 503)
 
     def test_signed_trust_package_is_not_proof_of_runtime_health(self):
@@ -601,6 +636,9 @@ class TruthfulTelemetryTests(unittest.TestCase):
             build_public_trust_state=builder,
         )
         observability = MagicMock()
+        observability.aggregate_health = load_functions(
+            Path(__file__).resolve().parents[1] / "services/observability_service.py", {"aggregate_health"}
+        )["aggregate_health"]
         observability.ObservabilityService.return_value._queue_lag.return_value = {"status": "healthy"}
         for valid, expected in ((False, "degraded"), (None, "unknown"), (True, "healthy")):
             builder.return_value = {

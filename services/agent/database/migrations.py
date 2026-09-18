@@ -1093,6 +1093,7 @@ def run_startup_migrations():
 
     CREATE TABLE IF NOT EXISTS compliance_score_history (
         id SERIAL PRIMARY KEY,
+        tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         framework VARCHAR(50) NOT NULL,
         score INTEGER NOT NULL,
@@ -1101,6 +1102,7 @@ def run_startup_migrations():
 
     CREATE TABLE IF NOT EXISTS compliance_drift_alerts (
         id SERIAL PRIMARY KEY,
+        tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         framework VARCHAR(50) NOT NULL,
         score_drop INTEGER NOT NULL,
@@ -1108,6 +1110,12 @@ def run_startup_migrations():
         current_score INTEGER NOT NULL,
         details TEXT NOT NULL
     );
+
+    -- Unattributed legacy rows remain preserved but inaccessible through tenant RLS.
+    ALTER TABLE compliance_score_history ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;
+    ALTER TABLE compliance_drift_alerts ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;
+    CREATE INDEX IF NOT EXISTS idx_compliance_score_history_tenant_framework ON compliance_score_history(tenant_id, framework, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_compliance_drift_alerts_tenant_framework ON compliance_drift_alerts(tenant_id, framework, id DESC);
 
     -- Missing telemetry is not a measured zero; preserve history and alert state.
     ALTER TABLE compliance_score_history ALTER COLUMN score DROP NOT NULL;
@@ -1585,6 +1593,18 @@ def run_startup_migrations():
         USING (tenant_id::text = agent.agent_current_tenant_id())
         WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
+    ALTER TABLE compliance_score_history ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_compliance_score_history ON compliance_score_history;
+    CREATE POLICY tenant_isolation_compliance_score_history ON compliance_score_history
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
+
+    ALTER TABLE compliance_drift_alerts ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_compliance_drift_alerts ON compliance_drift_alerts;
+    CREATE POLICY tenant_isolation_compliance_drift_alerts ON compliance_drift_alerts
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
+
     ALTER TABLE compliance_score_changes ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_compliance_score_changes ON compliance_score_changes;
     CREATE POLICY tenant_isolation_compliance_score_changes ON compliance_score_changes
@@ -1688,6 +1708,8 @@ def run_startup_migrations():
     ALTER TABLE compliance_control_evidence FORCE ROW LEVEL SECURITY;
     ALTER TABLE compliance_control_scores FORCE ROW LEVEL SECURITY;
     ALTER TABLE compliance_score_changes FORCE ROW LEVEL SECURITY;
+    ALTER TABLE compliance_score_history FORCE ROW LEVEL SECURITY;
+    ALTER TABLE compliance_drift_alerts FORCE ROW LEVEL SECURITY;
     ALTER TABLE event_delivery_records FORCE ROW LEVEL SECURITY;
     ALTER TABLE event_dead_letters FORCE ROW LEVEL SECURITY;
     ALTER TABLE rate_limit_events FORCE ROW LEVEL SECURITY;

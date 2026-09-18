@@ -4,6 +4,9 @@ import { getSessionContext, handleApiError } from "@/lib/api-client";
 export const dynamic = "force-dynamic";
 
 interface AuditMetricRecord { action?: string | null;
+  actor_type?: string | null;
+  request_id?: string | null;
+  idempotency_key?: string | null;
   duration_ms?: number | null;
   duration?: number | null;
   timestamp?: string | null;
@@ -31,6 +34,8 @@ export async function GET(request: Request) {
     const totalRequests = records.length;
     if (records.length > 0) {
       const latencies = records
+        // Provider outcomes measure the full request; decision/admin events can carry placeholder zero.
+        .filter((record) => record.actor_type === "gateway" && record.request_id && record.idempotency_key === `gateway:${record.request_id}:provider_outcome`)
         .map((record) => record.duration_ms ?? record.duration)
         .filter((latency): latency is number => typeof latency === "number" && Number.isFinite(latency) && latency >= 0)
         .sort((a: number, b: number) => a - b);

@@ -1,5 +1,127 @@
 # ENT-019: truthful telemetry
 
+## Final review corrections (2026-09-18)
+
+The final candidate additionally serializes evidence refreshes per tenant and
+uses one transaction for mapping, control scores and snapshot comparison. A real
+concurrent PostgreSQL reproduction previously doubled one negative finding;
+regression tests now verify serialization, no duplicate mappings and atomic
+rollback after a mid-score failure. A savepoint preserves unavailable snapshots
+after SQL source errors; the database context hook allows rollback before rebinding
+the next tenant statement. Notifications remain after commit. Existing transaction,
+RLS and scoring code is reused; redundant catalog writes and per-control commits
+are removed, with no new dependency.
+
+Fresh dead letters remain degraded when checkpoint lag is unknown. Compliance
+outages render unknown inputs and unavailable history rather than zero findings.
+Dashboard latency accepts measured gateway provider outcomes, excluding placeholder
+durations while preserving measured zero. Each defect has regression coverage.
+
+Final local results supersede earlier counts below: agent smoke 116 passed;
+CI-equivalent agent selection 101 passed plus 67 subtests; backend selection 47;
+console 48; policy/evidence 31. TypeScript, Tokei 12.1.2 line budgets and diff checks
+passed. Agent and console images rebuilt successfully; 22 telemetry/queue tests
+passed inside the agent image with read-only test mounts and no network. Independent
+adversarial re-review found no additional confirmed defects. Existing dependency
+deprecation warnings remain. Temporary review files and isolated databases were
+removed; running application containers were not replaced. Remote CI, required
+human approvals and deployed AWS verification remain separate, pending evidence.
+
+## Follow-up review: state precedence and tenant-bound legacy consumers
+
+Confirmed defects: the metrics HTTP regression returns `degraded` for unknown
+audit/queue observations; legacy scoring selects the first tenant, and snapshot
+history/alerts have no tenant key. Reports are authenticated by existing middleware,
+but RLS cannot isolate those two aggregate tables.
+
+Reuse/new-line decision (recorded before implementation): modify existing drift,
+report, observability and migration paths; retain the canonical evidence scorer,
+authenticated tenant context, HMAC-bound database context and existing RLS policy
+pattern. A small health classifier is necessary to express five-state precedence;
+this is a behavior correction, not a semantic duplicate-function refactor. Tenant
+arguments, SQL predicates, indexes and RLS are necessary to remove first-tenant
+selection and cross-tenant history comparisons. No new dependency or parallel
+scoring pipeline is needed. Unattributed legacy rows must remain preserved but
+invisible to runtime tenant reads; do not guess their owner.
+
+Implemented on top of `fafbc48875191a7d12cb4e91ef1350244077cf6d`:
+
+- Shared precedence is `unavailable > degraded > unknown > healthy > not_applicable`.
+  Empty/unrecognized observations remain unknown. Metrics, governance and trust
+  aggregation use the same classifier; known failure still takes precedence over
+  unknown. Readiness retains its explicit checked-dependency scope, and liveness
+  remains `alive`, not an unsupported claim of overall health.
+- Reports and both snapshot callers supply the trusted tenant. The existing
+  ContextVar identity is checked before scoring, report access or snapshot writes.
+  SQL also filters tenant IDs. History and alerts now have tenant foreign keys,
+  composite indexes, USING/WITH CHECK policies and FORCE RLS using the existing
+  HMAC-bound `agent.agent_current_tenant_id()` context. Removed global exemptions.
+- The independent read-only adversarial review found one additional defect:
+  metrics passed no tenant into the audit verifier, falsely rejecting valid tenant
+  chains with interleaved global IDs. Its reproduction failed without tenant scope
+  and passed with scope. Metrics now passes the authenticated tenant; a real A/B/A
+  hash-chain fixture verifies metrics, governance and auditor-report agreement.
+- Removed seven redundant numeric report initializers and shortened obsolete
+  scaffolding: 10 fewer physical production lines than the first candidate. Final
+  incremental production diff is 95 added / 71 deleted, net +24, using `git diff
+  --numstat` against the above head and excluding tests/docs/CI/unrelated edits.
+  The unavoidable growth is predominantly tenant migration/RLS and state handling.
+  No AGENTS.md budgeted production path changes in this follow-up. Incremental
+  non-prose positive growth is 322 lines, predominantly the real integration test;
+  independent material-growth approval remains required, not self-approved.
+
+Fresh verification (2026-09-18; Python 3.14, PostgreSQL 16, pinned psycopg2 2.9.12):
+
+- Focused telemetry: 19 tests passed, including eight classifier subtests and a
+  subprocess importing the real agent app, middleware, JWT/RBAC, scoring, reports,
+  database event hooks and cloud-deletion worker. ReportLab 5.0.0 and pypdf 6.14.2
+  are available. JSON/CSV/PDF exports were generated; PDF text was parsed to check
+  both the allowed tenant filename and absence of the other tenant's filename.
+- Real migration runs twice on an isolated UUID-named database created by the
+  test. Old unattributed history/alerts are preserved, not reassigned. Runtime role
+  is verified NOSUPERUSER/NOBYPASSRLS; startup security validation verifies FORCE
+  RLS. Cross-tenant/null-owner inserts fail with SQLSTATE 42501; cross-tenant
+  reads/updates/deletes expose/change zero rows. Forged plain tenant GUCs expose
+  no legacy history. Missing/mismatched application context fails with 403.
+- Alternating tenant snapshots do not manufacture cross-tenant drift. A real
+  within-tenant score drop emits three tenant-bound alerts and audit entries.
+  Both aggregate HTTP endpoints retain unknown audit/queue states, support healthy
+  controls, and preserve degraded/unavailable precedence. No AST extraction is used
+  by the PostgreSQL integration test.
+- Full agent smoke suite: 112 passed. Exact updated Agent CI selection: 97 passed,
+  56 subtests passed. Backend compliance/trust/evidence selection: 47 passed.
+  Console: 47 passed and `npx tsc --noEmit` passed. Policy/evidence tests: 31 passed.
+  Python compilation and `git diff --check` passed. Agent CI now starts the existing
+  pinned PostgreSQL image and requires the new integration test.
+- Rebuilt agent image manifest list
+  `sha256:79b37767ba82920b68498a6a5269a1a3731920f7b3d0921233e263bc664cc117`;
+  18 focused tests passed in a read-only network-isolated container. Running
+  application containers and databases were not migrated or replaced.
+
+Reproduction: set `ENT019_TEST_DATABASE_URL` to a loopback disposable PostgreSQL
+database whose name ends in `_test`, then run
+`python -m unittest discover -s services/agent/smoke_tests -p '*telemetry*.py' -v`.
+The test creates/drops only its own UUID-named database. CI installs the existing
+hash-pinned agent requirements; no dependencies were added. Initial local failures
+were a different PostgreSQL driver, missing pinned parser dependency and incomplete
+fixtures; these were corrected and checks rerun, not waived. Existing dependency
+deprecation warnings remain. Cloud discovery is an empty synthetic source, quota
+uses explicit isolated memory mode, and notifications write a temporary local log;
+these are not production cloud/Redis/SMTP deployment claims.
+
+Deployment/rollback: drain old report/snapshot workers, run the existing agent
+migration job and security finalization, then start the updated image and verify
+readiness. Old snapshot writers omit tenant IDs and are deliberately denied by RLS;
+do not overlap them after migration. Historical null-owner rows remain quarantined
+until separately proven ownership exists. Rollback must retain tenant columns,
+indexes and RLS: disable affected report/worker paths or roll forward with a
+tenant-aware fix, never restore aggregate access. Remote CI, human component/risk
+approval and AWS deployment/outage evidence remain pending. Unrelated
+invitation/configuration work is excluded from this change.
+
+The sections below retain evidence from earlier ENT-019 iterations; this follow-up
+supersedes their statements that legacy history/alerts are aggregate-only.
+
 Baseline: local merge `2d34f31` (tree identical to `align/master` `5ff6f4b`).
 T01 activation was verified against GitHub before implementation: PR 52,
 merge `1e40bdb5c8fd6b4e28c827035ab7d06645530ccb`, effective
