@@ -25,6 +25,29 @@ class WorkflowFinding(WorkflowPayload):
     entity_count: int | None = None
 
 
+class RedTeamFinding(WorkflowPayload):
+    probe_id: str | None = None
+    name: str | None = None
+    category: str | None = None
+    prompt: str | None = None
+    status: str | None = None
+    severity: str | None = None
+    case_severity: str | None = None
+    severity_rank: int | None = None
+    risk_score: float | None = None
+    policy_decision: str | None = None
+    response_status: str | None = None
+    matched_signals: list[str] | None = None
+    reason: str | None = None
+
+
+class RedTeamExecutionResult(WorkflowPayload):
+    posture: str | None = None
+    failed: int | None = None
+    passed: int | None = None
+    simulation_only: bool | None = None
+
+
 class RemediationTarget(WorkflowPayload):
     provider: str | None = None
     type: str | None = None

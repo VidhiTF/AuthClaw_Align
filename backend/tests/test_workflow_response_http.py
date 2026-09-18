@@ -21,8 +21,10 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.v1.endpoints import workflows
 from app.core.auth import get_tenant_db
-from app.db.models import ApprovalAudit, ComplianceWorkflow, PendingApproval, Tenant, User
+from app.db.models import ApprovalAudit, ComplianceWorkflow, EvidenceRecord, Finding, PendingApproval, Policy, Tenant, User
 from app.orchestrator import runner
+from app.orchestrator.connectors import DocumentScanner
+from app.services import findings_service, red_team
 from tests.test_acl18_remediation_approval import _plan
 from tests.test_workflow_response_contract import FIELDS, historical_verification_failure, workflow
 
@@ -35,7 +37,7 @@ def sqlite_array(_type, _compiler, **_kw):
 @pytest.fixture
 def api(monkeypatch):
     engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
-    for model in (Tenant, User, PendingApproval, ComplianceWorkflow, ApprovalAudit):
+    for model in (Tenant, User, PendingApproval, ComplianceWorkflow, ApprovalAudit, Policy, EvidenceRecord, Finding):
         model.__table__.create(engine)
     tenant, user = uuid4(), uuid4()
     payload = workflow(
@@ -239,3 +241,37 @@ def test_fresh_mfa_denial_still_precedes_approval(api, monkeypatch):
 def test_missing_workflow_on_resume_keeps_404(api):
     api.payload["workflow_id"] = str(uuid4())
     assert request_operation(api, "/v1", "resume").status_code == 404
+
+
+@pytest.mark.parametrize("prefix", ["/v1", "/api/v1"])
+@pytest.mark.parametrize("refused", [False, True])
+def test_all_workflow_producers_remain_readable(api, monkeypatch, prefix, refused):
+    # Run both production writers; only external scanner, audit and metric I/O is isolated.
+    monkeypatch.setattr(DocumentScanner, "list_documents", lambda *_: [])
+    monkeypatch.setattr(findings_service, "_emit_finding_audit", lambda *_: None)
+    monkeypatch.setattr(red_team.event_backbone, "increment_metric", lambda *_: None)
+    responses = {probe["id"]: "Sorry, I cannot do that." for probe in red_team.PROBES} if refused else {}
+    tenant_id = str(api.identity["tenant_id"])
+    with Session(api.engine) as db:
+        compliance = runner.ComplianceWorkflowRunner(db).start(tenant_id, "GDPR")
+        produced = red_team.run(db, tenant_id, responses)
+        red_id = produced["run"]["workflow_id"]
+        row = db.query(ComplianceWorkflow).filter_by(workflow_id=red_id).one()
+        expected = {key: deepcopy(getattr(row, key)) for key in ("findings", "remediation_plan", "execution_result")}
+        assert db.query(EvidenceRecord).filter_by(workflow_id=red_id).count() == len(red_team.PROBES)
+        assert db.query(Finding).filter_by(workflow_id=red_id).count() == (0 if refused else len(red_team.PROBES))
+    listing = api.client.get(f"{prefix}/workflows")
+    assert listing.status_code == 200, listing.text
+    by_id = {item["workflow_id"]: item for item in listing.json()}
+    assert set(by_id) == {api.payload["workflow_id"], compliance["workflow_id"], red_id}
+    detail = api.client.get(f"{prefix}/workflows/{red_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json() == by_id[red_id]
+    for key, value in expected.items():
+        assert detail.json()[key] == value
+    with Session(api.engine) as db:
+        row = db.query(ComplianceWorkflow).filter_by(workflow_id=red_id).one()
+        assert {key: getattr(row, key) for key in expected} == expected
+    api.identity["tenant_id"] = uuid4()
+    assert api.client.get(f"{prefix}/workflows").json() == []
+    assert api.client.get(f"{prefix}/workflows/{red_id}").status_code == 404

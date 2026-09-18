@@ -1,5 +1,6 @@
 """Workflow wire contracts; fake S3 exercises the real graph/connector producers."""
 
+import ast
 import json
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -9,18 +10,37 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from app.api.v1.endpoints import workflows
 from app.orchestrator import graph
 from app.orchestrator.connectors import DocumentScanner
 from app.orchestrator.remediation_state import upgrade_mutation_state
 from app.services.remediation_approval import build_action_payload, compute_action_hash
+from app.services import red_team
 from tests.test_remediation_connector import FakeS3
 from tests.test_remediation_failure_rollback import VerificationMismatchS3, VerificationReadFailureS3
 from tests.test_s3_remediation_recovery import CrashAfterTargetWriteS3
 
 FIELDS = ("findings", "remediation_plan", "remediation_actions", "execution_result", "rollback_result")
+
+
+def test_workflow_writer_inventory_matches_producer_coverage():
+    # New ORM producers must join test_all_workflow_producers_remain_readable.
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    writers = set()
+    for path in app_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = {"ComplianceWorkflow"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "app.db.models":
+                names.update(alias.asname or alias.name for alias in node.names if alias.name == "ComplianceWorkflow")
+        if any(isinstance(node, ast.Call) and (
+            isinstance(node.func, ast.Name) and node.func.id in names
+            or isinstance(node.func, ast.Attribute) and node.func.attr == "ComplianceWorkflow"
+        ) for node in ast.walk(tree)):
+            writers.add(path.relative_to(app_root).as_posix())
+    assert writers == {"orchestrator/runner.py", "services/red_team.py"}
 
 
 def workflow(**overrides):
@@ -261,13 +281,16 @@ def assert_workflow_openapi(spec):
                 check(value)
             if isinstance(node.get("additionalProperties"), dict):
                 check(node["additionalProperties"])
-        for branch in node.get("anyOf", []):
+        for branch in node.get("anyOf", []) + node.get("oneOf", []):
             check(branch)
 
-    for name in FIELDS:
-        field = schemas["WorkflowResponse"]["properties"][name]
-        assert {"type": "null"} in field["anyOf"]
-        check(field)
+    for variant in ("WorkflowResponse", "RedTeamWorkflowResponse"):
+        for name in FIELDS:
+            field = schemas[variant]["properties"][name]
+            assert {"type": "null"} in field["anyOf"]
+            check(field)
+    assert schemas["WorkflowResponse"]["properties"]["framework"]["not"] == {"const": "RED_TEAM"}
+    assert schemas["RedTeamWorkflowResponse"]["properties"]["framework"]["const"] == "RED_TEAM"
     for path, method, status_code in (
         ("", "get", "200"),
         ("", "post", "201"),
@@ -282,7 +305,43 @@ def assert_workflow_openapi(spec):
         ]["schema"]
         if method == "get" and not path:
             response = response["items"]
-        assert response == {"$ref": "#/components/schemas/WorkflowResponse"}
+        expected = [{"$ref": f"#/components/schemas/{name}"} for name in ("WorkflowResponse", "RedTeamWorkflowResponse")]
+        if method == "post" and not path:
+            assert response == expected[0]
+        else:
+            assert response["oneOf"] == expected
+
+
+@pytest.mark.parametrize("framework", ["HIPAA", "GDPR", "SOC2", "LEGACY_CUSTOM", "RED_TEAM"])
+def test_framework_selects_variant_without_changing_sparse_payload(framework):
+    payload = workflow(findings=[], remediation_plan=[], execution_result={})
+    payload["framework"] = framework
+    adapter = TypeAdapter(workflows.WorkflowResponseVariant)
+    result = adapter.validate_python(payload)
+    expected = workflows.RedTeamWorkflowResponse if framework == "RED_TEAM" else workflows.WorkflowResponse
+    assert type(result) is expected
+    assert adapter.dump_python(result, mode="json") == result.model_dump(mode="json")
+    for field in FIELDS:
+        assert result.model_dump()[field] == payload.get(field)
+
+
+@pytest.mark.parametrize("framework,field,value", [
+    ("RED_TEAM", "findings", [{"control": "compliance-only"}]),
+    ("RED_TEAM", "findings", [{"matched_signals": [42]}]),
+    ("RED_TEAM", "remediation_plan", [{"action": "compliance-only"}]),
+    ("RED_TEAM", "execution_result", {"actions_failed": 1}),
+    ("RED_TEAM", "execution_result", {"failed": "1"}),
+    ("RED_TEAM", "execution_result", {"simulation_only": "false"}),
+    ("RED_TEAM", "execution_result", {"posture": "go", "unknown": True}),
+    ("HIPAA", "findings", [red_team._grade(red_team.PROBES[0], None, None)]),
+    ("HIPAA", "remediation_plan", ["red-team reason"]),
+    ("HIPAA", "execution_result", {"posture": "go"}),
+])
+def test_framework_variant_rejects_incompatible_or_malformed_payload(framework, field, value):
+    payload = workflow(**{field: value})
+    payload["framework"] = framework
+    with pytest.raises(ValidationError):
+        TypeAdapter(workflows.WorkflowResponseVariant).validate_python(payload)
 
 
 @pytest.mark.parametrize(

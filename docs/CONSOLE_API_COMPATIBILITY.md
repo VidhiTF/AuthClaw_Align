@@ -70,6 +70,22 @@ retain the same behavior. Recovery and gateway-approval contracts are separate.
 The existing console plan rendering and action/rollback timeline use unchanged
 field names and value shapes; no client regeneration is required by this console.
 
+The shared workflow table has two production creators: the compliance runner
+(`HIPAA`, `GDPR`, `SOC2`) and `services/red_team.run` (`RED_TEAM`). Generic list
+and detail routes continue to expose both within the authenticated tenant.
+Responses for existing workflows use named compliance and red-team variants;
+`framework == "RED_TEAM"` selects red-team findings, a string-array remediation
+plan and a posture/pass/fail/simulation summary. Other framework strings retain
+the compliance contract for legacy compatibility. OpenAPI describes the variants
+with `oneOf` and mutually exclusive framework constraints; the runtime uses a
+callable discriminator without adding a wire field. Creating compliance scans
+still accepts only HIPAA/GDPR/SOC2. No execution or approval behavior is changed.
+
+The producer-inventory regression tracks ORM creation sites in the backend;
+adding a writer requires updating the real-producer list/detail integration test
+and its response contract. This inventory complements, rather than replaces,
+validation of historical data and review of raw SQL or external writers.
+
 Nested fields remain sparse: omitted keys are omitted, explicit nulls remain
 null, and empty arrays/objects remain empty. Top-level defaults are unchanged.
 Current connector payloads, partial results and legacy mutation snapshots are
