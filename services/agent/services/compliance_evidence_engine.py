@@ -155,6 +155,19 @@ SEVERITY_PENALTY = {"CRITICAL": 30, "HIGH": 22, "MEDIUM": 12, "LOW": 6}
 
 class ComplianceEvidenceEngine:
     corpus_version = "2026.07"
+    calculation_version = "agent-diagnostic-v2"
+
+    @classmethod
+    def diagnostic_metadata(cls) -> Dict[str, Any]:
+        # This engine maps activity by text; it does not qualify control assessments.
+        return {
+            "calculation_version": cls.calculation_version,
+            "score_kind": "diagnostic",
+            "authoritative": False,
+            "status": "unassessed",
+            "evidence_status": "unsupported",
+            "evidence_gaps": ["Control assessment qualification is unsupported by the agent diagnostic engine."],
+        }
 
     def ensure_catalog(self) -> None:
         with engine.connect() as conn:
@@ -268,10 +281,14 @@ class ComplianceEvidenceEngine:
                 {"tenant_id": tenant_id},
             ).fetchall()
             previous_rows = conn.execute(
-                text("SELECT framework, control_id, score FROM compliance_control_scores WHERE tenant_id = :tenant_id"),
+                text("SELECT framework, control_id, score, metadata FROM compliance_control_scores WHERE tenant_id = :tenant_id"),
                 {"tenant_id": tenant_id},
             ).fetchall()
-        previous = {(row.framework, row.control_id): row.score for row in previous_rows}
+        previous = {}
+        for row in previous_rows:
+            metadata = row.metadata if isinstance(row.metadata, dict) else json.loads(row.metadata or "{}")
+            if metadata.get("calculation_version") == self.calculation_version:
+                previous[(row.framework, row.control_id)] = row.score
         evidence_by_control: Dict[str, List[Dict[str, Any]]] = {}
         for row in evidence_rows:
             evidence_by_control.setdefault(row.control_id, []).append(dict(row._mapping))
@@ -281,13 +298,14 @@ class ComplianceEvidenceEngine:
             items = evidence_by_control.get(control["control_id"], [])
             negative = [item for item in items if int(item.get("impact") or 0) < 0]
             positive = [item for item in items if int(item.get("impact") or 0) >= 0]
-            score = 100
+            score = 100 if items else 0
             score += sum(int(item.get("impact") or 0) for item in negative)
-            score = max(0, min(100, score))
-            status = "passing" if score >= 85 else ("watch" if score >= 65 else "failing")
+            score = max(0, min(84, score))
+            status = "unassessed"
             reason = self._score_reason(control, positive, negative, score)
             source_event = items[-1]["source_type"] if items else "catalog_baseline"
             control_scores.append({
+                **self.diagnostic_metadata(),
                 "framework": control["framework"],
                 "control_id": control["control_id"],
                 "title": control["title"],
@@ -309,12 +327,15 @@ class ComplianceEvidenceEngine:
             weighted_score = sum(item["score"] * self._control_weight(item["control_id"]) for item in fw_controls) / weighted_total
             frameworks[framework.lower()] = round(weighted_score)
             frameworks[f"{framework.lower()}_controls"] = {
-                "passed": sum(1 for item in fw_controls if item["status"] == "passing"),
-                "failed": sum(1 for item in fw_controls if item["status"] == "failing"),
-                "watch": sum(1 for item in fw_controls if item["status"] == "watch"),
+                **self.diagnostic_metadata(),
+                "passed": 0,
+                "failed": 0,
+                "watch": 0,
+                "unassessed": len(fw_controls),
                 "items": fw_controls,
             }
         frameworks["corpus_version"] = self.corpus_version
+        frameworks.update(self.diagnostic_metadata())
         return frameworks
 
     def evidence_export_rows(
@@ -347,14 +368,14 @@ class ComplianceEvidenceEngine:
             params["limit"] = max(1, min(int(limit), 1000))
         with engine.connect() as conn:
             rows = conn.execute(text(sql), params).fetchall()
-        return [dict(row._mapping) for row in rows]
+        return [{**dict(row._mapping), **self.diagnostic_metadata()} for row in rows]
 
     def evidence_csv(self, tenant_id: int, framework: Optional[str] = None, control_id: Optional[str] = None) -> bytes:
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["framework", "control_id", "source_type", "source_id", "evidence_hash", "reason", "impact", "created_at"])
+        writer.writerow(["framework", "control_id", "source_type", "source_id", "evidence_hash", "reason", "impact", "created_at", "evidence_status", "calculation_version", "score_kind"])
         for row in self.evidence_export_rows(tenant_id, framework, control_id):
-            writer.writerow([row["framework"], row["control_id"], row["source_type"], row["source_id"], row["evidence_hash"], row["reason"], row["impact"], row["created_at"]])
+            writer.writerow([row["framework"], row["control_id"], row["source_type"], row["source_id"], row["evidence_hash"], row["reason"], row["impact"], row["created_at"], row["evidence_status"], row["calculation_version"], row["score_kind"]])
         return output.getvalue().encode("utf-8")
 
     def score_changes(self, tenant_id: int, framework: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -369,7 +390,15 @@ class ComplianceEvidenceEngine:
             params["limit"] = max(1, min(int(limit), 500))
         with engine.connect() as conn:
             rows = conn.execute(text(sql), params).fetchall()
-        return [dict(row._mapping) for row in rows]
+        results = []
+        for row in rows:
+            item = dict(row._mapping)
+            metadata = item.get("metadata") or {}
+            metadata = metadata if isinstance(metadata, dict) else json.loads(metadata)
+            item.update(self.diagnostic_metadata())
+            item["calculation_version"] = metadata.get("calculation_version", "legacy-unknown")
+            results.append(item)
+        return results
 
     def corpus_status(self) -> Dict[str, Any]:
         self.ensure_catalog()
@@ -390,7 +419,7 @@ class ComplianceEvidenceEngine:
     def _persist_control_score(self, tenant_id: int, control: Dict[str, Any], score: int, status: str, evidence_count: int, negative_findings: int, reason: str, source_event: str, previous: Dict[tuple, int]) -> None:
         key = (control["framework"], control["control_id"])
         previous_score = previous.get(key)
-        metadata = {"title": control["title"], "corpus_version": self.corpus_version}
+        metadata = {"title": control["title"], "corpus_version": self.corpus_version, **self.diagnostic_metadata()}
         with engine.connect() as conn:
             conn.execute(
                 text("""
@@ -560,6 +589,7 @@ class ComplianceEvidenceEngine:
 
     def _score_reason(self, control: Dict[str, Any], positive: List[Dict[str, Any]], negative: List[Dict[str, Any]], score: int) -> str:
         return (
-            f"{control['control_id']} score {score} from {len(positive)} supporting evidence items "
-            f"and {len(negative)} negative findings in corpus {self.corpus_version}."
+            f"{control['control_id']} diagnostic score {score} from {len(positive)} activity items "
+            f"and {len(negative)} negative findings. Unassessed: activity does not qualify compliance evidence. "
+            f"Calculation {self.calculation_version}; corpus {self.corpus_version}."
         )

@@ -119,6 +119,46 @@ test("supports public responses without Trust Summary", async ({ page }) => {
   await page.goto("/trust-center/demo-token");
 
   await expect(page.getByText("Trust Summary is unavailable for this response.")).toBeVisible();
+  await expect(page.getByText(/Calculation version: legacy_unversioned/).first()).toBeVisible();
+  await expect(page.getByText("Legacy results do not establish current evidence qualification.")).toBeVisible();
+});
+
+test("shows the server evidence gate and version without reclassifying a high score", async ({ page }) => {
+  const baseline = packageResponse();
+  const framework = baseline.scores.frameworks[0];
+  await page.route("**/api/trust-center/public/demo-token", (route) => route.fulfill({
+    json: {
+      ...baseline,
+      scores: {
+        ...baseline.scores, calculation_version: "evidence-v2", readiness_level: "monitor",
+        frameworks: [{ ...framework, calculation_version: "evidence-v2", readiness_level: "monitor", controls: [{
+          ...framework.controls[0], score: 99, status: "partial", gaps: ["Assessment expired; current review required"],
+          evidence_assessment: { state: "blocked", reason_codes: ["stale_assessment"], required_count: 1, qualified_count: 0, as_of: "2026-09-18T00:00:00Z", valid_until: null },
+        }] }],
+      },
+    },
+  }));
+  await page.goto("/trust-center/demo-token");
+  await expect(page.getByText(/Calculation version: evidence-v2/).first()).toBeVisible();
+  await expect(page.getByText("Evidence blocked: 0/1 requirements qualified")).toBeVisible();
+  await expect(page.getByText("Assessment expired; current review required")).toBeVisible();
+  await expect(page.getByText("stale_assessment", { exact: true })).toBeVisible();
+  await expect(page.getByText("partial - 99%")).toBeVisible();
+  await expect(page.getByText("Activity Diagnostics", { exact: true })).toBeVisible();
+});
+
+test("a failed package reload removes previously affirmative scores", async ({ page }) => {
+  let fail = false;
+  await page.route("**/api/trust-center/public/demo-token", (route) => route.fulfill(
+    fail ? { status: 503, json: { detail: "Assessment source unavailable" } } : { json: packageResponse() },
+  ));
+  await page.goto("/trust-center/demo-token");
+  await expect(page.getByText("AUDIT READY").first()).toBeVisible();
+  fail = true;
+  await page.reload();
+  await expect(page.getByText("Assessment source unavailable")).toBeVisible();
+  await expect(page.getByText("AUDIT READY")).toHaveCount(0);
+  await expect(page.getByText("90%")).toHaveCount(0);
 });
 
 test("verifies Trust Center access and navigates signed export", async ({ page }) => {

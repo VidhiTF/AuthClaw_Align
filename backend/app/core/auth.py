@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal, database_auth_context
-from app.db.dependencies import get_db
+from app.db.dependencies import get_db, get_score_db
 from app.core.crypto import (
     SECRET_ENVELOPE_PREFIX,
     SECRET_ENVELOPE_V2_PREFIX,
@@ -267,6 +267,11 @@ def get_tenant_db(
     # appends).  This is cleared with the request-scoped SQLAlchemy session.
     db.info["authclaw_database_auth_context"] = (kind, credential_hash)
     yield db
+
+
+def get_tenant_score_db(request: Request, db: Session = Depends(get_score_db)) -> Generator[Session, None, None]:
+    """Authenticate inside the same consistent view used by compliance scoring."""
+    yield from get_tenant_db(request, db)
 
 
 def require_scopes(required_scopes: List[str]):

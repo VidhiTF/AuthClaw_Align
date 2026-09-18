@@ -1,6 +1,7 @@
 import io
 import csv
 import json
+import logging
 from datetime import datetime, timezone
 from sqlalchemy import text
 from database import engine
@@ -19,7 +20,11 @@ def get_live_stats() -> dict:
         "scanned_today": 0,
         "critical_findings": 0,
         "open_approvals": 0,
-        "compliance_score": 100,
+        "compliance_score": None,
+        "compliance_status": "unassessed",
+        "compliance_authoritative": False,
+        "compliance_calculation_version": "agent-diagnostic-v2",
+        "compliance_evidence_gaps": ["This aggregate report cannot qualify tenant control assessments."],
         "drift_alerts": 0,
         "secret_leaks": 0,
         "pii_violations": 0,
@@ -48,8 +53,6 @@ def get_live_stats() -> dict:
             from main import get_all_approvals
             stats["open_approvals"] = sum(1 for a in get_all_approvals().values() if a["status"] == "pending")
             
-            avg_score = sum(stats["frameworks"].values()) // len(stats["frameworks"])
-            stats["compliance_score"] = avg_score
     except Exception as e:
         logging.getLogger("authclaw.reports").error(f"Failed to fetch live stats for report: {e}")
     return stats
@@ -70,7 +73,8 @@ def generate_executive_summary_report(fmt: str) -> bytes:
         writer.writerow(["Generated At", stats["timestamp"]])
         writer.writerow([])
         writer.writerow(["Metric", "Value"])
-        writer.writerow(["Global Compliance Score", f"{stats['compliance_score']}%"])
+        writer.writerow(["Compliance assessment", "Unassessed; qualified tenant assessment required"])
+        writer.writerow(["Calculation version", stats["compliance_calculation_version"]])
         writer.writerow(["Total Documents", stats["total_documents"]])
         writer.writerow(["Scanned Today", stats["scanned_today"]])
         writer.writerow(["Critical Findings", stats["critical_findings"]])
@@ -79,7 +83,7 @@ def generate_executive_summary_report(fmt: str) -> bytes:
         writer.writerow(["PII Violations", stats["pii_violations"]])
         writer.writerow(["Secret Leaks", stats["secret_leaks"]])
         writer.writerow([])
-        writer.writerow(["Framework compliance index:"])
+        writer.writerow(["Framework diagnostics (not a compliance assessment):"])
         for fw, score in stats["frameworks"].items():
             writer.writerow([fw, f"{score}%"])
         return output.getvalue().encode("utf-8")
@@ -115,9 +119,9 @@ def generate_executive_summary_report(fmt: str) -> bytes:
         story.append(Paragraph(f"Generated at: {stats['timestamp']} | Classification: Restricted Management Overview", subtitle_style))
         
         intro_text = (
-            f"This compliance report summarizes the overall data security and framework compliance status "
-            f"for all corporate repositories. Active monitoring is online. The organization's global compliance "
-            f"index is currently assessed at {stats['compliance_score']}%. There are {stats['critical_findings']} critical "
+            f"This report summarizes operational activity. Compliance is unassessed: qualified tenant control "
+            f"assessments are required. Calculation version: {stats['compliance_calculation_version']}. "
+            f"There are {stats['critical_findings']} critical "
             f"vulnerabilities and {stats['open_approvals']} actions awaiting human override approval."
         )
         story.append(Paragraph(intro_text, styles['BodyText']))
@@ -127,7 +131,7 @@ def generate_executive_summary_report(fmt: str) -> bytes:
         
         metric_data = [
             [Paragraph("KPI Metric Description", header_style), Paragraph("Current Value", header_style)],
-            [Paragraph("Global Compliance Index Score", cell_style), Paragraph(f"{stats['compliance_score']}%", cell_style)],
+            [Paragraph("Compliance assessment", cell_style), Paragraph("Unassessed", cell_style)],
             [Paragraph("Total Ingested Documents", cell_style), Paragraph(str(stats["total_documents"]), cell_style)],
             [Paragraph("Documents Scanned Today", cell_style), Paragraph(str(stats["scanned_today"]), cell_style)],
             [Paragraph("Critical Severity Gaps", cell_style), Paragraph(str(stats["critical_findings"]), cell_style)],
@@ -147,11 +151,11 @@ def generate_executive_summary_report(fmt: str) -> bytes:
         story.append(t1)
         story.append(Spacer(1, 12))
         
-        story.append(Paragraph("Framework Scoring Breakdown", section_style))
+        story.append(Paragraph("Framework Diagnostics", section_style))
         
-        fw_data = [[Paragraph("Framework", header_style), Paragraph("Readiness Score", header_style), Paragraph("Status", header_style)]]
+        fw_data = [[Paragraph("Framework", header_style), Paragraph("Diagnostic Score", header_style), Paragraph("Status", header_style)]]
         for fw, score in stats["frameworks"].items():
-            status = "Operational" if score >= 80 else ("Needs Attention" if score >= 60 else "Critical Risk")
+            status = "Unassessed"
             fw_data.append([
                 Paragraph(fw, cell_style),
                 Paragraph(f"{score}%", cell_style),
