@@ -54,6 +54,16 @@ there is no default signing credential. Current console endpoints are
 `GET /remediation/findings`. Additional method/path pairs require explicit key
 policy approval. Do not place production secrets in shell history or docs.
 
+Privileged agent approval and execution use request version 3. Version 3 appends
+the backend-verified MFA timestamp, exact method/path operation, request-body
+SHA-256, and a random assertion ID to the signed fields. The agent accepts these
+assertions for at most 60 seconds and consumes each assertion ID once in Redis.
+Only the explicit `POST /approve/*` and `POST /execute/*` key scopes support a
+single dynamic path segment, and only for version 3; version 2 remains exact-path
+only. The console removes the MFA code after the backend identity authority
+verifies it, so the factor is never forwarded to or stored by the agent. During
+deployment, update receivers before adding these two scopes or sending version 3.
+
 ## Verification record — 2026-09-17
 
 Implemented from master `45976f00fd04170f926e570a9ac99fc6574da931` on

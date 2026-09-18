@@ -868,6 +868,75 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
 
         self.assertEqual(counter, 123)
 
+    def test_control_plane_assertion_satisfies_agent_mfa_without_local_user_mapping(self):
+        import main
+
+        record = {
+            "approval_id": "approval-external-17",
+            "tenant_id": 42,
+            "requested_action": "delete",
+            "query": "delete sensitive records",
+            "risk_level": "HIGH",
+            "reason": "high_risk",
+            "metadata": {},
+        }
+        identity = {
+            "auth_source": "control_plane",
+            "tenant_id": 42,
+            "sub": "control-plane-user-17",
+            "mfa_assertion_id": "a" * 32,
+            "mfa_operation": "POST /approve/approval-external-17",
+        }
+        with patch.object(main, "_consume_approval_totp_counter") as local_totp:
+            verified, binding, replay_token = main._verify_approval_stage_mfa(
+                record,
+                identity,
+                {},
+                "approval",
+                "2099-01-01T00:00:00+00:00",
+            )
+
+        self.assertTrue(verified)
+        self.assertEqual(len(binding), 64)
+        self.assertGreater(replay_token, 0)
+        local_totp.assert_not_called()
+
+    def test_control_plane_assertion_cannot_cross_approval_or_stage(self):
+        import main
+
+        record = {"approval_id": "approval-17", "tenant_id": 42, "metadata": {}}
+        identity = {
+            "auth_source": "control_plane",
+            "tenant_id": 42,
+            "sub": "control-plane-user-17",
+            "mfa_assertion_id": "b" * 32,
+            "mfa_operation": "POST /approve/other-approval",
+        }
+        with self.assertRaises(main.HTTPException) as raised:
+            main._verify_approval_stage_mfa(
+                record, identity, {}, "approval", "2099-01-01T00:00:00+00:00"
+            )
+        self.assertEqual(raised.exception.status_code, 401)
+
+    def test_non_control_plane_identity_cannot_inject_mfa_assertion_claims(self):
+        import main
+
+        with self.assertRaises(main.HTTPException) as raised:
+            main._verify_approval_stage_mfa(
+                {"approval_id": "approval-17", "tenant_id": 42, "metadata": {}},
+                {
+                    "tenant_id": 42,
+                    "sub": "agent-user-17",
+                    "mfa_assertion_id": "c" * 32,
+                    "mfa_operation": "POST /approve/approval-17",
+                },
+                {},
+                "approval",
+                "2099-01-01T00:00:00+00:00",
+            )
+        self.assertEqual(raised.exception.status_code, 401)
+        self.assertEqual(raised.exception.detail, "MFA code is required")
+
     def test_approval_mfa_lock_deadline_is_persisted_as_utc_timestamp(self):
         import main
 

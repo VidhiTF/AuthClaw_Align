@@ -13,9 +13,10 @@ from urllib.parse import quote, unquote_plus
 from services.role_contract import normalize_role
 
 MAX_CLOCK_SKEW_SECONDS = 60
+MAX_MFA_ASSERTION_AGE_SECONDS = 60
 NONCE_TTL_SECONDS = 2 * MAX_CLOCK_SKEW_SECONDS + 1
 MAX_BODY_BYTES = 1024 * 1024
-HEADER_FIELDS = (
+BASE_HEADER_FIELDS = (
     "version",
     "timestamp",
     "nonce",
@@ -27,6 +28,13 @@ HEADER_FIELDS = (
     "role",
     "signature",
 )
+MFA_HEADER_FIELDS = (
+    "mfa-verified-at",
+    "mfa-operation",
+    "mfa-body-sha256",
+    "mfa-assertion-id",
+)
+HEADER_FIELDS = BASE_HEADER_FIELDS + MFA_HEADER_FIELDS
 # Wait out signatures accepted before Redis restart/promotion. The deployment
 # must use noeviction so a stable node never evicts a consumed nonce early.
 NONCE_SCRIPT = """
@@ -47,6 +55,10 @@ class ControlPlanePrincipal:
     tenant_id: str
     user_id: str
     role: str
+    mfa_verified_at: int | None = None
+    mfa_operation: str | None = None
+    mfa_body_sha256: str | None = None
+    mfa_assertion_id: str | None = None
 
 
 def canonical_query(query: str) -> str:
@@ -66,7 +78,8 @@ def canonical_query(query: str) -> str:
 
 
 def signature_payload(headers, method, path, query, body) -> bytes:
-    fields = ["authclaw:service-request:v2"] + [
+    version = headers.get("x-authclaw-version", "")
+    fields = [f"authclaw:service-request:v{version}"] + [
         headers.get(f"x-authclaw-{name}", "")
         for name in ("timestamp", "nonce", "service", "audience", "key-id")
     ]
@@ -78,6 +91,8 @@ def signature_payload(headers, method, path, query, body) -> bytes:
         headers.get("content-type", ""),
     ]
     fields += [headers.get(f"x-authclaw-{name}", "") for name in ("tenant-id", "user-id", "role")]
+    if version == "3":
+        fields += [headers.get(f"x-authclaw-{name}", "") for name in MFA_HEADER_FIELDS]
     if any(not isinstance(v, str) or any(ord(c) < 32 or ord(c) == 127 for c in v) for v in fields):
         raise ValueError("Invalid signed field")
     return "\n".join(fields).encode("utf-8")
@@ -89,13 +104,32 @@ def sign_control_plane_request(secret, headers, method, path, query="", body=b""
     ).hexdigest()
 
 
+def endpoint_allowed(endpoints, method: str, path: str, version: str) -> bool:
+    if f"{method} {path}" in endpoints:
+        return True
+    if version != "3" or method != "POST":
+        return False
+    return (
+        "POST /approve/*" in endpoints
+        and re.fullmatch(r"/approve/[A-Za-z0-9._:-]+", path) is not None
+    ) or (
+        "POST /execute/*" in endpoints
+        and re.fullmatch(r"/execute/[A-Za-z0-9._:-]+", path) is not None
+    )
+
+
 def verify_control_plane_request(
     headers, method, path, keyring, consume_nonce, *, query="", body=b"", now=None
 ):
     now = time.time() if now is None else now
     try:
         values = {name: headers.get(f"x-authclaw-{name}", "") for name in HEADER_FIELDS}
-        if not all(values.values()) or values["version"] != "2":
+        if not all(values[name] for name in BASE_HEADER_FIELDS) or values["version"] not in {"2", "3"}:
+            return None
+        has_mfa_fields = any(values[name] for name in MFA_HEADER_FIELDS)
+        if (values["version"] == "2" and has_mfa_fields) or (
+            values["version"] == "3" and not all(values[name] for name in MFA_HEADER_FIELDS)
+        ):
             return None
         if not re.fullmatch(r"[0-9]{10}", values["timestamp"]) or not re.fullmatch(
             r"[0-9a-f]{32}", values["nonce"]
@@ -109,10 +143,18 @@ def verify_control_plane_request(
             or values["audience"] != "agent"
             or key["audience"] != "agent"
             or not isinstance(key["endpoints"], list)
-            or f"{method} {path}" not in key["endpoints"]
+            or not endpoint_allowed(key["endpoints"], method, path, values["version"])
             or len(key["secret"].encode()) < 32
             or len(body) > MAX_BODY_BYTES
             or not re.fullmatch(r"[0-9a-f]{64}", values["signature"])
+        ):
+            return None
+        if values["version"] == "3" and (
+            not re.fullmatch(r"[0-9]{10}", values["mfa-verified-at"])
+            or abs(now - int(values["mfa-verified-at"])) > MAX_MFA_ASSERTION_AGE_SECONDS
+            or values["mfa-operation"] != f"{method} {path}"
+            or values["mfa-body-sha256"] != hashlib.sha256(body).hexdigest()
+            or not re.fullmatch(r"[0-9a-f]{32}", values["mfa-assertion-id"])
         ):
             return None
         expected = sign_control_plane_request(key["secret"], headers, method, path, query, body)
@@ -126,7 +168,15 @@ def verify_control_plane_request(
     ).hexdigest()
     if not consume_nonce(nonce_key, int(values["timestamp"])):
         return None
-    return ControlPlanePrincipal(values["tenant-id"], values["user-id"], role)
+    return ControlPlanePrincipal(
+        values["tenant-id"],
+        values["user-id"],
+        role,
+        int(values["mfa-verified-at"]) if values["version"] == "3" else None,
+        values["mfa-operation"] or None,
+        values["mfa-body-sha256"] or None,
+        values["mfa-assertion-id"] or None,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -155,6 +205,13 @@ def _consume_nonce(store, nonce, timestamp):
     return result == 1
 
 
+def _consume_mfa_assertion(store, assertion_id: str) -> bool:
+    return bool(store.set(
+        f"authclaw:mfa-assertion:v1:{assertion_id}", "1", nx=True,
+        ex=NONCE_TTL_SECONDS,
+    ))
+
+
 async def authenticate_control_plane(request):
     from fastapi import HTTPException
     from starlette.concurrency import run_in_threadpool
@@ -162,7 +219,10 @@ async def authenticate_control_plane(request):
     if not any(f"x-authclaw-{name}" in request.headers for name in HEADER_FIELDS):
         return None
     invalid = HTTPException(401, "Invalid control-plane signature.")
-    if any(len(request.headers.getlist(f"x-authclaw-{name}")) != 1 for name in HEADER_FIELDS):
+    present_fields = (
+        HEADER_FIELDS if request.headers.get("x-authclaw-version") == "3" else BASE_HEADER_FIELDS
+    )
+    if any(len(request.headers.getlist(f"x-authclaw-{name}")) != 1 for name in present_fields):
         raise invalid
     if len(request.headers.getlist("content-type")) > 1:
         raise invalid
@@ -192,5 +252,9 @@ async def authenticate_control_plane(request):
     except Exception:
         raise HTTPException(503, "Service authentication unavailable") from None
     if not principal:
+        raise invalid
+    if principal.mfa_assertion_id and not await run_in_threadpool(
+        _consume_mfa_assertion, store, principal.mfa_assertion_id
+    ):
         raise invalid
     return principal

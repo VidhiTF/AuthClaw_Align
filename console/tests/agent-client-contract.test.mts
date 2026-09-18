@@ -33,6 +33,45 @@ test("v2 signer binds query and uses explicit active service/endpoint keys", () 
   }
 });
 
+test("v3 signer binds a fresh backend MFA assertion to the actor action and body", () => {
+  const previous = process.env.AUTHCLAW_INTERNAL_SERVICE_SECRET;
+  const path = "/approve/approval-17";
+  const body = JSON.stringify({ comment: "approved" });
+  const bodyHash = createHash("sha256").update(body).digest("hex");
+  process.env.AUTHCLAW_INTERNAL_SERVICE_SECRET = JSON.stringify({
+    active_key_id: "v1",
+    keys: { v1: {
+      secret: "test-only-secret".repeat(3), service: "console", audience: "agent",
+      endpoints: ["POST /approve/*"],
+    } },
+  });
+  try {
+    const signed = controlPlaneHeaders(
+      new URL(`https://agent.invalid${path}`), "POST", body, "application/json",
+      { tenantId: "tenant", userId: "backend-user-uuid", role: "owner" },
+      { verified_at: Math.floor(Date.now() / 1000), operation: `POST ${path}`,
+        body_sha256: bodyHash, assertion_id: "a".repeat(32) },
+    );
+    assert.equal(signed["X-AuthClaw-Version"], "3");
+    assert.equal(signed["X-AuthClaw-MFA-Operation"], `POST ${path}`);
+    assert.equal(signed["X-AuthClaw-MFA-Body-SHA256"], bodyHash);
+    assert.equal(signed["X-AuthClaw-MFA-Assertion-ID"], "a".repeat(32));
+    assert.throws(() => controlPlaneHeaders(
+      new URL(`https://agent.invalid${path}`), "POST", body, "application/json",
+      { tenantId: "tenant", userId: "backend-user-uuid", role: "owner" },
+    ));
+    assert.throws(() => controlPlaneHeaders(
+      new URL(`https://agent.invalid${path}`), "POST", body, "application/json",
+      { tenantId: "tenant", userId: "backend-user-uuid", role: "owner" },
+      { verified_at: Math.floor(Date.now() / 1000), operation: "POST /approve/other",
+        body_sha256: bodyHash, assertion_id: "b".repeat(32) },
+    ));
+  } finally {
+    if (previous === undefined) delete process.env.AUTHCLAW_INTERNAL_SERVICE_SECRET;
+    else process.env.AUTHCLAW_INTERNAL_SERVICE_SECRET = previous;
+  }
+});
+
 const agentClient = fs.readFileSync(
   new URL("../src/lib/agent-client.ts", import.meta.url),
   "utf8",
@@ -75,6 +114,66 @@ test("agent requests validate the canonical backend session before dispatch", ()
   assert.match(apiClient, /if \(!validation\.ok\)/);
   assert.match(apiClient, /return \{ payload: null, session: null \}/);
   assert.doesNotMatch(apiClient, /sessionStore|sessions\.json/);
+});
+
+test("privileged agent requests verify MFA in backend and never forward the code", async () => {
+  const calls: Array<{ url: string; body: string; headers: Headers }> = [];
+  const path = "/approve/approval-17";
+  const secret = "test-only-secret".repeat(3);
+  const modules: Record<string, unknown> = {
+    "node:crypto": { createHash, createHmac, randomBytes },
+    "next/server": { NextResponse: { json: (body: unknown, init?: { status?: number }) => ({ body, status: init?.status ?? 200 }) } },
+    "next/headers": { cookies: async () => ({ get: () => ({ value: "acl_session_valid" }) }) },
+    "@/lib/cookie-options": { sessionCookieName: () => "authclaw_session" },
+  };
+  const load = (source: string) => {
+    const exports: Record<string, unknown> = {};
+    vm.runInNewContext(ts.transpileModule(source, { compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+    } }).outputText, {
+      exports, require: (name: string) => modules[name], Error, Headers, AbortSignal,
+      URL, URLSearchParams, Response, Buffer, JSON,
+      process: { env: {
+        API_URL: "http://backend.private:8000", AGENT_INTERNAL_URL: "http://agent.private:8001",
+        AUTHCLAW_INTERNAL_SERVICE_SECRET: JSON.stringify({ active_key_id: "v1", keys: {
+          v1: { secret, service: "console", audience: "agent", endpoints: ["POST /approve/*"] },
+        } }),
+      } },
+      fetch: async (url: string, options: RequestInit = {}) => {
+        const body = typeof options.body === "string" ? options.body : "";
+        const headers = new Headers(options.headers);
+        calls.push({ url, body, headers });
+        if (url.endsWith("/v1/auth/me")) return Response.json({
+          id: "backend-user-uuid", tenant_id: "backend-tenant-uuid", role: "owner", scopes: [],
+        });
+        if (url.endsWith("/v1/auth/mfa/agent-assertion")) {
+          const request = JSON.parse(body);
+          assert.equal(request.code, "654321");
+          return Response.json({
+            verified_at: Math.floor(Date.now() / 1000), operation: `POST ${path}`,
+            body_sha256: request.body_sha256, assertion_id: "f".repeat(32),
+          });
+        }
+        return Response.json({ status: "approved" });
+      },
+    });
+    return exports;
+  };
+  modules["./control-plane-auth"] = load(fs.readFileSync(
+    new URL("../src/lib/control-plane-auth.ts", import.meta.url), "utf8",
+  ));
+  modules["./errors"] = load(fs.readFileSync(new URL("../src/lib/errors.ts", import.meta.url), "utf8"));
+  const api = load(apiClient) as { agentFetch: (path: string, options: RequestInit) => Promise<unknown> };
+
+  await api.agentFetch(path, { method: "POST", body: JSON.stringify({ mfa_code: "654321", comment: "ok" }) });
+
+  const forwarded = calls.at(-1)!;
+  assert.equal(forwarded.url, `http://agent.private:8001${path}`);
+  assert.deepEqual(JSON.parse(forwarded.body), { comment: "ok" });
+  assert.doesNotMatch(forwarded.body, /654321|mfa_code/);
+  assert.equal(forwarded.headers.get("x-authclaw-version"), "3");
+  assert.equal(forwarded.headers.get("x-authclaw-user-id"), "backend-user-uuid");
+  assert.equal(forwarded.headers.get("x-authclaw-mfa-operation"), `POST ${path}`);
 });
 
 test("readiness authenticates before probes, sanitizes diagnostics, and distinguishes outages", async () => {

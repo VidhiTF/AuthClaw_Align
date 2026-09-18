@@ -243,6 +243,40 @@ was not available locally and Docker was not running, so the earlier full-tree
 Gitleaks result is not asserted against this final candidate diff. The current
 PR-head Security Scans job must pass before merge.
 
+## Control-plane MFA assertion integration remediation (2026-09-18)
+
+The control plane remains the credential authority. A new authenticated backend
+endpoint consumes the canonical user's TOTP or recovery factor with the existing
+replay and abuse controls, persists an audit-outbox event in the same transaction,
+and returns only a short-lived assertion identifier and action binding. The console
+removes the MFA code, then signs the assertion, immutable backend user ID, exact
+agent route, and sanitized request-body digest into HMAC request version 3. The
+agent accepts the assertion for at most 60 seconds and consumes its identifier
+once in Redis. Agent-local JWT users continue through the existing local-factor
+path and cannot inject assertion-shaped claims.
+
+Fresh verification for this remediation:
+
+```text
+backend ENT-022 security: 11 passed
+agent control-plane and approval authorization: 38 passed, 1 Redis integration skip,
+  32 subtests passed
+console signer/client contract: 8 passed
+console TypeScript: passed
+live PostgreSQL 16 / non-superuser FORCE RLS approval+execution: 1 passed
+targeted Python compilation and git diff --check: passed
+```
+
+The PostgreSQL test signs an external backend UUID principal, verifies its
+action/body-bound MFA assertion, performs the pending-to-approved and
+approved-to-executing-to-executed transitions through the production atomic
+store, confirms the three durable audit rows, and proves a second tenant cannot
+read or update the approval/audit rows or insert into the first tenant. It also exposed and corrected a real
+psycopg terminal-transition parameter typing error before this evidence was
+recorded. CI now provisions PostgreSQL for this test; the local run used the
+existing PostgreSQL 16 service and a temporary non-superuser role/schema that
+the test removed afterward.
+
 ## Deployment and rollback consequences
 
 1. Apply backend migration `050` before deploying backend code. The backend startup gate intentionally accepts only revision `050`; new code reads the added columns and must not run against `049`.

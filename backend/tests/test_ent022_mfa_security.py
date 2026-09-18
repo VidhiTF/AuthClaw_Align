@@ -7,7 +7,7 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from app.api.v1.endpoints import users, workflows
+from app.api.v1.endpoints import auth, users, workflows
 from app.core.auth import hash_key
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.db.models import PendingApproval
@@ -32,6 +32,49 @@ def test_production_mfa_configuration_has_no_static_default_or_bypass():
         line.startswith("AUTHCLAW_LITE_DEMO_TOTP_SECRET=") and line.split("=", 1)[1].strip()
         for line in example.splitlines()
     )
+
+
+def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkeypatch):
+    tenant_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    user = SimpleNamespace(
+        id=user_id,
+        tenant_id=tenant_id,
+        mfa_enabled=True,
+        mfa_secret=encrypt_secret("JBSWY3DPEHPK3PXP"),
+    )
+    request = MagicMock(headers={"x-request-id": "request-agent-mfa"})
+    request.state.tenant_id = tenant_id
+    request.state.user_id = user_id
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
+    verified = MagicMock(return_value=True)
+    published = MagicMock(return_value=None)
+    monkeypatch.setattr(auth, "verify_mfa_challenge", verified)
+    monkeypatch.setattr(auth.event_backbone, "publish_audit_event", published)
+
+    response = auth.create_agent_mfa_assertion(
+        auth.AgentMFAAssertionRequest(
+            code="654321",
+            method="POST",
+            path="/approve/approval-17",
+            body_sha256="a" * 64,
+        ),
+        request,
+        db,
+    )
+
+    assert response.operation == "POST /approve/approval-17"
+    assert response.body_sha256 == "a" * 64
+    assert len(response.assertion_id) == 32
+    assert "654321" not in str(response)
+    assert verified.call_args.kwargs["tenant_id"] == str(tenant_id)
+    assert verified.call_args.kwargs["operation"] == "agent_approval"
+    event = published.call_args.args[2]
+    assert event["actor_id"] == str(user_id)
+    assert event["body_sha256"] == "a" * 64
+    assert "654321" not in str(event)
+    db.commit.assert_called_once()
 
 
 def test_self_approval_is_rejected_and_audited():

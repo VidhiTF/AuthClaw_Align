@@ -467,10 +467,15 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
                 },
             ).scalar_one()
         request.state.control_plane_principal = {
+            "auth_source": "control_plane",
             "tenant_id": tenant_id,
             "external_tenant_id": principal.tenant_id,
             "sub": principal.user_id,
             "role": principal.role,
+            "mfa_verified_at": principal.mfa_verified_at,
+            "mfa_operation": principal.mfa_operation,
+            "mfa_body_sha256": principal.mfa_body_sha256,
+            "mfa_assertion_id": principal.mfa_assertion_id,
         }
         request.state.quota_user_id = principal.user_id
         return tenant_id
@@ -798,6 +803,27 @@ def _consume_approval_totp_counter(record: dict, user_payload: dict, mfa_code: s
     return int(counter)
 
 def _verify_approval_stage_mfa(record: dict, user_payload: dict, payload: dict, stage: str, expiry_at: str) -> Tuple[bool, str, int]:
+    assertion_id = (
+        user_payload.get("mfa_assertion_id")
+        if user_payload.get("auth_source") == "control_plane"
+        else None
+    )
+    if assertion_id:
+        route = "approve" if stage == "approval" else "execute"
+        expected_operation = f"POST /{route}/{record.get('approval_id')}"
+        if user_payload.get("mfa_operation") != expected_operation:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="MFA assertion is not bound to this privileged action",
+            )
+        actor = approval_actor_from_payload(user_payload)
+        replay_token = int(hashlib.sha256(assertion_id.encode("ascii")).hexdigest()[:15], 16)
+        return (
+            True,
+            _approval_mfa_binding_hash(record, actor, stage, replay_token, expiry_at),
+            replay_token,
+        )
+
     mfa_code = payload.get("mfa_code") if isinstance(payload, dict) else None
     if not mfa_code:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="MFA code is required")

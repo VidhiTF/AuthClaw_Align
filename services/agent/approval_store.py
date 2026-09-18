@@ -1005,9 +1005,9 @@ def finish_approval_execution_atomic(
                 text(
                     """
                     UPDATE gateway_approvals
-                    SET status = :final_status,
+                    SET status = CAST(:final_status AS VARCHAR),
                         executed_at = CASE
-                            WHEN :final_status = 'executed' THEN :transition_at
+                            WHEN CAST(:final_status AS VARCHAR) = 'executed' THEN :transition_at
                             ELSE executed_at
                         END,
                         last_action_at = :transition_at

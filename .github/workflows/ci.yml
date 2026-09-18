@@ -340,6 +340,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
+      postgres:
+        image: postgres:16.10-alpine@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: authclaw-agent-ci-owner
+          POSTGRES_DB: authclaw_agent_ci_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d authclaw_agent_ci_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
       redis:
         image: redis:7.4.7-alpine@sha256:02f2cc4882f8bf87c79a220ac958f58c700bdec0dfb9b9ea61b62fb0e8f1bfcf
         ports:
@@ -351,6 +364,7 @@ jobs:
           --health-retries 12
     env:
       ENT018_REDIS_URL: redis://localhost:6379
+      ENT022_AGENT_POSTGRES_URL: postgresql+psycopg://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
       QUOTA_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -371,6 +385,7 @@ jobs:
           ../../.ci-agent/bin/python -m pytest --noconftest -p no:cacheprovider \
             tests/test_sensitive_data_detection.py tests/test_audit_transport_contract.py \
             smoke_tests/test_control_plane_auth.py smoke_tests/test_agent_execution_authorization.py \
+            smoke_tests/test_control_plane_mfa_postgres.py \
             smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py \
             smoke_tests/test_quota_service.py smoke_tests/test_quota_http_boundary.py \
             smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py \
