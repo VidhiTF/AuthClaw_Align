@@ -81,6 +81,9 @@ def test_backend_totp_assertions_complete_signed_agent_actions(postgres, monkeyp
     ], cwd=root / "services/agent", capture_output=True, text=True, timeout=90,
         env={**os.environ, "ENT022_ASSERTION_BUNDLE": str(bundle_file),
              "ENT022_EVIDENCE_DIR": str(evidence_dir),
+             # The services pin different PostgreSQL drivers in CI.
+             "DATABASE_URL": os.environ["ENT022_AGENT_POSTGRES_URL"],
+             "MIGRATION_DATABASE_URL": os.environ["ENT022_AGENT_POSTGRES_URL"],
              "PYTHONPATH": str(root / "services/agent"),
              "AUTHCLAW_ENV": "test"})
     assert result.returncode == 0, result.stdout + result.stderr
