@@ -193,7 +193,7 @@ jobs:
           .ci-backend/bin/python -m pip install --require-hashes -r backend/requirements-test.txt
           cd backend
           ../.ci-backend/bin/python -m pytest -p no:cacheprovider -q \
-            tests/test_auth_baseline.py tests/test_mfa_replay.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
+            tests/test_auth_baseline.py tests/test_mfa_replay.py tests/test_ent022_mfa_security.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
             tests/test_client_ip.py tests/test_bff_client_ip.py tests/test_release4_abuse_controls.py \
             tests/test_oidc_transactions.py \
             tests/test_reset_abuse_security.py tests/test_review_logging_and_event_identity.py \
@@ -392,6 +392,35 @@ jobs:
             smoke_tests/test_quota_service.py smoke_tests/test_quota_http_boundary.py \
             smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py \
             smoke_tests/test_quota_redis.py smoke_tests/test_compliance_diagnostics.py -q
+      - name: Verify real backend TOTP through signed agent approval and execution
+        env:
+          ENT022_EVIDENCE_DIR: ${{ github.workspace }}/ent022-mfa-evidence
+          TEST_OWNER_DATABASE_URL: postgresql+psycopg://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
+          OWNER_DATABASE_URL: postgresql+psycopg://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
+          TEST_DATABASE_URL: postgresql+psycopg://authclaw_app:authclaw-ci-app@127.0.0.1:5432/authclaw_agent_ci_test
+          DATABASE_URL: postgresql+psycopg://authclaw_app:authclaw-ci-app@127.0.0.1:5432/authclaw_agent_ci_test
+          BACKEND_MIGRATION_DATABASE_URL: postgresql+psycopg://authclaw_migrator:authclaw-ci-migrator@127.0.0.1:5432/authclaw_agent_ci_test
+          BACKEND_MIGRATOR_PASSWORD: authclaw-ci-migrator
+          POSTGRES_APP_PASSWORD: authclaw-ci-app
+          REDIS_URL: redis://localhost:6379
+          ENVELOPE_KEY: YXV0aGNsYXctY2ktZW52ZWxvcGUta2V5LTMyaA==
+          API_KEY_HASH_SECRET: authclaw-ci-api-key-hash-secret
+          SESSION_SECRET: authclaw-ci-session-secret-material-32
+          AUTHCLAW_ENV: test
+        run: |
+          python -m venv .ci-mfa-backend
+          .ci-mfa-backend/bin/python -m pip install --require-hashes -r backend/requirements-test.txt
+          export ENT022_AGENT_PYTHON="$PWD/.ci-agent/bin/python"
+          cd backend
+          ../.ci-mfa-backend/bin/python -m pytest -p no:cacheprovider tests/test_agent_mfa_assertion_postgres.py -q
+      - name: Preserve privileged MFA audit evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ent022-mfa-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ent022-mfa-evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
 
   sdk:
     name: Python SDK Tests

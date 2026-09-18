@@ -88,12 +88,16 @@ def _now_iso() -> str:
 
 
 def _parse_optional_dt(value):
+    """Bind UTC wall time to the existing TIMESTAMP WITHOUT TIME ZONE columns.
+
+    Passing an aware datetime lets PostgreSQL shift it into the session timezone
+    before dropping the offset, corrupting expiry and audit timestamps.
+    """
     if not value:
         return None
-    if isinstance(value, datetime):
-        return value
     try:
-        return datetime.fromisoformat(str(value))
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
     except Exception:
         return None
 
@@ -576,7 +580,7 @@ def expire_approval_atomic(
                 {
                     "approval_id": approval_id,
                     "tenant_id": tenant_id,
-                    "expired_at": expired_at,
+                    "expired_at": _parse_optional_dt(expired_at),
                 },
             ).fetchone()
             if row is None:
@@ -644,7 +648,7 @@ def expire_approved_execution_atomic(
                 {
                     "approval_id": approval_id,
                     "tenant_id": tenant_id,
-                    "expired_at": expired_at,
+                    "expired_at": _parse_optional_dt(expired_at),
                 },
             ).fetchone()
             if row is None:
@@ -726,12 +730,12 @@ def approve_approval_atomic(
                 {
                     "approval_id": approval_id,
                     "tenant_id": tenant_id,
-                    "approved_at": approved_at,
+                    "approved_at": _parse_optional_dt(approved_at),
                     "approved_by": approver,
                     "mfa_verified": bool(mfa_verified),
                     "binding_hash": mfa_binding_hash,
                     "counter": mfa_counter,
-                    "execution_expires_at": execution_expires_at,
+                    "execution_expires_at": _parse_optional_dt(execution_expires_at),
                 },
             ).fetchone()
             if row is None:
@@ -750,7 +754,7 @@ def approve_approval_atomic(
                     {
                         "approval_id": approval_id,
                         "tenant_id": tenant_id,
-                        "approved_at": approved_at,
+                        "approved_at": _parse_optional_dt(approved_at),
                     },
                 ).fetchone()
                 if expired_row is not None:
@@ -828,7 +832,7 @@ def reject_approval_atomic(
                 {
                     "approval_id": approval_id,
                     "tenant_id": tenant_id,
-                    "rejected_at": rejected_at,
+                    "rejected_at": _parse_optional_dt(rejected_at),
                     "rejected_by": actor,
                 },
             ).fetchone()
@@ -906,7 +910,7 @@ def begin_approval_execution_atomic(
                     "approval_id": approval_id,
                     "tenant_id": tenant_id,
                     "actor": actor,
-                    "transition_at": transition_at,
+                    "transition_at": _parse_optional_dt(transition_at),
                     "token_hash": execution_token_hash,
                     "binding_hash": mfa_binding_hash,
                     "counter": mfa_counter,
@@ -933,7 +937,7 @@ def begin_approval_execution_atomic(
                     {
                         "approval_id": approval_id,
                         "tenant_id": tenant_id,
-                        "transition_at": transition_at,
+                        "transition_at": _parse_optional_dt(transition_at),
                     },
                 ).fetchone()
                 if expired_row is not None:
@@ -1024,7 +1028,7 @@ def finish_approval_execution_atomic(
                     "tenant_id": tenant_id,
                     "actor": actor,
                     "final_status": final_status,
-                    "transition_at": transition_at,
+                    "transition_at": _parse_optional_dt(transition_at),
                     "execution_token_hash": record.get("execution_token_hash"),
                 },
             ).fetchone()

@@ -4,6 +4,86 @@ Date: 2026-09-17
 Branch: `security/ent-022-privileged-mfa`
 Repository baseline: `align/master` at `45976f0`
 
+## Current verification scope (2026-09-18 follow-up)
+
+The earlier sections below are historical results, not claims about the newest
+commit. Current master compatibility includes `a8822e5`; backend migrations are
+`050` (T10), `051` (shared durable MFA replay), and `052` (pending enrollment).
+The current-head CI run linked in PR #58 is authoritative for its secret scan,
+component checks, and required human review gates.
+
+The reported opaque-UUID factor lookup was already fixed by the control-plane
+MFA assertion protocol at `54d5d6b`. A fresh investigation traced backend factor
+verification, the console signer, tenant mapping, and both agent action handlers.
+No second factor store or user synchronization was added. The follow-up reuses
+those implementations and replaces helper-only proof with HTTP integration.
+
+The stronger test exposed an additional confirmed defect: PostgreSQL converts an
+aware datetime to its session timezone when storing it in the agent's existing
+timezone-less timestamp columns. A fresh approval under Los Angeles session time
+returned HTTP 200, but execution immediately returned HTTP 400 because its window
+appeared expired. `approval_store._parse_optional_dt` now normalizes every write
+and atomic-transition comparison to UTC wall time, matching the existing read
+contract. This changes no schema and adds no parallel timestamp helper.
+
+Fresh local results for this follow-up:
+
+- Full Agent CI selection: **130 passed, 60 subtests passed**, no skips.
+- Backend auth, MFA replay/lifecycle, real-Redis abuse and migration selection:
+  **99 passed**, no skips.
+- `backend/tests/test_agent_mfa_assertion_postgres.py`: **1 passed**, including
+  three child HTTP scenarios under UTC, America/Los_Angeles, and Asia/Kolkata.
+- Repository-policy unit tests: **27 passed**; Python compilation and
+  `git diff --check`: **passed**.
+- Console signer/client contracts: **8 passed**; Tokei 12.1.2 line budget: **PASS**.
+- Gitleaks 8.24.3 full working-tree scan with `.gitleaks.toml` and redaction:
+  **PASS**, approximately 893.17 MB scanned, no leaks. The final commit's separate
+  CI Security Scans result must also pass before merge.
+
+The cross-service test creates a real backend UUID user in a fully migrated
+disposable PostgreSQL database, uses encrypted enrollment and valid TOTP through
+the production assertion endpoint function and Redis abuse controls, verifies
+TOTP replay rejection, and preserves the two durable backend issuance events.
+The actual console TypeScript signer supplies the assertions to the actual agent
+ASGI middleware and `/approve/*` and `/execute/*` handlers. No agent-local
+`tenant_users` table or factor exists in that scenario. Three durable agent audit
+events (`approved`, `executing`, `executed`) retain the backend actor UUID and
+`mfa_verified=true`. CI uploads these actual test rows as JSON artifacts bound to
+its checkout SHA/run, never as production audit evidence.
+
+Agent coverage also denies request replay, re-signed assertion replay, altered
+body/stage, viewer role, and cross-tenant access. Real PostgreSQL concurrent
+decisions produce exactly one winner and one audit row. A database constraint
+rejecting the execution audit insert proves the state transition rolls back.
+These checks run in all three database timezones. Each timezone is an independent
+deployment rehearsal; only its own random assertion replay keys are cleaned up
+after the replay-denial assertions.
+
+Limits: the backend uses its migrated authenticated RLS harness; agent approval
+tables use a minimal FORCE-RLS schema and non-superuser/NOBYPASSRLS role, with the
+production tenant-upsert function transplanted into that schema. Agent deployment
+grants and signed database-context functions are not proven by this test. Quota,
+provider execution, and legacy blockchain adapters are substituted; canonical
+approval state/audit transactions, request authentication, MFA and replay controls
+are real. This is not a browser interaction or deployed-system test.
+
+Failed attempts are retained in the test narrative: the initial HTTP test exposed
+the timestamp defect; the first cross-service parameterization incorrectly reused
+consumed assertion IDs across independent timezone scenarios (corrected fixture
+cleanup); an initial backend test invocation inherited unsupported `demo` mode
+and was rerun with explicit `AUTHCLAW_ENV=test`. No production guard was weakened.
+The isolated backend replay fixture initially failed on the new pending-backup
+ARRAY column; it now maps both backup columns to SQLite JSON, while PostgreSQL
+coverage remains real. A Windows connection stall against the intentionally
+unavailable unit-test audit database was diagnosed with a Python stack dump;
+rerunning with a two-second test-DSN connection timeout completed all 99 cases.
+
+Rollback: revert the follow-up application change only if a verified regression
+requires it; retain migrations `051`/`052`. Historical timezone-shifted timestamps
+cannot be reliably reconstructed without their original session timezone. Expire
+and re-request affected historical approvals through the normal workflow; do not
+extend windows or rewrite audit timestamps speculatively.
+
 ## Scope and resulting controls
 
 - Removed `approval.default_mfa_code` and its `123456` fallback from the agent policy loader.
