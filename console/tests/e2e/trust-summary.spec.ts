@@ -72,10 +72,10 @@ test("renders backend-provided Trust Summary buckets", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Trust Summary" })).toBeVisible();
   await expect(page.getByText("Verified", { exact: true })).toBeVisible();
   await expect(page.getByText("In Progress", { exact: true })).toBeVisible();
-  await expect(page.getByText("Planned", { exact: true })).toBeVisible();
+  await expect(page.getByText("Not qualified", { exact: true })).toBeVisible();
   await expect(page.getByText("Verified", { exact: true }).locator("..").getByText("1", { exact: true })).toBeVisible();
   await expect(page.getByText("In Progress", { exact: true }).locator("..").getByText("1", { exact: true })).toBeVisible();
-  await expect(page.getByText("Planned", { exact: true }).locator("..").getByText("1", { exact: true })).toBeVisible();
+  await expect(page.getByText("Not qualified", { exact: true }).locator("..").getByText("1", { exact: true })).toBeVisible();
   await expect(page.getByText("Access Controls")).toBeVisible();
   await expect(page.getByText("Monitoring")).toBeVisible();
   await expect(page.getByText("Remediation")).toBeVisible();
@@ -102,7 +102,7 @@ test("renders empty Trust Summary buckets", async ({ page }) => {
 
   await expect(page.getByText("Verified", { exact: true }).locator("..").getByText("0", { exact: true })).toBeVisible();
   await expect(page.getByText("In Progress", { exact: true }).locator("..").getByText("0", { exact: true })).toBeVisible();
-  await expect(page.getByText("Planned", { exact: true }).locator("..").getByText("0", { exact: true })).toBeVisible();
+  await expect(page.getByText("Not qualified", { exact: true }).locator("..").getByText("0", { exact: true })).toBeVisible();
   await expect(page.getByText("No controls in this category.")).toHaveCount(3);
 });
 
@@ -123,16 +123,17 @@ test("supports public responses without Trust Summary", async ({ page }) => {
   await expect(page.getByText("Legacy results do not establish current evidence qualification.")).toBeVisible();
 });
 
-test("shows the server evidence gate and version without reclassifying a high score", async ({ page }) => {
+test("100 percent activity cannot promote a zero qualified evidence score", async ({ page }) => {
   const baseline = packageResponse();
   const framework = baseline.scores.frameworks[0];
   await page.route("**/api/trust-center/public/demo-token", (route) => route.fulfill({
     json: {
       ...baseline,
       scores: {
-        ...baseline.scores, calculation_version: "evidence-v2", readiness_level: "monitor",
-        frameworks: [{ ...framework, calculation_version: "evidence-v2", readiness_level: "monitor", controls: [{
-          ...framework.controls[0], score: 99, status: "partial", gaps: ["Assessment expired; current review required"],
+        ...baseline.scores, overall_score: 0, calculation_version: "evidence-v2", readiness_level: "insufficient_evidence",
+        frameworks: [{ ...framework, score: 0, calculation_version: "evidence-v2", readiness_level: "insufficient_evidence", controls: [{
+          ...framework.controls[0], score: 0, status: "non_compliant", evidence: [], gaps: ["Assessment expired; current review required"],
+          activity_diagnostics: { score: 100, evidence: ["10000 audit events"], gaps: [], authoritative: false },
           evidence_assessment: { state: "blocked", reason_codes: ["stale_assessment"], required_count: 1, qualified_count: 0, as_of: "2026-09-18T00:00:00Z", valid_until: null },
         }] }],
       },
@@ -143,8 +144,12 @@ test("shows the server evidence gate and version without reclassifying a high sc
   await expect(page.getByText("Evidence blocked: 0/1 requirements qualified")).toBeVisible();
   await expect(page.getByText("Assessment expired; current review required")).toBeVisible();
   await expect(page.getByText("stale_assessment", { exact: true })).toBeVisible();
-  await expect(page.getByText("partial - 99%")).toBeVisible();
-  await expect(page.getByText("Activity Diagnostics", { exact: true })).toBeVisible();
+  await expect(page.getByText("non compliant - 0%")).toHaveClass(/text-red-200/);
+  await expect(page.getByText("100%", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Activity diagnostic score: 100% (not readiness)")).toBeVisible();
+  await expect(page.getByText("INSUFFICIENT EVIDENCE", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("MONITOR", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("AUDIT READY", { exact: true })).toHaveCount(0);
 });
 
 test("a failed package reload removes previously affirmative scores", async ({ page }) => {

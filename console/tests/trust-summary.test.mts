@@ -13,7 +13,7 @@ const summary: TrustSummary = {
 
 test("trust summary exposes the three backend-provided rendering sections", () => {
   const sections = trustSummarySections(summary);
-  assert.deepEqual(sections.map((section) => section.label), ["Verified", "In Progress", "Planned"]);
+  assert.deepEqual(sections.map((section) => section.label), ["Verified", "In Progress", "Not qualified"]);
   assert.deepEqual(sections.map((section) => section.controls[0]?.id), ["one", "two", "three"]);
 });
 

@@ -146,7 +146,7 @@ def test_real_http_proposal_review_and_response_contract(api):
     assert result["status"] == "CONSUMED"
     assert result["calculation_version"] == pending["calculation_version"]
     assert api.mfa.call_args.kwargs["required"] is True
-    assert api.mfa.call_args.kwargs["operation"] == f"control_assessment:{pending['approval_id']}"
+    assert api.mfa.call_args.kwargs["operation"] == "control_assessment_review"
     with Session(api.engine) as db:
         record = db.query(EvidenceRecord).filter(EvidenceRecord.evidence_type == "control_assessment").one()
         assert str(record.id) == result["evidence_id"]
@@ -283,14 +283,14 @@ def test_public_projection_keeps_gaps_and_version_but_removes_private_provenance
         permissions=["view_scores"], status="active", expires_at=None, created_at=None, last_accessed_at=None, access_count=0)
     monkeypatch.setattr(settings, "COMPLIANCE_OWNER_MAP_JSON", '{"platform_security":["Private fixture owner"]}')
     version = control_assessments.CALCULATION_VERSION
-    private_control = dict(id="CC7.2", name="Security Event Monitoring", status="partial", score=84.9,
+    private_control = dict(id="CC7.2", name="Security Event Monitoring", status="non_compliant", score=0,
         product_owners=["Private fixture owner"], operational_owners=["Private fixture owner"], gaps=["CC7.2: missing assessment"],
         traceability={"evidence": [{"id": "private-source"}]}, evidence_assessment={"state": "blocked",
         "reason_codes": ["missing_assessment"], "required_count": 2, "qualified_count": 0,
         "as_of": "2026-09-18T00:00:00+00:00", "valid_until": None, "evidence_ids": ["private-source"], "audit_id": "private-audit"})
-    scores = dict(calculation_version=version, overall_score=96, readiness_level="audit_ready", frameworks=[
-        dict(framework="SOC2", score=94, readiness_level="monitor", controls=[private_control]),
-        dict(framework="GDPR", score=98, readiness_level="audit_ready", controls=[])],
+    scores = dict(calculation_version=version, overall_score=50, readiness_level="insufficient_evidence", frameworks=[
+        dict(framework="SOC2", score=0, readiness_level="insufficient_evidence", controls=[private_control]),
+        dict(framework="GDPR", score=100, readiness_level="audit_ready", controls=[])],
         trust_summary=dict(counts={"verified": 1, "in_progress": 1, "planned": 0},
             verified=[{"framework": "GDPR", "id": "private-gdpr"}],
             in_progress=[{"framework": "SOC2", "id": "CC7.2"}], planned=[]))
@@ -300,8 +300,8 @@ def test_public_projection_keeps_gaps_and_version_but_removes_private_provenance
     result = trust_center.build_public_package(db, share)["scores"]
     scorer.assert_called_once_with(db, str(tid), persist=False, include_traceability=False)
     assert result["calculation_version"] == version
-    assert result["overall_score"] == 94
-    assert result["readiness_level"] == "monitor"
+    assert result["overall_score"] == 0
+    assert result["readiness_level"] == "insufficient_evidence"
     assert [row["framework"] for row in result["frameworks"]] == ["SOC2"]
     assert result["trust_summary"]["verified"] == []
     control = result["frameworks"][0]["controls"][0]
@@ -359,3 +359,34 @@ def test_public_access_revalidates_after_finishing_score_read(monkeypatch, revok
         recorder.assert_called_once()
         assert audit_access.call_count == 2
     assert state["lookups"] == 2
+
+
+@pytest.mark.parametrize("state,bucket,status,score", [
+    ("qualified", "verified", "compliant", 100),
+    ("blocked", "planned", "non_compliant", 0),
+])
+def test_trust_summary_preserves_public_qualification_metadata_without_provenance(state, bucket, status, score):
+    safe = dict(state=state, reason_codes=[] if state == "qualified" else ["missing_assessment"],
+        required_count=2, qualified_count=2 if state == "qualified" else 0,
+        as_of="2026-09-18T00:00:00Z", valid_until="2026-09-19T00:00:00Z")
+    control = dict(id="CC7.2", name="Monitoring", score=score, status=status,
+        gaps=[] if state == "qualified" else ["CC7.2: missing assessment"],
+        evidence_assessment={**safe, "evidence_ids": ["private-evidence"],
+            "audit_id": "private-audit", "source_hashes": {"private-source": "private-hash"}})
+    original = deepcopy(control)
+    raw = trust_center.compliance_scoring._build_trust_summary([dict(framework="SOC2", controls=[control])])
+    # The raw summary is used by the public package; private APIs additionally serialize it.
+    serialized = compliance_scores.TrustSummaryResponse.model_validate(raw).model_dump()
+    for summary in (raw, serialized):
+        assert summary["calculation_version"] == control_assessments.CALCULATION_VERSION
+        assert summary[bucket][0]["evidence_assessment"] == safe
+        assert summary[bucket][0]["gaps"] == control["gaps"]
+        assert "private" not in str(summary)
+    assert control == original
+
+
+def test_legacy_trust_summary_controls_remain_parseable():
+    parsed = compliance_scores.TrustSummaryControlResponse.model_validate(dict(
+        framework="SOC2", id="CC7.2", name="Monitoring", score=90, status="compliant"))
+    assert parsed.evidence_assessment is None
+    assert parsed.gaps == []

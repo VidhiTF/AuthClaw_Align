@@ -48,6 +48,7 @@ export function TrustSummary({ summary, dark = false }: { summary?: TrustSummary
           <p className={`mt-2 max-w-4xl text-xs leading-relaxed ${muted}`}>
             Verified means the control met AuthClaw&apos;s automated framework scoring criteria as of this assessment. Current criteria require qualified evidence; activity counts alone do not establish readiness. This summary is not an independent SOC 2 Type II report or a SOC 3 report, and no certification is implied.
           </p>
+          <p className={`mt-2 max-w-4xl text-xs leading-relaxed ${muted}`}>Not qualified means required reviewed evidence or control conditions are unmet; it does not mean the feature is unimplemented.</p>
         </div>
         <div className={`text-[10px] ${muted}`}>
           <div>As of {new Date(summary.generated_at).toLocaleString()}</div>

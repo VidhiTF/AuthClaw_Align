@@ -63,7 +63,7 @@ def calculation_version(*, scoring_source: str | None = None, assessment_source:
             "compute_evidence_integrity_hash", "canonical_evidence_payload"} <= integrity_names:
         raise RuntimeError("Incomplete evidence integrity policy")
     digest = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return "evidence-v2-" + digest[:20]
+    return "evidence-v3-" + digest[:20]
 
 
 def _definition_name(node: ast.AST) -> str | None:

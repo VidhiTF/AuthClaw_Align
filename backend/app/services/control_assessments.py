@@ -108,6 +108,18 @@ def _principal(db: Session, tenant_id: uuid.UUID, user_id: uuid.UUID) -> User:
     return user
 
 
+def lock_review_principals(db: Session, tenant_id, requester_id, reviewer_id) -> User:
+    tid, requester, reviewer = (uuid.UUID(str(value)) for value in (tenant_id, requester_id, reviewer_id))
+    if requester == reviewer:
+        raise ValueError("The requester cannot review their own assessment")
+    # Lock both actors before consuming MFA so cross-over reviews use one order.
+    users = db.query(User).filter(User.tenant_id == tid, User.id.in_((requester, reviewer))).order_by(
+        User.id).populate_existing().with_for_update().all()
+    if len(users) != 2 or any(not user.is_active or user.role not in {"owner", "admin"} for user in users):
+        raise ValueError("An active tenant owner or administrator is required")
+    return next(user for user in users if user.id == reviewer)
+
+
 def _integrity(record) -> bool:
     return (record.integrity_algorithm == INTEGRITY_ALGORITHM
             and record.integrity_version == INTEGRITY_VERSION and verify_evidence_integrity(record))
@@ -194,10 +206,7 @@ def review_assessment(db: Session, tenant_id: str, approval_id: str, reviewer_id
         PendingApproval.tenant_id == tid, PendingApproval.action_type == "control_assessment").with_for_update().first()
     if not approval or approval.status != "PENDING" or _utc(approval.expires_at) <= now:
         raise ValueError("Assessment approval is unavailable, expired, or already resolved")
-    reviewer = _principal(db, tid, uid)
-    _principal(db, tid, approval.requester_id)
-    if uid == approval.requester_id:
-        raise ValueError("The requester cannot review their own assessment")
+    reviewer = lock_review_principals(db, tid, approval.requester_id, uid)
     if not reviewer.mfa_enabled or mfa_timestamp is None or not now - timedelta(minutes=30) <= _utc(mfa_timestamp) <= now:
         raise ValueError("A fresh MFA verification is required")
     if not isinstance(reason, str) or not 20 <= len(reason.strip()) <= 2000:

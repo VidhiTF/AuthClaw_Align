@@ -19,7 +19,7 @@ import {
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
 import { TrustSummary } from "@/components/trust-summary";
-import { calculationVersion, evidenceAssessmentLabel, scoreHistoryEntries, type EvidenceAssessment, type TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
+import { calculationVersion, evidenceAssessmentLabel, scoreHistoryEntries, type ActivityDiagnostics, type EvidenceAssessment, type TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
 import { readinessLabel } from "@/lib/ui-format";
 
 type FrameworkId = "SOC2" | "GDPR" | "HIPAA";
@@ -63,6 +63,7 @@ interface ControlScore {
   evidence: string[];
   gaps: string[];
   evidence_assessment?: EvidenceAssessment;
+  activity_diagnostics?: ActivityDiagnostics;
   exceptions?: Array<{
     status: "open" | "closed";
     type: "evidence_gap" | "missing_evidence";
@@ -398,7 +399,7 @@ export default function FrameworksPage() {
             Compliance Frameworks
           </h1>
           <p className="text-[#6B7488] text-sm mt-1">
-            Readiness requires qualified control assessments. Activity counts describe progress and cannot establish compliance.
+            Scores show weighted coverage of qualified control assessments. 0% means required reviewed evidence or control conditions are unmet. Activity counts cannot establish compliance.
           </p>
         </div>
 
@@ -534,7 +535,7 @@ export default function FrameworksPage() {
 
                     <div className="grid gap-3 md:grid-cols-2">
                       <div>
-                        <p className="text-[10px] font-bold text-[#6B7488] uppercase tracking-wider">Activity Diagnostics</p>
+                        <p className="text-[10px] font-bold text-[#6B7488] uppercase tracking-wider">Evidence references</p>
                         <div className="mt-1.5 flex flex-col gap-1.5">
                           {(control.evidence.length ? control.evidence : ["No evidence signal yet"]).map((item) => (
                             <div key={item} className="flex items-center gap-2 text-xs text-[#475069]">
@@ -566,6 +567,11 @@ export default function FrameworksPage() {
                       <p className="font-semibold">{evidenceAssessmentLabel(control.evidence_assessment)}</p>
                       {control.evidence_assessment && <><p className="mt-1">As of {new Date(control.evidence_assessment.as_of).toLocaleString()}{control.evidence_assessment.valid_until && ` · Valid until ${new Date(control.evidence_assessment.valid_until).toLocaleString()}`}</p><p className="mt-1">{control.evidence_assessment.reason_codes.join(", ")}</p></>}
                     </div>
+                    {control.activity_diagnostics?.authoritative === false && <div className="rounded-lg border border-[#E6E9F0] p-3 text-xs text-[#475069]">
+                      <p>Activity diagnostic score: {control.activity_diagnostics.score}% (not readiness)</p>
+                      <p>{control.activity_diagnostics.evidence.join(" · ")}</p>
+                      <p>{control.activity_diagnostics.gaps.join(" · ")}</p>
+                    </div>}
 
                     {(control.exceptions ?? []).length > 0 && (
                       <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3">

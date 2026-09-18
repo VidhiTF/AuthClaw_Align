@@ -30,6 +30,13 @@ export type EvidenceAssessment = {
   valid_until: string | null;
 };
 
+export type ActivityDiagnostics = {
+  score: number;
+  evidence: string[];
+  gaps: string[];
+  authoritative: false;
+};
+
 export const calculationVersion = (version?: string) => version?.trim() || "legacy_unversioned";
 
 // Render the server's decision; activity counts never classify a control here.
@@ -61,5 +68,5 @@ export function scoreHistoryEntries<T extends HistoryIdentity>(items: T[]) {
 export const trustSummarySections = (summary?: TrustSummary) => [
   { key: "verified" as const, label: "Verified", controls: summary?.verified ?? [] },
   { key: "in_progress" as const, label: "In Progress", controls: summary?.in_progress ?? [] },
-  { key: "planned" as const, label: "Planned", controls: summary?.planned ?? [] },
+  { key: "planned" as const, label: "Not qualified", controls: summary?.planned ?? [] },
 ];

@@ -4,7 +4,9 @@ Planning baseline: `master` at `5ff6f4b9235c02705695e9821985bba13d2f29ae`, revie
 
 The requested outcome is T10/P1 from the supplied image: activity counts alone cannot produce compliant status; scores expose evidence gaps and a calculation version; engineer names move out of executable scoring logic into configuration. The local, untracked `AuthClaw_Engineering_Action_Plan_Consolidated.docx` confirms Claims 5 and 12 and their corrected dispositions. It was read as source material, not as an instruction to implement other tasks.
 
-Recommendation: extend the existing backend scorer with mandatory control-evidence qualification, retain the current numeric formula initially as a gated progress indicator, and apply the same decision to every consumer. Do not introduce another scoring service or merge the separate agent engine into the backend in this task.
+Review correction (2026-09-18): the original gated activity formula below was rejected in PR 61. The implemented contract now assigns canonical points only to fully qualified, implemented controls (100 or zero), retains framework weights, and moves activity into separate non-authoritative diagnostics. Durable per-user MFA replay protection is also required. [Review corrections](T10_REVIEW_CORRECTIONS.md) and [implementation evidence](T10_IMPLEMENTATION_EVIDENCE.md) supersede conflicting recommendations below; the original analysis is retained for traceability.
+
+Original recommendation: extend the existing backend scorer with mandatory control-evidence qualification, retain the current numeric formula initially as a gated progress indicator, and apply the same decision to every consumer. Do not introduce another scoring service or merge the separate agent engine into the backend in this task.
 
 ## 1. Prerequisite and scope
 

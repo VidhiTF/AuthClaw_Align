@@ -14,7 +14,7 @@ def sources():
 
 
 @pytest.mark.parametrize("old,new", [("if score >= 85:", "if score >= 86:"),
-    ('"weight": 0.125', '"weight": 0.126'), ('84.9', '84.8'),
+    ('"weight": 0.125', '"weight": 0.126'), ('100.0 if qualified', '99.0 if qualified'),
     ('RESOLVED_STATUSES = ("RESOLVED", "FALSE_POSITIVE")', 'RESOLVED_STATUSES = ("RESOLVED",)')])
 def test_score_policy_changes_have_distinct_identity(sources, old, new):
     before = calculation_version(**sources)
@@ -24,7 +24,7 @@ def test_score_policy_changes_have_distinct_identity(sources, old, new):
 
 
 @pytest.mark.parametrize("old,new", [('"monitoring_operation": 1', '"monitoring_operation": 2'),
-    ('if uid == approval.requester_id:', 'if False:'),
+    ('if requester == reviewer:', 'if False:'),
     ('expiry <= as_of', 'expiry < as_of')])
 def test_qualification_rules_have_distinct_identity(sources, old, new):
     before = calculation_version(**sources)

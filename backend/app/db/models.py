@@ -199,6 +199,7 @@ class User(Base):
     )
     mfa_enabled = Column(Boolean, default=False)
     mfa_secret = Column(Text, nullable=True)  # Encrypted TOTP secret
+    mfa_last_totp_step = Column(BigInteger, nullable=True)  # Last consumed step for this credential
     mfa_backup_codes = Column(ARRAY(String), nullable=True)  # Hashed one-time backup codes
     is_active = Column(Boolean, default=True)
     last_login = Column(DateTime(timezone=True), nullable=True)

@@ -27,6 +27,13 @@ class EvidenceAssessmentResponse(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class ActivityDiagnosticsResponse(BaseModel):
+    authoritative: bool = False
+    score: float
+    evidence: list[str]
+    gaps: list[str]
+
+
 class ControlScoreResponse(BaseModel):
     id: str
     name: str
@@ -35,6 +42,7 @@ class ControlScoreResponse(BaseModel):
     score: float
     status: str
     evidence: list[str]
+    activity_diagnostics: ActivityDiagnosticsResponse | None = None
     gaps: list[str]
     exceptions: list[dict[str, Any]] = Field(default_factory=list)
     product_owners: list[str] = Field(default_factory=list)
@@ -63,12 +71,23 @@ class TrustSummaryCountsResponse(BaseModel):
     planned: int
 
 
+class TrustSummaryEvidenceAssessmentResponse(BaseModel):
+    state: str
+    reason_codes: list[str]
+    required_count: int
+    qualified_count: int
+    as_of: str
+    valid_until: str | None = None
+
+
 class TrustSummaryControlResponse(BaseModel):
     framework: str
     id: str
     name: str
     score: float
     status: str
+    evidence_assessment: TrustSummaryEvidenceAssessmentResponse | None = None
+    gaps: list[str] = Field(default_factory=list)
 
 
 class TrustSummaryResponse(BaseModel):
@@ -171,9 +190,11 @@ def review_control_assessment(approval_id: UUID, payload: AssessmentReviewReques
         raise HTTPException(status_code=404, detail="Assessment not found")
     if approval.action_hash != payload.action_hash:
         raise HTTPException(status_code=409, detail="Review the current assessment before deciding")
-    _, timestamp = _verify_mfa_if_enabled(actor, request, payload, required=True,
-                                          operation=f"control_assessment:{approval_id}")
     try:
+        actor = control_assessments.lock_review_principals(db, request.state.tenant_id,
+                                                          approval.requester_id, actor.id)
+        _, timestamp = _verify_mfa_if_enabled(actor, request, payload, required=True,
+                                              operation="control_assessment_review")
         evidence = control_assessments.review_assessment(db, str(request.state.tenant_id), str(approval_id),
             str(actor.id), payload.approve, payload.reason, timestamp)
         response = {"approval_id": approval_id, "status": "CONSUMED" if evidence else "REJECTED",

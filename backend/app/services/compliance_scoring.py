@@ -473,25 +473,26 @@ def score_control(
     control: dict[str, Any], metrics: FrameworkMetrics,
     assessment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    scores: list[float] = []
-    evidence: list[str] = []
-    gaps: list[str] = []
+    activity_scores: list[float] = []
+    activity_evidence: list[str] = []
+    activity_gaps: list[str] = []
     for signal in control["signals"]:
         score, evidence_item, gap = _signal_score(signal, metrics)
-        scores.append(score)
+        activity_scores.append(score)
         if evidence_item:
-            evidence.append(evidence_item)
+            activity_evidence.append(evidence_item)
         if gap:
-            gaps.append(gap)
+            activity_gaps.append(gap)
     assessment = dict(assessment) if assessment is not None else {
         "state": "blocked", "reason_codes": ["missing_assessment"],
         "required_count": 1, "qualified_count": 0, "as_of": "", "valid_until": None,
         "gaps": ["No qualified control assessment"], "evidence_ids": [],
     }
-    if gaps:
-        assessment["reason_codes"] = sorted(set(assessment["reason_codes"]) | {"activity_gap"})
-    gaps.extend(assessment.get("gaps", []))
-    if assessment["state"] != "qualified" and not assessment.get("gaps"):
+    gaps = list(assessment.get("gaps", []))
+    qualified = (assessment["state"] == "qualified" and not assessment["reason_codes"]
+                 and assessment["required_count"] > 0
+                 and assessment["qualified_count"] == assessment["required_count"])
+    if not qualified and not gaps:
         gaps.append("No qualified control assessment")
     if metrics.open_findings:
         gaps.append("Open findings or accepted risks require disposition")
@@ -504,11 +505,10 @@ def score_control(
         assessment["reason_codes"] = sorted(set(assessment["reason_codes"]) | {"implementation_incomplete"})
     if unique_gaps:
         assessment["state"] = "blocked"
-    control_score = round(sum(scores) / max(1, len(scores)), 1)
+    # Canonical points represent qualified controls, never product usage. Keep
+    # the entire denominator: missing/incomplete controls cannot inflate coverage.
+    control_score = 100.0 if qualified and not unique_gaps else 0.0
     status = control_status(control_score)
-    if unique_gaps and status == "compliant":
-        control_score = min(control_score, 84.9)
-        status = "partial"
     return {
         "id": control["id"],
         "name": control["name"],
@@ -516,7 +516,12 @@ def score_control(
         "weight": control["weight"],
         "score": control_score,
         "status": status,
-        "evidence": sorted(set(evidence)),
+        "evidence": [f"{assessment['qualified_count']} of {assessment['required_count']} reviewed evidence requirements qualified"],
+        "activity_diagnostics": {
+            "authoritative": False,
+            "score": round(sum(activity_scores) / max(1, len(activity_scores)), 1),
+            "evidence": sorted(set(activity_evidence)), "gaps": sorted(set(activity_gaps)),
+        },
         "gaps": unique_gaps,
         "exceptions": [
             {"status": "open", "type": "evidence_gap", "message": gap}
@@ -718,6 +723,7 @@ def _build_trust_summary(frameworks: list[dict[str, Any]]) -> dict[str, Any]:
     for framework in frameworks:
         for control in framework["controls"]:
             bucket = status_to_bucket[control["status"]]
+            assessment = control.get("evidence_assessment")
             buckets[bucket].append(
                 {
                     "framework": framework["framework"],
@@ -725,6 +731,10 @@ def _build_trust_summary(frameworks: list[dict[str, Any]]) -> dict[str, Any]:
                     "name": control["name"],
                     "score": control["score"],
                     "status": control["status"],
+                    "evidence_assessment": {key: assessment[key] for key in (
+                        "state", "reason_codes", "required_count", "qualified_count", "as_of", "valid_until"
+                    ) if key in assessment} if assessment else None,
+                    "gaps": list(control.get("gaps", [])),
                 }
             )
     return {

@@ -17,16 +17,20 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import pyotp
+from fastapi import HTTPException
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import ApprovalAudit, ComplianceScoreSnapshot, Notification, PendingApproval, TrustCenterAccessLog, TrustCenterShare
-from app.db import dependencies
-from app.core.auth import get_tenant_score_db
-from app.services import audit_store, compliance_scoring, control_assessments, event_backbone, evidence_service, trust_center
+from app.db.models import ApprovalAudit, ComplianceScoreSnapshot, Notification, PendingApproval, TrustCenterAccessLog, TrustCenterShare, User
+from app.db import dependencies, session as database_session
+from app.core.auth import get_tenant_score_db, set_mfa_credentials
+from app.services import abuse_controls, audit_store, compliance_scoring, control_assessments, event_backbone, evidence_service, trust_center
 from app.api.v1.endpoints.trust_center import get_public_trust_center
+from app.api.v1.endpoints import compliance_scores
+from starlette.requests import Request
 from tests.db_safety import destructive_test_urls
 from tests.test_tenant_isolation import Identity, IsolationHarness
 
@@ -69,6 +73,11 @@ def postgres():
                 '{"CC7.2":{"status":"compliant"}}'::jsonb,2,3,0,0,now())"""),
                 {"id": legacy_snapshot, "tenant": legacy_tenant})
         command("-m", "alembic", "upgrade", "050")
+        with owner.begin() as conn:
+            conn.execute(text("""INSERT INTO users (id,tenant_id,email,role,platform_role,is_active,mfa_enabled,mfa_secret)
+                VALUES (:id,:tenant,'legacy-mfa@example.invalid','admin','NONE',true,true,'legacy-test-enrollment')"""),
+                {"id": uuid4(), "tenant": legacy_tenant})
+        command("-m", "alembic", "upgrade", "051")
         command("scripts/bootstrap_database_security.py", "finalize-backend")
         harness = IsolationHarness(owner, app, sessionmaker(bind=app, expire_on_commit=False))
         yield harness, command, legacy_snapshot
@@ -107,8 +116,7 @@ def reviewer(harness, requester):
     return identity
 
 
-def reviewed_assessment(harness, requester, approver=None):
-    approver = approver or reviewer(harness, requester)
+def pending_assessment(harness, requester):
     with harness.session_for(requester) as db:
         source = evidence_service.create_evidence(db, tenant_id=str(requester.tenant_id), workflow_id=None,
             framework="SOC2", source_type="audit_event", source_reference="T10 scoped monitoring export",
@@ -121,7 +129,12 @@ def reviewed_assessment(harness, requester, approver=None):
             "review_note": "Reviewed monitoring and triage operation against the scoped immutable export.",
         })
         db.commit()
-        proposal_id, source_id = proposal.id, source.id
+        return proposal.id, source.id, proposal.action_hash
+
+
+def reviewed_assessment(harness, requester, approver=None):
+    approver = approver or reviewer(harness, requester)
+    proposal_id, source_id, _ = pending_assessment(harness, requester)
     with harness.session_for(approver) as db:
         assessment = control_assessments.review_assessment(db, str(requester.tenant_id), str(proposal_id),
             str(approver.user_id), True, "Independent reviewer verified the source scope and successful outcomes.",
@@ -139,6 +152,9 @@ def test_migration_preserves_legacy_rows_and_restricted_forced_rls(postgres):
         assert row["control_scores"] == {"CC7.2": {"status": "compliant"}}
         assert row["calculation_version"] == "legacy_unversioned"
         assert row["assessment_metadata"] == {}
+        prior_user = conn.execute(text("SELECT mfa_enabled,mfa_last_totp_step FROM users WHERE tenant_id=:tenant"),
+                                 {"tenant": row["tenant_id"]}).one()
+        assert prior_user.mfa_enabled is True and prior_user.mfa_last_totp_step is None
         assert conn.execute(text("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='compliance_score_snapshots'")).scalar_one() == make_url(os.environ["BACKEND_MIGRATION_DATABASE_URL"]).username
         flags = conn.execute(text("""SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class
             WHERE relname IN ('compliance_score_snapshots','approval_audit','pending_approvals','evidence_records')""")).all()
@@ -149,9 +165,7 @@ def test_migration_preserves_legacy_rows_and_restricted_forced_rls(postgres):
         assert conn.execute(text("SELECT count(*) FROM compliance_score_snapshots")).scalar_one() == 0
 
 
-def test_real_evidence_writer_and_review_qualify_with_repeatable_read(postgres):
-    harness, _, _ = postgres
-    tenant = harness.create_identity("t10-producer")
+def seed_activity(harness, tenant):
     with harness.session_for(tenant) as db:
         for index in range(5):
             evidence_service.create_evidence(db, tenant_id=str(tenant.tenant_id), workflow_id=None,
@@ -163,21 +177,42 @@ def test_real_evidence_writer_and_review_qualify_with_repeatable_read(postgres):
                 action="security.monitoring", reason="Recorded scoped monitoring operation", provider="test",
                 actor_id=str(tenant.user_id), frameworks=["SOC2"]))
         db.commit()
+
+
+@pytest.mark.parametrize("with_activity", [False, True])
+def test_real_evidence_writer_and_review_qualify_with_repeatable_read(postgres, with_activity):
+    harness, _, _ = postgres
+    tenant = harness.create_identity("t10-producer")
+    if with_activity:
+        seed_activity(harness, tenant)
     with harness.session_for(tenant) as db:
         db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-        unreviewed = compliance_scoring.score_framework(db, str(tenant.tenant_id), "SOC2", include_traceability=False)
-        assert next(row for row in unreviewed["controls"] if row["id"] == "CC7.2")["status"] != "compliant"
+        db.info["compliance_read_transaction"] = True
+        unreviewed = compliance_scores.get_framework_score("SOC2", SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id)),
+            persist_snapshot=True, db=db)
+        assert unreviewed["score"] == 0 and unreviewed["readiness_level"] == "insufficient_evidence"
+        assert all(row["score"] == 0 and row["status"] == "non_compliant" for row in unreviewed["controls"])
+        if with_activity:
+            assert next(row for row in unreviewed["controls"] if row["id"] == "CC7.2")["activity_diagnostics"]["score"] == 100
+        assert db.query(ComplianceScoreSnapshot).one().overall_score == 0
     _, _, assessment_id = reviewed_assessment(harness, tenant)
     with harness.session_for(tenant) as db:
         db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         db.info["compliance_read_transaction"] = True
-        result = compliance_scoring.score_framework(db, str(tenant.tenant_id), "SOC2", include_traceability=False)
+        result = compliance_scores.get_framework_score("SOC2", SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id)),
+            persist_snapshot=True, db=db)
+        result = compliance_scores.FrameworkScoreResponse.model_validate(result).model_dump()
         control = next(row for row in result["controls"] if row["id"] == "CC7.2")
         assert control["evidence_assessment"]["state"] == "qualified", control["evidence_assessment"]
         assert control["status"] == "compliant"
+        assert control["score"] == 100
+        assert control["activity_diagnostics"]["authoritative"] is False
+        assert (control["activity_diagnostics"]["score"] == 100) is with_activity
         assert str(assessment_id) in control["evidence_assessment"]["evidence_ids"]
-        persisted = compliance_scoring.upsert_score_snapshot(db, str(tenant.tenant_id), result)
+        persisted = db.query(ComplianceScoreSnapshot).one()
         assert persisted.calculation_version == result["calculation_version"]
+        assert persisted.overall_score == 12.5
+        assert persisted.control_scores["CC7.2"]["score"] == 100
 
 
 def test_request_dependency_uses_single_connection_and_resets_write_isolation(postgres, monkeypatch):
@@ -304,13 +339,14 @@ def test_downgrade_refuses_retained_versioned_history_and_keeps_rls(postgres):
     result = command("-m", "alembic", "downgrade", "049", succeeds=False)
     assert "downgrade refused" in result.stderr
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "050"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "051"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='compliance_score_snapshots'")).scalar_one()
 
 
 def test_concurrent_public_score_views_rebind_and_log_each_access(postgres, monkeypatch):
     harness, _, _ = postgres
     tenant = harness.create_identity("t10-public")
+    seed_activity(harness, tenant)
     monkeypatch.setenv("SESSION_SECRET_V1", "test-only-t10-auditor-session-secret-32-bytes")
     monkeypatch.setenv("AUTHCLAW_SESSION_KEY_VERSION", "v1")
     delivered = {}
@@ -347,6 +383,8 @@ def test_concurrent_public_score_views_rebind_and_log_each_access(postgres, monk
         packages = [future.result(timeout=30) for future in futures]
     assert all(package["scores"]["calculation_version"] == control_assessments.CALCULATION_VERSION for package in packages)
     assert all([row["framework"] for row in package["scores"]["frameworks"]] == ["SOC2"] for package in packages)
+    assert all(package["scores"]["overall_score"] == 0
+               and package["scores"]["readiness_level"] == "insufficient_evidence" for package in packages)
     with harness.session_for(tenant) as db:
         assert db.get(TrustCenterShare, share_id).access_count == 2
         assert db.query(TrustCenterAccessLog).filter(TrustCenterAccessLog.share_id == share_id,
@@ -405,3 +443,148 @@ def test_synthetic_tenant_measurement(postgres):
         if tracemalloc.is_tracing():
             tracemalloc.stop()
         event.remove(harness.app_engine, "before_cursor_execute", track)
+
+
+@pytest.fixture
+def real_mfa(postgres, monkeypatch):
+    """Only rate-limit Redis storage is substituted; crypto, verifier and DB run."""
+    from app.api.v1.endpoints import workflows
+    harness, _, _ = postgres
+    requester = harness.create_identity("t10-durable-mfa")
+    approver = reviewer(harness, requester)
+    secret = pyotp.random_base32()
+    backup = "t10-one-use-backup-code"
+    monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "env")
+    monkeypatch.setenv("ENVELOPE_KEY_V1", "test-only-t10-envelope-key-material")
+    monkeypatch.setenv("AUTHCLAW_SECRET_KEY_VERSION", "v1")
+    monkeypatch.setenv("SESSION_SECRET_V1", "test-only-t10-mfa-session-key-material")
+    monkeypatch.setenv("AUTHCLAW_SESSION_KEY_VERSION", "v1")
+    class RedisRateLimitStorage:
+        def eval(self, script, _number, *_arguments):
+            if script == abuse_controls.MFA_CHECK_LUA:
+                return -2
+            if script == abuse_controls.MFA_RESET_LUA:
+                return 1
+            if script == abuse_controls.MFA_FAILURE_LUA:
+                return [1, 0, 0]
+            raise AssertionError("Unexpected Redis operation")
+    monkeypatch.setattr(workflows, "_get_redis", lambda: RedisRateLimitStorage())
+    # MFA security audit events use their normal writer against the disposable DB.
+    monkeypatch.setattr(database_session, "SessionLocal", harness.testing_session_local)
+    with harness.session_for(approver) as db:
+        user = db.get(User, approver.user_id)
+        set_mfa_credentials(user, secret, [backup])
+        db.commit()
+        assert user.mfa_secret != secret and user.mfa_last_totp_step is None
+    def decide(pending, code, actor=approver):
+        approval_id, _, action_hash = pending
+        request = Request({"type": "http", "headers": [], "query_string": b"",
+            "client": ("127.0.0.1", 12345)})
+        request.state.tenant_id, request.state.user_id = actor.tenant_id, actor.user_id
+        request.state.credential_kind = "session"
+        body = compliance_scores.AssessmentReviewRequest(approve=True, action_hash=action_hash,
+            reason="Independently verified each scoped operating record and its control outcome.", totp_code=code)
+        with harness.session_for(actor) as db:
+            return compliance_scores.review_control_assessment(approval_id, body, request, db)
+    return SimpleNamespace(harness=harness, requester=requester, approver=approver, secret=secret,
+        backup=backup, decide=decide, pending=lambda: pending_assessment(harness, requester))
+
+
+def test_real_totp_cannot_be_reused_across_distinct_approvals_and_next_step_succeeds(real_mfa):
+    state = real_mfa
+    first, second = state.pending(), state.pending()
+    code = pyotp.TOTP(state.secret).now()
+    assert state.decide(first, code)["status"] == "CONSUMED"
+    with state.harness.session_for(state.approver) as db:
+        consumed_step = db.get(User, state.approver.user_id).mfa_last_totp_step
+        assert isinstance(consumed_step, int)
+    with pytest.raises(HTTPException) as rejected:
+        state.decide(second, code)
+    assert rejected.value.status_code == 400
+    with state.harness.session_for(state.approver) as db:
+        assert db.get(PendingApproval, second[0]).status == "PENDING"
+        assert db.get(User, state.approver.user_id).mfa_last_totp_step == consumed_step
+    next_code = pyotp.TOTP(state.secret).at((consumed_step + 1) * 30)
+    assert state.decide(second, next_code)["status"] == "CONSUMED"
+    with state.harness.session_for(state.approver) as db:
+        assert db.get(User, state.approver.user_id).mfa_last_totp_step == consumed_step + 1
+
+
+def test_concurrent_same_totp_step_allows_exactly_one_approval(real_mfa):
+    state = real_mfa
+    proposals = [state.pending(), state.pending()]
+    code, barrier = pyotp.TOTP(state.secret).now(), Barrier(2)
+    def decide(pending):
+        barrier.wait(timeout=15)
+        try:
+            return state.decide(pending, code)["status"]
+        except HTTPException as exc:
+            assert exc.status_code == 400
+            return "MFA_REJECTED"
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(decide, pending) for pending in proposals]
+        outcomes = [future.result(timeout=30) for future in futures]
+    assert sorted(outcomes) == ["CONSUMED", "MFA_REJECTED"]
+    with state.harness.session_for(state.approver) as db:
+        rows = db.query(PendingApproval).filter(PendingApproval.id.in_([item[0] for item in proposals])).all()
+        assert sorted(row.status for row in rows) == ["CONSUMED", "PENDING"]
+        assert db.query(ApprovalAudit).filter(ApprovalAudit.action == "ASSESSMENT_APPROVED").count() == 1
+
+
+def test_real_backup_code_is_consumed_once_across_approvals(real_mfa):
+    state = real_mfa
+    first, second = state.pending(), state.pending()
+    assert state.decide(first, state.backup)["status"] == "CONSUMED"
+    with pytest.raises(HTTPException) as rejected:
+        state.decide(second, state.backup)
+    assert rejected.value.status_code == 400
+    with state.harness.session_for(state.approver) as db:
+        assert db.get(User, state.approver.user_id).mfa_backup_codes == []
+        assert db.get(PendingApproval, second[0]).status == "PENDING"
+
+
+def test_mfa_replay_state_is_tenant_scoped_and_reenrollment_preserves_consumption(real_mfa):
+    state = real_mfa
+    state.decide(state.pending(), pyotp.TOTP(state.secret).now())
+    stranger = state.harness.create_identity("t10-mfa-other-tenant")
+    with state.harness.session_for(stranger) as db:
+        assert db.query(User.mfa_last_totp_step).filter(User.id == state.approver.user_id).first() is None
+        assert db.execute(text("UPDATE users SET mfa_last_totp_step=NULL WHERE id=:id"),
+            {"id": state.approver.user_id}).rowcount == 0
+    with state.harness.session_for(state.approver) as db:
+        user = db.get(User, state.approver.user_id)
+        consumed = user.mfa_last_totp_step
+        set_mfa_credentials(user, state.secret, [])
+        db.commit()
+        assert db.get(User, state.approver.user_id).mfa_last_totp_step == consumed
+
+
+def test_cross_over_reviews_lock_principals_in_one_order_without_deadlock(real_mfa):
+    state = real_mfa
+    requester_secret = pyotp.random_base32()
+    with state.harness.session_for(state.requester) as db:
+        set_mfa_credentials(db.get(User, state.requester.user_id), requester_secret, [])
+        db.commit()
+    first = state.pending()
+    second = pending_assessment(state.harness, state.approver)
+    barrier = Barrier(2)
+    def decide(pending, code, actor):
+        barrier.wait(timeout=15)
+        return state.decide(pending, code, actor)["status"]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(decide, first, pyotp.TOTP(state.secret).now(), state.approver),
+                   executor.submit(decide, second, pyotp.TOTP(requester_secret).now(), state.requester)]
+        assert [future.result(timeout=30) for future in futures] == ["CONSUMED", "CONSUMED"]
+    with state.harness.session_for(state.approver) as db:
+        assert db.query(ApprovalAudit).filter(ApprovalAudit.action == "ASSESSMENT_APPROVED").count() == 2
+
+
+def test_durable_mfa_state_prevents_schema_downgrade(real_mfa, postgres):
+    state = real_mfa
+    state.decide(state.pending(), pyotp.TOTP(state.secret).now())
+    harness, command, _ = postgres
+    result = command("-m", "alembic", "downgrade", "050", succeeds=False)
+    assert "mfa" in result.stderr.lower() and "downgrade" in result.stderr.lower()
+    with harness.owner_engine.connect() as conn:
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "051"
+        assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='users'")).scalar_one()

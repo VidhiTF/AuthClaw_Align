@@ -3,13 +3,14 @@
 import hmac
 import logging
 import os
+import time
 from typing import Generator, List
 import pyotp
 from fastapi import Request, Depends, HTTPException, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy import inspect, text
+from sqlalchemy.orm import Session, object_session
 from app.db.session import SessionLocal, database_auth_context
 from app.db.dependencies import get_db, get_score_db
 from app.core.crypto import (
@@ -39,6 +40,12 @@ def hash_key(key: str) -> str:
 
 
 def set_mfa_credentials(user, secret: str, backup_codes: list[str]) -> None:
+    previous = user.mfa_secret or ""
+    if previous.startswith((SECRET_ENVELOPE_PREFIX, SECRET_ENVELOPE_V2_PREFIX)):
+        previous = decrypt_secret(previous)
+    # Re-encrypting the same credential must not make consumed codes valid again.
+    if not hmac.compare_digest(previous.upper(), secret.upper()):
+        user.mfa_last_totp_step = None
     user.mfa_secret = encrypt_secret(secret)
     user.mfa_backup_codes = [
         hash_key(f"mfa-backup:{code.lower()}") for code in backup_codes
@@ -47,32 +54,68 @@ def set_mfa_credentials(user, secret: str, backup_codes: list[str]) -> None:
 
 
 def verify_mfa_code(user, code: str) -> bool:
+    """Consume an enrolled user's factor; the caller owns commit or rollback."""
+    from app.db.models import User
+
+    if not isinstance(user, User) or not isinstance(code, str):
+        return False
+    db = object_session(user)
+    state = inspect(user)
+    if db is None or not state.persistent:
+        return False
+    with db.no_autoflush:
+        if (
+            state.attrs.id.history.has_changes()
+            or state.attrs.tenant_id.history.has_changes()
+            or user.tenant_id is None
+        ):
+            return False
+        # Refresh credentials and replay state after acquiring the same-tenant lock.
+        # Never authorize against a stale identity-map copy or flush local changes first.
+        user = db.query(User).filter(
+            User.id == state.identity[0], User.tenant_id == user.tenant_id,
+            User.is_active.is_(True), User.mfa_enabled.is_(True),
+        ).populate_existing().with_for_update().first()
+    if user is None or not user.mfa_secret:
+        return False
     code = code.strip().lower()
     stored_secret = user.mfa_secret or ""
     encrypted = stored_secret.startswith(
         (SECRET_ENVELOPE_PREFIX, SECRET_ENVELOPE_V2_PREFIX)
     )
     secret = decrypt_secret(stored_secret) if encrypted else stored_secret
-    if stored_secret and not encrypted:
-        user.mfa_secret = encrypt_secret(stored_secret)
-
     backup_codes = list(user.mfa_backup_codes or [])
     normalized_codes = [
         stored if len(stored) == 64 else hash_key(f"mfa-backup:{stored.lower()}")
         for stored in backup_codes
     ]
+    totp = pyotp.TOTP(secret)
+    current_step = int(time.time()) // totp.interval
+    matched_step = max(
+        (step for step in range(max(0, current_step - 1), current_step + 2)
+         if code.isascii() and hmac.compare_digest(totp.generate_otp(step), code)),
+        default=None,
+    )
+    if matched_step is not None:
+        if user.mfa_last_totp_step is not None and matched_step <= user.mfa_last_totp_step:
+            return False
+        user.mfa_last_totp_step = matched_step
+    else:
+        candidate = hash_key(f"mfa-backup:{code}")
+        remaining_codes = [
+            stored for stored in normalized_codes
+            if not hmac.compare_digest(candidate, stored)
+        ]
+        if len(remaining_codes) == len(normalized_codes):
+            return False
+        normalized_codes = remaining_codes
+    if not encrypted:
+        user.mfa_secret = encrypt_secret(secret)
     user.mfa_backup_codes = normalized_codes
-    if secret and pyotp.TOTP(secret).verify(code, valid_window=1):
-        return True
-
-    candidate = hash_key(f"mfa-backup:{code}")
-    for index, stored in enumerate(normalized_codes):
-        if hmac.compare_digest(candidate, stored):
-            user.mfa_backup_codes = (
-                normalized_codes[:index] + normalized_codes[index + 1 :]
-            )
-            return True
-    return False
+    # Later authorization refreshes must see consumption; success is durable only
+    # when the protected action commits, so a rolled-back action can retry safely.
+    db.flush()
+    return True
 
 
 def _normalize_role(role: str | None) -> str:

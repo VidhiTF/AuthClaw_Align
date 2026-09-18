@@ -1,7 +1,9 @@
 # T10: evidence-qualified compliance readiness
 
-T10 keeps the existing numerical progress signals but requires reviewed control
-evidence before a control can be `compliant`. Activity volume, free-text matches,
+T10 scores weighted coverage of qualified, independently reviewed control evidence.
+A fully qualified and implemented control earns 100; an unqualified control earns
+zero. Product activity is separate, non-authoritative diagnostic information.
+Activity volume, free-text matches,
 closed finding statuses, missing data, and agent diagnostics cannot establish
 compliance. These are engineering readiness indicators, not certifications.
 
@@ -9,13 +11,15 @@ compliance. These are engineering readiness indicators, not certifications.
 
 1. Obtain required component, consumer, security and governance reviews, including
    the material-growth exception; run required CI against the reviewed commit.
-2. Back up the database and test restore. Stop/drain old backend snapshot writers.
+2. Back up the database and test restore. Stop/drain old backend snapshot and MFA writers.
    Migration 050 changes the daily uniqueness key; old writers cannot overlap it.
-3. Run the existing database bootstrap/migrator procedure through revision 050.
+3. Run the existing database bootstrap/migrator procedure through revision 051.
    Existing rows become `legacy_unversioned`; no evidence is reclassified.
-4. Deploy the new backend with `AUTHCLAW_EXPECTED_DB_REVISION=050`, then agent and
-   console changes. The gateway accepts 049/050 for the cutover; backend requires
-   050. Existing versionless console data displays an explicit legacy label.
+   Migration 051 adds the per-user consumed TOTP timestep. Old MFA writers must
+   not overlap the deployment because they do not enforce this replay state.
+4. Deploy the new backend with `AUTHCLAW_EXPECTED_DB_REVISION=051`, then agent and
+   console changes. The gateway accepts 050/051 for the cutover; backend requires
+   051. Existing versionless console data displays an explicit legacy label.
 5. Set `COMPLIANCE_ENVIRONMENT` to the deployment scope (`local`, `ci`, `staging`,
    `production`), matching `AUTHCLAW_ENV`. Default `unconfigured` blocks evidence
    qualification. Incorrect explicit scope fails configuration validation.
@@ -31,6 +35,8 @@ normalized scoring/qualification definitions, catalog rules, and evidence-integr
 rules. Retain the deployed image/commit with assessment evidence. Rule changes
 change the version and require new reviews; historical assessments and snapshots
 remain available. Display-owner configuration does not change the calculation.
+The review correction uses the `evidence-v3-` method prefix; prior assessments must
+be reviewed again under the corrected method to qualify.
 
 ## Trusted assessment intake
 
@@ -60,6 +66,13 @@ new assessment administration UI in T10.
    and creates integrity-protected assessment evidence. Rejection records the
    decision without creating an assessment. A changed/expired request needs a new
    proposal; code and hash values must never be retained in support logs.
+
+Successful MFA proofs are consumed per user across operations. Wait for a new
+authenticator timestep before approving another request; previously consumed or
+older timesteps cannot authorize a second successful action. Backup codes are
+also single-use. Consumption and the protected action commit together; an action
+that rolls back does not consume a proof. Database row locks serialize concurrent
+attempts, independently of operation-specific Redis failure counters.
 
 The JSON field names above describe the backend contract. Confirm the configured
 API prefix from the deployment OpenAPI document when calling directly.
@@ -115,8 +128,8 @@ surfaces while deploying a forward fix that preserves the evidence gate. Restore
 from backup only under the established incident/recovery procedure. Do not deploy
 the former count-only scorer as an emergency compliance assertion.
 
-Migration downgrade refuses to discard versioned history or assessment audits.
+Migration downgrade refuses to discard consumed MFA replay state, versioned history or assessment audits.
 Before any T10 data exists, downgrade to 049 is possible during a drained maintenance
-window; after intake, retain 050 and use a forward fix. Immutable T10 audit records
+window; after MFA consumption or intake, retain 051 and use a forward fix. Immutable T10 audit records
 also intentionally prevent destructive updates/deletes; retention operations must
 account for this. Do not disable triggers/RLS to make a rollback pass.
