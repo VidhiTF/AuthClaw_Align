@@ -28,6 +28,7 @@ from app.services import control_assessments
 
 FRAMEWORKS = ("SOC2", "GDPR", "HIPAA")
 RESOLVED_STATUSES = ("RESOLVED", "FALSE_POSITIVE")
+MISSING_CONTROL_TREATMENT = "Missing, stale, untrusted or unknown control evidence remains unscored; operational activity is diagnostic only; source errors abort scoring."
 
 
 @dataclass(frozen=True)
@@ -345,7 +346,9 @@ def _signal_score(signal: str, metrics: FrameworkMetrics) -> tuple[float, str | 
     return 50.0, None, f"Unknown scoring signal {signal}"
 
 
-def readiness_level(score: float) -> str:
+def readiness_level(score: float | None) -> str:
+    if score is None:
+        return "insufficient_evidence"
     if score >= 90:
         return "audit_ready"
     if score >= 75:
@@ -355,7 +358,9 @@ def readiness_level(score: float) -> str:
     return "insufficient_evidence"
 
 
-def control_status(score: float) -> str:
+def control_status(score: float | None) -> str:
+    if score is None:
+        return "insufficient_evidence"
     if score >= 85:
         return "compliant"
     if score >= 60:
@@ -505,9 +510,10 @@ def score_control(
         assessment["reason_codes"] = sorted(set(assessment["reason_codes"]) | {"implementation_incomplete"})
     if unique_gaps:
         assessment["state"] = "blocked"
-    # Canonical points represent qualified controls, never product usage. Keep
-    # the entire denominator: missing/incomplete controls cannot inflate coverage.
-    control_score = 100.0 if qualified and not unique_gaps else 0.0
+    # Only a complete, current assessment can establish either success or failure.
+    observed = qualified or (bool(assessment["reason_codes"]) and
+        set(assessment["reason_codes"]) <= {"failed_assessment", "open_finding", "implementation_incomplete"})
+    control_score = (100.0 if qualified and not unique_gaps else 0.0) if observed else None
     status = control_status(control_score)
     return {
         "id": control["id"],
@@ -531,6 +537,7 @@ def score_control(
         "operational_owners": control_assessments.resolve_owners(control.get("operational_roles", ["governance"])),
         "evidence_assessment": assessment,
         "calculation_version": control_assessments.CALCULATION_VERSION,
+        "evidence_timestamp": assessment.get("evidence_timestamp"),
         "implementation_status": implementation_status,
         "evidence_sources": list(control.get("evidence_sources", [])),
         "collection_frequency": control.get("collection_frequency", "Not mapped"),
@@ -554,12 +561,16 @@ def _calculate_framework(
     if include_traceability:
         for control, catalog_control in zip(controls, CONTROL_CATALOG[framework]):
             control["traceability"] = _control_traceability(db, tenant_id, framework, catalog_control)
-    overall = round(sum(control["score"] * control["weight"] for control in controls), 1)
+    overall = (round(sum(control["score"] * control["weight"] for control in controls), 1)
+               if all(control["score"] is not None for control in controls) else None)
     framework_readiness = readiness_level(overall)
     if framework_readiness == "audit_ready" and any(control["status"] != "compliant" for control in controls):
         framework_readiness = "monitor"
     return {
         "framework": framework,
+        "evidence_timestamp": min(control["evidence_timestamp"] for control in controls) if all(control["evidence_timestamp"] for control in controls) else None,
+        "inputs_as_of": as_of.isoformat(),
+        "missing_control_treatment": MISSING_CONTROL_TREATMENT,
         "score": overall,
         "readiness_level": framework_readiness,
         "controls": controls,
@@ -603,9 +614,9 @@ def score_framework(db: Session, tenant_id: str, framework: str, *, include_trac
         return _calculate_framework(reader, tenant_id, framework, include_traceability=include_traceability, as_of=datetime.now(timezone.utc))
 
 
-def aggregate_readiness(frameworks: list[dict[str, Any]]) -> tuple[float, str]:
-    if not frameworks:
-        return 0.0, "insufficient_evidence"
+def aggregate_readiness(frameworks: list[dict[str, Any]]) -> tuple[float | None, str]:
+    if not frameworks or any(item["score"] is None for item in frameworks):
+        return None, "insufficient_evidence"
     score = round(sum(item["score"] for item in frameworks) / len(frameworks), 1)
     readiness = readiness_level(score)
     if readiness == "audit_ready" and any(item.get("readiness_level") != "audit_ready" for item in frameworks):
@@ -628,7 +639,7 @@ def upsert_score_snapshot(
     snapshot_date = as_of.astimezone(timezone.utc).date().isoformat()
     finish_score_read(db)
     db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"), {
-        "scope": f"compliance:{tid}:{framework}:{version}",
+        "scope": f"compliance:{tid}:{version}",
     })
     scope = db.query(ComplianceScoreSnapshot).filter(
         ComplianceScoreSnapshot.tenant_id == tid,
@@ -649,10 +660,11 @@ def upsert_score_snapshot(
     metrics = framework_score["metrics"]
     values = dict(
         tenant_id=tid, framework=framework, snapshot_date=snapshot_date,
-        calculation_version=version, overall_score=float(framework_score["score"]),
+        calculation_version=version, overall_score=framework_score["score"],
         readiness_level=framework_score["readiness_level"],
         control_scores={control["id"]: control for control in framework_score["controls"]},
-        assessment_metadata={"as_of": as_of.isoformat(), "environment": environment, "policy_version": version},
+        assessment_metadata={"as_of": as_of.isoformat(), "environment": environment, "policy_version": version,
+                             **{key: framework_score.get(key) for key in ("inputs_as_of", "evidence_timestamp", "missing_control_treatment")}},
         evidence_count=int(metrics["evidence_count"]), audit_event_count=int(metrics["audit_event_count"]),
         open_findings=int(metrics["open_findings"]), critical_findings=int(metrics["critical_findings"]),
         generated_at=as_of,
@@ -661,7 +673,7 @@ def upsert_score_snapshot(
         constraint="uq_compliance_score_tenant_framework_date_version", set_=values,
     ).returning(ComplianceScoreSnapshot)
     snapshot = db.execute(statement, execution_options={"populate_existing": True}).scalar_one()
-    drop = previous_score - snapshot.overall_score if previous_score is not None else 0
+    drop = previous_score - snapshot.overall_score if previous_score is not None and snapshot.overall_score is not None else 0
     if drop >= 5 and previous_time <= as_of and previous_environment == environment:
         add_notification(
             db, tenant_id=tid, type="compliance_score_drop",
@@ -669,6 +681,9 @@ def upsert_score_snapshot(
             body=f"{framework} dropped from {previous_score:.1f}% to {snapshot.overall_score:.1f}% ({version}).",
             link="/compliance",
         )
+    if previous_score is not None and snapshot.overall_score is None and previous_time <= as_of and previous_environment == environment:
+        add_notification(db, tenant_id=tid, type="compliance_score_unavailable", severity="warning",
+                         title=f"{framework} score is unknown", body="A current complete control assessment is unavailable.", link="/compliance")
     if commit:
         db.commit()
     return snapshot
@@ -701,6 +716,9 @@ def score_all_frameworks(
     trust_summary["generated_at"] = generated_at
     return {
         "overall_score": overall,
+        "evidence_timestamp": min(item["evidence_timestamp"] for item in frameworks) if all(item["evidence_timestamp"] for item in frameworks) else None,
+        "missing_control_treatment": MISSING_CONTROL_TREATMENT,
+        "inputs_as_of": generated_at,
         "readiness_level": overall_readiness,
         "frameworks": frameworks,
         "trust_summary": trust_summary,
@@ -719,6 +737,7 @@ def _build_trust_summary(frameworks: list[dict[str, Any]]) -> dict[str, Any]:
         "compliant": "verified",
         "partial": "in_progress",
         "non_compliant": "planned",
+        "insufficient_evidence": "planned",
     }
     for framework in frameworks:
         for control in framework["controls"]:
@@ -767,6 +786,8 @@ def score_history(db: Session, tenant_id: str, framework: str | None = None, day
             "snapshot_date": row.snapshot_date,
             "calculation_version": row.calculation_version,
             "overall_score": row.overall_score,
+            **{key: (row.assessment_metadata or {}).get(key) for key in (
+                "inputs_as_of", "evidence_timestamp", "missing_control_treatment")},
             "readiness_level": row.readiness_level,
             "evidence_count": row.evidence_count,
             "audit_event_count": row.audit_event_count,

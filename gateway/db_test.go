@@ -219,10 +219,10 @@ func TestCompatibleDatabaseRevisions(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{name: "default", want: []string{"051"}},
-		{name: "rollout window", value: "050, 051", want: []string{"050", "051"}},
-		{name: "duplicate", value: "051,051", wantErr: true},
-		{name: "stale rollout", value: "049,050", wantErr: true},
+		{name: "default", want: []string{"052"}},
+		{name: "rollout window", value: "051, 052", want: []string{"051", "052"}},
+		{name: "duplicate", value: "052,052", wantErr: true},
+		{name: "stale rollout", value: "050,051", wantErr: true},
 		{name: "malformed", value: "head", wantErr: true},
 		{name: "unsupported", value: "046,047", wantErr: true},
 		{name: "too broad", value: "046,047,048", wantErr: true},

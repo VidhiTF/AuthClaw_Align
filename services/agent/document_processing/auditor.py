@@ -105,7 +105,7 @@ def verify_document_audit_chain(document_id: int, tenant_id: int = None) -> dict
         ).fetchall()
         
     if not rows:
-        return {"valid": True, "records_checked": 0, "reason": "No audit records found."}
+        return {"valid": None, "status": "unknown", "records_checked": 0, "reason": "No audit records found."}
         
     records_checked = 0
     prev_hash = None

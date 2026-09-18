@@ -124,7 +124,8 @@ def _apply_tenant_context(conn, cursor, statement, parameters, context, executem
         return
 
     normalized = statement.lstrip().upper()
-    if normalized.startswith(("SET ", "RESET ", "SHOW ")) or "SET_CONFIG(" in normalized:
+    # Recovery must execute before rebinding context in an aborted transaction.
+    if normalized.startswith(("SET ", "RESET ", "SHOW ", "ROLLBACK TO SAVEPOINT ")) or "SET_CONFIG(" in normalized:
         return
 
     tenant_id = get_current_tenant_id()

@@ -4,6 +4,7 @@ import os
 import time
 import json
 import logging
+import uuid
 import requests
 from datetime import datetime, timezone
 from sqlalchemy import text
@@ -15,6 +16,7 @@ from document_processing.scanners import scan_text_for_sensitive_data
 from document_processing.chunker import split_text_into_chunks
 from document_processing.auditor import create_document_audit
 from approval_store import create_approval
+from services.tenant_context import validate_tenant_id
 
 logger = logging.getLogger("authclaw.document_processing.orchestrator")
 
@@ -23,7 +25,8 @@ def run_document_scan_pipeline(doc_id: int, file_bytes: bytes, filename: str, so
     Executes the complete document security & compliance scanning pipeline.
     """
     start_time = time.perf_counter()
-    logger.info(f"Starting compliance scan for doc {doc_id}: {filename}")
+    validate_tenant_id(tenant_id)
+    logger.info("Starting compliance scan for doc %s", doc_id)
     
     # 1. Extract text and metadata
     text_content = extract_document_text(file_bytes, filename)
@@ -264,14 +267,7 @@ Do not include markdown packaging like ```json.
         severity = "CRITICAL"
         risk_score = min(risk_score, 49)
         
-    # 7. Real-Time Alerting (trigger notification)
-    for f in all_findings:
-        if f.get("risk_level", "LOW").upper() in ("CRITICAL", "HIGH"):
-            try:
-                from document_processing.alerts import trigger_security_alert
-                trigger_security_alert(f, filename)
-            except Exception as alert_err:
-                logger.error(f"Failed to trigger real-time alert: {alert_err}")
+    alert_delivery = {"status": "not_applicable"}
 
     # 8. Human Approval Integration
     status = "completed"
@@ -295,8 +291,17 @@ Do not include markdown packaging like ```json.
         
     # 9. Save results to database
     duration_ms = int((time.perf_counter() - start_time) * 1000)
-    
+    scan_status = status
     with engine.connect() as conn:
+        # Commit the retryable alert and its scan together, before network I/O.
+        if any(f.get("risk_level", "LOW").upper() in ("CRITICAL", "HIGH") for f in all_findings):
+            from services.event_pipeline import EventPipeline
+            event_id = EventPipeline().record_event({
+                "event_type": "document_security_alert", "event_id": str(uuid.uuid4()),
+                "tenant_id": tenant_id, "document_id": doc_id,
+            }, stream="security_alert", connection=conn)
+            alert_delivery = {"status": "queued", "event_id": event_id}
+            status = "alert_delivery_pending"
         # Update documents table
         conn.execute(
             text("""
@@ -315,11 +320,10 @@ Do not include markdown packaging like ```json.
         )
         
         # Save scan run
-        scan_res = conn.execute(
+        conn.execute(
             text("""
-            INSERT INTO document_scans (tenant_id, document_id, timestamp, scan_duration_ms, raw_findings, status)
-            VALUES (:tenant_id, :doc_id, :timestamp, :duration, :findings_json, :status)
-            RETURNING id
+            INSERT INTO document_scans (tenant_id, document_id, timestamp, scan_duration_ms, raw_findings, status, outputs_json)
+            VALUES (:tenant_id, :doc_id, :timestamp, :duration, :findings_json, :status, :outputs)
             """),
             {
                 "tenant_id": tenant_id,
@@ -327,7 +331,8 @@ Do not include markdown packaging like ```json.
                 "timestamp": datetime.now(timezone.utc),
                 "duration": duration_ms,
                 "findings_json": json.dumps(all_findings),
-                "status": "completed"
+                "status": status,
+                "outputs": json.dumps({"alert_delivery": alert_delivery, "scan_status": scan_status}),
             }
         )
         
@@ -353,14 +358,18 @@ Do not include markdown packaging like ```json.
             )
             
         conn.commit()
-        
+
+    if alert_delivery["status"] == "queued":
+        alert_delivery = EventPipeline().deliver_event(event_id)
+        status = scan_status if alert_delivery["status"] == "delivered" else "alert_delivery_failed"
+
     create_document_audit(doc_id, "scan_completed", "system", f"Analysis completed in {duration_ms}ms. Risk Score: {risk_score} ({severity}). Findings Count: {len(all_findings)}", tenant_id=tenant_id)
-    logger.info(f"Completed scan pipeline for doc {doc_id}: {filename} ({severity} - {risk_score})")
+    logger.info("Completed scan for doc %s: %s", doc_id, status)
     
     # 10. Record Snapshot in Score History & Calculate Drift
     try:
         from document_processing.drift import record_compliance_snapshot
-        record_compliance_snapshot()
+        record_compliance_snapshot(tenant_id)
     except Exception as drift_err:
         logger.error(f"Failed to log compliance snapshot: {drift_err}")
 
@@ -370,6 +379,7 @@ Do not include markdown packaging like ```json.
         "risk_score": risk_score,
         "severity": severity,
         "status": status,
+        "alert_delivery": alert_delivery,
         "duration_ms": duration_ms,
         "findings": all_findings,
         "summary": gemini_summary

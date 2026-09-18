@@ -18,8 +18,8 @@ interface ControlScore {
   id: string;
   name: string;
   description: string;
-  score: number;
-  status: "compliant" | "partial" | "non_compliant";
+  score: number | null;
+  status: "compliant" | "partial" | "non_compliant" | "insufficient_evidence";
   evidence: string[];
   gaps: string[];
   evidence_assessment?: EvidenceAssessment;
@@ -29,7 +29,7 @@ interface ControlScore {
 interface FrameworkScore {
   calculation_version?: string;
   framework: string;
-  score: number;
+  score: number | null;
   readiness_level: string;
   controls: ControlScore[];
   metrics: {
@@ -54,7 +54,7 @@ interface TrustCenterPackage {
   };
   scores: {
     calculation_version?: string;
-    overall_score: number;
+    overall_score: number | null;
     readiness_level: string;
     frameworks: FrameworkScore[];
     generated_at: string;
@@ -81,6 +81,7 @@ interface VerifyResult {
 }
 
 const statusClass = (status: string) => {
+  if (status === "insufficient_evidence") return "border-slate-500/25 bg-slate-500/10 text-slate-300";
   if (status === "compliant") return "border-emerald-500/25 bg-emerald-500/10 text-emerald-200";
   if (status === "partial") return "border-amber-500/25 bg-amber-500/10 text-amber-100";
   return "border-red-500/25 bg-red-500/10 text-red-200";
@@ -302,12 +303,12 @@ export default function TrustCenterPage() {
             <p className="mt-2 max-w-3xl text-sm text-slate-400">
               {data.share.label} - Expires {new Date(data.share.expires_at).toLocaleString()} - Generated {new Date(data.generated_at).toLocaleString()}
             </p>
-            <p className="mt-2 text-xs text-slate-400">Calculation version: {calculationVersion(data.scores.calculation_version)} · Scores show weighted coverage of qualified control assessments. 0% means required reviewed evidence or control conditions are unmet; activity counts alone cannot establish compliance.</p>
+            <p className="mt-2 text-xs text-slate-400">Calculation version: {calculationVersion(data.scores.calculation_version)} · Scores require current reviewed evidence. Unknown means evidence is insufficient; 0% means a reviewed control failed. Activity counts cannot establish compliance.</p>
             {calculationVersion(data.scores.calculation_version) === "legacy_unversioned" && <p className="mt-1 text-xs text-amber-200">Legacy results do not establish current evidence qualification.</p>}
           </div>
           <div className="rounded-2xl border border-slate-800 bg-[#09090d] p-5 min-w-[220px]">
             <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Qualified evidence coverage</div>
-            <div className="mt-2 text-4xl font-black text-white">{data.scores.overall_score}%</div>
+            <div className="mt-2 text-4xl font-black text-white">{data.scores.overall_score == null ? "Unknown" : `${data.scores.overall_score}%`}</div>
             <div className="mt-1 text-xs font-semibold text-indigo-200">{readinessLabel(data.scores.readiness_level)}</div>
           </div>
         </header>
@@ -334,10 +335,10 @@ export default function TrustCenterPage() {
                   <div className="text-sm font-bold text-white">{framework.framework}</div>
                   <div className="mt-1 text-[10px] font-semibold uppercase text-slate-500">{readinessLabel(framework.readiness_level)}</div>
                 </div>
-                <div className="text-2xl font-black text-indigo-200">{framework.score}%</div>
+                <div className="text-2xl font-black text-indigo-200">{framework.score == null ? "Unknown" : `${framework.score}%`}</div>
               </div>
               <div className="mt-4 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                <div className="h-full rounded-full bg-indigo-500" style={{ width: `${framework.score}%` }} />
+                {framework.score != null && <div className="h-full rounded-full bg-indigo-500" style={{ width: `${framework.score}%` }} />}
               </div>
               <div className="mt-3 text-xs text-slate-500">
                 Activity diagnostics: {framework.metrics.evidence_count} records - {framework.metrics.audit_event_count} audit events - {framework.metrics.open_findings} open findings
@@ -365,7 +366,7 @@ export default function TrustCenterPage() {
                         <h3 className="text-sm font-bold text-white">{control.name}</h3>
                       </div>
                       <span className={`rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase ${statusClass(control.status)}`}>
-                        {control.status.replace("_", " ")} - {control.score}%
+                        {control.status.replaceAll("_", " ")} - {control.score == null ? "Unknown" : `${control.score}%`}
                       </span>
                     </div>
                     <p className="mt-2 text-xs leading-relaxed text-slate-400">{control.description}</p>

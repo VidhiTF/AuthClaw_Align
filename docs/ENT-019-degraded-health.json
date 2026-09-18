@@ -1,0 +1,20 @@
+{
+  "status": "degraded",
+  "scope": "trust_evidence",
+  "checks": {
+    "publication": "healthy",
+    "audit": "degraded",
+    "compliance_evidence": "healthy",
+    "queue": "healthy"
+  },
+  "trust_center": {
+    "published": true,
+    "signature_valid": true,
+    "cache": {}
+  },
+  "runtime": {
+    "audit_status": {
+      "valid": false
+    }
+  }
+}

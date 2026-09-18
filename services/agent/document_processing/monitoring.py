@@ -226,7 +226,7 @@ def sync_sources():
                     # Trigger snap to alert on drift drop
                     try:
                         from document_processing.drift import record_compliance_snapshot
-                        record_compliance_snapshot()
+                        record_compliance_snapshot(tenant_id)
                     except Exception as drift_err:
                         logger.error(f"Failed to record compliance snapshot: {drift_err}")
             

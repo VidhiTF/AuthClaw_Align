@@ -287,6 +287,8 @@ jobs:
           tests/test_review_otp_postgres.py
       - name: Run destructive PostgreSQL suites serially
         working-directory: backend
+        env:
+          ENT019_TEST_DATABASE_URL: ${{ env.OWNER_DATABASE_URL }}
         run: >-
           ../.ci-backend-integration/bin/python -m pytest -p no:cacheprovider -q
           tests/test_db_safety.py
@@ -302,6 +304,7 @@ jobs:
           tests/test_worker_lifecycle_postgres.py
           tests/test_workflow_advisory_lock_postgres.py
           tests/test_t10_postgres.py
+          tests/test_audit_metrics.py
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -344,6 +347,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
+      postgres:
+        image: postgres:16.10-alpine@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
+        env:
+          POSTGRES_PASSWORD: ent019-test-only
+          POSTGRES_DB: ent019_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ent019_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
       redis:
         image: redis:7.4.7-alpine@sha256:02f2cc4882f8bf87c79a220ac958f58c700bdec0dfb9b9ea61b62fb0e8f1bfcf
         ports:
@@ -354,6 +369,7 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
+      ENT019_TEST_DATABASE_URL: postgresql+psycopg2://postgres:ent019-test-only@127.0.0.1:5432/ent019_test
       ENT018_REDIS_URL: redis://localhost:6379
       QUOTA_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
@@ -374,6 +390,7 @@ jobs:
           cd services/agent
           ../../.ci-agent/bin/python -m pytest --noconftest -p no:cacheprovider \
             tests/test_sensitive_data_detection.py tests/test_audit_transport_contract.py \
+            smoke_tests/test_truthful_telemetry.py smoke_tests/test_telemetry_tenant_postgres.py smoke_tests/test_queue_health.py \
             smoke_tests/test_control_plane_auth.py smoke_tests/test_agent_execution_authorization.py \
             smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py \
             smoke_tests/test_quota_service.py smoke_tests/test_quota_http_boundary.py \
