@@ -27,6 +27,7 @@ class AuthState(TypedDict, total=False):
     decision: str
     decision_reason: str
     username: str
+    requester_id: str
     original_request_id: Optional[str]
 
     # Policy Check
@@ -76,7 +77,7 @@ class AuthState(TypedDict, total=False):
 GRAPH_STATE_CONTRACT = {
     "inputs": {
         "message", "session_id", "request_id", "correlation_id", "tenant_id",
-        "username", "original_request_id", "gateway_api_key", "route_id",
+        "username", "requester_id", "original_request_id", "gateway_api_key", "route_id",
         "provider", "model", "approval_id", "approval_status",
     },
     "node_outputs": {
@@ -90,7 +91,7 @@ GRAPH_STATE_CONTRACT = {
     },
     "caller_outputs": {
         "request_id", "correlation_id", "original_request_id", "tenant_id",
-        "username", "allowed", "block_reason", "block_category", "risk_level",
+        "username", "requester_id", "allowed", "block_reason", "block_category", "risk_level",
         "decision", "approval_id", "approval_status", "approval_reason",
         "policy_versions", "provider", "model", "route_id", "response",
         "provider_status", "provider_error", "audit_record_id",

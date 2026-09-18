@@ -113,9 +113,9 @@ def load_and_validate_policy(filepath: str) -> dict:
     require_mfa = approval_raw.get("require_mfa", True)
     if not isinstance(require_mfa, bool):
         raise ValueError("approval.require_mfa must be a boolean (true or false).")
-    default_mfa_code = str(approval_raw.get("default_mfa_code", "123456")).strip()
-    if not default_mfa_code:
-        raise ValueError("approval.default_mfa_code must be a non-empty string.")
+    require_separate_approver = approval_raw.get("require_separate_approver", True)
+    if not isinstance(require_separate_approver, bool):
+        raise ValueError("approval.require_separate_approver must be a boolean (true or false).")
     expiry_minutes = approval_raw.get("expiry_minutes", 30)
     if not isinstance(expiry_minutes, (int, float)) or expiry_minutes <= 0:
         raise ValueError("approval.expiry_minutes must be a positive number.")
@@ -174,7 +174,7 @@ def load_and_validate_policy(filepath: str) -> dict:
         "redaction": redaction_rules,
         "approval": {
             "require_mfa": require_mfa,
-            "default_mfa_code": default_mfa_code,
+            "require_separate_approver": require_separate_approver,
             "expiry_minutes": int(expiry_minutes),
             "execution_expiry_minutes": int(execution_expiry_minutes),
         },

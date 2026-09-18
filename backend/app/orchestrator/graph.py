@@ -84,6 +84,7 @@ class ComplianceState(TypedDict, total=False):
     workflow_id: str
     tenant_id: str
     request_id: str
+    requester_id: str
     framework: str  # GDPR, HIPAA, SOC2
     current_state: str
     findings: list[dict]

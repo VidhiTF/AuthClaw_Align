@@ -9,7 +9,7 @@ from unittest.mock import Mock, mock_open, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services.quota_service import QuotaExceeded, QuotaUnavailable
-from services.tenant_context import get_current_tenant_id, tenant_context
+from services.tenant_context import get_current_request_id, get_current_tenant_id, tenant_context
 
 
 class MonitoringQuotaTests(unittest.TestCase):
@@ -17,14 +17,15 @@ class MonitoringQuotaTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / "document_processing/monitoring.py"
         nodes = [node for node in ast.parse(source.read_text()).body
                  if isinstance(node, ast.FunctionDef) and node.name in
-                 {"sync_sources", "trigger_manual_sync", "start_background_monitoring", "_monitor_loop"}]
+                 {"_scan_request_context", "sync_sources", "trigger_manual_sync", "start_background_monitoring", "_monitor_loop"}]
         self.conn = Mock()
         self.conn.execute.return_value.fetchone.return_value = (1, 2, "completed")
         self.conn.execute.return_value.fetchall.return_value = []
         self.engine = Mock()
         self.engine.connect.return_value.__enter__ = Mock(return_value=self.conn)
         self.engine.connect.return_value.__exit__ = Mock(return_value=False)
-        self.ns = {"get_current_tenant_id": get_current_tenant_id,
+        self.ns = {"get_current_request_id": get_current_request_id,
+                   "get_current_tenant_id": get_current_tenant_id,
                    "QuotaExceeded": QuotaExceeded, "QuotaUnavailable": QuotaUnavailable,
                    "record_unavailable": Mock(), "engine": self.engine, "text": lambda value: value,
                    "get_watched_directory": Mock(), "WATCH_DIR": "fixture",
@@ -35,7 +36,8 @@ class MonitoringQuotaTests(unittest.TestCase):
                    "datetime": datetime, "timezone": timezone, "last_sync_time": "N/A",
                    "tenant_context": tenant_context, "threading": threading,
                    "_monitor_thread": None,
-                   "_stop_event": Mock(), "time": Mock()}
+                   "_stop_event": Mock(), "time": Mock(),
+                   "MONITOR_REQUESTER_ID": "service:document-monitor"}
         self.monitor_state = {"enabled": False, "status": "disabled",
                               "tenant_configured": False, "failures_total": 0,
                               "last_error_type": None, "last_success_timestamp": None}
@@ -76,14 +78,19 @@ class MonitoringQuotaTests(unittest.TestCase):
         for failure in (QuotaExceeded("expensive_model"), QuotaUnavailable("Redis unavailable")):
             self.ns["run_document_scan_pipeline"].side_effect = failure
             with tenant_context(7), self.assertRaises(type(failure)):
-                self.ns["trigger_manual_sync"]()
+                self.ns["trigger_manual_sync"]("oidc|manual-requester")
             self.assertEqual(self.ns["last_sync_time"], "N/A")
             self.ns["list_cloud_source_files"].assert_not_called()
 
     def test_manual_passes_verified_tenant_and_scopes_queries(self):
         with tenant_context(7):
-            self.assertEqual(self.ns["trigger_manual_sync"]()["status"], "success")
+            self.assertEqual(self.ns["trigger_manual_sync"]("oidc|manual-requester")["status"], "success")
         self.assertEqual(self.ns["run_document_scan_pipeline"].call_args.kwargs["tenant_id"], "7")
+        self.assertEqual(
+            self.ns["run_document_scan_pipeline"].call_args.kwargs["requested_by"],
+            "oidc|manual-requester",
+        )
+        self.assertTrue(self.ns["run_document_scan_pipeline"].call_args.kwargs["request_id"])
         for call in self.conn.execute.call_args_list:
             self.assertIn("tenant_id = :tenant_id", call.args[0])
             self.assertEqual(call.args[1]["tenant_id"], "7")
@@ -92,7 +99,17 @@ class MonitoringQuotaTests(unittest.TestCase):
         self.ns["os"].listdir.return_value = []
         self.ns["list_cloud_source_files"].side_effect = QuotaUnavailable("quota unavailable")
         with tenant_context(7), self.assertRaises(QuotaUnavailable):
-            self.ns["trigger_manual_sync"]()
+            self.ns["trigger_manual_sync"]("oidc|manual-requester")
+
+    def test_manual_sync_rejects_missing_requester_identity(self):
+        with tenant_context(7), self.assertRaises(ValueError):
+            self.ns["trigger_manual_sync"]("")
+        self.ns["run_document_scan_pipeline"].assert_not_called()
+
+    def test_autonomous_scan_uses_monitor_service_identity(self):
+        context = self.ns["_scan_request_context"](71)
+        self.assertEqual(context["requested_by"], "service:document-monitor")
+        self.assertTrue(context["request_id"])
         self.assertEqual(self.ns["last_sync_time"], "N/A")
 
 

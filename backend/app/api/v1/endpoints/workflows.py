@@ -12,7 +12,6 @@ Provides REST endpoints for managing LangGraph compliance workflows:
 import logging
 import uuid
 from typing import Annotated, Literal, Optional
-import pyotp
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Discriminator, Field, Tag, TypeAdapter, ValidationError, field_validator
@@ -22,7 +21,6 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.auth import (
     get_tenant_db,
     require_scopes,
-    set_mfa_credentials,
 )
 from app.api.v1.endpoints.onboarding import _get_redis
 from app.core.startup_checks import is_production
@@ -160,6 +158,36 @@ def _approval_response(approval: PendingApproval) -> GatewayApprovalResponse:
     )
 
 
+def _enforce_separate_approver(
+    db: Session,
+    approval: PendingApproval,
+    tenant_id: str,
+    actor_id: uuid.UUID,
+) -> None:
+    """Reject maker/checker conflicts without resolving the pending approval."""
+    if approval.requester_id != actor_id:
+        return
+    db.add(
+        ApprovalAudit(
+            id=uuid.uuid4(),
+            tenant_id=uuid.UUID(tenant_id),
+            approval_id=approval.id,
+            actor_id=actor_id,
+            action="SELF_APPROVAL_REJECTED",
+            action_hash=approval.action_hash,
+            reason="The requesting actor cannot approve this privileged action",
+            details={"action_id": approval.action_id, "action_type": approval.action_type},
+            mfa_verified=False,
+            mfa_timestamp=None,
+        )
+    )
+    db.commit()
+    raise HTTPException(
+        status_code=403,
+        detail="A privileged action must be approved by a different authorized user",
+    )
+
+
 def _tenant_tier(db: Session, tenant_id: str) -> str:
     tenant = db.query(Tenant).filter(Tenant.id == uuid.UUID(tenant_id)).first()
     return tenant.tier if tenant else "starter"
@@ -190,6 +218,7 @@ def create_workflow(
         result = runner.start(
             tenant_id=tenant_id,
             framework=framework,
+            requester_id=str(request.state.user_id),
             request_id=body.request_id,
         )
     except Exception as exc:
@@ -315,14 +344,20 @@ def _verify_mfa_if_enabled(
             )
         return False, None
 
-    # Collect TOTP code from body → query param → header (in that priority order)
-    totp_code: Optional[str] = None
-    if body:
-        totp_code = body.totp_code
-    if not totp_code:
-        totp_code = request.query_params.get("totp_code")
-    if not totp_code:
-        totp_code = request.headers.get("X-MFA-Code") or request.headers.get("X-TOTP-Code")
+    header_names = {str(name).lower() for name in request.headers.keys()}
+    if (
+        "totp_code" in request.query_params
+        or "x-mfa-code" in header_names
+        or "x-totp-code" in header_names
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="MFA credentials must be provided in the JSON request body",
+        )
+
+    # Secrets are accepted only in the request body so URLs and headers cannot
+    # retain them in proxy, access-log, or APM metadata.
+    totp_code = body.totp_code if body else None
 
     if not totp_code:
         raise HTTPException(
@@ -367,36 +402,11 @@ def mfa_setup(
     db: Session = Depends(get_tenant_db),
     _auth=require_scopes(["admin"]),
 ):
-    """Generate TOTP secret and 5 backup codes for the current admin user."""
-    user_id = request.state.user_id
-    user = db.query(User).filter(User.id == user_id).with_for_update().first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if user.mfa_enabled:
-        if not body or not body.totp_code:
-            raise HTTPException(status_code=400, detail="Current MFA token or backup code required")
-        if not verify_mfa_challenge(
-            _get_redis(), user, body.totp_code,
-            tenant_id=str(user.tenant_id), operation="mfa_replace",
-            request_id=request.headers.get("x-request-id", ""),
-        ):
-            raise HTTPException(status_code=400, detail="Current MFA token or backup code required")
-        
-    secret = pyotp.random_base32()
-    backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(5)]
-    
-    set_mfa_credentials(user, secret, backup_codes)
-    db.commit()
-    
-    totp = pyotp.TOTP(secret)
-    uri = totp.provisioning_uri(name=user.email, issuer_name="AuthClaw")
-    
-    return {
-        "mfa_secret": secret,
-        "provisioning_uri": uri,
-        "backup_codes": backup_codes,
-        "mfa_enabled": True
-    }
+    """Retired unsafe one-step enrollment path."""
+    raise HTTPException(
+        status_code=410,
+        detail="Use /v1/users/me/mfa/setup and /v1/users/me/mfa/confirm",
+    )
 
 
 @router.post("/approvals/expire-stale", status_code=200)
@@ -455,11 +465,12 @@ def approve_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).first()
+    ).with_for_update().first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
         raise HTTPException(status_code=400, detail=f"Approval already resolved: {approval.status}")
+    _enforce_separate_approver(db, approval, tenant_id, user_id)
 
     # Verify MFA for the approving user (enforced when MFA is enabled on their account)
     user = db.query(User).filter(
@@ -469,7 +480,7 @@ def approve_gateway_approval(
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
-        user, request, body, operation="gateway_approval"
+        user, request, body, required=True, operation="gateway_approval"
     )
 
     approval.status = "APPROVED"
@@ -604,7 +615,7 @@ def approve_workflow(
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_id == workflow_id,
         PendingApproval.action_type == "remediation",
-    ).first()
+    ).with_for_update().first()
     
     if not approval:
         raise HTTPException(status_code=404, detail="Approval record not found")
@@ -614,6 +625,7 @@ def approve_workflow(
             status_code=400,
             detail=f"Approval request is already resolved (status={approval.status})",
         )
+    _enforce_separate_approver(db, approval, tenant_id, user_id)
 
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
@@ -818,6 +830,26 @@ def remediate_workflow(
             status_code=400,
             detail="No remediation plan is available for this workflow",
         )
+
+    state_data = dict(wf.state_data or {})
+    workflow_requester_id = str(state_data.get("requester_id") or "").strip()
+    try:
+        uuid.UUID(workflow_requester_id)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(
+            status_code=409,
+            detail="Workflow requester identity is unavailable; remediation is denied",
+        )
+
+    remediation_requester_id = str(request.state.user_id)
+    existing_remediation_requester = str(
+        state_data.get("remediation_requester_id") or ""
+    ).strip()
+    if existing_remediation_requester and existing_remediation_requester != remediation_requester_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Workflow remediation requester identity is immutable",
+        )
     allowed, retry_after = check_worker_throttle(tenant_id, "remediation", tier=_tenant_tier(db, tenant_id))
     if not allowed:
         raise HTTPException(status_code=429, detail=f"Remediation worker throttle exceeded. Retry after {retry_after:.0f}s.")
@@ -829,7 +861,7 @@ def remediate_workflow(
         tenant_id,
         workflow_id,
         wf.remediation_plan,
-        requester_id=str(request.state.user_id),
+        requester_id=remediation_requester_id,
     )
 
     # Transition workflow to PAUSED/AWAITING_APPROVAL
@@ -839,9 +871,9 @@ def remediate_workflow(
     wf.approval_id = uuid.UUID(approval_id)
 
     # Update state_data
-    state_data = wf.state_data or {}
     state_data.update({
         "current_state": "AWAITING_APPROVAL",
+        "remediation_requester_id": remediation_requester_id,
         "execution_status": "PAUSED",
         "remediation_state": "NOT_STARTED",
         "remediation_actions": [],
@@ -884,7 +916,7 @@ def recover_workflows(
     tenant_id = str(request.state.tenant_id)
 
     runner = ComplianceWorkflowRunner(db)
-    results = runner.recover_interrupted(tenant_id)
+    results = runner.recover_interrupted(tenant_id, actor_id=str(request.state.user_id))
 
     return RecoveryResponse(
         recovered=len([r for r in results if r["status"] == "recovered"]),

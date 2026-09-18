@@ -40,6 +40,7 @@ def api(monkeypatch):
     for model in (Tenant, User, PendingApproval, ComplianceWorkflow, ApprovalAudit, Policy, EvidenceRecord, Finding):
         model.__table__.create(engine)
     tenant, user = uuid4(), uuid4()
+    reviewer_id = uuid4()
     payload = workflow(
         findings=[{"control": "doc", "evidence": "Entities: EMAIL_ADDRESS", "entity_count": 1}],
         remediation_plan=_plan(),
@@ -48,11 +49,14 @@ def api(monkeypatch):
         rollback_result={},
     )
     payload["tenant_id"] = str(tenant)
+    payload["requester_id"] = str(user)
     with Session(engine) as db:
         db.add(Tenant(id=tenant, name="contract-test"))
         db.add(
             User(id=user, tenant_id=tenant, email="reviewer@example.invalid", role="admin", is_active=True)
         )
+        db.add(User(id=reviewer_id, tenant_id=tenant, email="separate-reviewer@example.invalid",
+                    role="admin", is_active=True))
         db.add(
             ComplianceWorkflow(
                 id=uuid4(),
@@ -92,7 +96,8 @@ def api(monkeypatch):
     monkeypatch.setattr(runner, "emit_audit_event", lambda *_args, **_kw: None)
     monkeypatch.setattr(runner, "workflow_advisory_lock", lambda *_args: nullcontext())
     with TestClient(app, raise_server_exceptions=False) as client:
-        yield SimpleNamespace(client=client, engine=engine, identity=identity, payload=payload)
+        yield SimpleNamespace(client=client, engine=engine, identity=identity, payload=payload,
+                              reviewer_id=reviewer_id)
     engine.dispose()
 
 
@@ -117,6 +122,7 @@ def test_route_contract_and_sanitized_post_commit_errors(
 ):
     if operation in {"approve", "reject"}:
         assert request_operation(api, prefix, "remediate").status_code == 200
+        api.identity["user_id"] = api.reviewer_id
     payload = deepcopy(api.payload)
     if invalid:
         payload["findings"] = [{"entity_count": "private-marker"}]
@@ -232,6 +238,7 @@ def test_other_tenant_cannot_read_or_change_workflow(api, operation):
 
 def test_fresh_mfa_denial_still_precedes_approval(api, monkeypatch):
     assert request_operation(api, "/v1", "remediate").status_code == 200
+    api.identity["user_id"] = api.reviewer_id
     monkeypatch.setattr(workflows, "_verify_mfa_if_enabled", lambda *_args, **_kw: (False, None))
     assert request_operation(api, "/v1", "approve").status_code == 403
     with Session(api.engine) as db:
@@ -253,7 +260,8 @@ def test_all_workflow_producers_remain_readable(api, monkeypatch, prefix, refuse
     responses = {probe["id"]: "Sorry, I cannot do that." for probe in red_team.PROBES} if refused else {}
     tenant_id = str(api.identity["tenant_id"])
     with Session(api.engine) as db:
-        compliance = runner.ComplianceWorkflowRunner(db).start(tenant_id, "GDPR")
+        compliance = runner.ComplianceWorkflowRunner(db).start(
+            tenant_id, "GDPR", requester_id=str(api.identity["user_id"]))
         produced = red_team.run(db, tenant_id, responses)
         red_id = produced["run"]["workflow_id"]
         row = db.query(ComplianceWorkflow).filter_by(workflow_id=red_id).one()

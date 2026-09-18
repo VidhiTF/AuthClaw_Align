@@ -84,6 +84,6 @@ opa:
 
 approval:
   require_mfa: true
-  default_mfa_code: "123456"
+  require_separate_approver: true
   expiry_minutes: 30
   execution_expiry_minutes: 10

@@ -14,8 +14,9 @@ from app.db.models import User
 @pytest.fixture
 def mfa_user(monkeypatch):
     # SQLite exercises ORM refresh/commit semantics; PostgreSQL tests prove locking/RLS.
-    column = User.__table__.c.mfa_backup_codes
-    monkeypatch.setattr(column, "type", column.type.with_variant(JSON(), "sqlite"))
+    for name in ("mfa_backup_codes", "mfa_pending_backup_codes"):
+        column = User.__table__.c[name]
+        monkeypatch.setattr(column, "type", column.type.with_variant(JSON(), "sqlite"))
     monkeypatch.setenv("AUTHCLAW_SECRET_PROVIDER", "env")
     monkeypatch.setenv("ENVELOPE_KEY", "test-mfa-encryption-key-32-bytes!!")
     monkeypatch.setenv("API_KEY_HASH_SECRET", "test-mfa-backup-key")

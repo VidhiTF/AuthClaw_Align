@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
 import os
@@ -13,10 +14,13 @@ from app.db.models import APIKey, OnboardingEmailOTP, Tenant, User
 from app.schemas.models import UserCreate, UserInviteRequest, UserInviteResponse, UserResponse
 from app.core.auth import (
     get_tenant_db,
+    hash_key,
     require_roles,
     require_scopes,
-    set_mfa_credentials,
+    require_interactive_session,
+    revalidate_tenant_credential,
 )
+from app.core.crypto import decrypt_secret, encrypt_secret
 from app.api.v1.endpoints.onboarding import (
     OTP_TTL_MINUTES,
     _deliver_otp,
@@ -28,6 +32,7 @@ from app.api.v1.endpoints.onboarding import (
 )
 from app.services.abuse_controls import verify_mfa_challenge
 from app.services.email_service import EmailDeliveryError
+from app.services import event_backbone
 
 router = APIRouter()
 
@@ -49,6 +54,7 @@ class MFASecurityResponse(BaseModel):
     email: str
     role: str
     mfa_enabled: bool
+    enrollment_pending: bool = False
 
 
 class MFASetupResponse(MFASecurityResponse):
@@ -64,6 +70,51 @@ class MFASetupRequest(BaseModel):
 
 class MFADisableRequest(BaseModel):
     code: str = Field(min_length=6, max_length=64)
+
+
+class MFAConfirmRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class MFARecoveryCodesResponse(BaseModel):
+    backup_codes: list[str]
+
+
+class MFAAdminResetRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=64)
+
+
+def _commit_mfa_audit(
+    db: Session,
+    request: Request,
+    *,
+    action: str,
+    subject_id: UUID,
+    reason: str,
+) -> None:
+    tenant_id = str(request.state.tenant_id)
+    request_id = request.headers.get("x-request-id", "")
+    event = event_backbone.audit_event(
+        event_type="authentication",
+        tenant_id=tenant_id,
+        subject_id=str(subject_id),
+        identity_action=f"mfa:{action}",
+        action=f"mfa:{action}",
+        reason=reason,
+        provider="totp",
+        request_id=request_id,
+        actor_id=str(request.state.user_id),
+        # The canonical outbox persists execution_trace, not top-level extras.
+        trace=[f"subject_id:{subject_id}"],
+    )
+    event["subject_id"] = str(subject_id)
+    event["result"] = "success"
+    event["response_status"] = 200
+    if event_backbone.publish_audit_event(None, tenant_id, event, db=db):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MFA change could not be recorded",
+        )
 
 
 @router.get("", response_model=list[UserResponse], dependencies=[require_roles(["owner", "admin"])])
@@ -87,6 +138,11 @@ def get_my_security(request: Request, db: Session = Depends(get_tenant_db)):
         email=user.email,
         role=user.role,
         mfa_enabled=bool(user.mfa_enabled),
+        enrollment_pending=bool(
+            user.mfa_pending_secret
+            and user.mfa_pending_expires_at
+            and user.mfa_pending_expires_at > datetime.now(timezone.utc)
+        ),
     )
 
 
@@ -97,10 +153,12 @@ def setup_my_mfa(
     db: Session = Depends(get_tenant_db),
 ):
     """Enable TOTP MFA for approval-sensitive console actions."""
+    require_interactive_session(request)
     user = db.query(User).filter(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
     ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if user.mfa_enabled:
@@ -116,8 +174,16 @@ def setup_my_mfa(
 
     secret = pyotp.random_base32()
     backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(5)]
-    set_mfa_credentials(user, secret, backup_codes)
-    db.commit()
+    user.mfa_pending_secret = encrypt_secret(secret)
+    user.mfa_pending_last_totp_step = None
+    user.mfa_pending_backup_codes = [
+        hash_key(f"mfa-backup:{code.lower()}") for code in backup_codes
+    ]
+    user.mfa_pending_expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    _commit_mfa_audit(
+        db, request, action="enrollment_started", subject_id=user.id,
+        reason="pending_factor_created",
+    )
 
     totp = pyotp.TOTP(secret)
     uri = totp.provisioning_uri(name=user.email, issuer_name="AuthClaw Lite")
@@ -135,7 +201,8 @@ def setup_my_mfa(
         user_id=user.id,
         email=user.email,
         role=user.role,
-        mfa_enabled=True,
+        mfa_enabled=bool(user.mfa_enabled),
+        enrollment_pending=True,
         mfa_secret=secret,
         provisioning_uri=uri,
         backup_codes=backup_codes,
@@ -143,17 +210,82 @@ def setup_my_mfa(
     )
 
 
-@router.post("/me/mfa/disable", response_model=MFASecurityResponse)
-def disable_my_mfa(body: MFADisableRequest, request: Request, db: Session = Depends(get_tenant_db)):
-    """Disable TOTP MFA for the current console principal."""
+@router.post("/me/mfa/confirm", response_model=MFASecurityResponse)
+def confirm_my_mfa(
+    body: MFAConfirmRequest,
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+):
+    """Confirm possession of a pending TOTP factor before activating it."""
+    require_interactive_session(request)
     user = db.query(User).filter(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
     ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    now = datetime.now(timezone.utc)
+    expires_at = user.mfa_pending_expires_at
+    if not user.mfa_pending_secret or not expires_at or expires_at <= now:
+        user.mfa_pending_secret = None
+        user.mfa_pending_last_totp_step = None
+        user.mfa_pending_backup_codes = None
+        user.mfa_pending_expires_at = None
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="MFA enrollment is missing or expired",
+        )
+
+    if not verify_mfa_challenge(
+        _get_redis(), user, body.code,
+        tenant_id=str(user.tenant_id), operation="mfa_enrollment_confirm",
+        request_id=request.headers.get("x-request-id", ""),
+        pending_enrollment=True,
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid MFA token")
+
+    user.mfa_secret = user.mfa_pending_secret
+    user.mfa_backup_codes = list(user.mfa_pending_backup_codes or [])
+    user.mfa_last_totp_step = user.mfa_pending_last_totp_step
+    user.mfa_enabled = True
+    user.mfa_enrolled_at = now
+    user.mfa_pending_secret = None
+    user.mfa_pending_last_totp_step = None
+    user.mfa_pending_backup_codes = None
+    user.mfa_pending_expires_at = None
+    _commit_mfa_audit(
+        db, request, action="enrollment_confirmed", subject_id=user.id,
+        reason="totp_possession_confirmed",
+    )
+    return MFASecurityResponse(
+        user_id=user.id,
+        email=user.email,
+        role=user.role,
+        mfa_enabled=True,
+        enrollment_pending=False,
+    )
+
+
+@router.post("/me/mfa/disable", response_model=MFASecurityResponse)
+def disable_my_mfa(body: MFADisableRequest, request: Request, db: Session = Depends(get_tenant_db)):
+    """Disable TOTP MFA for the current console principal."""
+    require_interactive_session(request)
+    user = db.query(User).filter(
+        User.id == request.state.user_id,
+        User.tenant_id == request.state.tenant_id,
+    ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if not user.mfa_enabled or not user.mfa_secret:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
+    if user.role in {"owner", "admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Privileged MFA must be recovered by a separate owner",
+        )
 
     code = body.code.strip()
     if not verify_mfa_challenge(
@@ -166,12 +298,127 @@ def disable_my_mfa(body: MFADisableRequest, request: Request, db: Session = Depe
     user.mfa_enabled = False
     user.mfa_secret = None
     user.mfa_backup_codes = None
-    db.commit()
+    user.mfa_last_totp_step = None
+    user.mfa_pending_secret = None
+    user.mfa_pending_last_totp_step = None
+    user.mfa_pending_backup_codes = None
+    user.mfa_pending_expires_at = None
+    user.mfa_enrolled_at = None
+    _commit_mfa_audit(
+        db, request, action="disabled", subject_id=user.id,
+        reason="current_factor_verified",
+    )
     return MFASecurityResponse(
         user_id=user.id,
         email=user.email,
         role=user.role,
         mfa_enabled=False,
+        enrollment_pending=False,
+    )
+
+
+@router.post("/me/mfa/recovery-codes", response_model=MFARecoveryCodesResponse)
+def regenerate_my_mfa_recovery_codes(
+    body: MFADisableRequest,
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+):
+    """Replace recovery codes after a rate-limited fresh MFA challenge."""
+    require_interactive_session(request)
+    user = db.query(User).filter(
+        User.id == request.state.user_id,
+        User.tenant_id == request.state.tenant_id,
+    ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
+    if not user or not user.mfa_enabled or not user.mfa_secret:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
+    if not verify_mfa_challenge(
+        _get_redis(), user, body.code.strip(),
+        tenant_id=str(user.tenant_id), operation="mfa_recovery_codes",
+        request_id=request.headers.get("x-request-id", ""),
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid MFA token or backup code")
+
+    backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(5)]
+    user.mfa_backup_codes = [
+        hash_key(f"mfa-backup:{code.lower()}") for code in backup_codes
+    ]
+    _commit_mfa_audit(
+        db, request, action="recovery_codes_regenerated", subject_id=user.id,
+        reason="current_factor_verified",
+    )
+    return MFARecoveryCodesResponse(backup_codes=backup_codes)
+
+
+@router.post(
+    "/{id}/mfa/reset",
+    response_model=MFASecurityResponse,
+    dependencies=[require_roles(["owner"]), require_scopes(["admin"])],
+)
+def reset_user_mfa(
+    id: UUID,
+    body: MFAAdminResetRequest,
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+):
+    """Reset a lost factor and revoke the target's sessions and API keys atomically."""
+    require_interactive_session(request)
+    actor_id = UUID(str(request.state.user_id))
+    if id == actor_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="MFA recovery requires a separate owner",
+        )
+    locked_users = db.query(User).filter(
+        User.tenant_id == request.state.tenant_id,
+        User.id.in_([actor_id, id]),
+    ).order_by(User.id).with_for_update().all()
+    revalidate_tenant_credential(request, db)
+    users_by_id = {user.id: user for user in locked_users}
+    actor = users_by_id.get(actor_id)
+    target = users_by_id.get(id)
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if not actor or actor.role != "owner" or not actor.mfa_enabled or not actor.mfa_secret:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner MFA is required")
+    if not verify_mfa_challenge(
+        _get_redis(), actor, body.code.strip(),
+        tenant_id=str(actor.tenant_id), operation="mfa_admin_recovery",
+        request_id=request.headers.get("x-request-id", ""),
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid owner MFA token or backup code")
+
+    target.mfa_enabled = False
+    target.mfa_secret = None
+    target.mfa_backup_codes = None
+    target.mfa_last_totp_step = None
+    target.mfa_pending_secret = None
+    target.mfa_pending_last_totp_step = None
+    target.mfa_pending_backup_codes = None
+    target.mfa_pending_expires_at = None
+    target.mfa_enrolled_at = None
+    db.execute(
+        text("SELECT authn.revoke_user_sessions(:tenant_id, :user_id)"),
+        {"tenant_id": target.tenant_id, "user_id": target.id},
+    )
+    db.query(APIKey).filter(
+        APIKey.tenant_id == target.tenant_id,
+        APIKey.created_by == target.id,
+        APIKey.is_active.is_(True),
+    ).update(
+        {"is_active": False, "revoked_at": datetime.now(timezone.utc)},
+        synchronize_session=False,
+    )
+    _commit_mfa_audit(
+        db, request, action="recovery_reset", subject_id=target.id,
+        reason="separate_owner_verified",
+    )
+    return MFASecurityResponse(
+        user_id=target.id,
+        email=target.email,
+        role=target.role,
+        mfa_enabled=False,
+        enrollment_pending=False,
     )
 
 

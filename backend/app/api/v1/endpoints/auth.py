@@ -32,12 +32,14 @@ from app.api.v1.endpoints.onboarding import (
 from app.core.passwords import hash_password, validate_password, verify_password
 from app.core.crypto import get_session_key_ring
 from app.core.bff_client_ip import authenticate_bff_client_ip
-from app.core.auth import get_tenant_db, hash_key as _api_key_hash, require_roles, require_scopes
+from app.core.auth import (get_tenant_db, hash_key as _api_key_hash, require_roles,
+                           require_scopes, require_interactive_session, revalidate_tenant_credential)
 from app.db.models import APIKey, OnboardingEmailOTP, Tenant, TenantOIDCConfig, User
 from app.services.email_service import EmailDeliveryError
 
 from app.core.oidc import oidc_config
 from app.services import event_backbone, oidc_sso, oidc_transactions
+from app.services.abuse_controls import verify_mfa_challenge
 
 router = APIRouter()
 logger = logging.getLogger("api.auth")
@@ -132,6 +134,25 @@ class CurrentUserResponse(BaseModel):
     scopes: list[str]
     mfa_enabled: bool
     is_active: bool
+
+
+class AgentMFAAssertionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(min_length=6, max_length=64)
+    method: str = Field(pattern=r"^POST$")
+    path: str = Field(
+        min_length=10,
+        max_length=300,
+        pattern=r"^/(?:approve|execute)/[A-Za-z0-9._:-]+$",
+    )
+    body_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class AgentMFAAssertionResponse(BaseModel):
+    verified_at: int
+    operation: str
+    body_sha256: str
+    assertion_id: str
 
 
 class PasswordResetRequest(BaseModel):
@@ -633,6 +654,72 @@ def current_user(request: Request, db: Session = Depends(get_db)):
         scopes=list(request.state.scopes),
         mfa_enabled=bool(user.mfa_enabled),
         is_active=bool(user.is_active),
+    )
+
+
+@router.post("/mfa/agent-assertion", response_model=AgentMFAAssertionResponse)
+def create_agent_mfa_assertion(
+    payload: AgentMFAAssertionRequest,
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+):
+    """Verify the control-plane factor before the console signs an agent action."""
+    require_interactive_session(request)
+    user = db.query(User).filter(
+        User.id == request.state.user_id,
+        User.tenant_id == request.state.tenant_id,
+    ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
+    if not user or not user.mfa_enabled or not user.mfa_secret:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="MFA enrollment is required for privileged agent actions",
+        )
+    operation = f"{payload.method} {payload.path}"
+    if not verify_mfa_challenge(
+        _get_redis(),
+        user,
+        payload.code,
+        tenant_id=str(request.state.tenant_id),
+        operation="agent_approval" if payload.path.startswith("/approve/") else "agent_execution",
+        request_id=request.headers.get("x-request-id", ""),
+    ):
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Invalid MFA token or backup code")
+
+    verified_at = int(datetime.now(timezone.utc).timestamp())
+    assertion_id = secrets.token_hex(16)
+    event = event_backbone.audit_event(
+        event_type="authentication",
+        tenant_id=str(request.state.tenant_id),
+        subject_id=str(request.state.user_id),
+        identity_action=f"mfa:agent_assertion:{assertion_id}",
+        action="mfa:agent_assertion_issued",
+        reason=operation,
+        provider="control-plane-mfa",
+        request_id=request.headers.get("x-request-id", ""),
+        actor_id=str(request.state.user_id),
+        trace=[],
+    )
+    event.update({
+        "result": "success",
+        "response_status": 200,
+        "body_sha256": payload.body_sha256,
+    })
+    if event_backbone.publish_audit_event(
+        None, str(request.state.tenant_id), event, db=db
+    ):
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MFA assertion could not be recorded",
+        )
+    db.commit()
+    return AgentMFAAssertionResponse(
+        verified_at=verified_at,
+        operation=operation,
+        body_sha256=payload.body_sha256,
+        assertion_id=assertion_id,
     )
 
 
