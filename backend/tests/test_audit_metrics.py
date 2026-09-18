@@ -51,27 +51,29 @@ def test_metrics_cover_full_window_and_only_tenant_gateway_requests(monkeypatch)
             request = SimpleNamespace(state=SimpleNamespace(tenant_id=tenant))
             result = audit.get_audit_metrics(request, db=conn, hours=24)
             assert result["source"] == "postgres"
-            assert result["complete"] is True
-            assert result["totalRequests"] == 201
-            assert result["redactions24h"] == 1
-            assert result["p99LatencyMs"] == 198
-            assert result["requestsPerSec"] == pytest.approx(201 / 86400)
+            assert result["complete"] is False and result["status"] == "unknown"
+            assert all(result[key] is None for key in ("totalRequests", "redactions24h", "p99LatencyMs", "requestsPerSec"))
+            assert result["observations"] == {"scope": "persisted_gateway_events_only",
+                "distinctRequestIds": 201, "redactedRequestIds": 1, "providerOutcomeP99Ms": 198}
             conn.execute(text("DELETE FROM audit_log_metadata WHERE tenant_id = :tenant"), {"tenant": tenant})
             result = audit.get_audit_metrics(request, db=conn, hours=24)
-            assert result["totalRequests"] == result["requestsPerSec"] == result["redactions24h"] == 0
+            assert result["totalRequests"] is result["requestsPerSec"] is result["redactions24h"] is None
+            assert result["status"] == "unknown" and result["complete"] is False
+            assert result["observations"]["distinctRequestIds"] == 0
             assert result["p99LatencyMs"] is None
             conn.execute(text("""INSERT INTO audit_log_metadata VALUES
                 (:tenant, 'gateway', 'measured-zero', 'gateway:measured-zero:provider_outcome', 'allow', 0, :created),
                 (:tenant, 'gateway', 'decision-only', 'gateway:decision-only:decision:block', 'block', 99999, :created)
             """), {"tenant": tenant, "created": now})
             result = audit.get_audit_metrics(request, db=conn, hours=24)
-            assert result["totalRequests"] == 2
-            assert result["p99LatencyMs"] == 0
+            assert result["observations"]["distinctRequestIds"] == 2
+            assert result["observations"]["providerOutcomeP99Ms"] == 0
             conn.execute(text("""INSERT INTO audit_log_metadata VALUES
                 (:tenant, 'gateway', NULL, 'legacy', 'allow', 0, :created)
             """), {"tenant": tenant, "created": now})
             result = audit.get_audit_metrics(request, db=conn, hours=24)
             assert result["complete"] is False
+            assert result["status"] == "degraded"
             assert result["totalRequests"] is result["redactions24h"] is result["requestsPerSec"] is None
     finally:
         engine.dispose()

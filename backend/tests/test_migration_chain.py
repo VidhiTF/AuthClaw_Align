@@ -86,7 +86,11 @@ def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch)
     monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "052")
     assert compatible_database_revisions() == ("052",)
 
-    for invalid in ("051", "051,052", "052,052", "050", "050,051", "051,051", "049", "049,050", "050,050", "048,048", "47", "046,047", "046,047,048", "048,head"):
+    for supported in ("051", "051,052", "052,051"):
+        monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", supported)
+        assert compatible_database_revisions() == tuple(supported.split(","))
+
+    for invalid in ("052,052", "050", "050,051", "051,051", "049", "049,050", "050,050", "048,048", "47", "046,047", "046,047,048", "048,head"):
         monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", invalid)
         with pytest.raises(RuntimeError):
             compatible_database_revisions()

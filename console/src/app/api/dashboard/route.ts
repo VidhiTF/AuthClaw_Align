@@ -21,6 +21,7 @@ export async function GET(request: Request) {
     const approvalValid = Array.isArray(approvals) && approvals.every((item) => typeof item?.status === "string");
     const metricNames = ["totalRequests", "redactions24h", "requestsPerSec", "p99LatencyMs"] as const;
     const gatewayValid = gateway?.source === "postgres" && typeof gateway.complete === "boolean"
+      && ["healthy", "degraded", "unknown", "unavailable", "not_applicable"].includes(gateway.status)
       && [gateway.windowStart, gateway.windowEnd].every((value) => typeof value === "string" && Number.isFinite(Date.parse(value)))
       && metricNames.every((name) => gateway[name] === null || (typeof gateway[name] === "number" && Number.isFinite(gateway[name]) && gateway[name] >= 0));
     const auditValid = Array.isArray(audit?.records) && audit.records.every((record: { record_id?: string; action?: string; timestamp?: string }) =>
@@ -28,19 +29,20 @@ export async function GET(request: Request) {
     const generatedAt = new Date().toISOString();
     const sources = {
       approvals: { status: approvalValid ? "healthy" : "unavailable", source: "postgres", observedAt: generatedAt },
-      gateway: { status: !gatewayValid ? "unavailable" : gateway.complete ? "healthy" : "unknown", source: "postgres", observedAt: gatewayValid ? gateway.windowEnd : generatedAt },
+      gateway: { status: !gatewayValid ? "unavailable" : gateway.status, source: "postgres", observedAt: gatewayValid ? gateway.windowEnd : generatedAt },
       audit: { status: auditValid ? "healthy" : "unavailable", source: auditValid ? audit.source : null, observedAt: generatedAt },
     };
-    const metrics = Object.fromEntries(metricNames.map((name) => [name, gatewayValid ? gateway[name] : null]));
+    const metrics = Object.fromEntries(metricNames.map((name) => [name, gatewayValid && gateway.complete && gateway.status === "healthy" ? gateway[name] : null]));
     const metricStates = {
       openApprovals: sources.approvals.status,
-      ...Object.fromEntries(metricNames.map((name) => [name, !gatewayValid ? "unavailable" : metrics[name] === null ? "unknown" : "healthy"])),
+      ...Object.fromEntries(metricNames.map((name) => [name, sources.gateway.status !== "healthy" ? sources.gateway.status : metrics[name] === null ? "unknown" : "healthy"])),
     };
     const states = [...Object.values(sources).map((source) => source.status), ...Object.values(metricStates)];
     // Failures outrank missing observations; a successful source never masks another's failure.
     const status = ["unavailable", "degraded", "unknown", "healthy", "not_applicable"].find((state) => states.includes(state)) || "unknown";
     return NextResponse.json({
       status, sources, metricStates, generatedAt,
+      coverageReason: gatewayValid && !gateway.complete ? (typeof gateway.reason === "string" ? gateway.reason : "Gateway collection coverage is unverified.") : null,
       complete: gatewayValid ? gateway.complete : false,
       windowStart: gatewayValid ? gateway.windowStart : null, windowEnd: gatewayValid ? gateway.windowEnd : null,
       openApprovals: approvalValid ? approvals.filter((item) => item.status === "PENDING").length : null,

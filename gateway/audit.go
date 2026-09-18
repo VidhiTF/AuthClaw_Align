@@ -284,8 +284,12 @@ func persistAuditMetadata(parent context.Context, event *AuditEvent) error {
 			event.IdempotencyKey = event.ID
 		}
 		executionTrace := "[]"
-		if len(event.ExecutionTrace) > 0 {
-			if traceBytes, traceErr := json.Marshal(event.ExecutionTrace); traceErr == nil {
+		trace := append([]string(nil), event.ExecutionTrace...)
+		if correlationID, _ := parent.Value(CorrelationIDContextKey).(string); correlationID != "" && len(correlationID) <= 128 {
+			trace = append(trace, "client_correlation_id:"+correlationID)
+		}
+		if len(trace) > 0 {
+			if traceBytes, traceErr := json.Marshal(trace); traceErr == nil {
 				executionTrace = string(traceBytes)
 			}
 		}

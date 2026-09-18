@@ -2941,18 +2941,11 @@ async def upload_document(
     except (QuotaExceeded, QuotaUnavailable):
         raise
     except Exception as ex:
-        # Fallback if pipeline fails (e.g. LLM issues) so document is still indexed
-        logger.error(f"Scan pipeline failed, fallback indexing document: {ex}")
-        pipeline_res = {
-            "document_id": doc_id,
-            "filename": filename,
-            "risk_score": 100,
-            "severity": "LOW",
-            "status": "completed",
-            "duration_ms": 0,
-            "findings": [],
-            "summary": "Scan pipeline fallback"
-        }
+        logger.error("Document scan failed: %s", type(ex).__name__)
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE documents SET status='scan_failed' WHERE id=:id AND tenant_id=:tenant AND status NOT IN ('alert_delivery_pending', 'alert_delivery_failed')"),
+                         {"id": doc_id, "tenant": tenant_id})
+        raise HTTPException(503, "Document scan unavailable; no successful assessment was produced") from ex
     
     # 3. Find matching knowledge_document ID for frontend backward compatibility
     with engine.connect() as conn:
@@ -2964,7 +2957,7 @@ async def upload_document(
         
     return {
         "document_id": f"doc_{k_doc_id}",
-        "status": "indexed",
+        "status": pipeline_res["status"],
         "pipeline_results": pipeline_res
     }
 

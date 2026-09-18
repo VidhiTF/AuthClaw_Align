@@ -50,7 +50,7 @@ test("overview clears stale values after an outage and renders an explicit alert
       const unavailable = failed || !!failedSource && url.includes(failedSource);
       const response = { ok: !unavailable, status: unavailable ? 503 : 200,
         json: async () => url.includes("dashboard") ? { status: health, totalRequests: 12345, redactions24h: 0, openApprovals: 0,
-          metricStates: { p99LatencyMs: "unknown" }, sources: { audit: { status: "healthy" } }, recentActivity: [] }
+          coverageReason: "Gateway collection coverage is unverified.", metricStates: { p99LatencyMs: "unknown" }, sources: { audit: { status: "healthy" } }, recentActivity: [] }
           : { generated_at: "2026-09-18T00:00:00Z", frameworks: [{ framework: "SOC2", score, readiness_level: "insufficient_evidence", metrics: { evidence_count: 0, open_findings: 0 } }] } };
       if (delayed) await new Promise<void>((resolve) => pending.push(resolve));
       return response;
@@ -58,6 +58,7 @@ test("overview clears stale values after an outage and renders an explicit alert
   });
   const render = () => { cursor = 0; refCursor = 0; return renderToStaticMarkup(React.createElement(page.default as React.ComponentType)); };
   render(); await refresh!(); assert.match(render(), /12345/);
+  assert.match(render(), /Gateway collection coverage is unverified/);
   failedSource = "compliance-scores"; await refresh!();
   assert.match(render(), /12345/); assert.match(render(), /Current compliance assessment unavailable/);
   failedSource = "dashboard"; await refresh!();
@@ -80,8 +81,8 @@ test("overview clears stale values after an outage and renders an explicit alert
     `<!doctype html><meta charset="utf-8"><title>ENT-019 synthetic outage dashboard export</title>${html}`);
 });
 
-test("dashboard uses the complete canonical aggregate, independent of audit mirror serialization", async () => {
-  const metrics = { source: "postgres", complete: true, totalRequests: 201, redactions24h: 1,
+test("dashboard honors canonical coverage and state, independent of audit mirror serialization", async () => {
+  const metrics = { source: "postgres", status: "healthy", complete: true, totalRequests: 201, redactions24h: 1,
     requestsPerSec: 201 / 86400, p99LatencyMs: 0, windowStart: "2026-09-17T00:00:00Z", windowEnd: "2026-09-18T00:00:00Z" };
   let auditSource = "postgres", failure = "", malformed = "";
   const calls: string[] = [];
@@ -125,6 +126,13 @@ test("dashboard uses the complete canonical aggregate, independent of audit mirr
   const noLatency = await route.GET(request) as { status: string; metricStates: Record<string, string>; totalRequests: number };
   assert.equal(noLatency.status, "unknown"); assert.equal(noLatency.metricStates.p99LatencyMs, "unknown");
   assert.equal(noLatency.totalRequests, 201);
+  for (const state of ["unknown", "degraded", "unavailable", "not_applicable"]) {
+    Object.assign(metrics, { status: state, complete: false, totalRequests: 201 });
+    const incomplete = await route.GET(request) as { totalRequests: number | null; metricStates: Record<string, string>; sources: Record<string, { status: string }> };
+    assert.equal(incomplete.totalRequests, null, "Incomplete persisted rows must never become a total traffic count");
+    assert.equal(incomplete.sources.gateway.status, state);
+    assert.equal(incomplete.metricStates.totalRequests, state);
+  }
 });
 
 test("compliance score and history failures render unknown inputs; recovery preserves measured zero", async () => {

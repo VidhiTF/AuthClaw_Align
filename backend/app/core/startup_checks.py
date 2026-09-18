@@ -32,7 +32,7 @@ _VALID_ENVIRONMENTS = {
 logger = logging.getLogger("authclaw.backend.startup")
 
 _DB_REVISION_PATTERN = re.compile(r"^[0-9]{3}$")
-_ROLLOUT_DB_REVISIONS = frozenset({"052"})
+_ROLLOUT_DB_REVISIONS = frozenset({"051", "052"})
 
 
 def compatible_database_revisions() -> tuple[str, ...]:
@@ -48,7 +48,7 @@ def compatible_database_revisions() -> tuple[str, ...]:
     ):
         raise RuntimeError(
             "AUTHCLAW_EXPECTED_DB_REVISION must contain one or two unique "
-            "supported revision (052)"
+            "supported revisions (051, 052)"
         )
     return revisions
 

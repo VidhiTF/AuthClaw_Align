@@ -181,7 +181,7 @@ def run_integration():
             else:
                 raise AssertionError("legacy writer inserted without authenticated context")
         with tempfile.TemporaryDirectory(prefix="ent019-telemetry-") as temporary:
-            with patch.object(alerts, "ALERTS_LOG", str(Path(temporary) / "alerts.log")):
+            with tenant_context(None, required=True):
                 # Diagnostic scoring is tenant-bound and never authoritative;
                 # the retired legacy snapshot hook must leave stored history intact.
                 for tenant in (7, 8, 7):
@@ -290,6 +290,7 @@ def run_integration():
                 with owner.connect() as conn:
                     assert conn.execute(text("SELECT count(*) FROM agent.compliance_score_history WHERE tenant_id IS NULL")).scalar() == 1
                     assert conn.execute(text("SELECT count(*) FROM agent.compliance_drift_alerts WHERE tenant_id IS NULL")).scalar() == 1
+        verify_alert_outage_and_retry(client, tokens, engine, tenant_context)
         verify_atomic_scoring(engine, tenant_context)
         print("tenant telemetry integration passed: middleware, reports, worker, migration, restricted-role RLS, concurrent scoring and rollback")
     finally:
@@ -300,6 +301,117 @@ def run_integration():
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+def verify_alert_outage_and_retry(client, tokens, engine, tenant_context):
+    from document_processing import orchestrator, alerts
+    from services.event_pipeline import EventPipeline
+    from services.observability_service import ObservabilityService
+    from unittest.mock import MagicMock
+
+    smtp = MagicMock()
+    smtp.return_value.__enter__.return_value.send_message.return_value = {}
+    with tenant_context(7, request_id="alert-fixture-a", required=True), engine.begin() as conn:
+        for email, role, verified in (("verified@tenant-a.test", "Admin", True),
+                                      ("unverified@tenant-a.test", "Admin", False),
+                                      ("viewer@tenant-a.test", "Viewer", True)):
+            conn.execute(text("""INSERT INTO tenant_users(tenant_id,email,password_hash,role,email_verified,status)
+                VALUES (7,:email,'test-only',:role,:verified,'active')"""), {"email": email, "role": role, "verified": verified})
+    with tenant_context(8, request_id="alert-fixture-b", required=True), engine.begin() as conn:
+        conn.execute(text("""INSERT INTO tenant_users(tenant_id,email,password_hash,role,email_verified,status)
+            VALUES (8,'private@tenant-b.test','test-only','Admin',TRUE,'active')"""))
+
+    finding = {"finding_type": "Secret", "matched_pattern": "TEST_SECRET", "matched_text": "never-email-this-secret", "risk_level": "CRITICAL"}
+    with tenant_context(7, request_id="alert-worker", required=True), patch.dict(os.environ, GOOGLE_API_KEY="", SMTP_HOST="smtp.test.invalid", SKIP_EMAIL_DELIVERY_FOR_TESTING="false"), patch.object(alerts.smtplib, "SMTP", smtp):
+        smtp.side_effect = OSError("private-transport-error")
+        with patch.object(orchestrator, "extract_document_text", return_value="test"), patch.object(orchestrator, "extract_file_metadata", return_value={}), patch.object(orchestrator, "split_text_into_chunks", return_value=[]), patch.object(orchestrator, "scan_text_for_sensitive_data", return_value=[finding]), patch("rag.vector_store.save_document_chunks"), patch.object(orchestrator, "create_approval"):
+            result = orchestrator.run_document_scan_pipeline(7, b"test", "never-email-this-filename", tenant_id=7)
+        assert result["status"] == "alert_delivery_failed" and result["alert_delivery"]["status"] == "dead_letter"
+        event_id = result["alert_delivery"]["event_id"]
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT status FROM documents WHERE id=7")).scalar() == "alert_delivery_failed"
+            scan = conn.execute(text("SELECT status,outputs_json FROM document_scans WHERE document_id=7 ORDER BY id DESC LIMIT 1")).one()
+            assert scan.status == "alert_delivery_failed" and json.loads(scan.outputs_json)["alert_delivery"]["event_id"] == event_id
+            record = conn.execute(text("SELECT payload,error_message,status FROM event_delivery_records WHERE event_id=:id"), {"id": event_id}).one()
+            assert "never-email" not in record.payload and "private-transport" not in record.error_message
+        metrics = EventPipeline().delivery_metrics()
+        assert metrics["security_alerts"]["status"] == "unavailable"
+        assert ObservabilityService()._queue_lag(metrics)["status"] == "degraded"
+        assert client.get("/documents/7", headers=tokens[7]).json()["status"] == "alert_delivery_failed"
+        assert client.get("/metrics", headers=tokens[7]).json()["event_pipeline"]["security_alerts"]["status"] == "unavailable"
+        with tenant_context(8, request_id="alert-other-tenant", required=True):
+            assert EventPipeline().deliver_event(event_id)["status"] == "missing"
+            assert EventPipeline().retry_dead_letters()["retried"] == 0
+        smtp.side_effect = None
+        assert EventPipeline().retry_dead_letters()["delivered"] == 1
+        message = smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+        assert message["To"] == "verified@tenant-a.test"
+        assert "never-email" not in str(message) and "tenant-b" not in str(message)
+        sent = smtp.return_value.__enter__.return_value.send_message.call_count
+        assert EventPipeline().deliver_event(event_id)["status"] == "delivered"
+        assert smtp.return_value.__enter__.return_value.send_message.call_count == sent
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT status FROM documents WHERE id=7")).scalar() == "pending_approval"
+            assert conn.execute(text("SELECT resolved_at IS NOT NULL FROM event_dead_letters WHERE event_id=:id"), {"id": event_id}).scalar() is True
+        assert EventPipeline().delivery_metrics()["security_alerts"]["status"] == "healthy"
+
+        # A retry immediately after commit sees the scan, not an unlinked event.
+        original_delivery = EventPipeline.deliver_event
+        def retry_first(pipeline, identifier, **kwargs):
+            with engine.connect() as conn:
+                assert conn.execute(text("SELECT count(*) FROM document_scans WHERE outputs_json::jsonb #>> '{alert_delivery,event_id}'=:id"), {"id": identifier}).scalar() == 1
+            original_delivery(pipeline, identifier, retry=True)
+            return original_delivery(pipeline, identifier, **kwargs)
+        with patch.object(orchestrator, "extract_document_text", return_value="test"), patch.object(orchestrator, "extract_file_metadata", return_value={}), patch.object(orchestrator, "split_text_into_chunks", return_value=[]), patch.object(orchestrator, "scan_text_for_sensitive_data", return_value=[finding]), patch("rag.vector_store.save_document_chunks"), patch.object(orchestrator, "create_approval"), patch.object(EventPipeline, "deliver_event", retry_first):
+            result = orchestrator.run_document_scan_pipeline(7, b"test", "concurrent-scan", tenant_id=7)
+        assert result["status"] == "pending_approval" and result["alert_delivery"]["status"] == "delivered"
+        assert smtp.return_value.__enter__.return_value.send_message.call_count == sent + 1
+
+        # A committed outbox survives a dispatcher/finalization crash and revocation.
+        with patch.object(EventPipeline, "deliver_event", side_effect=RuntimeError("private-dispatch-error")), patch.object(orchestrator, "extract_document_text", return_value="test"), patch.object(orchestrator, "create_approval"), patch("rag.vector_store.save_document_chunks"):
+            response = client.post("/documents/upload", headers=tokens[7], files={"file": ("retryable.txt", b"test", "text/plain")})
+        assert response.status_code == 503 and "private-dispatch" not in response.text
+        with engine.begin() as conn:
+            assert conn.execute(text("SELECT status FROM documents WHERE filename='retryable.txt'")).scalar() == "alert_delivery_pending"
+            conn.execute(text("UPDATE tenant_users SET email_verified=FALSE WHERE email='verified@tenant-a.test'"))
+        sent = smtp.return_value.__enter__.return_value.send_message.call_count
+        assert EventPipeline().retry_dead_letters()["failed"] == 1
+        assert smtp.return_value.__enter__.return_value.send_message.call_count == sent
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE tenant_users SET email_verified=TRUE WHERE email='verified@tenant-a.test'"))
+        assert EventPipeline().retry_dead_letters()["delivered"] == 1
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT status FROM documents WHERE filename='retryable.txt'")).scalar() == "pending_approval"
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT status FROM document_scans WHERE document_id=7 ORDER BY id DESC LIMIT 1")).scalar() == "pending_approval"
+
+        # Durable insertion failure must never produce an indexed/clean scan.
+        with patch.object(EventPipeline, "record_event", side_effect=RuntimeError("private-persistence-error")), patch.object(orchestrator, "extract_document_text", return_value="test"), patch.object(orchestrator, "create_approval"), patch("rag.vector_store.save_document_chunks"):
+            response = client.post("/documents/upload", headers=tokens[7], files={"file": ("outage.txt", b"test", "text/plain")})
+        assert response.status_code == 503 and "private-persistence" not in response.text, response.text
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT status FROM documents WHERE filename='outage.txt'")).scalar() == "scan_failed"
+            assert conn.execute(text("SELECT count(*) FROM document_scans JOIN documents ON documents.id=document_scans.document_id WHERE filename='outage.txt'")).scalar() == 0
+
+        # Two independent retry workers serialize at the durable record.
+        queued = EventPipeline().record_event({"event_type": "document_security_alert", "event_id": str(uuid.uuid4()), "tenant_id": 7, "document_id": 7}, "security_alert")
+        entered, release = Event(), Event()
+        def send_once(message):
+            entered.set()
+            assert release.wait(5)
+            return {}
+        def deliver():
+            with tenant_context(7, request_id="concurrent-alert-worker", required=True):
+                return EventPipeline().deliver_event(queued)
+        smtp.return_value.__enter__.return_value.send_message.side_effect = send_once
+        sent = smtp.return_value.__enter__.return_value.send_message.call_count
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            first = workers.submit(deliver)
+            assert entered.wait(5)
+            second = workers.submit(deliver)
+            release.set()
+            assert first.result()["status"] == second.result()["status"] == "delivered"
+        assert smtp.return_value.__enter__.return_value.send_message.call_count == sent + 1
 
 
 def verify_clickhouse_outages(client, tokens, engine, tenant_context):

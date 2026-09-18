@@ -1,5 +1,97 @@
 # ENT-019: truthful telemetry verification
 
+## Review follow-up at bb889054
+
+The four follow-up findings concern audit coverage, read-scope snapshot writes,
+alert delivery propagation, and the 051/052 rollout boundary. Reuse the existing
+canonical audit records, scope dependencies, scoring functions, tenant-bound
+event delivery/retry tables, and schema guard. Do not add another telemetry or
+notification subsystem. New lines are limited to enforcing these boundaries and
+their failure-path tests. The code-work and fix-finding workflows required a
+fresh read-only boundary investigator, one independent candidate reviewer, and
+repeat regression checks. The candidate review identified the upload fallback,
+scan/outbox race, and incorrect Compose service placement; all were corrected.
+
+### Current follow-up disposition
+
+- Gateway identities are server-owned; incoming `X-Request-ID` is bounded
+  correlation metadata, not the canonical idempotency key. Connect-test
+  classification still uses the original correlation value. An exact event
+  retry stays idempotent; two requests with the same header remain distinct.
+- A successful database query cannot detect a request lost before persistence.
+  Therefore the API never labels current collection complete: total traffic,
+  redactions, throughput and total-population P99 are NULL. Useful persisted-row
+  measurements remain under `observations` with `persisted_gateway_events_only`
+  scope. Missing legacy identities produce degraded; unproven coverage produces
+  unknown; query failure produces unavailable. The dashboard explains this.
+  A durable all-traffic admission/coverage ledger is not claimed or introduced.
+- Compliance GETs cannot persist, even with `persist_snapshot=true`. Explicit
+  POSTs to `/v1/compliance-scores` and `/v1/compliance-scores/{framework}` require
+  write scope and nullable schema 052. Existing transactional snapshot/notification
+  writes are reused. Callers needing history must use POST, not polling GET.
+- Each scan atomically queues one tenant-bound security alert alongside its
+  result. SMTP failure is persisted as dead-letter and `alert_delivery_failed`,
+  exposed through document APIs and operational metrics. The existing retry
+  endpoint includes queued alerts after a crash. PostgreSQL row locks serialize
+  workers; delivery and scan-state repair commit together. A dispatcher failure
+  leaves pending work visible. Upload errors return 503, never a fabricated
+  clean scan. SMTP is at-least-once across a send-success/DB-commit crash, not an
+  exactly-once mail protocol; concurrent healthy workers do not duplicate sends.
+- Recipients are re-authorized on retry: active, verified tenant administrators
+  only. No global ADMIN_EMAIL routing, matched secrets, filenames, or shared
+  alerts.log fallback. Missing recipients/configuration is a visible failure.
+- Backend rollout explicitly accepts configured `051,052`; writers remain
+  disabled on 051. Full Compose passes the disabled-by-default optional
+  ClickHouse setting to the agent, not the unrelated audit consumer.
+
+### Fresh follow-up checks (2026-09-18, after bb889054)
+
+- Backend CI unit selection: **513 passed**. Real PostgreSQL T10 lifecycle,
+  read-only GET, 051/052 startup, nullable writer gate, concurrency and rollback:
+  **24 passed**; PostgreSQL audit metrics: **2 passed**. No skip in these targeted
+  runs. Restricted-role middleware/RLS fixtures remain separate from unit mocks.
+- Agent CI selection: **122 passed, 84 subtests passed**. Final focused telemetry
+  and PostgreSQL repetition: **20 passed, 8 subtests passed**. The real-DB alert
+  path covers SMTP failure, API/metrics state, recipient revocation, tenant denial,
+  crash recovery, immediate retry and concurrent delivery. Network-isolated
+  rebuilt-agent image: **25 unittest cases passed** using image production code.
+- Gateway CI selection and `go vet` passed. Full gateway suite with local
+  PostgreSQL/Redis/OPA: **280 passed cases/subcases**, optional integration tests
+  skipped unless enabled. Authenticated PostgreSQL audit/Bedrock tests were run
+  separately and passed, including repeated correlation IDs and a fail-open
+  missing outcome. TLS and legacy optional canonical-load rehearsals were not
+  enabled in this follow-up.
+- Console **53 unit tests**, TypeScript and production Docker build passed.
+  ESLint: zero errors, 14 pre-existing navigation warnings. BrowserAct's installed
+  launcher pointed to a missing Python runtime; existing Playwright was used.
+  Built Next.js/BFF at localhost:3309 passed Chromium 1440x1050 and 390x844:
+  correct page/title, visible coverage notice and Unknown values, no framework
+  overlay or runtime errors, Refresh outage/recovery. The fixture used the actual
+  backend aggregate over gateway-created PostgreSQL rows; authentication and
+  unrelated endpoints were synthetic. Notice placement was corrected to preserve
+  the existing metric-strip CSS during failures. The HTML export was regenerated.
+- All four affected images rebuilt with separate review tags; application
+  containers were not replaced. Compose contract passed; repository/release
+  policy tests: **35 passed, 46 subtests**. Python compilation, diff whitespace
+  and Tokei budgets passed. Test containers and temporary browser files are
+  removed after verification; implementation tests and required artifacts remain.
+
+Initial failures were corrected rather than counted as passes: a new PostgreSQL
+GET fixture omitted repeatable-read setup; the replay test requires a localhost
+Redis URL; a browser selector also matched Next.js's route announcer. Running
+destructive gateway tests during browser checks invalidated the fixture, so the
+fixture was recreated and UI checks rerun serially. Full gateway execution
+required the existing OPA policy and correct test-role password. The production
+agent image intentionally excludes pytest; its unittest-only image check was
+rerun without the pytest-based diagnostic module (covered in the host CI suite).
+
+Compared with bb889054, production Python/Go/TypeScript is **193 added / 191
+deleted lines (net +2)**, excluding tests, documentation and configuration.
+The alert sender is 51 lines smaller; duplicate delivery/reset logic and the
+fabricated upload fallback were removed. Required regression coverage accounts
+for most growth. Human line-growth and component/risk-owner approvals remain
+release gates, not something these tests or AI reviews can supply.
+
 ## Scope and reuse
 
 The specification review of PR 60 at `5f4dab35` identified eleven confirmed
@@ -43,8 +135,13 @@ Reuse decisions made before implementation:
 | Misleading score timestamp | Trusted selected observation times plus one consistent `inputs_as_of`; missing observation time stays NULL | Assessment provenance tests |
 
 Health precedence is `unavailable > degraded > unknown > healthy >
-not_applicable`. Missing observations cannot become success; measured failures
-outrank unknowns. Basic liveness says `alive`, not that dependent systems are
+not_applicable`. This is completeness health, not process liveness: any failed
+required source makes the aggregate unavailable even while other measurements
+remain visible. Degraded denotes measured unhealthy/incomplete data; unknown
+denotes unmeasured/unverified data. Optional disabled sources are not applicable,
+and the aggregate is not applicable only when all sources are. Missing
+observations cannot become success; measured failures outrank unknowns.
+Basic liveness says `alive`, not that dependent systems are
 healthy. Successful diagnostics still do not certify compliance.
 
 Backend UUID tenant context and agent integer tenant context remain separate,
@@ -53,18 +150,18 @@ not interchangeable backend assessments. Master's retirement of the old aggregat
 drift writer is retained; compatibility hooks cannot create new compliance posture.
 Operational reports are tenant-bound and explicitly unassessed.
 
-The authoritative audit aggregate counts distinct observed gateway request IDs
-(including denied/in-flight requests), not all audit events. P99 uses completed
-provider outcomes only and preserves actual zero milliseconds. Missing legacy
-request identity marks request totals incomplete/unknown, not silently complete.
-A healthy source with no latency observation returns unknown latency.
+The persisted audit observations count distinct observed gateway request IDs
+(including denied/in-flight requests), not all audit events or total traffic.
+Observed P99 uses completed provider outcomes only and preserves actual zero.
+The follow-up contract above supersedes the original completeness calculation:
+neither identified rows nor a valid chain proves collection coverage.
 
 The independently reviewed candidate also fixed a duplicate `compliance_status`
 key, and selective migration repairs old unobserved scores. Consumer review found
 nullable trust-summary/public-share fields, which now render Unknown instead of
 a bare percent or misleading zero. Shared templates preserve provenance labels.
 
-## Fresh verification (2026-09-18)
+## Previous verification (2026-09-18, through bb889054)
 
 No application's database, running container or external mail service was used for
 destructive/outage tests. PostgreSQL 16 and Redis test containers use isolated
@@ -155,9 +252,11 @@ in the measured scopes was 2,124 code lines.
 
 1. Deploy null-aware console/readers before enabling nullable score writers.
 2. Run backend Alembic upgrade to 052 and the existing agent migration job before
-   starting new backend/agent writers. New backend requires 052; gateway accepts
-   051/052 for a bounded rollout. A previous backend can continue using its old
-   supported revision until replacement; do not bypass its startup revision guard.
+   enabling snapshot writes. Deploy the new null-aware backend with
+   `AUTHCLAW_EXPECTED_DB_REVISION=051,052` while still on 051; POSTs return 503
+   until the expansion. Retire old readers, migrate, then enable writer callers.
+   Both backend and gateway accept 051/052 for this bounded rollout. Do not
+   bypass an old binary's startup guard or roll back to a non-null-aware reader.
 3. Agent migration preserves unattributed legacy history without assigning it to
    a guessed tenant. New legacy-shape writes bind only to authenticated tenant
    context. FORCE RLS remains mandatory.
@@ -173,7 +272,8 @@ in the measured scopes was 2,124 code lines.
 Source failure returns an unavailable response rather than pretending persisted
 history is fresh. A database outage cannot persist a new marker in that same
 database; clients must honor the response state. Unknown transitions with reachable
-storage persist a NULL snapshot and an atomic notification.
+storage persist a NULL snapshot and an atomic notification through the explicit
+write-authorized POST; read polling cannot create those transitions.
 
 ## Remaining release boundaries
 
@@ -185,9 +285,11 @@ approvals. Material test growth needs the existing line-growth owner exception.
 Architectural suggestions are not new feature scope: backend/agent identifiers
 remain separate, agent SMTP remains operator-configured, and broader caching or
 trust-health inventory changes need their own contract. Full Compose's agent
-ClickHouse HTTP default is not a successful connectivity claim; operators must
-configure the actual reachable authenticated endpoint or explicitly disable the
-optional mirror. Its unavailable state and PostgreSQL fallback are tested.
+ClickHouse mirror is explicitly disabled by default. Enabling it requires a
+reachable authenticated HTTP endpoint; an unavailable enabled source is not a
+successful connectivity claim. Its unavailable state and PostgreSQL fallback
+are tested. SMTP deployment must supply transport configuration and verified
+tenant administrators; disabled delivery is intentionally visible as failed.
 
 Verification above was completed before publication. PR merge and deployment
 remain separate; the running application's deployment was not changed.

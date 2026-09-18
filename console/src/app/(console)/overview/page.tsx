@@ -14,6 +14,7 @@ import { calculationVersion } from "@/lib/trust-summary";
 import { readinessLabel } from "@/lib/ui-format";
 
 interface DashboardMetrics {
+  coverageReason?: string | null;
   status: "healthy" | "degraded" | "unavailable" | "unknown" | "not_applicable";
   sources: Record<string, { status: string }>;
   metricStates: Record<string, string>;
@@ -128,8 +129,10 @@ export default function OverviewPage() {
     : metrics?.status || "unknown";
 
   return (
-    <div className="ac-page ac-page-overview mx-auto max-w-none space-y-5">
+    <div className="space-y-5">
       {error && <div role="alert" className="rounded-md border border-red-300 bg-red-50 p-4 text-red-800">{error}</div>}
+      {metrics?.coverageReason && <div role="status" className="rounded-md border border-amber-300 bg-amber-50 p-4 text-amber-900">{metrics.coverageReason}</div>}
+      <div className="ac-page ac-page-overview mx-auto max-w-none space-y-5">
       {/* Page Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -162,7 +165,7 @@ export default function OverviewPage() {
           <div className="absolute top-0 right-0 w-24 h-24 rounded-full bg-indigo-500/5 blur-[40px] pointer-events-none" />
           <div className="flex justify-between items-start">
             <div>
-              <p className="text-[10px] uppercase tracking-widest font-bold text-[#6B7488]">Traffic Logged</p>
+              <p className="text-[10px] uppercase tracking-widest font-bold text-[#6B7488]">Total Requests</p>
               <h3 className="text-2xl font-bold text-[#0E1726] mt-2">
                 {loading ? "..." : metrics?.totalRequests ?? "Unknown"}
               </h3>
@@ -172,7 +175,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <div className="mt-4 flex items-center justify-between text-xs">
-            <span className="text-[#6B7488]">Unique observed gateway requests · last {trafficRange}h</span>
+            <span className="text-[#6B7488]">Gateway traffic · last {trafficRange}h</span>
             <Link href="/audit" className="text-indigo-400 hover:text-indigo-300 flex items-center gap-0.5 font-medium transition">
               Logs <ArrowUpRight className="w-3 h-3" />
             </Link>
@@ -231,7 +234,7 @@ export default function OverviewPage() {
                 ) : metrics?.p99LatencyMs !== null && metrics?.p99LatencyMs !== undefined ? (
                   `${metrics.p99LatencyMs} ms`
                 ) : (
-                  <span className="text-sm font-medium text-[#6B7488]">{metrics?.metricStates?.p99LatencyMs === "unavailable" || !metrics && error ? "Unavailable" : "Unknown — no measurements"}</span>
+                  <span className="text-sm font-medium text-[#6B7488]">{metrics?.metricStates?.p99LatencyMs === "unavailable" || !metrics && error ? "Unavailable" : metrics?.coverageReason ? "Unknown — coverage unverified" : "Unknown — no measurements"}</span>
                 )}
               </h3>
             </div>
@@ -271,6 +274,7 @@ export default function OverviewPage() {
           <div className="flex items-center justify-between"><h3 className="text-lg font-bold">Recent activity</h3><Link href="/audit" className="text-xs font-semibold text-[#6D28D9]">View all →</Link></div>
           <div className="mt-3 divide-y divide-[#EEF1F6]">{recentActivity.length === 0 ? <div className="py-10 text-center text-xs text-[#6B7488]">{emptyActivity}</div> : recentActivity.map((record, index) => <Link href="/audit" key={record.record_id} className="flex gap-3 py-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${index % 3 === 0 ? "bg-[#6D28D9]" : index % 3 === 1 ? "bg-emerald-500" : "bg-[#E9A93C]"}`}/><span className="min-w-0"><strong className="block truncate text-xs">{record.action.replaceAll("_", " ")}</strong><span className="mt-0.5 block truncate text-[10px] text-[#6B7488]">{record.provider || "AuthClaw"}{record.model ? ` · ${record.model}` : ""}</span></span><time className="ml-auto shrink-0 text-[9px] text-[#6B7488]">{new Date(record.timestamp).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</time></Link>)}</div>
         </aside>
+      </div>
       </div>
     </div>
   );

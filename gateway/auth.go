@@ -24,6 +24,7 @@ const (
 	TenantIDContextKey       contextKey = "tenant_id"
 	ScopesContextKey         contextKey = "scopes"
 	RequestIDContextKey      contextKey = "request_id"
+	CorrelationIDContextKey  contextKey = "correlation_id"
 	UserIDContextKey         contextKey = "user_id"
 	APIKeyHashContextKey     contextKey = "api_key_hash"
 	CredentialKindContextKey contextKey = "credential_kind"
@@ -197,11 +198,8 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		}
 
 		// 3. Inject tenant info and request_id into context
-		// Honour an upstream X-Request-ID header; generate one if absent.
-		requestID := r.Header.Get("X-Request-ID")
-		if requestID == "" {
-			requestID = generateRequestID()
-		}
+		// Caller correlation must never be an audit deduplication identity.
+		requestID := "gw2-" + generateRequestID()
 		w.Header().Set("X-Request-ID", requestID)
 		userAgent := r.UserAgent()
 		if len(userAgent) > 512 {
@@ -238,6 +236,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), TenantIDContextKey, tenantID)
 		ctx = context.WithValue(ctx, ScopesContextKey, scopes)
 		ctx = context.WithValue(ctx, RequestIDContextKey, requestID)
+		ctx = context.WithValue(ctx, CorrelationIDContextKey, r.Header.Get("X-Request-ID"))
 		ctx = context.WithValue(ctx, UserIDContextKey, userID)
 		ctx = context.WithValue(ctx, APIKeyHashContextKey, keyHash)
 		ctx = context.WithValue(ctx, CredentialKindContextKey, credentialKind)

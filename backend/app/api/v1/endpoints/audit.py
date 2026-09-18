@@ -248,7 +248,7 @@ def get_audit_metrics(
     request: Request, db: Session = Depends(get_tenant_db),
     hours: int = Query(default=24, ge=1, le=720),
 ):
-    """Full-window gateway observations from the authoritative tenant audit chain."""
+    """Recorded observations, never an assertion that every gateway event arrived."""
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=hours)
     try:
@@ -266,14 +266,22 @@ def get_audit_metrics(
     except Exception as exc:
         logger.exception("Dashboard audit metrics query failed")
         raise HTTPException(status_code=503, detail="Gateway telemetry unavailable") from exc
-    complete = row["unidentified"] == 0
+    # Fail-open/async gateway requests may never reach this database. Neither a
+    # valid chain nor a successful SELECT proves end-to-end collection coverage.
+    identified = row["unidentified"] == 0
     return {
-        "source": "postgres", "complete": complete,
+        "source": "postgres", "complete": False,
+        "status": "unknown" if identified else "degraded",
+        "reason": "Gateway collection coverage is unverified; recorded observations are not total traffic.",
         "windowStart": start.isoformat(), "windowEnd": end.isoformat(),
-        "totalRequests": row["requests"] if complete else None,
-        "redactions24h": row["redactions"] if complete else None,
-        "requestsPerSec": row["requests"] / (hours * 3600) if complete else None,
-        "p99LatencyMs": row["p99"],
+        "totalRequests": None, "redactions24h": None,
+        "requestsPerSec": None, "p99LatencyMs": None,
+        "observations": {
+            "scope": "persisted_gateway_events_only",
+            "distinctRequestIds": row["requests"] if identified else None,
+            "redactedRequestIds": row["redactions"] if identified else None,
+            "providerOutcomeP99Ms": row["p99"],
+        },
     }
 
 

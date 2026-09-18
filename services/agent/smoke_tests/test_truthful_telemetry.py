@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email import message_from_bytes
+from email.message import EmailMessage
 from types import SimpleNamespace
 
 from fastapi import FastAPI, Header, HTTPException
@@ -82,31 +83,33 @@ class TruthfulTelemetryTests(unittest.TestCase):
                 self.assertEqual(aggregate(*reversed(states)), expected)
 
     def test_alert_transport_does_not_swallow_delivery_failures(self):
-        smtp, files = MagicMock(), MagicMock()
+        smtp, database = MagicMock(), MagicMock()
+        database.connect.return_value.__enter__.return_value.execute.return_value.scalars.return_value.all.return_value = ["admin@tenant.test"]
+        smtp.SMTP.return_value.__enter__.return_value.send_message.return_value = {}
         scope = load_functions(
             Path(__file__).resolve().parents[1] / "document_processing/alerts.py",
-            {"trigger_security_alert"}, os=MagicMock(getenv=os.getenv), datetime=datetime,
-            smtplib=smtp, MIMEText=MIMEText, MIMEMultipart=MIMEMultipart,
-            logger=MagicMock(), ALERTS_LOG="unused.log", open=files,
+            {"trigger_security_alert"}, os=os, engine=database, text=text,
+            smtplib=smtp, EmailMessage=EmailMessage,
         )
+        event = {"tenant_id": 7, "document_id": 1}
         with patch.dict(os.environ, {"SMTP_HOST": "smtp.test.invalid", "SKIP_EMAIL_DELIVERY_FOR_TESTING": "false"}):
             smtp.SMTP.side_effect = OSError("SMTP unavailable")
-            with self.assertRaises(RuntimeError):
-                scope["trigger_security_alert"]({}, "System Health")
+            with self.assertRaises(OSError):
+                scope["trigger_security_alert"](event)
             smtp.SMTP.side_effect = None
-            scope["trigger_security_alert"]({}, "System Health")
-            smtp.SMTP.return_value.__enter__.return_value.sendmail.assert_called_once()
+            scope["trigger_security_alert"](event)
+            smtp.SMTP.return_value.__enter__.return_value.send_message.assert_called_once()
             with patch.dict(os.environ, {"SMTP_HOST": ""}):
-                files.side_effect = OSError("disk full")
                 with self.assertRaises(RuntimeError):
-                    scope["trigger_security_alert"]({}, "System Health")
-                files.side_effect = None
-                scope["trigger_security_alert"]({}, "System Health")
-            files.side_effect = OSError("log unavailable")
-            scope["trigger_security_alert"]({}, "System Health")  # SMTP can still deliver.
+                    scope["trigger_security_alert"](event)
             with patch.dict(os.environ, {"SKIP_EMAIL_DELIVERY_FOR_TESTING": "true"}):
                 with self.assertRaises(RuntimeError):
-                    scope["trigger_security_alert"]({}, "System Health")
+                    scope["trigger_security_alert"](event)
+            with self.assertRaises(HTTPException):
+                scope["trigger_security_alert"]({"tenant_id": 8, "document_id": 1})
+            smtp.SMTP.return_value.__enter__.return_value.send_message.return_value = {"admin@tenant.test": (550, "refused")}
+            with self.assertRaises(RuntimeError):
+                scope["trigger_security_alert"](event)
 
     def test_alert_reaches_local_smtp_receiver(self):
         messages = []
@@ -127,24 +130,26 @@ class TruthfulTelemetryTests(unittest.TestCase):
                         break
                     self.wfile.write(b"250 OK\r\n")
 
+        database = MagicMock()
+        database.connect.return_value.__enter__.return_value.execute.return_value.scalars.return_value.all.return_value = ["admin@tenant.test"]
         scope = load_functions(
             Path(__file__).resolve().parents[1] / "document_processing/alerts.py",
-            {"trigger_security_alert"}, os=MagicMock(getenv=os.getenv), datetime=datetime,
-            smtplib=smtplib, MIMEText=MIMEText, MIMEMultipart=MIMEMultipart,
-            logger=MagicMock(), ALERTS_LOG="unused.log", open=MagicMock(),
+            {"trigger_security_alert"}, os=os, engine=database, text=text,
+            smtplib=smtplib, EmailMessage=EmailMessage,
         )
         with socketserver.TCPServer(("127.0.0.1", 0), Receiver) as server:
             worker = threading.Thread(target=server.handle_request, daemon=True)
             worker.start()
             try:
                 with patch.dict(os.environ, {"SMTP_HOST": "127.0.0.1", "SMTP_PORT": str(server.server_address[1]), "SMTP_USE_TLS": "false", "SMTP_USERNAME": "", "SMTP_PASSWORD": "", "SKIP_EMAIL_DELIVERY_FOR_TESTING": "false"}):
-                    scope["trigger_security_alert"]({"matched_pattern": "SOC2_COMPLIANCE_UNKNOWN", "matched_text": "No current score is available."}, "System Health")
+                    scope["trigger_security_alert"]({"tenant_id": 7, "document_id": 1, "matched_text": "never-email-this-secret"})
             finally:
                 worker.join(timeout=4)
         self.assertEqual(len(messages), 1)
         message = message_from_bytes(messages[0])
         self.assertNotIn("Leak", str(message["Subject"]))
-        self.assertIn(b"SOC2_COMPLIANCE_UNKNOWN", message.get_payload(0).get_payload(decode=True))
+        self.assertEqual(message["To"], "admin@tenant.test")
+        self.assertNotIn(b"never-email-this-secret", messages[0])
 
     def test_compliance_timestamp_is_source_time_not_remapping_time(self):
         engine = MagicMock()

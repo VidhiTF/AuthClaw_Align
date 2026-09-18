@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
@@ -55,7 +57,8 @@ func TestAuditAuthenticatedContextPostgres(t *testing.T) {
 	t.Setenv("AUDIT_FAIL_CLOSED", "true")
 	t.Setenv("AUDIT_OUTBOX_PATH", t.TempDir()+"/recovery.ndjson")
 	tenant, user, key := randomTestUUID(t), randomTestUUID(t), randomTestUUID(t)
-	hash := strings.ReplaceAll(randomTestUUID(t), "-", "") + strings.ReplaceAll(randomTestUUID(t), "-", "")
+	rawKey := "audit-integration-" + randomTestUUID(t)
+	hash := HashKey(rawKey)
 	if _, err = owner.Exec(`INSERT INTO tenants(id,name,status) VALUES ($1,$2,'active')`, tenant, "audit context regression "+tenant); err != nil {
 		t.Fatal(err)
 	}
@@ -146,4 +149,47 @@ func TestAuditAuthenticatedContextPostgres(t *testing.T) {
 	if err = persistAuditMetadata(ctx, &AuditEvent{ID: randomTestUUID(t), TenantID: randomTestUUID(t)}); err == nil {
 		t.Fatal("cross-tenant append accepted")
 	}
+	t.Run("repeated correlation persists distinct requests", func(t *testing.T) {
+		t.Setenv("GATEWAY_AUTH_LAST_USED_ENABLED", "false")
+		ids := map[string]bool{}
+		handler := AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id := r.Context().Value(RequestIDContextKey).(string)
+			if ids[id] {
+				t.Fatal("caller correlation reused as audit identity")
+			}
+			ids[id] = true
+			observed := &AuditEvent{ID: randomTestUUID(t), TenantID: tenant, RequestID: id, Action: "block", IdempotencyKey: auditIdempotencyKey(id, "decision:block")}
+			if e := EmitAuditEvent(r.Context(), observed); e != nil {
+				t.Fatal(e)
+			}
+			if e := EmitAuditEvent(r.Context(), observed); e != nil {
+				t.Fatal("legitimate retry changed canonical payload", e)
+			}
+		}))
+		for range 2 {
+			r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			r.Header.Set("Authorization", "Bearer "+rawKey)
+			r.Header.Set("X-Request-ID", "connect-test-repeated")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatal(w.Code, w.Body.String())
+			}
+		}
+		var observed int
+		if e := owner.QueryRow("SELECT count(DISTINCT request_id) FROM audit_log_metadata WHERE tenant_id=$1 AND request_id LIKE 'gw2-%'", tenant).Scan(&observed); e != nil || observed != 2 {
+			t.Fatalf("canonical aggregate undercounted repeated correlation: %d %v", observed, e)
+		}
+		// A fail-open outcome can be absent entirely. The backend must never
+		// infer end-to-end completeness from these two well-identified rows.
+		t.Setenv("AUDIT_FAIL_CLOSED", "false")
+		before := auditFailOpenLosses.Load()
+		lost := &AuditEvent{ID: randomTestUUID(t), TenantID: tenant, RequestID: "lost-outcome", Action: "allow", IdempotencyKey: auditIdempotencyKey("lost-outcome", "provider_outcome")}
+		if e := EmitAuditEvent(context.Background(), lost); e != nil || auditFailOpenLosses.Load() != before+1 {
+			t.Fatalf("fail-open persistence failure not exercised: %v", e)
+		}
+		if e := owner.QueryRow("SELECT count(*) FROM audit_log_metadata WHERE tenant_id=$1 AND request_id='lost-outcome'", tenant).Scan(&observed); e != nil || observed != 0 {
+			t.Fatalf("failed outcome unexpectedly persisted: %d %v", observed, e)
+		}
+	})
 }

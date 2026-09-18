@@ -3,7 +3,7 @@ import os
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 from sqlalchemy import text
@@ -34,11 +34,18 @@ class EventPipeline:
         )
 
     def record_and_deliver(self, event: Dict[str, Any], stream: str = "audit") -> Dict[str, Any]:
+        return self.deliver_event(self.record_event(event, stream))
+
+    def record_event(self, event: Dict[str, Any], stream: str = "audit", *, connection=None) -> str:
         topic = self.audit_topic if stream == "audit" else self.analytics_topic
+        if stream == "security_alert":
+            from services.tenant_context import validate_tenant_id
+            validate_tenant_id(event.get("tenant_id"))
+            topic = "security_alert"
         event_id = self._event_id(event)
         tenant_id = self._event_tenant(event)
         payload = json.dumps(event, sort_keys=True, default=str)
-        with engine.connect() as conn:
+        with nullcontext(connection) if connection is not None else engine.connect() as conn:
             conn.execute(
                 text(
                     """
@@ -64,43 +71,49 @@ class EventPipeline:
                     "payload": payload,
                 },
             )
-            conn.commit()
-        return self.deliver_event(event_id)
+            if connection is None:
+                conn.commit()
+        return event_id
 
-    def deliver_event(self, event_id: str) -> Dict[str, Any]:
-        with engine.connect() as conn:
+    def deliver_event(self, event_id: str, *, retry: bool = False) -> Dict[str, Any]:
+        # Keep the row locked through delivery and result persistence. A crash
+        # rolls back the claim; concurrent workers cannot send the same alert.
+        with engine.begin() as conn:
             row = conn.execute(
-                text("SELECT * FROM event_delivery_records WHERE event_id = :event_id"),
+                text("SELECT * FROM event_delivery_records WHERE event_id = :event_id FOR UPDATE"),
                 {"event_id": event_id},
             ).fetchone()
-        if not row:
-            return {"status": "missing", "event_id": event_id}
-        record = dict(row._mapping)
-        event = json.loads(record["payload"])
-        attempts = int(record["attempts"] or 0)
-        errors = []
-        delivered = False
+            if not row:
+                return {"status": "missing", "event_id": event_id}
+            record = dict(row._mapping)
+            if record["status"] == "delivered":
+                return {"status": "delivered", "event_id": event_id}
+            if record["stream"] == "security_alert":
+                from services.tenant_context import validate_tenant_id
+                validate_tenant_id(record["tenant_id"])
+            event = json.loads(record["payload"])
+            attempts = 0 if retry else int(record["attempts"] or 0)
+            errors = []
+            delivered = False
+            for attempt in range(attempts + 1, self.max_attempts + 1):
+                try:
+                    if record["stream"] == "security_alert":
+                        from document_processing.alerts import trigger_security_alert
+                        trigger_security_alert(event, connection=conn)
+                    else:
+                        self.audit_publisher.publish(record["topic"], event, serialized=record["payload"])
+                        if self.clickhouse_enabled:
+                            self._write_clickhouse(event)
+                    delivered = True
+                    attempts = attempt
+                    break
+                except Exception as exc:
+                    attempts = attempt
+                    errors.append(type(exc).__name__ if record["stream"] == "security_alert" else str(exc))
+                    time.sleep(min(0.05 * attempt, 0.25))
 
-        for attempt in range(attempts + 1, self.max_attempts + 1):
-            try:
-                self.audit_publisher.publish(
-                    record["topic"],
-                    event,
-                    serialized=record["payload"],
-                )
-                if self.clickhouse_enabled:
-                    self._write_clickhouse(event)
-                delivered = True
-                attempts = attempt
-                break
-            except Exception as exc:
-                attempts = attempt
-                errors.append(str(exc))
-                time.sleep(min(0.05 * attempt, 0.25))
-
-        status = "delivered" if delivered else "dead_letter"
-        error_message = "; ".join(errors[-3:]) if errors else None
-        with engine.connect() as conn:
+            status = "delivered" if delivered else "dead_letter"
+            error_message = None if delivered else "; ".join(errors[-3:]) or record["error_message"]
             conn.execute(
                 text(
                     """
@@ -148,8 +161,24 @@ class EventPipeline:
                         "attempts": attempts,
                     },
                 )
-            conn.commit()
-        self.refresh_checkpoint(record["stream"])
+            if record["stream"] == "security_alert":
+                if delivered:
+                    conn.execute(text("UPDATE event_dead_letters SET resolved_at = NOW() WHERE event_id = :id"), {"id": event_id})
+                scans = conn.execute(text("""
+                    UPDATE document_scans SET status = CASE WHEN :delivered THEN outputs_json::jsonb ->> 'scan_status'
+                        ELSE 'alert_delivery_failed' END,
+                        outputs_json = jsonb_set(outputs_json::jsonb, '{alert_delivery,status}', CAST(:status AS jsonb))::text
+                    WHERE tenant_id = :tenant AND document_id = :document AND outputs_json::jsonb #>> '{alert_delivery,event_id}' = :id
+                    RETURNING id, document_id, status
+                """), {"tenant": record["tenant_id"], "document": event["document_id"], "id": event_id, "delivered": delivered, "status": json.dumps(status)}).all()
+                for scan in scans:
+                    conn.execute(text("""
+                        UPDATE documents SET status = :status WHERE id = :document AND tenant_id = :tenant
+                            AND status IN ('alert_delivery_pending', 'alert_delivery_failed') AND NOT EXISTS (
+                                SELECT 1 FROM document_scans WHERE document_id = :document AND tenant_id = :tenant AND id > :scan)
+                    """), {"status": scan.status, "document": scan.document_id, "tenant": record["tenant_id"], "scan": scan.id})
+        if record["stream"] != "security_alert":
+            self.refresh_checkpoint(record["stream"])
         return {"status": status, "event_id": event_id, "attempts": attempts, "error_message": error_message}
 
     def retry_dead_letters(self, limit: int = 100) -> Dict[str, Any]:
@@ -159,7 +188,7 @@ class EventPipeline:
                     """
                     SELECT event_id
                     FROM event_delivery_records
-                    WHERE status = 'dead_letter'
+                    WHERE status = 'dead_letter' OR (stream = 'security_alert' AND status = 'queued')
                     ORDER BY updated_at ASC
                     LIMIT :limit
                     """
@@ -169,13 +198,7 @@ class EventPipeline:
         delivered = 0
         failed = 0
         for row in rows:
-            with engine.connect() as conn:
-                conn.execute(
-                    text("UPDATE event_delivery_records SET status = 'queued', attempts = 0 WHERE event_id = :event_id"),
-                    {"event_id": row.event_id},
-                )
-                conn.commit()
-            result = self.deliver_event(row.event_id)
+            result = self.deliver_event(row.event_id, retry=True)
             if result["status"] == "delivered":
                 delivered += 1
             else:
@@ -247,7 +270,9 @@ class EventPipeline:
             by_stream.setdefault(stream, {"queued": 0, "delivered": 0, "dead_letter": 0, "max_attempts": 0})
             by_stream[stream][status] = int(count or 0)
             by_stream[stream]["max_attempts"] = max(by_stream[stream]["max_attempts"], int(attempts or 0))
+        alerts = by_stream.get("security_alert", {})
         return {
+            "security_alerts": {"status": "not_applicable" if not alerts else "unavailable" if alerts.get("dead_letter") else "unknown" if alerts.get("queued") or alerts.get("delivering") else "healthy", **alerts},
             "kafka_rest_configured": self.audit_publisher.configured,
             "clickhouse_enabled": self.clickhouse_enabled,
             "streams": by_stream,

@@ -15,6 +15,7 @@ from time import perf_counter
 import tracemalloc
 from types import SimpleNamespace
 from uuid import uuid4
+from unittest.mock import patch
 
 import pytest
 import pyotp
@@ -27,6 +28,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.models import ApprovalAudit, ComplianceScoreSnapshot, Notification, PendingApproval, TrustCenterAccessLog, TrustCenterShare, User
 from app.db import dependencies, session as database_session
 from app.core.auth import get_tenant_score_db, set_mfa_credentials
+from app.core.startup_checks import validate_database_security
 from app.services import abuse_controls, audit_store, compliance_scoring, control_assessments, event_backbone, evidence_service, trust_center
 from app.api.v1.endpoints.trust_center import get_public_trust_center
 from app.api.v1.endpoints import compliance_scores
@@ -78,8 +80,17 @@ def postgres():
                 VALUES (:id,:tenant,'legacy-mfa@example.invalid','admin','NONE',true,true,'legacy-test-enrollment')"""),
                 {"id": uuid4(), "tenant": legacy_tenant})
         command("-m", "alembic", "upgrade", "051")
+        command("scripts/bootstrap_database_security.py", "finalize-backend")
+        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="051,052"), app.connect() as connection:
+            validate_database_security(connection)
+            with pytest.raises(HTTPException) as failure:
+                compliance_scores.require_snapshot_schema(connection)
+            assert failure.value.status_code == 503
         command("-m", "alembic", "upgrade", "head")
         command("scripts/bootstrap_database_security.py", "finalize-backend")
+        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="051,052"), app.connect() as connection:
+            validate_database_security(connection)
+            compliance_scores.require_snapshot_schema(connection)
         harness = IsolationHarness(owner, app, sessionmaker(bind=app, expire_on_commit=False))
         yield harness, command, legacy_snapshot
     finally:
@@ -101,6 +112,17 @@ def score(score_value, *, generated_at=None):
         "score": score_value, "readiness_level": "monitor", "controls": [],
         "generated_at": (generated_at or datetime.now(timezone.utc)).isoformat(),
         "metrics": {"evidence_count": 0, "audit_event_count": 0, "open_findings": 0, "critical_findings": 0}}
+
+
+def test_real_get_does_not_write_snapshot_or_notification(postgres):
+    harness, _, _ = postgres
+    tenant = harness.create_identity("ent019-read-only")
+    request = SimpleNamespace(method="GET", state=SimpleNamespace(tenant_id=tenant.tenant_id))
+    with harness.session_for(tenant) as db:
+        db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        assert compliance_scores.get_compliance_scores(request, db=db)["overall_score"] is None
+        assert compliance_scores.get_framework_score("SOC2", request, db=db)["score"] is None
+        assert db.query(ComplianceScoreSnapshot).count() == db.query(Notification).count() == 0
 
 
 def reviewer(harness, requester):
@@ -189,8 +211,7 @@ def test_real_evidence_writer_and_review_qualify_with_repeatable_read(postgres, 
     with harness.session_for(tenant) as db:
         db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         db.info["compliance_read_transaction"] = True
-        unreviewed = compliance_scores.get_framework_score("SOC2", SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id)),
-            persist_snapshot=True, db=db)
+        unreviewed = compliance_scores.get_framework_score("SOC2", SimpleNamespace(method="POST", state=SimpleNamespace(tenant_id=tenant.tenant_id)), db=db)
         assert unreviewed["score"] is None and unreviewed["readiness_level"] == "insufficient_evidence"
         assert all(row["score"] is None and row["status"] == "insufficient_evidence" for row in unreviewed["controls"])
         if with_activity:
@@ -200,8 +221,7 @@ def test_real_evidence_writer_and_review_qualify_with_repeatable_read(postgres, 
     with harness.session_for(tenant) as db:
         db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         db.info["compliance_read_transaction"] = True
-        result = compliance_scores.get_framework_score("SOC2", SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id)),
-            persist_snapshot=True, db=db)
+        result = compliance_scores.get_framework_score("SOC2", SimpleNamespace(method="POST", state=SimpleNamespace(tenant_id=tenant.tenant_id)), db=db)
         result = compliance_scores.FrameworkScoreResponse.model_validate(result).model_dump()
         control = next(row for row in result["controls"] if row["id"] == "CC7.2")
         assert control["evidence_assessment"]["state"] == "qualified", control["evidence_assessment"]
