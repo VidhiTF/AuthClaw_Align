@@ -97,6 +97,8 @@ def test_public_health(client: TestClient):
     openapi_resp = client.get("/openapi.json")
     assert openapi_resp.status_code == status.HTTP_200_OK
     assert "paths" in openapi_resp.json()
+    from tests.test_workflow_response_contract import assert_workflow_openapi
+    assert_workflow_openapi(openapi_resp.json())
 
     docs_resp = client.get("/docs")
     assert docs_resp.status_code == status.HTTP_200_OK
@@ -1099,12 +1101,13 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     wf_approved_data = response_approve.json()
 
     # Expected outcomes
-    assert wf_approved_data["current_state"] == "COMPLETE"
+    assert wf_approved_data["current_state"] == "COMPLETE", wf_approved_data
     assert wf_approved_data["execution_status"] == "COMPLETED"
     assert wf_approved_data["approval_status"] == "APPROVED"
 
     # Verify db states
     db_session.rollback()
+    db_session.expire_all()  # Session provisioning committed the owner's earlier snapshot.
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
     db_wf_final = db_session.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id

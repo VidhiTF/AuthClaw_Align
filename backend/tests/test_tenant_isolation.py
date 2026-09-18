@@ -436,6 +436,13 @@ def test_policies_are_isolated_by_authenticated_session(isolation: IsolationHarn
     ("table_name", "seed_sql", "insert_sql"),
     (
         (
+            "compliance_workflows",
+            "INSERT INTO public.compliance_workflows "
+            "(id, tenant_id, workflow_id, framework) VALUES (:id, :tenant_id, CAST(:id AS text), 'HIPAA')",
+            "INSERT INTO public.compliance_workflows "
+            "(id, tenant_id, workflow_id, framework) VALUES (:attempt_id, :tenant_id, CAST(:attempt_id AS text), 'HIPAA')",
+        ),
+        (
             "aws_usage_limits",
             "INSERT INTO public.aws_usage_limits (id, tenant_id) VALUES (:id, :tenant_id)",
             "INSERT INTO public.aws_usage_limits (id, tenant_id) VALUES (:attempt_id, :tenant_id)",
@@ -450,7 +457,7 @@ def test_policies_are_isolated_by_authenticated_session(isolation: IsolationHarn
             "VALUES (:attempt_id, :tenant_id, 'isolation', 'blocked.txt', 'blocked.txt')",
         ),
     ),
-    ids=("aws-usage-limits", "aws-s3-documents"),
+    ids=("compliance-workflows", "aws-usage-limits", "aws-s3-documents"),
 )
 def test_p0_resource_cross_tenant_crud_is_denied(
     isolation: IsolationHarness,
@@ -496,3 +503,35 @@ def test_p0_resource_cross_tenant_crud_is_denied(
             {"id": record_id},
         )
         assert (updated.rowcount, deleted.rowcount) == (0, 0)
+
+
+def test_workflow_response_routes_respect_authenticated_postgres_boundary(isolation):
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from app.api.v1.endpoints import workflows
+    from app.db.models import ComplianceWorkflow
+    from sqlalchemy.orm import Session
+
+    tenant_a, tenant_b = isolation.create_identity("workflow-a"), isolation.create_identity("workflow-b")
+    own_id, other_id = str(uuid4()), str(uuid4())
+    with Session(isolation.owner_engine) as db:
+        for identity, workflow_id in ((tenant_a, own_id), (tenant_b, other_id)):
+            db.add(ComplianceWorkflow(id=uuid4(), tenant_id=identity.tenant_id, workflow_id=workflow_id,
+                                     framework="HIPAA", current_state="COMPLETE", execution_status="COMPLETED",
+                                     findings=[{"control": "private-document", "entity_count": 0}],
+                                     remediation_plan=[], execution_result={}, state_data={"rollback_result": {}}))
+        db.commit()
+    request = Request({"type": "http", "headers": []})
+    request.state.tenant_id, request.state.user_id = tenant_a.tenant_id, tenant_a.user_id
+    with isolation.session_for(tenant_a) as db:
+        assert db.execute(text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")).scalar_one() is False
+        assert db.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'compliance_workflows'::regclass")).scalar_one() is True
+        assert [row.workflow_id for row in db.query(ComplianceWorkflow).all()] == [own_id]
+        result = workflows.list_workflows(request, db)
+        assert [row.workflow_id for row in result] == [own_id]
+        assert result[0].model_dump()["findings"] == [{"control": "private-document", "entity_count": 0}]
+    for operation in (workflows.get_workflow, workflows.resume_workflow, workflows.approve_workflow,
+                      workflows.reject_workflow, workflows.remediate_workflow):
+        with isolation.session_for(tenant_a) as db, pytest.raises(HTTPException) as exc:
+            operation(workflow_id=other_id, request=request, db=db)
+        assert exc.value.status_code == 404

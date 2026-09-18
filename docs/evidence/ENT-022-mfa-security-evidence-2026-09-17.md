@@ -54,7 +54,26 @@ used a noncanonical definer role and correctly failed startup. After fixing only
 the disposable test setup, seven cases passed and the workflow approval case
 failed its final COMPLETE-state assertion. Master concurrently advanced to
 `1a3970c` (workflow response contracts), creating PR conflicts. Integration and
-post-integration results must supersede this preliminary compatibility result.
+post-integration results supersede this preliminary compatibility result below.
+
+Final integrated verification against master `1a3970c`:
+
+- Full Backend Security and Compliance CI selection: **649 passed**, no skips.
+- Existing `test_endpoints.py` plus `test_phase10.py` in a freshly migrated
+  disposable database: **13 passed**, no skips.
+- Merged workflow response contract/HTTP tests: **99 passed** (also included in
+  the 649 above). Incoming fixtures now provide required requester IDs and use
+  a separate approver; no production security guard was relaxed.
+- Recovery and signed cross-service PostgreSQL/Redis tests: **9 passed** again,
+  including the six observed lock waits and three child agent timezone cases.
+- The legacy HTTP failure was the owner test session's cached workflow object,
+  not the response or durable transition: the probe observed APPROVED consumption
+  and EXECUTE_REMEDIATION. Expiring that fixture's cached state after session
+  provisioning made both original database assertions and HTTP tests pass.
+- The only textual merge conflict was the workflow typing-import block. The
+  merged code retains the incoming response types and does not restore retired
+  one-step MFA enrollment. The final immutable source archive and CI results are
+  linked to the pushed SHA in PR #58; earlier scan results are not substituted.
 
 Operational consequences: recovery invalidates all target-owned API keys,
 including integrations, which need newly issued keys. Deploy all backend workers
