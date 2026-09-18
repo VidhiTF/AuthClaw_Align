@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Award,
@@ -19,7 +19,7 @@ import {
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
 import { TrustSummary } from "@/components/trust-summary";
-import type { TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
+import { calculationVersion, evidenceAssessmentLabel, scoreHistoryEntries, type ActivityDiagnostics, type EvidenceAssessment, type TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
 import { readinessLabel } from "@/lib/ui-format";
 
 type FrameworkId = "SOC2" | "GDPR" | "HIPAA";
@@ -62,6 +62,8 @@ interface ControlScore {
   status: "compliant" | "partial" | "non_compliant";
   evidence: string[];
   gaps: string[];
+  evidence_assessment?: EvidenceAssessment;
+  activity_diagnostics?: ActivityDiagnostics;
   exceptions?: Array<{
     status: "open" | "closed";
     type: "evidence_gap" | "missing_evidence";
@@ -76,6 +78,7 @@ interface ControlScore {
 }
 
 interface FrameworkScore {
+  calculation_version?: string;
   framework: FrameworkId;
   score: number;
   readiness_level: string;
@@ -98,6 +101,7 @@ interface FrameworkScore {
 }
 
 interface ComplianceScoreState {
+  calculation_version?: string;
   overall_score: number;
   readiness_level: string;
   frameworks: FrameworkScore[];
@@ -106,6 +110,8 @@ interface ComplianceScoreState {
 }
 
 interface ScoreHistoryItem {
+  id?: string;
+  calculation_version?: string;
   framework: FrameworkId;
   snapshot_date: string;
   overall_score: number;
@@ -201,6 +207,7 @@ export default function FrameworksPage() {
   const [scores, setScores] = useState<ComplianceScoreState | null>(null);
   const [history, setHistory] = useState<ScoreHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const scoreRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [activeFramework, setActiveFramework] = useState<FrameworkId>("SOC2");
   const [exporting, setExporting] = useState(false);
@@ -219,10 +226,13 @@ export default function FrameworksPage() {
   });
 
   const fetchScores = useCallback(async () => {
+    const request = ++scoreRequest.current;
     setLoading(true);
     setError(null);
+    setScores(null);
+    setHistory([]);
     try {
-      const scoreRes = await fetch("/api/compliance-scores?persist_snapshot=false");
+      const scoreRes = await fetch("/api/compliance-scores?persist_snapshot=false", { cache: "no-store" });
       if (scoreRes.status === 401) {
         window.location.href = "/login";
         return;
@@ -231,25 +241,31 @@ export default function FrameworksPage() {
       const scoreData = await scoreRes.json() as ComplianceScoreState;
       const frameworkData = scoreData.frameworks.find((item) => item.framework === activeFramework);
       if (!frameworkData || frameworkData.generated_at !== scoreData.generated_at
-        || (scoreData.trust_summary && scoreData.trust_summary.generated_at !== scoreData.generated_at)) {
+        || calculationVersion(frameworkData.calculation_version) !== calculationVersion(scoreData.calculation_version)
+        || (scoreData.trust_summary && (scoreData.trust_summary.generated_at !== scoreData.generated_at
+          || calculationVersion(scoreData.trust_summary.calculation_version) !== calculationVersion(scoreData.calculation_version)))) {
         throw new Error("Compliance snapshot mismatch");
       }
-      setScores(scoreData);
-      const historyRes = await fetch(`/api/compliance-scores/history?framework=${activeFramework}&days=30`);
+      const historyRes = await fetch(`/api/compliance-scores/history?framework=${activeFramework}&days=30`, { cache: "no-store" });
       if (historyRes.status === 401) {
         window.location.href = "/login";
         return;
       }
-      if (historyRes.ok) {
-        const historyData = await historyRes.json();
-        setHistory(historyData.items || []);
-      }
+      if (!historyRes.ok) throw new Error("Failed to load score history; refresh to retrieve a complete view");
+      const historyData = await historyRes.json();
+      if (request !== scoreRequest.current) return;
+      setScores(scoreData);
+      setHistory(historyData.items || []);
     } catch (err: unknown) {
       const message = getErrorMessage(err, "Failed to load compliance scoring data");
       console.warn("Frameworks fetchScores failed:", message);
-      setError(message);
+      if (request === scoreRequest.current) {
+        setScores(null);
+        setHistory([]);
+        setError(message);
+      }
     } finally {
-      setLoading(false);
+      if (request === scoreRequest.current) setLoading(false);
     }
   }, [activeFramework]);
 
@@ -273,7 +289,7 @@ export default function FrameworksPage() {
     const timer = window.setTimeout(() => {
       void fetchScores();
     }, 0);
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); scoreRequest.current += 1; };
   }, [fetchScores]);
 
   useEffect(() => {
@@ -383,12 +399,13 @@ export default function FrameworksPage() {
             Compliance Frameworks
           </h1>
           <p className="text-[#6B7488] text-sm mt-1">
-            Live readiness scores from evidence, findings, audit-chain events, redactions, policies, and approvals.
+            Scores show weighted coverage of qualified control assessments. 0% means required reviewed evidence or control conditions are unmet. Activity counts cannot establish compliance.
           </p>
         </div>
 
         <button
           onClick={fetchScores}
+          disabled={loading}
           className="self-start sm:self-center p-2 rounded-lg bg-[#F5F7FA] hover:bg-[#EEF1F6] text-[#475069] border border-[#E6E9F0] transition"
           title="Refresh framework statistics"
         >
@@ -424,7 +441,7 @@ export default function FrameworksPage() {
 
                 <div className="text-right">
                   <span className={`text-2xl font-black ${frameworkMeta[framework].accent}`}>
-                    {loading ? "-" : `${score?.score ?? 0}%`}
+                    {loading || !score ? "—" : `${score.score}%`}
                   </span>
                   <span className="block text-[8px] text-[#6B7488] font-bold uppercase tracking-wider mt-0.5">
                     {score ? readinessLabel(score.readiness_level) : "NO DATA"}
@@ -434,6 +451,7 @@ export default function FrameworksPage() {
 
               <h3 className="text-sm font-bold text-[#0E1726] mt-4 group-hover:text-indigo-300 transition">{frameworkMeta[framework].name}</h3>
               <p className="text-[#6B7488] text-xs mt-1 leading-relaxed">{frameworkMeta[framework].desc}</p>
+              {score && <p className="mt-2 text-[10px] text-[#6B7488]">Calculation version: {calculationVersion(score.calculation_version)}</p>}
 
               <div className="w-full bg-[#F5F7FA]/60 h-1.5 rounded-full mt-4 overflow-hidden">
                 <div
@@ -446,6 +464,7 @@ export default function FrameworksPage() {
         })}
       </div>
 
+      {scores && <p className="text-xs text-[#6B7488]">As of {new Date(scores.generated_at).toLocaleString()} · Calculation version: {calculationVersion(scores.calculation_version)}{calculationVersion(scores.calculation_version) === "legacy_unversioned" && " · Legacy results do not establish current evidence qualification."}</p>}
       <TrustSummary summary={scores?.trust_summary} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -454,18 +473,18 @@ export default function FrameworksPage() {
             <div className="px-6 py-4 border-b border-[#E6E9F0] bg-[#F5F7FA] flex items-center justify-between">
               <h3 className="text-sm font-bold text-[#0E1726] uppercase tracking-wider flex items-center gap-2">
                 <ShieldCheck className="w-4.5 h-4.5 text-indigo-400" />
-                {activeFramework} Live Control Scores
+                {activeFramework} Control Assessments
               </h3>
               <span className="text-[10px] text-[#6B7488] font-bold">
                 {activeScore?.controls.length || 0} controls
               </span>
             </div>
 
-            {loading || !activeScore ? (
+            {loading ? (
               <div className="p-8 flex justify-center">
                 <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500" />
               </div>
-            ) : (
+            ) : !activeScore ? <p className="p-8 text-sm text-[#6B7488]">Current compliance assessment unavailable. Refresh to try again.</p> : (
               <div className="divide-y divide-[#E6E9F0]/60">
                 {activeScore.controls.map((control) => (
                   <div key={control.id} className="p-6 space-y-3 hover:bg-[#F5F7FA]/10 transition-colors">
@@ -516,7 +535,7 @@ export default function FrameworksPage() {
 
                     <div className="grid gap-3 md:grid-cols-2">
                       <div>
-                        <p className="text-[10px] font-bold text-[#6B7488] uppercase tracking-wider">Evidence Signals</p>
+                        <p className="text-[10px] font-bold text-[#6B7488] uppercase tracking-wider">Evidence references</p>
                         <div className="mt-1.5 flex flex-col gap-1.5">
                           {(control.evidence.length ? control.evidence : ["No evidence signal yet"]).map((item) => (
                             <div key={item} className="flex items-center gap-2 text-xs text-[#475069]">
@@ -543,6 +562,16 @@ export default function FrameworksPage() {
                         </div>
                       </div>
                     </div>
+
+                    <div className="rounded-lg border border-[#E6E9F0] p-3 text-xs text-[#475069]">
+                      <p className="font-semibold">{evidenceAssessmentLabel(control.evidence_assessment)}</p>
+                      {control.evidence_assessment && <><p className="mt-1">As of {new Date(control.evidence_assessment.as_of).toLocaleString()}{control.evidence_assessment.valid_until && ` · Valid until ${new Date(control.evidence_assessment.valid_until).toLocaleString()}`}</p><p className="mt-1">{control.evidence_assessment.reason_codes.join(", ")}</p></>}
+                    </div>
+                    {control.activity_diagnostics?.authoritative === false && <div className="rounded-lg border border-[#E6E9F0] p-3 text-xs text-[#475069]">
+                      <p>Activity diagnostic score: {control.activity_diagnostics.score}% (not readiness)</p>
+                      <p>{control.activity_diagnostics.evidence.join(" · ")}</p>
+                      <p>{control.activity_diagnostics.gaps.join(" · ")}</p>
+                    </div>}
 
                     {(control.exceptions ?? []).length > 0 && (
                       <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3">
@@ -609,7 +638,7 @@ export default function FrameworksPage() {
           <div className="rounded-[20px] border border-[#E6E9F0] bg-white p-5 shadow-xl space-y-4">
             <h3 className="text-xs font-bold uppercase tracking-wider text-[#6B7488] flex items-center gap-1.5">
               <FileCheck className="w-4 h-4 text-indigo-400" />
-              Live Score Inputs
+              Activity Diagnostics
             </h3>
             <div className="space-y-3 text-xs">
               {[
@@ -622,7 +651,7 @@ export default function FrameworksPage() {
               ].map(([label, value]) => (
                 <div key={label} className="flex justify-between py-1.5 border-b border-[#E6E9F0] last:border-b-0">
                   <span className="text-[#6B7488]">{label}</span>
-                  <span className="font-bold text-[#0E1726] font-mono">{loading ? "-" : value ?? 0}</span>
+                  <span className="font-bold text-[#0E1726] font-mono">{loading || !activeScore ? "—" : value ?? 0}</span>
                 </div>
               ))}
             </div>
@@ -634,12 +663,14 @@ export default function FrameworksPage() {
               {history.length === 0 ? (
                 <div className="text-xs text-[#6B7488]">No score snapshots yet.</div>
               ) : (
-                history.map((item) => (
-                  <div key={`${item.framework}-${item.snapshot_date}`} className="rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] p-3">
+                scoreHistoryEntries(history).map(({ item, key, version, methodChanged }) => (
+                  <div key={key} className="rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] p-3">
+                    {methodChanged && <p className="mb-2 border-b border-amber-300 pb-2 text-xs text-amber-800">Calculation method changed. Scores across this boundary are not comparable.</p>}
                     <div className="flex justify-between text-xs">
                       <span className="text-[#6B7488]">{item.snapshot_date}</span>
                       <span className="font-bold text-[#0E1726]">{item.overall_score}%</span>
                     </div>
+                    <p className="mt-1 text-[10px] text-[#6B7488]">Calculation version: {version}</p>
                     <div className="mt-2 h-1.5 rounded-full bg-[#F5F7FA] overflow-hidden">
                       <div className="h-full rounded-full bg-indigo-500" style={{ width: `${item.overall_score}%` }} />
                     </div>

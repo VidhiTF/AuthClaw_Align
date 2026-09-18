@@ -2320,7 +2320,7 @@ def get_metrics():
             failed_tests = conn.execute(text("SELECT COUNT(*) FROM pentest_simulations WHERE status = 'FAIL'")).scalar() or 0
             
             # Incorporate document findings into compliance score
-            compliance_score = max(0, 100 - (open_findings * 5) - (failed_tests * 10) - (total_violations * 8))
+            compliance_score = max(0, min(84, 100 - (open_findings * 5) - (failed_tests * 10) - (total_violations * 8)))
             from services.event_pipeline import EventPipeline
             from verify_audit import verify_audit_chain
             event_pipeline_metrics = EventPipeline().delivery_metrics()
@@ -2353,7 +2353,7 @@ def get_metrics():
         event_pipeline_metrics = {"streams": {}, "checkpoints": []}
         audit_chain_status = {"valid": True, "records_checked": 0}
         risk_dist = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
-        compliance_score = 90
+        compliance_score = None
 
     approvals = get_all_approvals()
     pending = sum(1 for a in approvals.values() if a["status"] == "pending")
@@ -2392,6 +2392,11 @@ def get_metrics():
         "active_routes": active_routes,
         "active_policies": active_policies,
         "compliance_score": compliance_score,
+        "compliance_status": "unavailable" if compliance_score is None else "unassessed",
+        "compliance_authoritative": False,
+        "compliance_score_kind": "diagnostic",
+        "compliance_calculation_version": "agent-diagnostic-v2",
+        "compliance_evidence_gaps": ["Aggregate activity metrics do not qualify control assessments."],
         "open_findings": open_findings,
         "active_workers": active_workers,
         
@@ -3991,6 +3996,13 @@ def _compact_framework_scores(scores: Dict[str, Any]) -> Dict[str, Any]:
                 "passed": value.get("passed", 0),
                 "failed": value.get("failed", 0),
                 "watch": value.get("watch", 0),
+                "unassessed": value.get("unassessed", 0),
+                "status": value.get("status", "unassessed"),
+                "authoritative": False,
+                "score_kind": "diagnostic",
+                "calculation_version": value.get("calculation_version"),
+                "evidence_status": value.get("evidence_status", "unsupported"),
+                "evidence_gaps": value.get("evidence_gaps", []),
                 "items": [
                     {
                         "framework": item.get("framework"),
@@ -4003,6 +4015,11 @@ def _compact_framework_scores(scores: Dict[str, Any]) -> Dict[str, Any]:
                         "reason": item.get("reason"),
                         "source_event": item.get("source_event"),
                         "calculated_at": item.get("calculated_at"),
+                        "authoritative": False,
+                        "score_kind": "diagnostic",
+                        "calculation_version": item.get("calculation_version"),
+                        "evidence_status": item.get("evidence_status", "unsupported"),
+                        "evidence_gaps": item.get("evidence_gaps", []),
                     }
                     for item in value.get("items", [])
                 ],
@@ -4031,8 +4048,8 @@ def get_compliance_framework_explorer(
             controls = [item for item in controls if item.get("framework") == framework_key]
     try:
         scores = engine.calculate_scores(tenant_id)
-    except Exception:
-        scores = {}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Compliance diagnostics are unavailable") from exc
     try:
         evidence_rows = engine.evidence_export_rows(tenant_id, framework=framework, refresh_scores=False, limit=300)
     except Exception:
@@ -4057,9 +4074,10 @@ def get_compliance_framework_explorer(
         "controls": [
             {
                 **control,
+                **engine.diagnostic_metadata(),
                 "score": score_items.get(control["control_id"], {}).get("score"),
                 "status": score_items.get(control["control_id"], {}).get("status", "catalog_only"),
-                "risk": "LOW" if (score_items.get(control["control_id"], {}).get("score") or 100) >= 85 else "MEDIUM",
+                "risk": "UNASSESSED",
                 "evidence": evidence_by_control.get(control["control_id"], []),
                 "linked_audit_logs": [
                     item for item in evidence_by_control.get(control["control_id"], [])

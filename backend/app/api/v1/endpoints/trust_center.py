@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, require_roles, require_scopes
 from app.core.bff_client_ip import authenticate_bff_client_ip
-from app.db.dependencies import get_db
+from app.db.dependencies import get_db, get_score_db
 from app.db.models import Tenant, TrustCenterShare
 from app.services.email_service import EmailDeliveryError
 from app.services import trust_center
@@ -172,12 +172,17 @@ def revoke_trust_center_share(
 def get_public_trust_center(
     token: str,
     request: Request,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_score_db),
 ):
     try:
         share = _public_share_or_404(db, token)
         _require_auditor_access(request, share, token)
         package = trust_center.build_public_package(db, share)
+        trust_center.compliance_scoring.finish_score_read(db)
+        # Access counters are writes, so revalidate the share after releasing the
+        # scoring snapshot instead of competing to update it in REPEATABLE READ.
+        share = _public_share_or_404(db, token)
+        _require_auditor_access(request, share, token)
         trust_center.record_access(
             db,
             share,

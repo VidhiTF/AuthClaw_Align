@@ -4,16 +4,20 @@ import json
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import jwt
 import pyotp
 import pytest
 from fastapi import HTTPException, Request
+from sqlalchemy import JSON, create_engine
+from sqlalchemy.orm import Session
 
 from app.core.auth import hash_key, verify_mfa_code
 from app.core import oidc
 from app.core.crypto import decrypt_secret
 from app.core.passwords import hash_password, verify_password
+from app.db.models import User
 from app.schemas.models import APIKeyCreate, APIKeyRotate
 from app.services import oidc_sso
 from app.services.email_service import send_otp_email
@@ -49,32 +53,37 @@ def test_internal_exception_detail_is_sanitized():
     assert b"secret" not in response.body
 
 
-def test_mfa_disable_requires_current_code(monkeypatch):
+@pytest.fixture
+def persisted_mfa_identity(monkeypatch):
+    monkeypatch.setattr(user_endpoints, "_get_redis", lambda: None)
+    column = User.__table__.c.mfa_backup_codes
+    monkeypatch.setattr(column, "type", column.type.with_variant(JSON(), "sqlite"))
+    engine = create_engine("sqlite://")
+    User.__table__.create(engine)
+    with Session(engine, autoflush=False) as db:
+        secret = pyotp.random_base32()
+        user = User(id=uuid4(), tenant_id=uuid4(), email="owner@example.com",
+                    role="owner", is_active=True, mfa_enabled=True,
+                    mfa_secret=secret, mfa_backup_codes=["backup01"])
+        db.add(user)
+        db.commit()
+        monkeypatch.setattr(db, "commit", MagicMock(wraps=db.commit))
+        request = MagicMock()
+        request.state.user_id, request.state.tenant_id = user.id, user.tenant_id
+        yield db, user, request, secret
+    engine.dispose()
+
+
+def test_mfa_disable_requires_current_code(monkeypatch, persisted_mfa_identity):
     monkeypatch.setattr(
         user_endpoints,
         "verify_mfa_challenge",
         lambda _client, user, code, **_kwargs: verify_mfa_code(user, code),
     )
-    secret = pyotp.random_base32()
-    user = MagicMock(
-        id="00000000-0000-4000-8000-000000000001",
-        tenant_id="00000000-0000-4000-8000-000000000002",
-        email="owner@example.com",
-        role="owner",
-        mfa_enabled=True,
-        mfa_secret=secret,
-        mfa_backup_codes=["backup01"],
-    )
-    request = MagicMock()
-    request.state.user_id = user.id
-    request.state.tenant_id = user.tenant_id
-    db = MagicMock()
-    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
-        user
-    )
+    db, user, request, secret = persisted_mfa_identity
 
     with pytest.raises(HTTPException, match="Invalid MFA token"):
-        user_endpoints.disable_my_mfa(user_endpoints.MFADisableRequest(code="000000"), request, db)
+        user_endpoints.disable_my_mfa(user_endpoints.MFADisableRequest(code="invalid"), request, db)
     assert user.mfa_enabled is True
     db.commit.assert_not_called()
 
@@ -89,29 +98,13 @@ def test_mfa_disable_requires_current_code(monkeypatch):
     db.commit.assert_called_once()
 
 
-def test_mfa_replacement_requires_current_factor_and_protects_credentials(monkeypatch):
+def test_mfa_replacement_requires_current_factor_and_protects_credentials(monkeypatch, persisted_mfa_identity):
     monkeypatch.setattr(
         user_endpoints,
         "verify_mfa_challenge",
         lambda _client, user, code, **_kwargs: verify_mfa_code(user, code),
     )
-    secret = pyotp.random_base32()
-    user = MagicMock(
-        id="00000000-0000-4000-8000-000000000001",
-        tenant_id="00000000-0000-4000-8000-000000000002",
-        email="owner@example.com",
-        role="owner",
-        mfa_enabled=True,
-        mfa_secret=secret,
-        mfa_backup_codes=["backup01"],
-    )
-    request = MagicMock()
-    request.state.user_id = user.id
-    request.state.tenant_id = user.tenant_id
-    db = MagicMock()
-    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
-        user
-    )
+    db, user, request, secret = persisted_mfa_identity
 
     with pytest.raises(HTTPException, match="Current MFA token"):
         user_endpoints.setup_my_mfa(request, None, db)

@@ -1,5 +1,5 @@
 import { CalendarClock, CheckCircle2, Clock3, ShieldCheck } from "lucide-react";
-import { TrustSummary as TrustSummaryData, trustSummarySections } from "@/lib/trust-summary";
+import { TrustSummary as TrustSummaryData, calculationVersion, evidenceAssessmentLabel, trustSummarySections } from "@/lib/trust-summary";
 
 const sectionStyle = {
   verified: {
@@ -46,10 +46,15 @@ export function TrustSummary({ summary, dark = false }: { summary?: TrustSummary
             Trust Summary
           </h2>
           <p className={`mt-2 max-w-4xl text-xs leading-relaxed ${muted}`}>
-            Controls are evaluated using AuthClaw&apos;s automated framework scoring. This summary is not an independent SOC 2 Type II report or a SOC 3 report, and no certification is implied.
+            Verified means the control met AuthClaw&apos;s automated framework scoring criteria as of this assessment. Current criteria require qualified evidence; activity counts alone do not establish readiness. This summary is not an independent SOC 2 Type II report or a SOC 3 report, and no certification is implied.
           </p>
+          <p className={`mt-2 max-w-4xl text-xs leading-relaxed ${muted}`}>Not qualified means required reviewed evidence or control conditions are unmet; it does not mean the feature is unimplemented.</p>
         </div>
-        <span className={`text-[10px] ${muted}`}>Generated {new Date(summary.generated_at).toLocaleString()}</span>
+        <div className={`text-[10px] ${muted}`}>
+          <div>As of {new Date(summary.generated_at).toLocaleString()}</div>
+          <div>Calculation version: {calculationVersion(summary.calculation_version)}</div>
+          {calculationVersion(summary.calculation_version) === "legacy_unversioned" && <div>Legacy results do not establish current evidence qualification.</div>}
+        </div>
       </div>
 
       <div className="mt-5 grid gap-4 lg:grid-cols-3">
@@ -78,6 +83,8 @@ export function TrustSummary({ summary, dark = false }: { summary?: TrustSummary
                         <span className={`shrink-0 text-[10px] font-bold ${muted}`}>{control.score}%</span>
                       </div>
                       <div className={`mt-1 font-mono text-[10px] ${muted}`}>{control.framework} · {control.id}</div>
+                      <div className={`mt-1 text-[10px] ${muted}`}>{evidenceAssessmentLabel(control.evidence_assessment)}</div>
+                      {control.gaps?.map((gap) => <p key={gap} className={`mt-1 text-[10px] ${muted}`}>{gap}</p>)}
                     </div>
                   ))
                 )}

@@ -199,6 +199,7 @@ class User(Base):
     )
     mfa_enabled = Column(Boolean, default=False)
     mfa_secret = Column(Text, nullable=True)  # Encrypted TOTP secret
+    mfa_last_totp_step = Column(BigInteger, nullable=True)  # Last consumed step for this credential
     mfa_backup_codes = Column(ARRAY(String), nullable=True)  # Hashed one-time backup codes
     is_active = Column(Boolean, default=True)
     last_login = Column(DateTime(timezone=True), nullable=True)
@@ -1028,6 +1029,8 @@ class ComplianceScoreSnapshot(Base):
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     framework = Column(String(50), nullable=False)
     snapshot_date = Column(String(10), nullable=False)
+    calculation_version = Column(String(100), nullable=False, default="legacy_unversioned", server_default="legacy_unversioned")
+    assessment_metadata = Column(JSON, nullable=False, default=dict, server_default="{}")
     overall_score = Column(Float, nullable=False, default=0.0)
     readiness_level = Column(String(50), nullable=False, default="insufficient_evidence")
     control_scores = Column(JSON, nullable=False, default=dict)
@@ -1040,7 +1043,7 @@ class ComplianceScoreSnapshot(Base):
     tenant = relationship("Tenant", back_populates="compliance_score_snapshots")
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "framework", "snapshot_date", name="uq_compliance_score_tenant_framework_date"),
+        UniqueConstraint("tenant_id", "framework", "snapshot_date", "calculation_version", name="uq_compliance_score_tenant_framework_date_version"),
         Index("idx_compliance_score_tenant", "tenant_id"),
         Index("idx_compliance_score_framework", "tenant_id", "framework"),
         Index("idx_compliance_score_date", "tenant_id", "snapshot_date"),
