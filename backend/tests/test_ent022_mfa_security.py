@@ -79,6 +79,57 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     db.commit.assert_called_once()
 
 
+def test_workflow_mfa_uses_only_json_body(monkeypatch):
+    user = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        mfa_enabled=True,
+        mfa_secret="encrypted-factor",
+    )
+    verify = MagicMock(return_value=True)
+    monkeypatch.setattr(workflows, "verify_mfa_challenge", verify)
+    monkeypatch.setattr(workflows, "_get_redis", MagicMock(return_value=object()))
+
+    unsafe_requests = [
+        SimpleNamespace(query_params={"totp_code": "654321"}, headers={}),
+        SimpleNamespace(query_params={}, headers={"X-MFA-Code": "654321"}),
+        SimpleNamespace(query_params={}, headers={"X-TOTP-Code": "654321"}),
+    ]
+    for request in unsafe_requests:
+        with pytest.raises(HTTPException, match="JSON request body") as exc:
+            workflows._verify_mfa_if_enabled(
+                user, request, workflows.ApprovalRequest(totp_code="123456")
+            )
+        assert exc.value.status_code == 400
+    verify.assert_not_called()
+
+    request = SimpleNamespace(query_params={}, headers={"x-request-id": "request-body-mfa"})
+    verified, timestamp = workflows._verify_mfa_if_enabled(
+        user,
+        request,
+        workflows.ApprovalRequest(totp_code="123456"),
+    )
+
+    assert verified is True
+    assert timestamp is not None
+    assert verify.call_args.args[2] == "123456"
+
+
+def test_production_edge_blocks_and_redacts_legacy_mfa_transports():
+    edge = (REPOSITORY_ROOT / "infra/terraform/edge.tf").read_text(encoding="utf-8")
+    tls_proxy = (
+        REPOSITORY_ROOT
+        / "infra/terraform/modules/regional_stack/tls-nginx.conf.tftpl"
+    ).read_text(encoding="utf-8")
+
+    assert 'name     = "block-mfa-credentials-outside-body"' in edge
+    assert 'single_query_argument { name = "totp_code" }' in edge
+    assert 'single_header { name = "x-mfa-code" }' in edge
+    assert 'single_header { name = "x-totp-code" }' in edge
+    assert "sampled_requests_enabled   = false" in edge
+    assert "access_log off;" in tls_proxy
+
+
 def test_self_approval_is_rejected_and_audited():
     actor_id = uuid.uuid4()
     approval = SimpleNamespace(

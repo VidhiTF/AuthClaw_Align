@@ -344,14 +344,20 @@ def _verify_mfa_if_enabled(
             )
         return False, None
 
-    # Collect TOTP code from body → query param → header (in that priority order)
-    totp_code: Optional[str] = None
-    if body:
-        totp_code = body.totp_code
-    if not totp_code:
-        totp_code = request.query_params.get("totp_code")
-    if not totp_code:
-        totp_code = request.headers.get("X-MFA-Code") or request.headers.get("X-TOTP-Code")
+    header_names = {str(name).lower() for name in request.headers.keys()}
+    if (
+        "totp_code" in request.query_params
+        or "x-mfa-code" in header_names
+        or "x-totp-code" in header_names
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="MFA credentials must be provided in the JSON request body",
+        )
+
+    # Secrets are accepted only in the request body so URLs and headers cannot
+    # retain them in proxy, access-log, or APM metadata.
+    totp_code = body.totp_code if body else None
 
     if not totp_code:
         raise HTTPException(
