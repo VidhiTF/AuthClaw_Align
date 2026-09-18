@@ -327,21 +327,16 @@ class TestRemediationRollback:
         assert statuses["tenant/doc-success.txt"] == RemediationActionStatus.ROLLED_BACK.value
         assert statuses["tenant/doc-fail.txt"] == RemediationActionStatus.FAILED.value
 
-    def test_action_audit_extra_trace_reaches_kafka_payload(self, monkeypatch):
+    def test_action_audit_extra_trace_reaches_publisher_payload(self, monkeypatch):
         sent_events = []
 
-        class DummyFuture:
-            def get(self, timeout):
-                return None
+        def capture_event(producer, tenant_id, event):
+            sent_events.append({"key": tenant_id, "value": event})
 
-        class DummyProducer:
-            def send(self, topic, key=None, value=None):
-                sent_events.append({"topic": topic, "key": key, "value": value})
-                return DummyFuture()
-
-        monkeypatch.setattr(workflow_runner, "_kafka_producer", DummyProducer())
+        # The publisher now persists an outbox before transport delivery. This
+        # runner test checks its event boundary; transport has separate tests.
         monkeypatch.setattr(workflow_runner, "_init_kafka_producer", lambda: None)
-        monkeypatch.setattr(workflow_runner.event_backbone, "persist_audit_event", lambda _event: None)
+        monkeypatch.setattr(workflow_runner.event_backbone, "publish_audit_event", capture_event)
 
         workflow_runner.emit_audit_event(
             workflow_id="workflow-123",
@@ -360,7 +355,6 @@ class TestRemediationRollback:
 
         assert len(sent_events) == 1
         event = sent_events[0]["value"]
-        assert sent_events[0]["topic"] == "audit.events"
         assert sent_events[0]["key"] == "tenant-123"
         assert event["action"] == "workflow:remediation_action_failed"
         assert "workflow_id=workflow-123" in event["execution_trace"]

@@ -11,11 +11,11 @@ Provides REST endpoints for managing LangGraph compliance workflows:
 
 import logging
 import uuid
-from typing import Optional
+from typing import Annotated, Literal, Optional
 import pyotp
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Discriminator, Field, Tag, TypeAdapter, ValidationError, field_validator
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -36,6 +36,15 @@ from app.services.remediation_approval import (
 )
 from app.services.worker_throttle import check_worker_throttle
 from app.services.abuse_controls import verify_mfa_challenge
+from app.schemas.workflows import (
+    RedTeamExecutionResult,
+    RedTeamFinding,
+    WorkflowExecutionResult,
+    WorkflowFinding,
+    WorkflowRemediationAction,
+    WorkflowRemediationPlan,
+    WorkflowRollbackResult,
+)
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("api.workflows")
@@ -51,26 +60,67 @@ class ApprovalRequest(BaseModel):
     totp_code: Optional[str] = Field(None, description="TOTP code or backup code for MFA validation")
 
 
-class WorkflowResponse(BaseModel):
+class WorkflowResponseBase(BaseModel):
     workflow_id: str
     tenant_id: str
     framework: str
     current_state: str
     execution_status: str
     risk_score: Optional[float] = None
-    findings: Optional[list] = None
-    remediation_plan: Optional[list] = None
     remediation_state: Optional[str] = None
-    remediation_actions: Optional[list] = None
-    rollback_result: Optional[dict] = None
+    remediation_actions: Optional[list[WorkflowRemediationAction]] = None
+    rollback_result: Optional[WorkflowRollbackResult] = None
     approval_status: Optional[str] = None
     approval_id: Optional[str] = None
-    execution_result: Optional[dict] = None
     error_message: Optional[str] = None
     retry_count: Optional[int] = 0
     started_at: Optional[str] = None
     updated_at: Optional[str] = None
     completed_at: Optional[str] = None
+
+
+class WorkflowResponse(WorkflowResponseBase):
+    framework: str = Field(..., json_schema_extra={"not": {"const": "RED_TEAM"}})
+    findings: Optional[list[WorkflowFinding]] = None
+    remediation_plan: Optional[list[WorkflowRemediationPlan]] = None
+    execution_result: Optional[WorkflowExecutionResult] = None
+
+    @field_validator("framework")
+    @classmethod
+    def compliance_framework(cls, value):
+        if value == "RED_TEAM":
+            raise ValueError("RED_TEAM requires its own response contract")
+        return value
+
+
+class RedTeamWorkflowResponse(WorkflowResponseBase):
+    framework: Literal["RED_TEAM"]
+    findings: Optional[list[RedTeamFinding]] = None
+    remediation_plan: Optional[list[str]] = None
+    execution_result: Optional[RedTeamExecutionResult] = None
+
+
+def _workflow_variant(value):
+    framework = value.get("framework") if isinstance(value, dict) else getattr(value, "framework", None)
+    return "red_team" if framework == "RED_TEAM" else "compliance"
+
+
+# A callable discriminator preserves legacy compliance framework strings while
+# selecting RED_TEAM explicitly, including when serializing model instances.
+WorkflowResponseVariant = Annotated[
+    Annotated[WorkflowResponse, Tag("compliance")] | Annotated[RedTeamWorkflowResponse, Tag("red_team")],
+    Discriminator(_workflow_variant),
+]
+_workflow_response_adapter = TypeAdapter(WorkflowResponseVariant)
+
+
+def _workflow_response(result: dict) -> WorkflowResponseVariant:
+    try:
+        return _workflow_response_adapter.validate_python(result)
+    except ValidationError:
+        # Validation errors embed input values; never log persisted payloads.
+        logger.error("Workflow response contract validation failed")
+        raise HTTPException(status_code=500, detail="Internal server error") from None
 
 
 class RecoveryResponse(BaseModel):
@@ -142,13 +192,13 @@ def create_workflow(
             framework=framework,
             request_id=body.request_id,
         )
-        return WorkflowResponse(**result)
     except Exception as exc:
         logger.error("Failed to create workflow: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+    return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/resume", response_model=WorkflowResponse)
+@router.post("/{workflow_id}/resume", response_model=WorkflowResponseVariant)
 def resume_workflow(
     workflow_id: str,
     request: Request,
@@ -161,12 +211,12 @@ def resume_workflow(
     try:
         runner = ComplianceWorkflowRunner(db)
         result = runner.resume(workflow_id, tenant_id, actor_id=str(request.state.user_id))
-        return WorkflowResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         logger.error("Failed to resume workflow: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+    return _workflow_response(result)
 
 
 def _auto_expire_stale(db: Session, tenant_id: str, actor_id: uuid.UUID) -> None:
@@ -476,7 +526,7 @@ def reject_gateway_approval(
     return _approval_response(approval)
 
 
-@router.get("", response_model=list[WorkflowResponse])
+@router.get("", response_model=list[WorkflowResponseVariant])
 def list_workflows(
     request: Request,
     db: Session = Depends(get_tenant_db),
@@ -493,13 +543,13 @@ def list_workflows(
     )
     runner = ComplianceWorkflowRunner(db)
     return [
-        WorkflowResponse(**result)
+        _workflow_response(result)
         for row in rows
         if (result := runner.get_status(row.workflow_id, tenant_id)) is not None
     ]
 
 
-@router.get("/{workflow_id}", response_model=WorkflowResponse)
+@router.get("/{workflow_id}", response_model=WorkflowResponseVariant)
 def get_workflow(
     workflow_id: str,
     request: Request,
@@ -515,10 +565,10 @@ def get_workflow(
     if not result:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
-    return WorkflowResponse(**result)
+    return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/approve", response_model=WorkflowResponse)
+@router.post("/{workflow_id}/approve", response_model=WorkflowResponseVariant)
 def approve_workflow(
     workflow_id: str,
     request: Request,
@@ -651,13 +701,13 @@ def approve_workflow(
                 body=f"{workflow_id} finished with remediation state {remediation_state}.",
                 link="/agent",
             )
-        return WorkflowResponse(**result)
     except Exception as exc:
         logger.error("Failed to approve/resume workflow: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+    return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/reject", response_model=WorkflowResponse)
+@router.post("/{workflow_id}/reject", response_model=WorkflowResponseVariant)
 def reject_workflow(
     workflow_id: str,
     request: Request,
@@ -732,13 +782,13 @@ def reject_workflow(
     # Resume workflow (which wraps up since it's rejected)
     try:
         result = runner.resume(workflow_id, tenant_id, actor_id=str(user_id))
-        return WorkflowResponse(**result)
     except Exception as exc:
         logger.error("Failed to reject/resume workflow: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+    return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/remediate", response_model=WorkflowResponse)
+@router.post("/{workflow_id}/remediate", response_model=WorkflowResponseVariant)
 def remediate_workflow(
     workflow_id: str,
     request: Request,
@@ -821,7 +871,7 @@ def remediate_workflow(
 
     runner = ComplianceWorkflowRunner(db)
     result = runner.get_status(workflow_id, tenant_id)
-    return WorkflowResponse(**result)
+    return _workflow_response(result)
 
 
 @router.post("/recover", response_model=RecoveryResponse)
