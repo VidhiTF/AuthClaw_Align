@@ -56,14 +56,15 @@ def test_internal_exception_detail_is_sanitized():
 @pytest.fixture
 def persisted_mfa_identity(monkeypatch):
     monkeypatch.setattr(user_endpoints, "_get_redis", lambda: None)
-    column = User.__table__.c.mfa_backup_codes
-    monkeypatch.setattr(column, "type", column.type.with_variant(JSON(), "sqlite"))
+    for name in ("mfa_backup_codes", "mfa_pending_backup_codes"):
+        column = User.__table__.c[name]
+        monkeypatch.setattr(column, "type", column.type.with_variant(JSON(), "sqlite"))
     engine = create_engine("sqlite://")
     User.__table__.create(engine)
     with Session(engine, autoflush=False) as db:
         secret = pyotp.random_base32()
         user = User(id=uuid4(), tenant_id=uuid4(), email="owner@example.com",
-                    role="owner", is_active=True, mfa_enabled=True,
+                    role="viewer", is_active=True, mfa_enabled=True,
                     mfa_secret=secret, mfa_backup_codes=["backup01"])
         db.add(user)
         db.commit()
