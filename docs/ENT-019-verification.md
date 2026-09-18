@@ -12,11 +12,11 @@ merge `1e40bdb5c8fd6b4e28c827035ab7d06645530ccb`, effective
   former 142 ms/90%/valid-chain fallbacks are removed. Measured zero latency is
   preserved; no latency sample is null. Approval counts use the checked database
   transaction rather than the approval helper's silent-error/stale-cache path.
-- Detailed health reports observed database health, unavailable checks, and
-  unknown unmeasured provider/runtime features. Readiness adds `health_status`
+- Detailed health reuses measured readiness checks with explicit `agent_readiness`
+  scope; unmeasured provider/runtime features remain separately unknown. Readiness adds `health_status`
   while retaining its existing ready/not_ready contract and not_applicable local
-  production validation. Basic `/health` remains process liveness only, not proof
-  that dependencies are healthy.
+  production validation. Basic `/health` and its canonical alias return
+  `status: alive, scope: process_liveness`, not dependency-health claims.
 - Analytics query/connection failures are HTTP 503, not empty successful counts.
   Missing queue checkpoints are unknown/null and alertable, never zero lag with
   alerts cleared. Observed threshold violations remain degraded. Disabled
@@ -42,12 +42,16 @@ merge `1e40bdb5c8fd6b4e28c827035ab7d06645530ccb`, effective
   audit records, not a complete traffic total. Real zero durations survive.
 - Review also covered legacy drift snapshots, executive/auditor reports, framework
   explorer, and public trust health. Source errors abort reports instead of returning
-  100 or empty findings; missing evidence is explicitly unknown. Drift skips unknown
-  scores and handles historical nulls. JSON/CSV/PDF executive exports retain score
+  100 or empty findings; missing evidence is explicitly unknown. Drift persists null
+  scores with unknown/unavailable state and alerts instead of retaining stale posture.
+  JSON/CSV/PDF executive exports retain score
   provenance. Audit summaries and reports preserve unknown versus corrupted chains.
   Framework explorer rejects source errors and never labels null/zero scores LOW.
-  Public trust health treats signatures as artifact integrity, not runtime health;
-  unprobed services remain unknown and source outages return sanitized HTTP 503.
+  Public trust health forces fresh evidence and combines signature, audit, compliance
+  evidence presence and the existing queue classifier under `trust_evidence` scope.
+  Healthy means these checks passed, not that compliance is 100% or that unprobed
+  backend/gateway/provider services are healthy. Those remain unknown; source
+  outages return sanitized HTTP 503.
 
 ## Reuse, review, and compatibility
 
@@ -99,8 +103,8 @@ Artifacts are generated from exercised code, not fabricated production observati
 
 - [Unavailable metrics response](ENT-019-unavailable-telemetry.json): an injected
   database outage returns 503 with null latency, score and audit validity.
-- [Degraded detailed health](ENT-019-degraded-health.json): database probe succeeds
-  while unmeasured runtime/provider health remains visibly unknown.
+- [Degraded trust health](ENT-019-degraded-health.json): publication and evidence
+  checks succeed but a failed audit integrity check keeps the aggregate degraded.
 - [Dashboard outage HTML export](ENT-019-dashboard-outage.html): the actual React
   overview rendered after synthetic success followed by HTTP 503; assertions
   prove the previous 12345 request count disappears and an alert/Unknown appears.
@@ -117,3 +121,130 @@ clients handle null/unknown states and HTTP 503, and alert delivery responds to
 missing queue telemetry. Roll back code as a coordinated producer/consumer change;
 do not reintroduce success fallbacks to hide an outage. New snapshot metadata is
 additive; older code ignores it and older snapshots remain readable.
+
+## PR 60 blocker remediation (2026-09-18)
+
+This section supersedes the initial review's claims that skipping unknown snapshots
+and retaining a `healthy` liveness label were acceptable. Both review findings at
+`064189454d42de79341b68d8a89490d6042c0943` were reproduced before patching (three
+focused failures). Independent investigation confirmed the source paths and schema.
+
+Reuse/new-line decision: modify the existing drift writer and alert/audit helpers,
+reuse readiness and queue classification, and retain status in existing history
+JSON. No new production module, dependency, or duplicated classifier. Four
+idempotent nullable-column alterations are necessary: history score and alert
+drop/previous/current score cannot represent missing data while NOT NULL.
+The final production diff is 90 added / 109 deleted lines (net -19).
+
+- Unknown and acquisition-error observations persist null plus unknown/unavailable
+  status, without inventing a numeric drop. Real zero remains numeric. Recovery
+  starts from the latest null row, not an older successful score. Persistence
+  failure triggers an unavailable alert and raises; it cannot write a marker when
+  the database itself is down. Consumers must not treat stored history as a live
+  observation during a database outage.
+- Snapshot and alert records commit before external audit/notification work.
+  Independent adversarial review found that missing audit tenant context and
+  premature loop exit could lose later framework notifications. The writer now
+  passes the trusted runtime tenant, attempts every framework independently, and
+  raises delivery errors. Unknown observations notify on each invocation so audit
+  or transport recovery is not suppressed by committed history. Existing HIGH
+  alert transport and numeric SCORE_DRIFT pattern are retained.
+- Basic liveness intentionally changes its label to `alive`; readiness's existing
+  `ready/not_ready` API and Docker/Terraform readiness targets are preserved.
+  Detailed readiness can recover to healthy; invalid/failed production validation,
+  database or rate-limiter checks return unavailable. Nonproduction validation is
+  not_applicable. Trust health distinguishes successful, failed, missing and
+  unavailable evidence without using its cache to hide source failure.
+
+Fresh verification commands/results:
+
+- `.venv-t02/Scripts/python.exe -m unittest discover -s services/agent/smoke_tests
+  -p test_truthful_telemetry.py -q`: 13 passed (real SQLite transactions plus ASGI
+  alias/success/outage/recovery tests). With `ENT019_TEST_DATABASE_URL` pointing to
+  disposable PostgreSQL 16: 13 passed; actual migration statements run twice against
+  TEMP tables, followed by numeric/unknown/unavailable/recovery and delivery-failure
+  transitions. Test doubles isolate external audit/notification boundaries; the
+  trusted tenant argument is asserted, not claimed as a full deployed RLS drill.
+- Full agent smoke discovery against disposable Redis: 106 passed.
+- Exact Agent CI selection from `.github/workflows/ci.yml`, with `--noconftest
+  -p no:cacheprovider`: 91 passed and 48 subtests passed. The unsafe legacy database
+  conftest was never loaded. Syntax compilation and `git diff --check` passed.
+- Agent image rebuilt with `docker compose --env-file .env.full.example -f
+  docker-compose.full.yml build agent`; focused tests also execute its actual code
+  in a read-only network-isolated container. Existing unrelated Compose/environment
+  edits were preserved, not included in this remediation.
+
+Rollout: run the existing agent migration job before replacing agent writers;
+nullable expansion preserves all existing rows and supports old numeric writers.
+No backfill or destructive migration is required. Keep nullable columns on rollback
+(restoring NOT NULL would reject retained null history); coordinated code rollback
+would reintroduce the reviewed defects. Legacy aggregate history still intentionally
+lacks tenant columns/RLS, as documented in `tenant_isolation_report.py`; this patch
+does not redesign those tables. Audit identity uses the existing trusted tenant
+context, never a request-supplied tenant. No authentication/RLS policy was weakened.
+
+Remaining release evidence: live AWS deployment/outage and alert delivery proof,
+remote checks for the new commit, and renewed independent human owner approval.
+The synthetic dashboard export remains component evidence, not deployment proof.
+These local fixes are not a claim of PR approval or production deployment.
+
+## Follow-up staff review (2026-09-18)
+
+Used the code-work/code-verification workflow, with a fresh independent adversarial
+review and local reproduction of its findings. This review adds five confirmed
+corrections to the PR 60 remediation above:
+
+- Alert delivery no longer swallows configured SMTP failure or failed log-only
+  delivery. A log-directory failure cannot prevent an available SMTP path. Test-only
+  email suppression still requires successful logging. The shared alert subject
+  now says security alert, not a fabricated claim of a data leak. Existing callers
+  already catch/report transport errors; snapshot persistence remains committed.
+- Legacy score evidence time comes from source collection/lifecycle metadata,
+  normalized to UTC, not the time derived rows are rebuilt. Missing or malformed
+  timestamps remain null; undated legacy document findings remain undated. The
+  derived row's created_at remains a remapping timestamp, not collection proof.
+- Checkpoints must be recent, nonnegative, complete, and agree with observed stream
+  counts. Missing streams, conflicting queued/dead-letter counts, bad timestamps,
+  and timestamps older than AUTHCLAW_QUEUE_LAG_ALERT_SECONDS (default 300 seconds)
+  are unknown and alertable. Idle checkpoints can become unknown: no recent
+  observation is not proof of a worker outage or of worker health.
+- Unknown control-change history now stores null plus status metadata. A fifth
+  idempotent nullable alteration covers compliance_score_changes.current_score.
+  Readers also normalize legacy catalog_baseline history to null. Repeated unknown
+  observations do not invent changes; recovery to a measured zero does create a
+  change. Existing control-score storage retains its documented zero/unknown pair.
+- Removed duplicate alert-fallback branches, repeated queue-threshold computation,
+  and unused readiness imports. No new production module or dependency. Compared
+  with the start of this follow-up, correctness checks add 30 net production lines;
+  compared with reviewed PR head 0641894 the combined remediation adds 11. Across
+  the full ENT-019 production scope versus align/master, git numstat is 400 added /
+  409 deleted: net reduction 9. Tests and unrelated working-tree edits are excluded.
+
+Fresh final verification:
+
+- Focused telemetry suite: 17 passed on SQLite and disposable PostgreSQL 16.
+  Actual nullable migrations execute twice; real snapshot/control-history writes
+  verify missing/recovery transitions. An actual loopback SMTP receiver accepts and
+  checks the generated unknown-compliance message; failure injection verifies
+  unavailable SMTP/logging without contacting any external mail service.
+- Full agent smoke discovery: 110 passed with isolated Redis/PostgreSQL.
+- Exact Agent CI selection: 95 passed plus 48 subtests, using --noconftest.
+- Backend compliance/trust/evidence selection: 47 passed.
+- Console unit suite: 47 passed; npx tsc --noEmit passed.
+- Repository-policy/compliance-hardening checks: 31 passed.
+- Rebuilt agent image: all 17 focused tests passed in a read-only, network-isolated
+  container (the SMTP test uses only its loopback interface). Python compilation
+  and diff whitespace checks passed. Dependency deprecation warnings remain.
+
+The independent review reproduced the missing-stream and null-history defects;
+both received failing-before/passing-after regression tests. Source-timestamp,
+SMTP failure and stale-checkpoint cases were similarly reproduced before fixes.
+Windows test-source reads explicitly use UTF-8. The extended source-event fixture
+initially lacked an approval reason; it was corrected and retested, not skipped.
+
+Deployment still requires running the existing agent migration job before replacing
+writers, keeping nullable columns on rollback, remote CI and renewed owner approval.
+SMTP proof is local, not managed production delivery proof. No live AWS outage or
+rollout was performed, and unrelated invitation/email/configuration edits were left
+untouched. Material test growth requires the existing independent owner exception;
+neither this review nor passing local tests substitutes for that approval.

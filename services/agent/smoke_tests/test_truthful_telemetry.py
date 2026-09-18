@@ -5,15 +5,25 @@ import csv
 import io
 import json
 import os
+import re
+import smtplib
+import socketserver
+import threading
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email import message_from_bytes
+from types import SimpleNamespace
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -21,7 +31,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 
 
 def load_functions(path, names, **namespace):
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     exec(
         compile(
             ast.Module(
@@ -37,6 +47,208 @@ def load_functions(path, names, **namespace):
 
 
 class TruthfulTelemetryTests(unittest.TestCase):
+    def test_alert_transport_does_not_swallow_delivery_failures(self):
+        smtp, files = MagicMock(), MagicMock()
+        scope = load_functions(
+            Path(__file__).resolve().parents[1] / "document_processing/alerts.py",
+            {"trigger_security_alert"}, os=MagicMock(getenv=os.getenv), datetime=datetime,
+            smtplib=smtp, MIMEText=MIMEText, MIMEMultipart=MIMEMultipart,
+            logger=MagicMock(), ALERTS_LOG="unused.log", open=files,
+        )
+        with patch.dict(os.environ, {"SMTP_HOST": "smtp.test.invalid", "SKIP_EMAIL_DELIVERY_FOR_TESTING": "false"}):
+            smtp.SMTP.side_effect = OSError("SMTP unavailable")
+            with self.assertRaises(RuntimeError):
+                scope["trigger_security_alert"]({}, "System Health")
+            smtp.SMTP.side_effect = None
+            scope["trigger_security_alert"]({}, "System Health")
+            smtp.SMTP.return_value.__enter__.return_value.sendmail.assert_called_once()
+            with patch.dict(os.environ, {"SMTP_HOST": ""}):
+                files.side_effect = OSError("disk full")
+                with self.assertRaises(RuntimeError):
+                    scope["trigger_security_alert"]({}, "System Health")
+                files.side_effect = None
+                scope["trigger_security_alert"]({}, "System Health")
+            files.side_effect = OSError("log unavailable")
+            scope["trigger_security_alert"]({}, "System Health")  # SMTP can still deliver.
+            with patch.dict(os.environ, {"SKIP_EMAIL_DELIVERY_FOR_TESTING": "true"}):
+                with self.assertRaises(RuntimeError):
+                    scope["trigger_security_alert"]({}, "System Health")
+
+    def test_alert_reaches_local_smtp_receiver(self):
+        messages = []
+
+        class Receiver(socketserver.StreamRequestHandler):
+            def handle(self):
+                self.connection.settimeout(3)
+                self.wfile.write(b"220 localhost\r\n")
+                while line := self.rfile.readline():
+                    if line.upper().startswith(b"DATA"):
+                        self.wfile.write(b"354 Send message\r\n")
+                        chunks = []
+                        while (chunk := self.rfile.readline()) not in (b".\r\n", b""):
+                            chunks.append(chunk)
+                        messages.append(b"".join(chunks))
+                    elif line.upper().startswith(b"QUIT"):
+                        self.wfile.write(b"221 Bye\r\n")
+                        break
+                    self.wfile.write(b"250 OK\r\n")
+
+        scope = load_functions(
+            Path(__file__).resolve().parents[1] / "document_processing/alerts.py",
+            {"trigger_security_alert"}, os=MagicMock(getenv=os.getenv), datetime=datetime,
+            smtplib=smtplib, MIMEText=MIMEText, MIMEMultipart=MIMEMultipart,
+            logger=MagicMock(), ALERTS_LOG="unused.log", open=MagicMock(),
+        )
+        with socketserver.TCPServer(("127.0.0.1", 0), Receiver) as server:
+            worker = threading.Thread(target=server.handle_request, daemon=True)
+            worker.start()
+            try:
+                with patch.dict(os.environ, {"SMTP_HOST": "127.0.0.1", "SMTP_PORT": str(server.server_address[1]), "SMTP_USE_TLS": "false", "SMTP_USERNAME": "", "SMTP_PASSWORD": "", "SKIP_EMAIL_DELIVERY_FOR_TESTING": "false"}):
+                    scope["trigger_security_alert"]({"matched_pattern": "SOC2_COMPLIANCE_UNKNOWN", "matched_text": "No current score is available."}, "System Health")
+            finally:
+                worker.join(timeout=4)
+        self.assertEqual(len(messages), 1)
+        message = message_from_bytes(messages[0])
+        self.assertNotIn("Leak", str(message["Subject"]))
+        self.assertIn(b"SOC2_COMPLIANCE_UNKNOWN", message.get_payload(0).get_payload(decode=True))
+
+    def test_compliance_timestamp_is_source_time_not_remapping_time(self):
+        engine = MagicMock()
+        scope = load_functions(
+            Path(__file__).resolve().parents[1] / "services/compliance_evidence_engine.py",
+            {"ComplianceEvidenceEngine"}, Dict=dict, Any=object, List=list, Optional=Optional,
+            engine=engine, text=text, datetime=datetime, timezone=timezone, json=json,
+        )
+        service = scope["ComplianceEvidenceEngine"]()
+        service.map_evidence = MagicMock()
+        service.catalog = lambda: [{"control_id": "one", "framework": "SOC2", "title": "Control"}]
+        service._control_weight = lambda _: 1
+        service._persist_control_score = MagicMock()
+        execute = engine.connect.return_value.__enter__.return_value.execute
+        for metadata, expected in (({}, None), ({"evidence_timestamp": "2020-01-02"}, "2020-01-02T00:00:00+00:00"), ({"evidence_timestamp": "2020-01-02T05:30:00+05:30"}, "2020-01-02T00:00:00+00:00"), ({"evidence_timestamp": "invalid"}, None)):
+            mapping = {"framework": "SOC2", "control_id": "one", "impact": 8, "source_type": "evidence", "created_at": datetime.now(timezone.utc), "metadata": json.dumps(metadata)}
+            row = SimpleNamespace(control_id="one", _mapping=mapping)
+            execute.return_value.fetchall.side_effect = [[row], []]
+            payload = service.calculate_scores(7)
+            self.assertEqual(payload["evidence_timestamp"], expected)
+            self.assertEqual(payload["soc2"], 100)
+
+        row = SimpleNamespace(id=1, name="Evidence", category="SOC2", file_path="evidence.pdf", framework="SOC2", control_id="one", evidence_timestamp="2020-01-02", risk_level="HIGH", finding_type="PII", matched_pattern="PII", recommendation="redact", impact="policy", location_evidence="page 1", approval_id="approval", status="approved", metadata="{}", mfa_verified=True, approval_status="approved", policy_name="policy", policy_type="PII", provider="test", severity="HIGH", evidence="{}")
+        scope["SEVERITY_PENALTY"] = {"HIGH": 10}
+        row.reason = "Approval reason"
+        execute.return_value.fetchall.side_effect = [[row]] * 5
+        events = service._collect_source_events(7)
+        self.assertEqual([event["evidence_timestamp"] for event in events], ["2020-01-02", None, "2020-01-02", "2020-01-02", "2020-01-02"])
+
+    def test_control_change_history_preserves_unknown_and_recovery_to_zero(self):
+        engine = MagicMock()
+        scope = load_functions(
+            Path(__file__).resolve().parents[1] / "services/compliance_evidence_engine.py",
+            {"ComplianceEvidenceEngine"}, Dict=dict, Any=object, List=list, Optional=Optional,
+            engine=engine, text=text, datetime=datetime, timezone=timezone, json=json,
+        )
+        service = scope["ComplianceEvidenceEngine"]()
+        execute = engine.connect.return_value.__enter__.return_value.execute
+        control = {"framework": "SOC2", "control_id": "one", "title": "Control"}
+        for previous, status, count, expected in ((100, "unknown", 0, None), (None, "failing", 1, 0)):
+            execute.reset_mock()
+            service._persist_control_score(7, control, 0, status, count, 0, "Reason", "catalog_baseline" if not count else "evidence", {("SOC2", "one"): previous})
+            change = execute.call_args.args[1]
+            self.assertEqual(change["current_score"], expected)
+            self.assertEqual(json.loads(change["metadata"])["status"], status)
+        execute.return_value.fetchall.return_value = [SimpleNamespace(_mapping={"current_score": 100, "source_event": "catalog_baseline"})]
+        self.assertIsNone(service.score_changes(7)[0]["current_score"])
+
+    def test_snapshot_unknown_outage_recovery_and_failed_persistence(self):
+        # Real SQL and transactions. Optional PostgreSQL rehearsal uses only TEMP tables.
+        engine = create_engine(os.getenv("ENT019_TEST_DATABASE_URL", "sqlite://"))
+        self.addCleanup(engine.dispose)
+        migration = (Path(__file__).resolve().parents[1] / "database/migrations.py").read_text()
+        with engine.begin() as conn:
+            if engine.dialect.name == "sqlite":
+                conn.connection.driver_connection.create_function("NOW", 0, lambda: datetime.now(timezone.utc).isoformat())
+            for table, alteration_count in (("compliance_score_history", 1), ("compliance_drift_alerts", 3), ("compliance_control_scores", 0), ("compliance_score_changes", 1)):
+                ddl = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \(.*?\);", migration, re.S).group()
+                ddl = ddl.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE")
+                ddl = ddl.replace("REFERENCES tenants(id) ON DELETE CASCADE", "")
+                alterations = re.findall(rf"ALTER TABLE {table} ALTER COLUMN \w+ DROP NOT NULL;", migration)
+                self.assertEqual(len(alterations), alteration_count)
+                if engine.dialect.name == "sqlite":
+                    ddl = ddl.replace("SERIAL", "INTEGER")
+                    for alter in alterations:
+                        ddl = ddl.replace(f"{alter.split()[5]} INTEGER NOT NULL", f"{alter.split()[5]} INTEGER")
+                conn.execute(text(ddl))
+                if engine.dialect.name == "postgresql":
+                    for _ in range(2):  # Existing installations and idempotent restart.
+                        for alter in alterations:
+                            conn.execute(text(alter))
+        calculator, audit, alert = MagicMock(), MagicMock(), MagicMock()
+        scope = load_functions(
+            Path(__file__).resolve().parents[1] / "document_processing/drift.py",
+            {"record_compliance_snapshot"}, engine=engine, text=text, json=json,
+            datetime=datetime, timezone=timezone, get_current_framework_scores=calculator, logger=MagicMock(),
+        )
+        tenant = MagicMock()
+        tenant.get_current_tenant_id.return_value = "7"
+        with patch.dict(sys.modules, {"document_processing.auditor": audit, "document_processing.alerts": alert, "services.tenant_context": tenant}):
+            for score, expected_alerts in ((90, 0), (None, 3), (80, 3), (0, 6)):
+                calculator.return_value = dict.fromkeys(("soc2", "gdpr", "hipaa"), score)
+                scope["record_compliance_snapshot"]()
+                with engine.connect() as conn:
+                    rows = conn.execute(text("SELECT score, details FROM compliance_score_history ORDER BY id DESC LIMIT 3")).all()
+                self.assertEqual(len(rows), 3)
+                self.assertTrue(all(row[0] == score for row in rows))
+                self.assertTrue(all(json.loads(row[1])["status"] == ("unknown" if score is None else "healthy") for row in rows))
+                self.assertEqual(alert.trigger_security_alert.call_count, expected_alerts)
+            calculator.side_effect = HTTPException(503, "source unavailable")
+            with self.assertRaises(HTTPException):
+                scope["record_compliance_snapshot"]()
+            with engine.connect() as conn:
+                latest = conn.execute(text("SELECT score, details FROM compliance_score_history ORDER BY id DESC LIMIT 3")).all()
+                loss = conn.execute(text("SELECT score_drop, current_score FROM compliance_drift_alerts WHERE current_score IS NULL")).all()
+            self.assertTrue(all(row[0] is None and json.loads(row[1])["status"] == "unavailable" for row in latest))
+            self.assertEqual(len(loss), 6)
+            self.assertTrue(all(tuple(row) == (None, None) for row in loss))
+            self.assertEqual(alert.trigger_security_alert.call_count, 9)
+            calculator.side_effect = None
+            calculator.return_value = dict.fromkeys(("soc2", "gdpr", "hipaa"), 70)
+            scope["record_compliance_snapshot"]()
+            self.assertEqual(alert.trigger_security_alert.call_count, 9)
+            calculator.return_value = dict.fromkeys(("soc2", "gdpr", "hipaa"), None)
+            audit.create_document_audit.side_effect = RuntimeError("audit unavailable")
+            with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+                scope["record_compliance_snapshot"]()
+            self.assertEqual(alert.trigger_security_alert.call_count, 12)
+            self.assertTrue(all(call.kwargs["tenant_id"] == "7" for call in audit.create_document_audit.call_args_list))
+            audit.create_document_audit.side_effect = None
+            scope["record_compliance_snapshot"]()
+            self.assertEqual(alert.trigger_security_alert.call_count, 15)
+            alert.trigger_security_alert.side_effect = RuntimeError("notification unavailable")
+            with self.assertRaisesRegex(RuntimeError, "notification unavailable"):
+                scope["record_compliance_snapshot"]()
+            self.assertEqual(alert.trigger_security_alert.call_count, 18)
+            alert.trigger_security_alert.side_effect = None
+            scope["record_compliance_snapshot"]()
+            self.assertEqual(alert.trigger_security_alert.call_count, 21)
+            with patch.object(engine, "connect", side_effect=RuntimeError("database down")):
+                with self.assertRaisesRegex(RuntimeError, "database down"):
+                    scope["record_compliance_snapshot"]()
+            self.assertEqual(alert.trigger_security_alert.call_args.args[0]["matched_pattern"], "COMPLIANCE_SNAPSHOT_UNAVAILABLE")
+
+        scoring = load_functions(
+            Path(__file__).resolve().parents[1] / "services/compliance_evidence_engine.py",
+            {"ComplianceEvidenceEngine"}, Dict=dict, Any=object, List=list, Optional=Optional,
+            engine=engine, text=text, datetime=datetime, timezone=timezone, json=json,
+        )["ComplianceEvidenceEngine"]()
+        control = {"framework": "SOC2", "control_id": "one", "title": "Control"}
+        previous = {}
+        for score, status, count in ((80, "watch", 1), (0, "unknown", 0), (0, "unknown", 0), (0, "failing", 1)):
+            scoring._persist_control_score(7, control, score, status, count, 0, "Reason", "evidence" if count else "catalog_baseline", previous)
+            previous = {("SOC2", "one"): score if count else None}
+        changes = scoring.score_changes(7)
+        self.assertEqual([row["current_score"] for row in changes], [0, None, 80])
+        self.assertEqual([row["previous_score"] for row in changes], [None, 80, None])
+
     def test_measured_zero_and_unknown_latency_are_distinct_and_audit_outage_fails(self):
         engine, pipeline, verifier = MagicMock(), MagicMock(), MagicMock()
         result = engine.connect.return_value.__enter__.return_value.execute.return_value
@@ -211,22 +423,38 @@ class TruthfulTelemetryTests(unittest.TestCase):
             List=list,
             HTTPException=HTTPException,
             os=os,
+            datetime=datetime,
+            timezone=timezone,
         )
         service = scope["ObservabilityService"]()
         unknown = service._queue_lag({"checkpoints": []})
         self.assertEqual(unknown["status"], "unknown")
         self.assertTrue(unknown["alertable"])
         self.assertIsNone(unknown["max_lag_seconds"])
-        observed = service._queue_lag(
-            {"checkpoints": [{"lag_seconds": 0, "dead_letter_count": 0, "pending_events": 0}]}
-        )
+        checkpoint = {"stream": "audit", "lag_seconds": 0, "dead_letter_count": 0, "pending_events": 0, "updated_at": datetime.now(timezone.utc)}
+        observed = service._queue_lag({"streams": {}, "checkpoints": [checkpoint]})
         self.assertEqual(observed["status"], "healthy")
         self.assertFalse(observed["alertable"])
+        for updated_at in (None, "invalid", datetime.now(timezone.utc) - timedelta(days=1), datetime.now(timezone.utc) + timedelta(days=1)):
+            result = service._queue_lag({"streams": {}, "checkpoints": [{**checkpoint, "updated_at": updated_at}]})
+            self.assertEqual(result["status"], "unknown")
+            self.assertTrue(result["alertable"])
+            self.assertIsNone(result["max_lag_seconds"])
+        for field in ("lag_seconds", "dead_letter_count", "pending_events"):
+            for invalid in (None, -1, "broken", float("nan")):
+                self.assertEqual(service._queue_lag({"streams": {}, "checkpoints": [{**checkpoint, field: invalid}]})["status"], "unknown")
+        self.assertEqual(service._queue_lag({"streams": {"audit": {"dead_letter": 1}}, "checkpoints": [{**checkpoint, "dead_letter_count": 1, "pending_events": 1}]})["status"], "degraded")
+        self.assertEqual(service._queue_lag({"checkpoints": [checkpoint]})["status"], "unknown")
+        for streams in ({"analytics": {"queued": 1}}, {"audit": {"dead_letter": 1}}):
+            result = service._queue_lag({"streams": streams, "checkpoints": [checkpoint]})
+            self.assertEqual(result["status"], "unknown")
+            self.assertTrue(result["alertable"])
 
     def test_legacy_report_and_drift_consumers_do_not_invent_scores(self):
         engine = MagicMock()
         conn = engine.connect.return_value.__enter__.return_value
         conn.execute.return_value.fetchall.return_value = [(7,)]
+        conn.execute.return_value.fetchone.return_value = (90, None)
         scores = {
             "soc2": None,
             "gdpr": None,
@@ -274,10 +502,19 @@ class TruthfulTelemetryTests(unittest.TestCase):
             {
                 "services.compliance_evidence_engine": calculator,
                 "document_processing.drift": MagicMock(**scope),
+                "document_processing.auditor": MagicMock(),
+                "document_processing.alerts": MagicMock(),
+                "services.tenant_context": MagicMock(get_current_tenant_id=lambda: "7"),
             },
         ):
             scope["record_compliance_snapshot"]()
-            self.assertFalse(any("INSERT" in str(call) for call in conn.execute.call_args_list))
+            snapshots = [call.args[1] for call in conn.execute.call_args_list if "INSERT INTO compliance_score_history" in str(call)]
+            self.assertEqual(len(snapshots), 3)
+            self.assertTrue(all(row["score"] is None and json.loads(row["details"])["status"] == "unknown" for row in snapshots))
+            alerts = [call.args[1] for call in conn.execute.call_args_list if "INSERT INTO compliance_drift_alerts" in str(call)]
+            self.assertEqual(len(alerts), 3)
+            self.assertTrue(all(row["curr"] is None and row["drop"] is None for row in alerts))
+            self.assertEqual(sys.modules["document_processing.alerts"].trigger_security_alert.call_count, 3)
             with self.assertRaises(HTTPException):
                 report["get_live_stats"]()
             scores.update(soc2=0, gdpr=60, hipaa=90)
@@ -287,7 +524,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
             self.assertEqual(payload["calculation_version"], "evidence-impact-v2")
             self.assertTrue(report["generate_executive_summary_report"]("pdf").startswith(b"%PDF"))
             self.assertIn(b"evidence-impact-v2", report["generate_executive_summary_report"]("csv"))
-            conn.execute.return_value.fetchone.return_value = (None,)
+            conn.execute.return_value.fetchone.return_value = (None, '{"status":"unknown"}')
             scope["record_compliance_snapshot"]()
             self.assertTrue(conn.commit.called)
             conn.execute.return_value.fetchall.return_value = []
@@ -363,12 +600,35 @@ class TruthfulTelemetryTests(unittest.TestCase):
             Any=object,
             build_public_trust_state=builder,
         )
-        for valid, expected in ((False, "degraded"), (None, "unknown"), (True, "unknown")):
+        observability = MagicMock()
+        observability.ObservabilityService.return_value._queue_lag.return_value = {"status": "healthy"}
+        for valid, expected in ((False, "degraded"), (None, "unknown"), (True, "healthy")):
             builder.return_value = {
+                "status": "published",
                 "verification": {"valid": True},
-                "payload": {"runtime": {"audit_status": {"valid": valid}}},
+                "payload": {"framework_scores": {"soc2": 90, "gdpr": 80, "hipaa": 70}, "runtime": {"audit_status": {"valid": valid}}},
             }
-            self.assertEqual(scope["trust_runtime_health"]()["status"], expected)
+            with patch.dict(sys.modules, {"services.observability_service": observability}):
+                payload = scope["trust_runtime_health"]()
+                self.assertEqual(payload["status"], expected)
+                if expected == "degraded" and os.getenv("ENT019_TELEMETRY_EXPORT"):
+                    Path(os.environ["ENT019_TELEMETRY_EXPORT"]).with_name(
+                        "ENT-019-degraded-health.json"
+                    ).write_text(json.dumps(payload, indent=2) + "\n")
+                builder.assert_called_with(force_refresh=True)
+        with patch.dict(sys.modules, {"services.observability_service": observability}):
+            for score, queue, signature, expected in (
+                (None, "healthy", True, "unknown"),
+                (0, "healthy", True, "healthy"),
+                (90, "unknown", True, "unknown"),
+                (90, "degraded", True, "degraded"),
+                (90, "unavailable", True, "unavailable"),
+                (90, "healthy", False, "degraded"),
+            ):
+                builder.return_value["payload"]["framework_scores"]["soc2"] = score
+                builder.return_value["verification"]["valid"] = signature
+                observability.ObservabilityService.return_value._queue_lag.return_value = {"status": queue}
+                self.assertEqual(scope["trust_runtime_health"]()["status"], expected)
         builder.side_effect = RuntimeError("secret database details")
         payload = scope["trust_runtime_health"]()
         self.assertEqual(payload["status"], "unavailable")
@@ -443,36 +703,56 @@ class TruthfulTelemetryTests(unittest.TestCase):
             self.assertIsNone(result["valid"])
             self.assertEqual(result["status"], "unknown")
 
-    def test_health_distinguishes_unavailable_degraded_and_unknown(self):
+    def test_health_distinguishes_readiness_from_unmeasured_features(self):
         engine = MagicMock()
         scope = load_functions(
             Path(__file__).resolve().parents[1] / "main.py",
-            {"get_health_details", "get_readiness"},
+            {"get_health", "get_health_details", "get_readiness"},
             app=FastAPI(),
             JSONResponse=JSONResponse,
             os=os,
+            json=json,
             check_available=lambda: None,
             validate_database_security=lambda: None,
             _rbac_enforcement_enabled=lambda: True,
         )
+        client = TestClient(scope["app"])
         with patch.dict(
             sys.modules, {"database": MagicMock(engine=engine), "providers": MagicMock()}
         ), patch.dict(os.environ, {"AUTHCLAW_ENV": "development"}):
             payload = json.loads(scope["get_health_details"]().body)
-            self.assertEqual(payload["status"], "degraded")
+            self.assertEqual(payload["status"], "healthy")
+            self.assertEqual(payload["scope"], "agent_readiness")
             self.assertEqual(payload["provider_status"], "unknown")
             self.assertIsNone(payload["audit_chain_active"])
-            if os.getenv("ENT019_TELEMETRY_EXPORT"):
-                Path(os.environ["ENT019_TELEMETRY_EXPORT"]).with_name(
-                    "ENT-019-degraded-health.json"
-                ).write_text(json.dumps(payload, indent=2) + "\n")
             ready = json.loads(scope["get_readiness"]().body)
             self.assertEqual(ready["health_status"], "healthy")
             self.assertEqual(ready["checks"]["production_validation"], "not_applicable")
-            engine.connect.side_effect = RuntimeError("outage")
+            for route in ("/health", "/api/v1/agent/health"):
+                self.assertEqual(client.get(route).json(), {"status": "alive", "scope": "process_liveness"})
+            for route in ("/health/ready", "/api/v1/agent/health/ready", "/health/details"):
+                self.assertEqual(client.get(route).status_code, 200)
+            scope["validate_database_security"] = MagicMock(side_effect=RuntimeError("outage"))
             response = scope["get_health_details"]()
             self.assertEqual(response.status_code, 503)
             self.assertEqual(json.loads(response.body)["status"], "unavailable")
+            for route in ("/health/ready", "/api/v1/agent/health/ready", "/health/details"):
+                self.assertEqual(client.get(route).status_code, 503)
+            scope["validate_database_security"].side_effect = None
+            scope["check_available"] = MagicMock(side_effect=RuntimeError("redis down"))
+            self.assertEqual(client.get("/health/details").status_code, 503)
+            self.assertEqual(client.get("/health/details").json()["database_status"], "healthy")
+            scope["check_available"].side_effect = None
+            self.assertEqual(client.get("/health/details").json()["status"], "healthy")
+            validation = MagicMock()
+            with patch.dict(os.environ, {"AUTHCLAW_ENV": "production"}), patch.dict(sys.modules, {"startup.validation": validation}):
+                for errors, expected in (([], "healthy"), (["invalid configuration"], "unavailable")):
+                    validation.validate_production_environment.return_value = errors
+                    self.assertEqual(client.get("/health/details").json()["status"], expected)
+                validation.validate_production_environment.side_effect = RuntimeError("secret validation error")
+                response = client.get("/health/details")
+                self.assertEqual(response.status_code, 503)
+                self.assertNotIn("secret", response.text)
 
 
 if __name__ == "__main__":

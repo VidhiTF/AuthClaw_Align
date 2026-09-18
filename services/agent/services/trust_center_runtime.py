@@ -168,10 +168,22 @@ def build_public_trust_state(*, force_refresh: bool = False) -> Dict[str, Any]:
 
 def trust_runtime_health() -> Dict[str, Any]:
     try:
-        state = build_public_trust_state()
+        from services.observability_service import ObservabilityService
+
+        state = build_public_trust_state(force_refresh=True)
         runtime = state.get("payload", {}).get("runtime", {})
+        audit_valid = runtime.get("audit_status", {}).get("valid")
+        scores = state.get("payload", {}).get("framework_scores", {})
+        checks = {
+            "publication": "healthy" if state.get("status") == "published" and state.get("verification", {}).get("valid") is True else "degraded",
+            "audit": "unknown" if audit_valid is None else "healthy" if audit_valid else "degraded",
+            "compliance_evidence": "healthy" if all(scores.get(framework) is not None for framework in ("soc2", "gdpr", "hipaa")) else "unknown",
+            "queue": ObservabilityService()._queue_lag(runtime.get("event_pipeline", {}))["status"],
+        }
         return {
-            "status": "degraded" if state.get("verification", {}).get("valid") is not True or runtime.get("audit_status", {}).get("valid") is False else "unknown",
+            "status": next((status for status in ("unavailable", "degraded", "unknown") if status in checks.values()), "healthy"),
+            "scope": "trust_evidence",
+            "checks": checks,
             "trust_center": {
                 "published": state.get("status") == "published",
                 "signature_valid": state.get("verification", {}).get("valid") is True,
@@ -180,4 +192,4 @@ def trust_runtime_health() -> Dict[str, Any]:
             "runtime": runtime,
         }
     except Exception:
-        return {"status": "unavailable", "error": "Trust telemetry source unavailable"}
+        return {"status": "unavailable", "scope": "trust_evidence", "error": "Trust telemetry source unavailable"}

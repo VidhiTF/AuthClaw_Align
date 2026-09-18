@@ -25,92 +25,65 @@ def get_current_framework_scores() -> dict:
         raise HTTPException(status_code=503, detail="Compliance telemetry unavailable") from exc
 
 def record_compliance_snapshot():
-    """
-    Saves a compliance score snapshot for each framework and checks for score drift.
-    """
+    """Persist missing observations as null, and alert without inventing a drop."""
+    from document_processing.alerts import trigger_security_alert
+    from document_processing.auditor import create_document_audit
+    from services.tenant_context import get_current_tenant_id
+
     timestamp = datetime.now(timezone.utc)
-    scores = get_current_framework_scores()
-    
+    source_error = None
+    try:
+        scores = get_current_framework_scores()
+    except Exception as exc:
+        scores, source_error = {}, exc
+    alerts = []
     try:
         with engine.connect() as conn:
             for framework in ("SOC2", "GDPR", "HIPAA"):
-                score = scores[framework.lower()]
-                if score is None:
-                    logger.warning("Compliance telemetry unknown for %s; snapshot skipped", framework)
-                    continue
-                # 1. Fetch previous score for the framework to calculate drift
-                prev = conn.execute(
-                    text("""
-                    SELECT score FROM compliance_score_history 
-                    WHERE framework = :fw 
-                    ORDER BY id DESC LIMIT 1
-                    """),
-                    {"fw": framework}
-                ).fetchone()
-                
-                # Save the new snapshot
-                conn.execute(
-                    text("""
+                score = scores.get(framework.lower())
+                status = "unavailable" if source_error else "unknown" if score is None else "healthy"
+                prev = conn.execute(text("""
+                    SELECT score FROM compliance_score_history
+                    WHERE framework = :fw ORDER BY id DESC LIMIT 1
+                """), {"fw": framework}).fetchone()
+                previous = prev[0] if prev else None
+                details = {key: scores.get(key) for key in ("calculation_version", "evidence_timestamp", "missing_control_treatment")}
+                details["status"] = status
+                conn.execute(text("""
                     INSERT INTO compliance_score_history (timestamp, framework, score, details)
                     VALUES (:ts, :fw, :score, :details)
-                    """),
-                    {
-                        "ts": timestamp,
-                        "fw": framework,
-                        "score": score,
-                        "details": json.dumps({key: scores[key] for key in ("calculation_version", "evidence_timestamp", "missing_control_treatment")})
-                    }
-                )
-                
-                if prev and prev[0] is not None:
-                    prev_score = prev[0]
-                    score_drop = prev_score - score
-                    
-                    if score_drop > 5:
-                        # Drift detected! Log drift alert.
-                        logger.warning(f"Compliance Drift Detected! {framework} dropped by {score_drop} points.")
-                        
-                        conn.execute(
-                            text("""
-                            INSERT INTO compliance_drift_alerts 
-                            (timestamp, framework, score_drop, previous_score, current_score, details)
-                            VALUES (:ts, :fw, :drop, :prev, :curr, :details)
-                            """),
-                            {
-                                "ts": timestamp,
-                                "fw": framework,
-                                "drop": score_drop,
-                                "prev": prev_score,
-                                "curr": score,
-                                "details": f"Framework score dropped from {prev_score}% to {score}% due to new scan findings."
-                            }
-                        )
-                        
-                        # Write to cryptographic audit logs
-                        from document_processing.auditor import create_document_audit
-                        # We use 0 as virtual doc_id representing the system compliance status
-                        create_document_audit(
-                            0, 
-                            "compliance_drift", 
-                            "system", 
-                            f"Compliance drift detected for framework {framework}. Score dropped from {prev_score}% to {score}% (Drop: {score_drop}%)."
-                        )
-                        
-                        # Trigger alert notification
-                        try:
-                            from document_processing.alerts import trigger_security_alert
-                            trigger_security_alert({
-                                "finding_type": "Regulatory",
-                                "risk_level": "HIGH",
-                                "matched_pattern": f"{framework}_SCORE_DRIFT",
-                                "matched_text": f"{framework} compliance score dropped by {score_drop} points.",
-                                "recommendation": "Review recent file uploads and resolve exposed secrets or policy violations.",
-                                "impact": "Decreased security readiness and high exposure to compliance audit failures.",
-                                "priority": "P1",
-                                "location_evidence": "Workspace compliance snapshot"
-                            }, "System Health")
-                        except Exception as alert_err:
-                            logger.error(f"Failed to alert on drift: {alert_err}")
+                """), {"ts": timestamp, "fw": framework, "score": score, "details": json.dumps(details)})
+                drop = previous - score if previous is not None and score is not None else None
+                if score is None or (drop is not None and drop > 5):
+                    message = (f"{framework} compliance telemetry {status}; no current score is available."
+                               if score is None else f"{framework} compliance score dropped from {previous}% to {score}% (drop: {drop}).")
+                    conn.execute(text("""
+                        INSERT INTO compliance_drift_alerts
+                        (timestamp, framework, score_drop, previous_score, current_score, details)
+                        VALUES (:ts, :fw, :drop, :prev, :curr, :details)
+                    """), {"ts": timestamp, "fw": framework, "drop": drop, "prev": previous, "curr": score, "details": message})
+                    alerts.append((f"{framework}_SCORE_DRIFT" if score is not None else f"{framework}_COMPLIANCE_{status.upper()}", message))
             conn.commit()
-    except Exception as e:
-        logger.error(f"Failed to record score snapshot history: {e}")
+    except Exception:
+        trigger_security_alert({"risk_level": "HIGH", "matched_pattern": "COMPLIANCE_SNAPSHOT_UNAVAILABLE",
+                                "matched_text": "Compliance snapshot persistence failed; previous scores are stale."}, "System Health")
+        raise
+
+    # Commit first: an audit/notification outage must not restore stale posture.
+    notification_error = None
+    for pattern, message in alerts:
+        try:
+            create_document_audit(0, "compliance_drift", "system", message, tenant_id=get_current_tenant_id())
+        except Exception as exc:
+            logger.exception("Compliance audit failed")
+            notification_error = exc
+        try:
+            trigger_security_alert({"finding_type": "Regulatory", "risk_level": "HIGH",
+                                    "matched_pattern": pattern, "matched_text": message,
+                                    "recommendation": "Restore evidence collection and review compliance findings.",
+                                    "priority": "P1"}, "System Health")
+        except Exception as exc:
+            logger.exception("Compliance notification failed")
+            notification_error = exc
+    if source_error or notification_error:
+        raise source_error or notification_error

@@ -1,9 +1,20 @@
 {
   "status": "degraded",
-  "audit_chain_active": null,
-  "hitl_enabled": null,
-  "policy_enforcement_enabled": null,
-  "redaction_enabled": null,
-  "provider_status": "unknown",
-  "database_status": "healthy"
+  "scope": "trust_evidence",
+  "checks": {
+    "publication": "healthy",
+    "audit": "degraded",
+    "compliance_evidence": "healthy",
+    "queue": "healthy"
+  },
+  "trust_center": {
+    "published": true,
+    "signature_valid": true,
+    "cache": {}
+  },
+  "runtime": {
+    "audit_status": {
+      "valid": false
+    }
+  }
 }

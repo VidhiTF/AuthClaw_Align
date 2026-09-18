@@ -450,22 +450,35 @@ class ObservabilityService:
 
     def _queue_lag(self, pipeline: Dict[str, Any]) -> Dict[str, Any]:
         checkpoints = pipeline.get("checkpoints", [])
-        if not checkpoints or any(cp.get(key) is None for cp in checkpoints for key in ("lag_seconds", "dead_letter_count", "pending_events")):
-            return {"status": "unknown", "max_lag_seconds": None, "pending_events": None,
-                    "dead_letter_count": None, "alertable": True}
-        max_lag = 0
-        dead_letters = 0
-        pending = 0
-        for checkpoint in pipeline.get("checkpoints", []):
-            max_lag = max(max_lag, _int(checkpoint.get("lag_seconds")))
-            dead_letters += _int(checkpoint.get("dead_letter_count"))
-            pending += _int(checkpoint.get("pending_events"))
+        unknown = {"status": "unknown", "max_lag_seconds": None, "pending_events": None,
+                   "dead_letter_count": None, "alertable": True}
+        streams = pipeline.get("streams")
+        if not checkpoints or not isinstance(streams, dict) or set(streams) - {cp.get("stream") for cp in checkpoints}:
+            return unknown
+        threshold = int(os.getenv("AUTHCLAW_QUEUE_LAG_ALERT_SECONDS", "300"))
+        max_lag = dead_letters = pending = 0
+        for checkpoint in checkpoints:
+            try:
+                updated = datetime.fromisoformat(str(checkpoint["updated_at"]))
+                age = (datetime.now(timezone.utc) - updated.replace(tzinfo=updated.tzinfo or timezone.utc)).total_seconds()
+                lag, dead, queued = (int(checkpoint[key]) for key in ("lag_seconds", "dead_letter_count", "pending_events"))
+                if not 0 <= age <= threshold or min(lag, dead, queued) < 0:
+                    return unknown
+                counts = streams.get(checkpoint["stream"], {})
+                if int(counts.get("dead_letter", 0)) != dead or int(counts.get("queued", 0)) + dead != queued:
+                    return unknown
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return unknown
+            max_lag = max(max_lag, lag)
+            dead_letters += dead
+            pending += queued
+        alertable = max_lag > threshold or dead_letters > 0
         return {
-            "status": "degraded" if max_lag > int(os.getenv("AUTHCLAW_QUEUE_LAG_ALERT_SECONDS", "300")) or dead_letters > 0 else "healthy",
+            "status": "degraded" if alertable else "healthy",
             "max_lag_seconds": max_lag,
             "pending_events": pending,
             "dead_letter_count": dead_letters,
-            "alertable": max_lag > int(os.getenv("AUTHCLAW_QUEUE_LAG_ALERT_SECONDS", "300")) or dead_letters > 0,
+            "alertable": alertable,
         }
 
     def _recent_requests(self, conn, tenant_id_text: str) -> List[Dict[str, Any]]:

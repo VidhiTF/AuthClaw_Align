@@ -270,7 +270,7 @@ class ComplianceEvidenceEngine:
                 {"tenant_id": tenant_id},
             ).fetchall()
             previous_rows = conn.execute(
-                text("SELECT framework, control_id, score FROM compliance_control_scores WHERE tenant_id = :tenant_id"),
+                text("SELECT framework, control_id, CASE WHEN status = 'unknown' THEN NULL ELSE score END AS score FROM compliance_control_scores WHERE tenant_id = :tenant_id"),
                 {"tenant_id": tenant_id},
             ).fetchall()
         previous = {(row.framework, row.control_id): row.score for row in previous_rows}
@@ -289,7 +289,15 @@ class ComplianceEvidenceEngine:
             status = "unknown" if not items else "passing" if score >= 85 else ("watch" if score >= 65 else "failing")
             reason = self._score_reason(control, positive, negative, score)
             source_event = items[-1]["source_type"] if items else "catalog_baseline"
-            evidence_timestamp = max((item["created_at"].isoformat() for item in items if item.get("created_at")), default=None)
+            timestamps = []
+            for item in items:
+                try:
+                    observed = datetime.fromisoformat(json.loads(item.get("metadata") or "{}")["evidence_timestamp"])
+                    timestamps.append(observed.replace(tzinfo=observed.tzinfo or timezone.utc).astimezone(timezone.utc))
+                except (KeyError, TypeError, ValueError):
+                    timestamps = []  # Never substitute remapping time for missing source time.
+                    break
+            evidence_timestamp = max(timestamps).isoformat() if timestamps else None
             control_scores.append({
                 "framework": control["framework"],
                 "control_id": control["control_id"],
@@ -321,7 +329,8 @@ class ComplianceEvidenceEngine:
             }
         frameworks["corpus_version"] = self.corpus_version
         frameworks["calculation_version"] = self.calculation_version
-        frameworks["evidence_timestamp"] = max((item["evidence_timestamp"] for item in control_scores if item["evidence_timestamp"]), default=None)
+        observed_controls = [item for item in control_scores if item["evidence_count"]]
+        frameworks["evidence_timestamp"] = max((item["evidence_timestamp"] for item in observed_controls), default=None) if all(item["evidence_timestamp"] for item in observed_controls) else None
         frameworks["missing_control_treatment"] = self.missing_control_treatment
         return frameworks
 
@@ -377,7 +386,11 @@ class ComplianceEvidenceEngine:
             params["limit"] = max(1, min(int(limit), 500))
         with engine.connect() as conn:
             rows = conn.execute(text(sql), params).fetchall()
-        return [dict(row._mapping) for row in rows]
+        changes = [dict(row._mapping) for row in rows]
+        for change in changes:
+            if change.get("source_event") == "catalog_baseline":
+                change["current_score"] = None  # Legacy no-evidence history used 0 or 100.
+        return changes
 
     def corpus_status(self) -> Dict[str, Any]:
         self.ensure_catalog()
@@ -400,7 +413,8 @@ class ComplianceEvidenceEngine:
         previous_score = previous.get(key)
         metadata = {"title": control["title"], "corpus_version": self.corpus_version,
                     "calculation_version": self.calculation_version, "evidence_timestamp": evidence_timestamp,
-                    "missing_control_treatment": self.missing_control_treatment}
+                    "missing_control_treatment": self.missing_control_treatment, "status": status}
+        observed_score = score if evidence_count else None
         with engine.connect() as conn:
             conn.execute(
                 text("""
@@ -435,7 +449,7 @@ class ComplianceEvidenceEngine:
                     "metadata": json.dumps(metadata),
                 },
             )
-            if previous_score is None or int(previous_score) != int(score):
+            if key not in previous or previous_score != observed_score:
                 conn.execute(
                     text("""
                         INSERT INTO compliance_score_changes (
@@ -452,7 +466,7 @@ class ComplianceEvidenceEngine:
                         "framework": control["framework"],
                         "control_id": control["control_id"],
                         "previous_score": previous_score,
-                        "current_score": score,
+                        "current_score": observed_score,
                         "reason": reason,
                         "source_event": source_event,
                         "metadata": json.dumps(metadata),
@@ -464,7 +478,7 @@ class ComplianceEvidenceEngine:
         events: List[Dict[str, Any]] = []
         with engine.connect() as conn:
             evidence = conn.execute(
-                text("SELECT id, name, category, file_path, hash, control_id, framework FROM compliance_evidence WHERE tenant_id = :tenant_id"),
+                text("SELECT id, name, category, file_path, hash, control_id, framework, collected_at AS evidence_timestamp FROM compliance_evidence WHERE tenant_id = :tenant_id"),
                 {"tenant_id": tenant_id},
             ).fetchall()
             document_findings = conn.execute(
@@ -479,15 +493,15 @@ class ComplianceEvidenceEngine:
                 {"tenant_id": tenant_id},
             ).fetchall()
             approvals = conn.execute(
-                text("SELECT approval_id, status, reason, metadata, mfa_verified FROM gateway_approvals WHERE tenant_id = :tenant_id"),
+                text("SELECT approval_id, status, reason, metadata, mfa_verified, COALESCE(last_action_at, created_at)::text AS evidence_timestamp FROM gateway_approvals WHERE tenant_id = :tenant_id"),
                 {"tenant_id": tenant_id},
             ).fetchall()
             audit_rows = conn.execute(
-                text("SELECT id, risk_level, approval_status, policy_name, policy_type, matched_pattern, integrity_hash FROM audit_logs WHERE tenant_id = :tenant_id ORDER BY id DESC LIMIT 200"),
+                text("SELECT id, risk_level, approval_status, policy_name, policy_type, matched_pattern, integrity_hash, created_at::text AS evidence_timestamp FROM audit_logs WHERE tenant_id = :tenant_id ORDER BY id DESC LIMIT 200"),
                 {"tenant_id": tenant_id},
             ).fetchall()
             remediation = conn.execute(
-                text("SELECT id, provider, finding_type, severity, status, approval_status, evidence FROM remediation_findings WHERE tenant_id = :tenant_id"),
+                text("SELECT id, provider, finding_type, severity, status, approval_status, evidence, COALESCE(updated_at, created_at)::text AS evidence_timestamp FROM remediation_findings WHERE tenant_id = :tenant_id"),
                 {"tenant_id": tenant_id},
             ).fetchall()
 
@@ -495,6 +509,7 @@ class ComplianceEvidenceEngine:
             framework = row.framework or row.category
             events.append({
                 "source_type": "evidence",
+                "evidence_timestamp": row.evidence_timestamp,
                 "source_id": row.id,
                 "evidence_id": row.id,
                 "framework_hint": framework,
@@ -507,6 +522,7 @@ class ComplianceEvidenceEngine:
             risk = str(row.risk_level or "LOW").upper()
             events.append({
                 "source_type": "document_finding",
+                "evidence_timestamp": None,  # No collection timestamp on legacy finding rows.
                 "source_id": row.id,
                 "text": f"{row.finding_type} {row.matched_pattern} {row.recommendation} {row.impact} {row.location_evidence}",
                 "reason": f"Document finding {row.finding_type} with {risk} risk affects control scoring.",
@@ -515,6 +531,7 @@ class ComplianceEvidenceEngine:
         for row in approvals:
             events.append({
                 "source_type": "approval",
+                "evidence_timestamp": row.evidence_timestamp,
                 "source_id": row.approval_id,
                 "text": f"{row.status} {row.reason} {row.metadata}",
                 "reason": f"Approval {row.approval_id} lifecycle event recorded as {row.status}.",
@@ -524,6 +541,7 @@ class ComplianceEvidenceEngine:
             allowed_bonus = 4 if row.approval_status in {"approved", "executed", "N/A"} else 0
             events.append({
                 "source_type": "audit",
+                "evidence_timestamp": row.evidence_timestamp,
                 "source_id": row.id,
                 "text": f"{row.risk_level} {row.approval_status} {row.policy_name} {row.policy_type} {row.matched_pattern}",
                 "reason": f"Audit hash-chain record {row.id} contributes policy/audit evidence.",
@@ -534,6 +552,7 @@ class ComplianceEvidenceEngine:
             remediated = row.status == "remediated" or row.approval_status == "executed"
             events.append({
                 "source_type": "remediation",
+                "evidence_timestamp": row.evidence_timestamp,
                 "source_id": row.id,
                 "text": f"{row.provider} {row.finding_type} {row.severity} {row.status} {row.evidence}",
                 "reason": f"Remediation finding {row.finding_type} is {row.status}.",

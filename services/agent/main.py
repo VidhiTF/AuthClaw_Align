@@ -2153,9 +2153,7 @@ def reload_policies_endpoint():
 @app.get("/api/v1/agent/health")
 @app.get("/health")
 def get_health():
-    return {
-        "status": "healthy"
-    }
+    return {"status": "alive", "scope": "process_liveness"}
 
 
 @app.get("/internal/metrics/quota", include_in_schema=False)
@@ -2189,30 +2187,19 @@ def get_quota_metrics(authorization: str = Header(None)):
 
 @app.get("/health/details")
 def get_health_details():
-    database_status = "healthy"
-    try:
-        from database import engine
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-    except Exception:
-        database_status = "unavailable"
-
-    provider_status = "unknown"
-    try:
-        from providers import get_provider
-        get_provider()
-    except Exception:
-        provider_status = "unavailable"
-
-    return JSONResponse(status_code=503 if database_status == "unavailable" else 200, content={
-        "status": "unavailable" if database_status == "unavailable" else "degraded",
+    readiness = get_readiness()
+    payload = json.loads(readiness.body)
+    return JSONResponse(status_code=readiness.status_code, content={
+        "status": payload["health_status"],
+        "scope": "agent_readiness",
+        "checks": payload["checks"],
+        "unmeasured": ["provider", "audit_chain", "hitl", "policy_enforcement", "redaction"],
         "audit_chain_active": None,
         "hitl_enabled": None,
         "policy_enforcement_enabled": None,
         "redaction_enabled": None,
-        "provider_status": provider_status,
-        "database_status": database_status
+        "provider_status": "unknown",
+        "database_status": "unavailable" if payload["checks"]["database"] == "unhealthy" else payload["checks"]["database"],
     })
 
 
@@ -2233,8 +2220,6 @@ def get_readiness():
         checks["rate_limiter"] = "unhealthy"
         http_status = 503
     try:
-        from database import engine
-        from sqlalchemy import text
         validate_database_security()
         checks["database"] = "healthy"
     except Exception:
@@ -2243,7 +2228,10 @@ def get_readiness():
 
     if os.getenv("AUTHCLAW_ENV", "development").lower() in {"production", "prod"}:
         from startup.validation import validate_production_environment
-        validation_errors = validate_production_environment()
+        try:
+            validation_errors = validate_production_environment()
+        except Exception:
+            validation_errors = ["Production validation unavailable"]
         if validation_errors:
             checks["production_validation"] = "failed"
             checks["production_errors"] = validation_errors

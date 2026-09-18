@@ -893,6 +893,7 @@ def run_startup_migrations():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         metadata TEXT
     );
+    ALTER TABLE compliance_score_changes ALTER COLUMN current_score DROP NOT NULL;
 
     CREATE TABLE IF NOT EXISTS regulatory_corpus_versions (
         version_id VARCHAR(50) PRIMARY KEY,
@@ -1107,6 +1108,12 @@ def run_startup_migrations():
         current_score INTEGER NOT NULL,
         details TEXT NOT NULL
     );
+
+    -- Missing telemetry is not a measured zero; preserve history and alert state.
+    ALTER TABLE compliance_score_history ALTER COLUMN score DROP NOT NULL;
+    ALTER TABLE compliance_drift_alerts ALTER COLUMN score_drop DROP NOT NULL;
+    ALTER TABLE compliance_drift_alerts ALTER COLUMN previous_score DROP NOT NULL;
+    ALTER TABLE compliance_drift_alerts ALTER COLUMN current_score DROP NOT NULL;
 
     ALTER TABLE document_findings ADD COLUMN IF NOT EXISTS impact VARCHAR(255);
     ALTER TABLE document_findings ADD COLUMN IF NOT EXISTS priority VARCHAR(10);
