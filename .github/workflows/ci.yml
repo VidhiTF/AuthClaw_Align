@@ -193,7 +193,7 @@ jobs:
           .ci-backend/bin/python -m pip install --require-hashes -r backend/requirements-test.txt
           cd backend
           ../.ci-backend/bin/python -m pytest -p no:cacheprovider -q \
-            tests/test_auth_baseline.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
+            tests/test_auth_baseline.py tests/test_mfa_replay.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
             tests/test_client_ip.py tests/test_bff_client_ip.py tests/test_release4_abuse_controls.py \
             tests/test_oidc_transactions.py \
             tests/test_reset_abuse_security.py tests/test_review_logging_and_event_identity.py \
@@ -203,6 +203,7 @@ jobs:
             tests/test_migration_chain.py tests/test_migration_044.py tests/test_auth_session_binding_migration.py tests/test_platform_admin_seed.py \
             tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
             tests/test_compliance_scoring.py tests/test_migration_038.py tests/test_migration_040.py \
+            tests/test_control_assessments.py tests/test_compliance_policy.py tests/test_t10_api_contract.py \
             tests/test_secret_crypto.py tests/test_secret_retirement.py tests/test_audit_transport_contract.py \
             tests/test_s3_remediation_protocol.py tests/test_s3_remediation_recovery.py \
             tests/test_remediation_connector.py tests/test_connector_target_binding.py tests/test_remediation_failure_rollback.py
@@ -284,6 +285,8 @@ jobs:
           tests/test_review_otp_postgres.py
       - name: Run destructive PostgreSQL suites serially
         working-directory: backend
+        env:
+          ENT019_TEST_DATABASE_URL: ${{ env.OWNER_DATABASE_URL }}
         run: >-
           ../.ci-backend-integration/bin/python -m pytest -p no:cacheprovider -q
           tests/test_db_safety.py
@@ -298,6 +301,8 @@ jobs:
           tests/test_secret_retirement_postgres.py
           tests/test_worker_lifecycle_postgres.py
           tests/test_workflow_advisory_lock_postgres.py
+          tests/test_t10_postgres.py
+          tests/test_audit_metrics.py
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -388,7 +393,7 @@ jobs:
             smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py \
             smoke_tests/test_quota_service.py smoke_tests/test_quota_http_boundary.py \
             smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py \
-            smoke_tests/test_quota_redis.py -q
+            smoke_tests/test_quota_redis.py smoke_tests/test_compliance_diagnostics.py -q
 
   sdk:
     name: Python SDK Tests

@@ -57,6 +57,17 @@ class TruthfulTelemetryTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(tenant_context(7, request_id="telemetry-test", required=True))
 
+    def test_audit_verification_events_are_tristate(self):
+        verifier, audit = MagicMock(), MagicMock()
+        scope = load_functions(Path(__file__).resolve().parents[1] / "main.py", {"verify_audit"},
+            app=FastAPI(), Optional=Optional, Header=Header, uuid=MagicMock(),
+            resolve_tenant_from_authorization=lambda _: 7)
+        with patch.dict(sys.modules, {"verify_audit": verifier, "startup.audit": audit}):
+            for valid, suffix in ((True, "passed"), (False, "failed"), (None, "unknown")):
+                verifier.verify_audit_chain.return_value = {"valid": valid, "records_checked": 0}
+                self.assertIs(scope["verify_audit"]()["valid"], valid)
+                self.assertEqual(audit.log_audit_event.call_args.kwargs["event"], "audit_verification_" + suffix)
+
     def test_health_precedence_preserves_all_five_states(self):
         aggregate = load_functions(
             Path(__file__).resolve().parents[1] / "services/observability_service.py", {"aggregate_health"}
@@ -156,7 +167,8 @@ class TruthfulTelemetryTests(unittest.TestCase):
             execute.return_value.fetchall.side_effect = [[row], []]
             payload = service.calculate_scores(7)
             self.assertEqual(payload["evidence_timestamp"], expected)
-            self.assertEqual(payload["soc2"], 100)
+            self.assertEqual(payload["soc2"], 84)
+            self.assertFalse(payload["authoritative"])
 
         row = SimpleNamespace(id=1, name="Evidence", category="SOC2", file_path="evidence.pdf", framework="SOC2", control_id="one", evidence_timestamp="2020-01-02", risk_level="HIGH", finding_type="PII", matched_pattern="PII", recommendation="redact", impact="policy", location_evidence="page 1", approval_id="approval", status="approved", metadata="{}", mfa_verified=True, approval_status="approved", policy_name="policy", policy_type="PII", provider="test", severity="HIGH", evidence="{}")
         scope["SEVERITY_PENALTY"] = {"HIGH": 10}
@@ -178,14 +190,14 @@ class TruthfulTelemetryTests(unittest.TestCase):
         control = {"framework": "SOC2", "control_id": "one", "title": "Control"}
         for previous, status, count, expected in ((100, "unknown", 0, None), (None, "failing", 1, 0)):
             execute.reset_mock()
-            service._persist_control_score(7, control, 0, status, count, 0, "Reason", "catalog_baseline" if not count else "evidence", {("SOC2", "one"): previous})
+            service._persist_control_score(7, control, expected, status, count, 0, "Reason", "catalog_baseline" if not count else "evidence", {("SOC2", "one"): previous})
             change = execute.call_args.args[1]
             self.assertEqual(change["current_score"], expected)
             self.assertEqual(json.loads(change["metadata"])["status"], status)
         execute.return_value.fetchall.return_value = [SimpleNamespace(_mapping={"current_score": 100, "source_event": "catalog_baseline"})]
         self.assertIsNone(service.score_changes(7)[0]["current_score"])
 
-    def test_snapshot_unknown_outage_recovery_and_failed_persistence(self):
+    def test_nullable_control_persistence_and_recovery_to_measured_zero(self):
         # Real SQL and transactions. Optional PostgreSQL rehearsal uses only TEMP tables.
         engine = create_engine(os.getenv("ENT019_TEST_DATABASE_URL", "sqlite://"))
         self.addCleanup(engine.dispose)
@@ -193,7 +205,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
         with engine.begin() as conn:
             if engine.dialect.name == "sqlite":
                 conn.connection.driver_connection.create_function("NOW", 0, lambda: datetime.now(timezone.utc).isoformat())
-            for table, alteration_count in (("compliance_score_history", 1), ("compliance_drift_alerts", 3), ("compliance_control_scores", 0), ("compliance_score_changes", 1)):
+            for table, alteration_count in (("compliance_score_history", 1), ("compliance_drift_alerts", 3), ("compliance_control_scores", 1), ("compliance_score_changes", 1)):
                 ddl = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \(.*?\);", migration, re.S).group()
                 ddl = ddl.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE")
                 ddl = ddl.replace("REFERENCES tenants(id) ON DELETE CASCADE", "")
@@ -208,61 +220,6 @@ class TruthfulTelemetryTests(unittest.TestCase):
                     for _ in range(2):  # Existing installations and idempotent restart.
                         for alter in alterations:
                             conn.execute(text(alter))
-        calculator, audit, alert = MagicMock(), MagicMock(), MagicMock()
-        scope = load_functions(
-            Path(__file__).resolve().parents[1] / "document_processing/drift.py",
-            {"record_compliance_snapshot"}, engine=engine, text=text, json=json,
-            datetime=datetime, timezone=timezone, get_current_framework_scores=calculator, logger=MagicMock(),
-        )
-        tenant = MagicMock()
-        tenant.get_current_tenant_id.return_value = "7"
-        scoring_module = MagicMock()
-        scoring_module.ComplianceEvidenceEngine.return_value.transaction.side_effect = lambda _: engine.begin()
-        with patch.dict(sys.modules, {"document_processing.auditor": audit, "document_processing.alerts": alert, "services.tenant_context": tenant, "services.compliance_evidence_engine": scoring_module}):
-            for score, expected_alerts in ((90, 0), (None, 3), (80, 3), (0, 6)):
-                calculator.return_value = dict.fromkeys(("soc2", "gdpr", "hipaa"), score)
-                scope["record_compliance_snapshot"](7)
-                with engine.connect() as conn:
-                    rows = conn.execute(text("SELECT score, details FROM compliance_score_history ORDER BY id DESC LIMIT 3")).all()
-                self.assertEqual(len(rows), 3)
-                self.assertTrue(all(row[0] == score for row in rows))
-                self.assertTrue(all(json.loads(row[1])["status"] == ("unknown" if score is None else "healthy") for row in rows))
-                self.assertEqual(alert.trigger_security_alert.call_count, expected_alerts)
-            calculator.side_effect = HTTPException(503, "source unavailable")
-            with self.assertRaises(HTTPException):
-                scope["record_compliance_snapshot"](7)
-            with engine.connect() as conn:
-                latest = conn.execute(text("SELECT score, details FROM compliance_score_history ORDER BY id DESC LIMIT 3")).all()
-                loss = conn.execute(text("SELECT score_drop, current_score FROM compliance_drift_alerts WHERE current_score IS NULL")).all()
-            self.assertTrue(all(row[0] is None and json.loads(row[1])["status"] == "unavailable" for row in latest))
-            self.assertEqual(len(loss), 6)
-            self.assertTrue(all(tuple(row) == (None, None) for row in loss))
-            self.assertEqual(alert.trigger_security_alert.call_count, 9)
-            calculator.side_effect = None
-            calculator.return_value = dict.fromkeys(("soc2", "gdpr", "hipaa"), 70)
-            scope["record_compliance_snapshot"](7)
-            self.assertEqual(alert.trigger_security_alert.call_count, 9)
-            calculator.return_value = dict.fromkeys(("soc2", "gdpr", "hipaa"), None)
-            audit.create_document_audit.side_effect = RuntimeError("audit unavailable")
-            with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
-                scope["record_compliance_snapshot"](7)
-            self.assertEqual(alert.trigger_security_alert.call_count, 12)
-            self.assertTrue(all(call.kwargs["tenant_id"] == 7 for call in audit.create_document_audit.call_args_list))
-            audit.create_document_audit.side_effect = None
-            scope["record_compliance_snapshot"](7)
-            self.assertEqual(alert.trigger_security_alert.call_count, 15)
-            alert.trigger_security_alert.side_effect = RuntimeError("notification unavailable")
-            with self.assertRaisesRegex(RuntimeError, "notification unavailable"):
-                scope["record_compliance_snapshot"](7)
-            self.assertEqual(alert.trigger_security_alert.call_count, 18)
-            alert.trigger_security_alert.side_effect = None
-            scope["record_compliance_snapshot"](7)
-            self.assertEqual(alert.trigger_security_alert.call_count, 21)
-            with patch.object(engine, "connect", side_effect=RuntimeError("database down")):
-                with self.assertRaisesRegex(RuntimeError, "database down"):
-                    scope["record_compliance_snapshot"](7)
-            self.assertEqual(alert.trigger_security_alert.call_args.args[0]["matched_pattern"], "COMPLIANCE_SNAPSHOT_UNAVAILABLE")
-
         scoring = load_functions(
             Path(__file__).resolve().parents[1] / "services/compliance_evidence_engine.py",
             {"ComplianceEvidenceEngine"}, Dict=dict, Any=object, List=list, Optional=Optional,
@@ -270,9 +227,11 @@ class TruthfulTelemetryTests(unittest.TestCase):
         )["ComplianceEvidenceEngine"]()
         control = {"framework": "SOC2", "control_id": "one", "title": "Control"}
         previous = {}
-        for score, status, count in ((80, "watch", 1), (0, "unknown", 0), (0, "unknown", 0), (0, "failing", 1)):
+        for score, status, count in ((80, "watch", 1), (None, "unknown", 0), (None, "unknown", 0), (0, "failing", 1)):
             scoring._persist_control_score(7, control, score, status, count, 0, "Reason", "evidence" if count else "catalog_baseline", previous)
             previous = {("SOC2", "one"): score if count else None}
+        with engine.connect() as conn:
+            self.assertEqual(conn.execute(text("SELECT score FROM compliance_control_scores")).scalar(), 0)
         changes = scoring.score_changes(7)
         self.assertEqual([row["current_score"] for row in changes], [0, None, 80])
         self.assertEqual([row["previous_score"] for row in changes], [None, 80, None])
@@ -300,6 +259,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
             Any=object,
             List=list,
             HTTPException=HTTPException,
+            os=os,
         )
         pipeline.EventPipeline.return_value.delivery_metrics.return_value = {"checkpoints": []}
         verifier.verify_audit_chain.return_value = {"valid": False, "records_checked": 1}
@@ -321,6 +281,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
                 payload = scope["get_metrics"]()
                 self.assertEqual(payload["avg_latency"], latency)
                 self.assertEqual(payload["status"], "degraded")
+                self.assertEqual(payload["compliance_status"], "unknown")
                 self.assertIs(payload["audit_chain_status"]["valid"], False)
                 self.assertIsNone(payload["queue_lag_seconds"])
             verifier.verify_audit_chain.return_value = {"valid": None, "status": "unknown", "records_checked": 0}
@@ -443,7 +404,9 @@ class TruthfulTelemetryTests(unittest.TestCase):
         self.assertEqual(payload["soc2_controls"]["unknown"], 1)
         self.assertEqual(payload["soc2_controls"]["passed"], 0)
         self.assertIsNone(payload["evidence_timestamp"])
-        self.assertEqual(payload["calculation_version"], "evidence-impact-v2")
+        self.assertEqual(payload["calculation_version"], "agent-diagnostic-v2")
+        self.assertIsNone(service._persist_control_score.call_args.args[2])
+        self.assertIn("unknown", service._persist_control_score.call_args.args[6])
         engine.connect.side_effect = RuntimeError("source outage")
         with self.assertRaises(RuntimeError):
             service.calculate_scores(7)
@@ -475,7 +438,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
             self.assertTrue(result["alertable"])
             self.assertIsNone(result["max_lag_seconds"])
         for field in ("lag_seconds", "dead_letter_count", "pending_events"):
-            for invalid in (None, -1, "broken", float("nan")):
+            for invalid in (None, -1, "broken", float("nan"), 0.5, False):
                 self.assertEqual(service._queue_lag({"streams": {}, "checkpoints": [{**checkpoint, field: invalid}]})["status"], "unknown")
         self.assertEqual(service._queue_lag({"streams": {"audit": {"dead_letter": 1}}, "checkpoints": [{**checkpoint, "dead_letter_count": 1, "pending_events": 1}]})["status"], "degraded")
         self.assertEqual(service._queue_lag({"checkpoints": [checkpoint]})["status"], "unknown")
@@ -484,39 +447,22 @@ class TruthfulTelemetryTests(unittest.TestCase):
             self.assertEqual(result["status"], status)
             self.assertTrue(result["alertable"])
 
-    def test_legacy_report_and_drift_consumers_do_not_invent_scores(self):
+    def test_legacy_reports_are_unassessed_and_retired_drift_cannot_write(self):
         engine = MagicMock()
-        conn = engine.connect.return_value.__enter__.return_value
-        conn.execute.return_value.fetchall.return_value = [(7,)]
-        conn.execute.return_value.fetchone.return_value = (90, None)
-        scores = {
-            "soc2": None,
-            "gdpr": None,
-            "hipaa": None,
-            "calculation_version": "evidence-impact-v2",
-            "evidence_timestamp": None,
-            "missing_control_treatment": "Missing controls remain unknown",
-        }
-        calculator = MagicMock()
-        calculator.ComplianceEvidenceEngine.return_value.calculate_scores.return_value = scores
-        calculator.ComplianceEvidenceEngine.return_value.transaction.side_effect = lambda _: engine.connect()
         scope = load_functions(
             Path(__file__).resolve().parents[1] / "document_processing/drift.py",
-            {"get_current_framework_scores", "record_compliance_snapshot"},
-            engine=engine,
-            text=lambda sql: sql,
-            HTTPException=HTTPException,
-            datetime=datetime,
-            timezone=timezone,
-            json=json,
-            logger=MagicMock(),
+            {"get_current_framework_scores", "record_compliance_snapshot"}, engine=engine,
         )
+        self.assertEqual(scope["get_current_framework_scores"](7), {})
+        self.assertIsNone(scope["record_compliance_snapshot"](7))
+        engine.connect.assert_not_called()
         report = load_functions(
             Path(__file__).resolve().parents[1] / "document_processing/reports.py",
             {"get_live_stats", "generate_executive_summary_report"},
             engine=engine,
             text=lambda sql: sql,
             HTTPException=HTTPException,
+            os=os,
             datetime=datetime,
             timezone=timezone,
             json=json,
@@ -532,51 +478,29 @@ class TruthfulTelemetryTests(unittest.TestCase):
             Table=Table,
             TableStyle=TableStyle,
         )
-        with patch.dict(
-            sys.modules,
-            {
-                "services.compliance_evidence_engine": calculator,
-                "document_processing.drift": MagicMock(**scope),
-                "document_processing.auditor": MagicMock(),
-                "document_processing.alerts": MagicMock(),
-                "services.tenant_context": MagicMock(get_current_tenant_id=lambda: "7"),
-            },
-        ):
-            scope["record_compliance_snapshot"](7)
-            snapshots = [call.args[1] for call in conn.execute.call_args_list if "INSERT INTO compliance_score_history" in str(call)]
-            self.assertEqual(len(snapshots), 3)
-            self.assertTrue(all(row["score"] is None and json.loads(row["details"])["status"] == "unknown" for row in snapshots))
-            alerts = [call.args[1] for call in conn.execute.call_args_list if "INSERT INTO compliance_drift_alerts" in str(call)]
-            self.assertEqual(len(alerts), 3)
-            self.assertTrue(all(row["curr"] is None and row["drop"] is None for row in alerts))
-            self.assertEqual(sys.modules["document_processing.alerts"].trigger_security_alert.call_count, 3)
-            with self.assertRaises(HTTPException):
-                report["get_live_stats"](7)
-            scores.update(soc2=0, gdpr=60, hipaa=90)
-            conn.execute.return_value.scalar.return_value = 0
-            payload = json.loads(report["generate_executive_summary_report"]("json", 7))
-            self.assertEqual(payload["compliance_score"], 50)
-            self.assertEqual(payload["calculation_version"], "evidence-impact-v2")
-            self.assertTrue(report["generate_executive_summary_report"]("pdf", 7).startswith(b"%PDF"))
-            self.assertIn(b"evidence-impact-v2", report["generate_executive_summary_report"]("csv", 7))
-            conn.execute.return_value.fetchone.return_value = (None, '{"status":"unknown"}')
-            scope["record_compliance_snapshot"](7)
-            self.assertTrue(conn.begin_nested.called)
-            with self.assertRaises(HTTPException):
-                scope["get_current_framework_scores"](8)
-            engine.connect.side_effect = RuntimeError("secret database outage")
-            calculator.ComplianceEvidenceEngine.return_value.calculate_scores.side_effect = RuntimeError("secret database outage")
-            for loader in (scope["get_current_framework_scores"], report["get_live_stats"]):
-                with self.assertRaises(HTTPException) as caught:
-                    loader(7)
-                self.assertEqual(caught.exception.status_code, 503)
-                self.assertNotIn("secret", caught.exception.detail)
+        conn = engine.connect.return_value.__enter__.return_value
+        conn.execute.return_value.scalar.return_value = 0
+        payload = json.loads(report["generate_executive_summary_report"]("json", 7))
+        self.assertIsNone(payload["compliance_score"])
+        self.assertFalse(payload["compliance_authoritative"])
+        self.assertEqual(payload["compliance_status"], "unassessed")
+        self.assertEqual(payload["calculation_version"], "agent-diagnostic-v2")
+        self.assertTrue(report["generate_executive_summary_report"]("pdf", 7).startswith(b"%PDF"))
+        self.assertIn(b"Unassessed", report["generate_executive_summary_report"]("csv", 7))
+        self.assertTrue(all(call.args[1] == {"tenant_id": 7} for call in conn.execute.call_args_list))
+        with self.assertRaises(HTTPException):
+            report["get_live_stats"](8)
+        engine.connect.side_effect = RuntimeError("secret database outage")
+        with self.assertRaises(HTTPException) as caught:
+            report["get_live_stats"](7)
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertNotIn("secret", caught.exception.detail)
 
     def test_audit_summary_and_report_preserve_unknown(self):
         verifier, engine = MagicMock(), MagicMock()
         verifier.verify_audit_chain.return_value = {"valid": None, "records_checked": 0}
         engine.connect.return_value.__enter__.return_value.execute.return_value.fetchall.return_value = (
-            []
+            [(1, datetime.now(timezone.utc), "Request", None, None, "hash", None)]
         )
         summary = load_functions(
             Path(__file__).resolve().parents[1] / "main.py",
@@ -596,6 +520,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
             datetime=datetime,
             timezone=timezone,
             io=io,
+            csv=csv,
             colors=colors,
             letter=letter,
             getSampleStyleSheet=getSampleStyleSheet,
@@ -610,6 +535,9 @@ class TruthfulTelemetryTests(unittest.TestCase):
             self.assertIsNone(summary["verify_audit_summary"]()["valid"])
             self.assertEqual(summary["verify_audit_summary"]()["status"], "unknown")
             self.assertTrue(report["generate_auditor_evidence_report"]("pdf", 7).startswith(b"%PDF"))
+            audit = json.loads(report["generate_auditor_evidence_report"]("json", 7))["audit_logs"][0]
+            self.assertEqual((audit["risk"], audit["status"]), ("UNKNOWN", "UNKNOWN"))
+            self.assertIn(b"UNKNOWN,UNKNOWN", report["generate_auditor_evidence_report"]("csv", 7))
             for valid, expected in ((None, "UNKNOWN"), (False, "CORRUPTED"), (True, "VALID")):
                 verifier.verify_audit_chain.return_value["valid"] = valid
                 self.assertEqual(
@@ -702,7 +630,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
             Any=object,
         )
         with patch.dict(sys.modules, {"services.compliance_evidence_engine": calculator}):
-            for score, risk in ((None, "UNKNOWN"), (0, "MEDIUM"), (90, "LOW")):
+            for score, risk in ((None, "UNASSESSED"), (0, "UNASSESSED"), (90, "UNASSESSED")):
                 service.calculate_scores.return_value = {
                     "soc2_controls": {
                         "unknown": int(score is None),

@@ -10,12 +10,13 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, require_roles, require_scopes
@@ -240,6 +241,40 @@ def get_audit_logs(
 
     # ── PostgreSQL fallback ────────────────────────────────────────────────────
     return _query_postgres(db, tenant_id, limit, offset, action, integrity_check)
+
+
+@router.get("/metrics", dependencies=[require_scopes(["read"])])
+def get_audit_metrics(
+    request: Request, db: Session = Depends(get_tenant_db),
+    hours: int = Query(default=24, ge=1, le=720),
+):
+    """Full-window gateway observations from the authoritative tenant audit chain."""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=hours)
+    try:
+        row = db.execute(text("""
+            SELECT count(DISTINCT nullif(request_id, '')) AS requests,
+                count(DISTINCT nullif(request_id, '')) FILTER (WHERE action = 'redact') AS redactions,
+                count(*) FILTER (WHERE nullif(request_id, '') IS NULL) AS unidentified,
+                percentile_disc(0.99) WITHIN GROUP (ORDER BY duration_ms) FILTER (
+                    WHERE idempotency_key = concat_ws(':', 'gateway', request_id, 'provider_outcome')
+                    AND duration_ms >= 0) AS p99
+            FROM audit_log_metadata
+            WHERE tenant_id = :tenant_id AND actor_type = 'gateway'
+                AND created_at >= :start AND created_at < :end
+        """), {"tenant_id": str(request.state.tenant_id), "start": start, "end": end}).mappings().one()
+    except Exception as exc:
+        logger.exception("Dashboard audit metrics query failed")
+        raise HTTPException(status_code=503, detail="Gateway telemetry unavailable") from exc
+    complete = row["unidentified"] == 0
+    return {
+        "source": "postgres", "complete": complete,
+        "windowStart": start.isoformat(), "windowEnd": end.isoformat(),
+        "totalRequests": row["requests"] if complete else None,
+        "redactions24h": row["redactions"] if complete else None,
+        "requestsPerSec": row["requests"] / (hours * 3600) if complete else None,
+        "p99LatencyMs": row["p99"],
+    }
 
 
 @router.get(

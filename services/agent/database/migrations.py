@@ -894,6 +894,13 @@ def run_startup_migrations():
         metadata TEXT
     );
     ALTER TABLE compliance_score_changes ALTER COLUMN current_score DROP NOT NULL;
+    ALTER TABLE compliance_control_scores ALTER COLUMN score DROP NOT NULL;
+    -- DDL holds the table lock until this transaction restores FORCE RLS.
+    ALTER TABLE compliance_control_scores NO FORCE ROW LEVEL SECURITY;
+    UPDATE compliance_control_scores SET score = NULL, status = 'unknown',
+        reason = 'No evidence mapped; score is unknown.'
+        WHERE evidence_count = 0 AND score IS NOT NULL;
+    ALTER TABLE compliance_control_scores FORCE ROW LEVEL SECURITY;
 
     CREATE TABLE IF NOT EXISTS regulatory_corpus_versions (
         version_id VARCHAR(50) PRIMARY KEY,
@@ -1301,6 +1308,10 @@ def run_startup_migrations():
     REVOKE ALL ON FUNCTION set_agent_context(text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION bind_agent_context(text, text, text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION agent_current_tenant_id() FROM PUBLIC;
+
+    -- Old writers omit tenant_id; only the authenticated transaction may supply it.
+    ALTER TABLE compliance_score_history ALTER COLUMN tenant_id SET DEFAULT agent.agent_current_tenant_id()::integer;
+    ALTER TABLE compliance_drift_alerts ALTER COLUMN tenant_id SET DEFAULT agent.agent_current_tenant_id()::integer;
 
     ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_audit_logs ON audit_logs;

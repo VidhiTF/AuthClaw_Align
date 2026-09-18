@@ -282,8 +282,11 @@ def record_access(
     ip_address: str = "",
     user_agent: str = "",
 ) -> None:
-    share.last_accessed_at = now_utc()
-    share.access_count = (share.access_count or 0) + 1
+    db.query(TrustCenterShare).filter(TrustCenterShare.id == share.id,
+        TrustCenterShare.tenant_id == share.tenant_id).update({
+            TrustCenterShare.last_accessed_at: now_utc(),
+            TrustCenterShare.access_count: TrustCenterShare.access_count + 1,
+        }, synchronize_session=False)
     db.add(
         TrustCenterAccessLog(
             tenant_id=share.tenant_id,
@@ -324,7 +327,7 @@ def build_public_package(
     include_export: bool = False,
 ) -> dict[str, Any]:
     tenant = db.query(Tenant).filter(Tenant.id == share.tenant_id).first()
-    scores = compliance_scoring.score_all_frameworks(db, str(share.tenant_id), persist=False)
+    scores = compliance_scoring.score_all_frameworks(db, str(share.tenant_id), persist=False, include_traceability=False)
     allowed = set(share.frameworks or DEFAULT_FRAMEWORKS)
     scores["frameworks"] = [item for item in scores["frameworks"] if item["framework"] in allowed]
     trust_summary = scores.get("trust_summary")
@@ -334,9 +337,19 @@ def build_public_package(
         trust_summary["counts"] = {
             bucket: len(trust_summary[bucket]) for bucket in ("verified", "in_progress", "planned")
         }
-    if scores["frameworks"]:
-        scores["overall_score"] = round(sum(item["score"] for item in scores["frameworks"]) / len(scores["frameworks"]), 1)
-        scores["readiness_level"] = compliance_scoring.readiness_level(scores["overall_score"])
+    scores["overall_score"], scores["readiness_level"] = compliance_scoring.aggregate_readiness(scores["frameworks"])
+    for framework in scores["frameworks"]:
+        catalog = {item["id"]: item for item in compliance_scoring.CONTROL_CATALOG[framework["framework"]]}
+        for control in framework.get("controls", []):
+            roles = catalog.get(control["id"], {})
+            control["product_owners"] = compliance_scoring.control_assessments.resolve_owners(roles.get("product_roles", ["platform_security"]), public=True)
+            control["operational_owners"] = compliance_scoring.control_assessments.resolve_owners(roles.get("operational_roles", ["governance"]), public=True)
+            # Public qualification detail is an allowlist, never internal review/source IDs.
+            assessment = control.get("evidence_assessment", {})
+            control["evidence_assessment"] = {key: assessment[key] for key in (
+                "state", "reason_codes", "required_count", "qualified_count", "as_of", "valid_until",
+            ) if key in assessment}
+            control.pop("traceability", None)
     signing = signing_key_metadata()
     package: dict[str, Any] = {
         "tenant": {

@@ -10,18 +10,24 @@ import {
   UserRound,
 } from "lucide-react";
 import Link from "next/link";
+import { calculationVersion } from "@/lib/trust-summary";
+import { readinessLabel } from "@/lib/ui-format";
 
 interface DashboardMetrics {
-  openApprovals: number;
-  redactions24h: number;
-  totalRequests: number;
+  status: "healthy" | "degraded" | "unavailable" | "unknown" | "not_applicable";
+  sources: Record<string, { status: string }>;
+  metricStates: Record<string, string>;
+  openApprovals: number | null;
+  redactions24h: number | null;
+  totalRequests: number | null;
   requestsPerSec: number | null;
   p99LatencyMs: number | null;
 }
 
 interface FrameworkScore {
+  calculation_version?: string;
   framework: "SOC2" | "GDPR" | "HIPAA";
-  score: number;
+  score: number | null;
   readiness_level: string;
   metrics: {
     evidence_count: number;
@@ -32,7 +38,9 @@ interface FrameworkScore {
 }
 
 interface ComplianceScoreState {
-  overall_score: number;
+  calculation_version?: string;
+  generated_at: string;
+  overall_score: number | null;
   readiness_level: string;
   frameworks: FrameworkScore[];
 }
@@ -49,39 +57,48 @@ interface RecentAuditRecord {
 export default function OverviewPage() {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [complianceScores, setComplianceScores] = useState<ComplianceScoreState | null>(null);
+  const [scoresError, setScoresError] = useState<string | null>(null);
+  const metricsRequest = useRef(0);
   const [recentActivity, setRecentActivity] = useState<RecentAuditRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const requestSequence = useRef(0);
   const [loading, setLoading] = useState(true); const [trafficRange, setTrafficRange] = useState(24); const trafficRangeRef = useRef(24);
 
   const fetchMetrics = useCallback(async (full = true, hours = trafficRangeRef.current) => {
-    const sequence = ++requestSequence.current;
+    const request = ++metricsRequest.current;
+    setMetrics(null);
+    setError(null);
+    setComplianceScores(null);
+    setScoresError(null);
     try {
       if (full) setLoading(true);
-      const [dashboardRes, scoresRes] = await Promise.all([
-        fetch(`/api/dashboard?hours=${hours}`, { signal: AbortSignal.timeout(15000) }),
-        fetch("/api/compliance-scores?persist_snapshot=false", { signal: AbortSignal.timeout(15000) }),
-      ]);
-      if (sequence !== requestSequence.current) return;
-      if (dashboardRes.status === 401) {
-        window.location.href = "/login";
-        return;
-      }
-      if (!dashboardRes.ok) throw new Error("Failed to load metrics");
-      if (scoresRes?.status === 401) { window.location.href = "/login"; return; }
-      if (!scoresRes.ok) throw new Error("Compliance telemetry unavailable");
-      const [data, scores] = await Promise.all([dashboardRes.json(), scoresRes.json()]);
-      if (sequence !== requestSequence.current) return;
-      setMetrics(data); setRecentActivity(data.recentActivity || []);
-      setComplianceScores(scores); setError(null);
+      const results = await Promise.allSettled([
+        fetch(`/api/dashboard?hours=${hours}`, { cache: "no-store", signal: AbortSignal.timeout(15000) }),
+        fetch("/api/compliance-scores?persist_snapshot=false", { cache: "no-store", signal: AbortSignal.timeout(15000) }),
+      ].map(async (pending) => {
+        const response = await pending;
+        if (response.status === 401) { window.location.href = "/login"; throw new Error("Session expired"); }
+        if (!response.ok) throw new Error("Data unavailable");
+        return response.json();
+      }));
+      if (request !== metricsRequest.current) return;
+      const [dashboard, scores] = results;
+      if (dashboard.status === "fulfilled") {
+        setMetrics(dashboard.value);
+        setRecentActivity(dashboard.value.recentActivity || []);
+        setError(dashboard.value.status === "unavailable" ? "Telemetry unavailable for some dashboard sources. Successful observations remain visible." : null);
+      } else { setMetrics(null); setRecentActivity([]); setError("Telemetry unavailable — dashboard source checks failed. Values are unknown."); }
+      if (scores.status === "fulfilled") setComplianceScores(scores.value);
+      else setScoresError("Current compliance assessment unavailable. Refresh to try again.");
     } catch (err: unknown) {
-      if (sequence !== requestSequence.current) return;
-      setMetrics(null); setComplianceScores(null); setRecentActivity([]);
-      setError("Telemetry unavailable — source checks failed. Values are unknown.");
       const message = err instanceof Error ? err.message : "Could not retrieve real-time metrics";
       console.warn("Overview fetch metrics failed:", message);
+      if (request === metricsRequest.current) {
+        setMetrics(null); setRecentActivity([]); setComplianceScores(null);
+        setError("Telemetry unavailable — source checks failed. Values are unknown.");
+        setScoresError("Current compliance assessment unavailable. Refresh to try again.");
+      }
     } finally {
-      if (sequence === requestSequence.current) setLoading(false);
+      if (request === metricsRequest.current) setLoading(false);
     }
   }, []);
 
@@ -93,6 +110,7 @@ export default function OverviewPage() {
     return () => {
       window.clearTimeout(initialFetch);
       clearInterval(interval);
+      metricsRequest.current += 1;
     };
   }, [fetchMetrics]);
 
@@ -103,6 +121,11 @@ export default function OverviewPage() {
   };
 
   const complianceReadiness = complianceScores?.frameworks || [];
+  const emptyActivity = metrics?.sources?.audit?.status === "healthy" ? "No recent audit activity."
+    : metrics?.sources?.audit?.status === "unavailable" || error ? "Audit activity unavailable" : "Audit activity unknown";
+  const telemetryStatus = error || scoresError ? "unavailable"
+    : metrics?.status === "healthy" && (!complianceScores || complianceReadiness.some((framework) => framework.score == null)) ? "unknown"
+    : metrics?.status || "unknown";
 
   return (
     <div className="ac-page ac-page-overview mx-auto max-w-none space-y-5">
@@ -126,7 +149,7 @@ export default function OverviewPage() {
             Refresh
           </button>
           <div role="status" className="px-3 py-2 rounded-lg border text-xs font-semibold">
-            {error ? "Telemetry unavailable" : metrics ? "Telemetry loaded" : "Telemetry unknown"}
+            {`Telemetry ${telemetryStatus}`}
           </div>
         </div>
       </div>
@@ -149,7 +172,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <div className="mt-4 flex items-center justify-between text-xs">
-            <span className="text-[#6B7488]">Requests in latest 100 audit records</span>
+            <span className="text-[#6B7488]">Unique observed gateway requests · last {trafficRange}h</span>
             <Link href="/audit" className="text-indigo-400 hover:text-indigo-300 flex items-center gap-0.5 font-medium transition">
               Logs <ArrowUpRight className="w-3 h-3" />
             </Link>
@@ -161,7 +184,7 @@ export default function OverviewPage() {
           <div className="absolute top-0 right-0 w-24 h-24 rounded-full bg-emerald-500/5 blur-[40px] pointer-events-none" />
           <div className="flex justify-between items-start">
             <div>
-              <p className="text-[10px] uppercase tracking-widest font-bold text-[#6B7488]">PII Redactions</p>
+              <p className="text-[10px] uppercase tracking-widest font-bold text-[#6B7488]">Redacted requests</p>
               <h3 className="text-2xl font-bold text-[#0E1726] mt-2">
                 {loading ? "..." : metrics?.redactions24h ?? "Unknown"}
               </h3>
@@ -208,7 +231,7 @@ export default function OverviewPage() {
                 ) : metrics?.p99LatencyMs !== null && metrics?.p99LatencyMs !== undefined ? (
                   `${metrics.p99LatencyMs} ms`
                 ) : (
-                  <span className="text-sm font-medium text-[#6B7488]">{error ? "Unavailable" : "Unknown — no measurements"}</span>
+                  <span className="text-sm font-medium text-[#6B7488]">{metrics?.metricStates?.p99LatencyMs === "unavailable" || !metrics && error ? "Unavailable" : "Unknown — no measurements"}</span>
                 )}
               </h3>
             </div>
@@ -217,7 +240,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <div className="mt-4 flex items-center justify-between text-xs text-[#6B7488]">
-            <span>99th percentile request overhead</span>
+            <span>99th percentile observed outcomes</span>
             <span>Proxy latency</span>
           </div>
         </div>
@@ -225,11 +248,11 @@ export default function OverviewPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,2.15fr)_minmax(18rem,.9fr)]">
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           <section className="rounded-md border border-[#DCE1E9] bg-white p-5">
             <div className="flex items-start justify-between gap-4">
               <div><h3 className="text-lg font-bold">Traffic intelligence</h3><p className="mt-0.5 text-xs text-[#6B7488]">Governed AI requests, redactions, and policy actions.</p></div>
-              <div className="flex overflow-hidden rounded-md border border-[#DCE1E9] text-[10px] font-semibold">{[[24,"24h"],[168,"7d"],[720,"30d"]].map(([hours,label]) => <button key={hours} type="button" aria-pressed={trafficRange === hours} onClick={() => { trafficRangeRef.current = Number(hours); setTrafficRange(Number(hours)); void fetchMetrics(false, Number(hours)); }} className={trafficRange === hours ? "bg-[#F1ECFE] px-4 py-2 text-[#6D28D9]" : "px-4 py-2 hover:bg-[#F5F7FA]"}>{label}</button>)}</div>
+              <div className="flex shrink-0 overflow-hidden rounded-md border border-[#DCE1E9] text-[10px] font-semibold">{[[24,"24h"],[168,"7d"],[720,"30d"]].map(([hours,label]) => <button key={hours} type="button" aria-pressed={trafficRange === hours} onClick={() => { trafficRangeRef.current = Number(hours); setTrafficRange(Number(hours)); void fetchMetrics(false, Number(hours)); }} className={trafficRange === hours ? "bg-[#F1ECFE] px-4 py-2 text-[#6D28D9]" : "px-4 py-2 hover:bg-[#F5F7FA]"}>{label}</button>)}</div>
             </div>
             <div className="mt-5 grid min-h-44 place-items-center border-y border-[#EEF1F6] bg-[linear-gradient(#EEF1F6_1px,transparent_1px),linear-gradient(90deg,#EEF1F6_1px,transparent_1px)] bg-[size:100%_25%,12.5%_100%]">
               <div className="rounded-md bg-white/90 px-4 py-3 text-center text-xs text-[#6B7488]"><Activity className="mx-auto mb-2 h-5 w-5 text-[#6D28D9]"/>Historical traffic appears as real gateway telemetry accumulates.</div>
@@ -237,15 +260,16 @@ export default function OverviewPage() {
             <div className="mt-4 grid grid-cols-3 gap-3 text-xs"><div><span className="text-[#6D28D9]">●</span> Total requests<strong className="mt-1 block text-sm">{metrics?.totalRequests ?? "Unknown"}</strong></div><div><span className="text-[#E9A93C]">●</span> Redactions<strong className="mt-1 block text-sm">{metrics?.redactions24h ?? "Unknown"}</strong></div><div><span className="text-[#94A3B8]">●</span> Throughput<strong className="mt-1 block text-sm">{metrics?.requestsPerSec == null ? "—" : `${metrics.requestsPerSec}/s`}</strong></div></div>
           </section>
 
-          <section className="overflow-hidden rounded-md border border-[#DCE1E9] bg-white">
-            <div className="flex items-center justify-between px-5 py-4"><div><h3 className="text-lg font-bold">Compliance readiness</h3><p className="text-xs text-[#6B7488]">Policy coverage and control status across key frameworks.</p></div><Link href="/compliance" className="text-xs font-semibold text-[#6D28D9]">View details →</Link></div>
-            <table className="w-full text-left text-xs"><thead><tr><th className="px-5 py-2">Framework</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Coverage</th><th className="px-4 py-2">Evidence</th><th className="px-5 py-2">Open issues</th></tr></thead><tbody>{complianceReadiness.length === 0 ? <tr><td colSpan={5} className="px-5 py-8 text-center text-[#6B7488]">Compliance scores will appear after the live scoring endpoint responds.</td></tr> : complianceReadiness.map((framework) => { const meta = frameworkLabels[framework.framework]; return <tr key={framework.framework} className="border-t border-[#EEF1F6]"><td className="px-5 py-3 font-semibold">{meta.name}</td><td className="px-4 py-3 text-[#475069]">{framework.readiness_level}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><span>{framework.score}%</span><span className="h-1.5 w-20 overflow-hidden rounded-full bg-[#EEF1F6]"><span className="block h-full bg-[#6D28D9]" style={{width:`${framework.score}%`}}/></span></div></td><td className="px-4 py-3">{framework.metrics.evidence_count}</td><td className="px-5 py-3">{framework.metrics.open_findings}</td></tr>; })}</tbody></table>
+          <section className="overflow-x-auto rounded-md border border-[#DCE1E9] bg-white">
+            <div className="flex items-center justify-between px-5 py-4"><div><h3 className="text-lg font-bold">Compliance readiness</h3><p className="text-xs text-[#6B7488]">Scores require current reviewed evidence. Unknown means evidence is insufficient; 0% means a reviewed control failed. Activity counts cannot establish compliance.</p></div><Link href="/compliance" className="text-xs font-semibold text-[#6D28D9]">View details →</Link></div>
+            {complianceScores && <p className="px-5 pb-3 text-[10px] text-[#6B7488]">As of {new Date(complianceScores.generated_at).toLocaleString()} · Calculation version: {calculationVersion(complianceScores.calculation_version)}{calculationVersion(complianceScores.calculation_version) === "legacy_unversioned" && " · Legacy results do not establish current evidence qualification."}</p>}
+            <table className="w-full text-left text-xs"><thead><tr><th className="px-5 py-2">Framework</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Qualified evidence coverage</th><th className="px-4 py-2">Activity records</th><th className="px-5 py-2">Open issues</th></tr></thead><tbody>{complianceReadiness.length === 0 ? <tr><td colSpan={5} className="px-5 py-8 text-center text-[#6B7488]" role={scoresError ? "alert" : "status"}>{scoresError || (loading ? "Loading current compliance assessment…" : "Current compliance assessment unknown")}</td></tr> : complianceReadiness.map((framework) => { const meta = frameworkLabels[framework.framework]; return <tr key={framework.framework} className="border-t border-[#EEF1F6]"><td className="px-5 py-3 font-semibold">{meta.name}<span className="mt-1 block text-[10px] font-normal text-[#6B7488]">{calculationVersion(framework.calculation_version)}</span></td><td className="px-4 py-3 text-[#475069]">{readinessLabel(framework.readiness_level)}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><span>{framework.score == null ? "Unknown" : `${framework.score}%`}</span>{framework.score != null && <span className="h-1.5 w-20 overflow-hidden rounded-full bg-[#EEF1F6]"><span className="block h-full bg-[#6D28D9]" style={{width:`${framework.score}%`}}/></span>}</div></td><td className="px-4 py-3">{framework.metrics.evidence_count}</td><td className="px-5 py-3">{framework.metrics.open_findings}</td></tr>; })}</tbody></table>
           </section>
         </div>
 
         <aside className="rounded-md border border-[#DCE1E9] bg-white p-5">
           <div className="flex items-center justify-between"><h3 className="text-lg font-bold">Recent activity</h3><Link href="/audit" className="text-xs font-semibold text-[#6D28D9]">View all →</Link></div>
-          <div className="mt-3 divide-y divide-[#EEF1F6]">{recentActivity.length === 0 ? <div className="py-10 text-center text-xs text-[#6B7488]">{error ? "Audit activity unavailable" : "No recent audit activity."}</div> : recentActivity.map((record, index) => <Link href="/audit" key={record.record_id} className="flex gap-3 py-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${index % 3 === 0 ? "bg-[#6D28D9]" : index % 3 === 1 ? "bg-emerald-500" : "bg-[#E9A93C]"}`}/><span className="min-w-0"><strong className="block truncate text-xs">{record.action.replaceAll("_", " ")}</strong><span className="mt-0.5 block truncate text-[10px] text-[#6B7488]">{record.provider || "AuthClaw"}{record.model ? ` · ${record.model}` : ""}</span></span><time className="ml-auto shrink-0 text-[9px] text-[#6B7488]">{new Date(record.timestamp).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</time></Link>)}</div>
+          <div className="mt-3 divide-y divide-[#EEF1F6]">{recentActivity.length === 0 ? <div className="py-10 text-center text-xs text-[#6B7488]">{emptyActivity}</div> : recentActivity.map((record, index) => <Link href="/audit" key={record.record_id} className="flex gap-3 py-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${index % 3 === 0 ? "bg-[#6D28D9]" : index % 3 === 1 ? "bg-emerald-500" : "bg-[#E9A93C]"}`}/><span className="min-w-0"><strong className="block truncate text-xs">{record.action.replaceAll("_", " ")}</strong><span className="mt-0.5 block truncate text-[10px] text-[#6B7488]">{record.provider || "AuthClaw"}{record.model ? ` · ${record.model}` : ""}</span></span><time className="ml-auto shrink-0 text-[9px] text-[#6B7488]">{new Date(record.timestamp).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</time></Link>)}</div>
         </aside>
       </div>
     </div>

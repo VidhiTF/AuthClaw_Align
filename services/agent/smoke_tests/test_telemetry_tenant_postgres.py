@@ -88,23 +88,48 @@ def run_integration():
                     VALUES ('SOC2',20,99,79,'unattributed legacy alert');
             """))
         run_startup_migrations()
-        run_startup_migrations()  # Idempotent migration with retained history.
         with owner.begin() as conn:
+            conn.execute(text("INSERT INTO agent.tenants(id,name,status,subscription_tier,plan,tier) VALUES (7,'Tenant A','active','professional','professional','professional'),(8,'Tenant B','active','professional','professional','professional'),(9,'Empty tenant','active','professional','professional','professional')"))
+            conn.execute(text("""
+                INSERT INTO agent.compliance_control_scores
+                    (tenant_id,framework,control_id,score,status,evidence_count,reason)
+                VALUES (9,'SOC2','legacy-empty-zero',0,'failing',0,'legacy baseline'),
+                       (9,'SOC2','legacy-empty-high',100,'passing',0,'legacy baseline'),
+                       (9,'SOC2','measured-zero',0,'unassessed',1,'measured zero');
+            """))
+            measured_before = conn.execute(text("SELECT row_to_json(s)::text FROM agent.compliance_control_scores s WHERE tenant_id=9 AND control_id='measured-zero'")).scalar_one()
+        run_startup_migrations()  # Upgrade stored legacy scores, retain genuine zero.
+        with owner.begin() as conn:
+            legacy = conn.execute(text("SELECT score,status,reason FROM agent.compliance_control_scores WHERE tenant_id=9 AND control_id IN ('legacy-empty-zero','legacy-empty-high')")).all()
+            assert len(legacy) == 2
+            assert all(score is None and status == "unknown" and "no evidence" in reason.lower() and "unknown" in reason.lower() for score, status, reason in legacy)
+            assert conn.execute(text("SELECT row_to_json(s)::text FROM agent.compliance_control_scores s WHERE tenant_id=9 AND control_id='measured-zero'")).scalar_one() == measured_before
+            assert tuple(conn.execute(text("SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='agent.compliance_control_scores'::regclass")).one()) == (True, True)
+            conn.execute(text("DELETE FROM agent.compliance_control_scores WHERE tenant_id=9 AND control_id IN ('legacy-empty-zero','legacy-empty-high','measured-zero')"))
             conn.execute(text("GRANT USAGE ON SCHEMA agent TO ent019_runtime"))
             conn.execute(text("GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA agent TO ent019_runtime"))
             conn.execute(text("GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA agent TO ent019_runtime"))
             secure_agent_authentication_boundary(conn, Role(base.username, "", "agent"), Role("ent019_runtime", "", "agent"))
-            conn.execute(text("INSERT INTO agent.tenants(id,name,status,subscription_tier,plan,tier) VALUES (7,'Tenant A','active','professional','professional','professional'),(8,'Tenant B','active','professional','professional','professional')"))
         validate_database_security()
         from services.tenant_context import tenant_context
         from document_processing import drift, reports, monitoring, alerts
-        from services.compliance_evidence_engine import CONTROL_CATALOG
+        from services.compliance_evidence_engine import CONTROL_CATALOG, ComplianceEvidenceEngine
         from services import observability_service
         import verify_audit
         import main
         from fastapi import HTTPException
         from fastapi.testclient import TestClient
         from pypdf import PdfReader
+
+        with tenant_context(9, request_id="empty-diagnostics", required=True):
+            scores = ComplianceEvidenceEngine().calculate_scores(9)
+            assert all(scores[framework] is None for framework in ("soc2", "gdpr", "hipaa"))
+            assert scores["authoritative"] is False and scores["status"] == "unassessed"
+            with engine.connect() as conn:
+                controls = conn.execute(text("SELECT score,status,evidence_count FROM compliance_control_scores WHERE tenant_id=9")).all()
+                assert len(controls) == len(CONTROL_CATALOG)
+                assert all(score is None and status == "unknown" and count == 0 for score, status, count in controls)
+                assert conn.execute(text("SELECT count(*) FROM compliance_score_changes WHERE current_score IS NOT NULL")).scalar() == 0
 
         with engine.connect() as conn:
             assert tuple(conn.execute(text("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user")).one()) == (False, False)
@@ -136,26 +161,53 @@ def run_integration():
                             assert exc.orig.pgcode == "42501", str(exc)
                         else:
                             raise AssertionError("RLS accepted unbound/cross-tenant insert")
+
+        # Old binaries omit tenant_id: the secure default binds to authenticated
+        # context, while original unattributed rows remain quarantined.
+        legacy_inserts = (
+            "INSERT INTO compliance_score_history(framework,score,details) VALUES ('SOC2',84,'legacy writer') RETURNING tenant_id",
+            "INSERT INTO compliance_drift_alerts(framework,score_drop,previous_score,current_score,details) VALUES ('SOC2',10,84,74,'legacy writer') RETURNING tenant_id",
+        )
+        for tenant in (7, 8):
+            with tenant_context(tenant, request_id="rolling-old-writer", required=True), engine.begin() as conn:
+                for statement in legacy_inserts:
+                    assert conn.execute(text(statement)).scalar_one() == tenant
+        for statement in legacy_inserts:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(statement))
+            except DBAPIError as exc:
+                assert exc.orig.pgcode == "42501", str(exc)
+            else:
+                raise AssertionError("legacy writer inserted without authenticated context")
         with tempfile.TemporaryDirectory(prefix="ent019-telemetry-") as temporary:
             with patch.object(alerts, "ALERTS_LOG", str(Path(temporary) / "alerts.log")):
-                # Real scoring, real snapshot SQL, real chained audit; alternate tenants.
+                # Diagnostic scoring is tenant-bound and never authoritative;
+                # the retired legacy snapshot hook must leave stored history intact.
                 for tenant in (7, 8, 7):
                     with tenant_context(tenant, request_id="snapshot-worker", required=True):
+                        scores = ComplianceEvidenceEngine().calculate_scores(tenant)
+                        assert scores["authoritative"] is False and scores["status"] == "unassessed"
+                        assert all(score is None or 0 <= score <= 84 for score in (scores["soc2"], scores["gdpr"], scores["hipaa"]))
                         drift.record_compliance_snapshot(tenant)
                 with tenant_context(7, request_id="tenant-a", required=True), engine.begin() as conn:
-                    assert conn.execute(text("SELECT count(*) FROM compliance_drift_alerts")).scalar() == 0
-                    assert set(conn.execute(text("SELECT score FROM compliance_score_history")).scalars()) == {100}
+                    assert conn.execute(text("SELECT count(*) FROM compliance_drift_alerts")).scalar() == 1
+                    assert conn.execute(text("SELECT score FROM compliance_score_history")).scalars().all() == [84]
                     conn.execute(text("INSERT INTO document_findings(tenant_id,document_id,finding_type,matched_pattern,matched_text,risk_level,recommendation) VALUES (7,7,'Regulatory','SOC2 GDPR HIPAA','private-7','CRITICAL','fix')"))
                 with tenant_context(7, request_id="drop-worker", required=True):
-                    drift.record_compliance_snapshot(7)
+                    with patch("document_processing.auditor.create_document_audit") as audit, patch.object(alerts, "trigger_security_alert") as alert:
+                        drift.record_compliance_snapshot(7)
+                        audit.assert_not_called()
+                        alert.assert_not_called()
                     with engine.connect() as conn:
                         rows = conn.execute(text("SELECT tenant_id,previous_score,current_score FROM compliance_drift_alerts")).all()
-                        assert len(rows) == 3 and all(row[0] == 7 and row[1] == 100 and row[2] < 100 for row in rows)
+                        assert [tuple(row) for row in rows] == [(7, 84, 74)]
                 # Missing/mismatched application context must fail before any source access.
                 for bound in (None, 8):
                     with tenant_context(bound, request_id="wrong-tenant", required=True):
-                        for call in (lambda: drift.record_compliance_snapshot(7), lambda: drift.get_current_framework_scores(7),
-                                     lambda: reports.generate_executive_summary_report("json", 7),
+                        assert drift.record_compliance_snapshot(7) is None
+                        assert drift.get_current_framework_scores(7) == {}
+                        for call in (lambda: reports.generate_executive_summary_report("json", 7),
                                      lambda: reports.generate_technical_findings_report("json", 7),
                                      lambda: reports.generate_auditor_evidence_report("json", 7)):
                             try:
@@ -175,11 +227,15 @@ def run_integration():
                 healthy_queue = {"streams": {}, "checkpoints": [{"stream": "audit", "lag_seconds": 0,
                     "pending_events": 0, "dead_letter_count": 0, "updated_at": datetime.now(timezone.utc).isoformat()}]}
                 for valid, queue, expected in ((None, healthy_queue, "unknown"), (True, {}, "unknown"),
+                                               (True, None, "unknown"), (True, {"streams": {}, "checkpoints": [None]}, "unknown"),
                                                (True, healthy_queue, "healthy"), (False, {}, "degraded")):
                     with patch.object(verify_audit, "verify_audit_chain", return_value={"valid": valid}), patch.object(observability_service, "verify_audit_chain", return_value={"valid": valid}), patch.object(observability_service.EventPipeline, "delivery_metrics", return_value=queue):
                         for endpoint in ("/metrics", "/analytics/governance"):
                             response = client.get(endpoint, headers=tokens[7])
                             assert response.status_code == 200 and response.json()["status"] == expected, response.text
+                with patch.dict(os.environ, AUTHCLAW_QUEUE_LAG_ALERT_SECONDS="invalid"):
+                    response = client.get("/metrics", headers=tokens[7])
+                    assert response.status_code == 200 and response.json()["queue_status"] == "unavailable", response.text
                 verify_clickhouse_outages(client, tokens, engine, tenant_context)
                 for tenant in (7, 8):
                     for kind in ("executive", "technical", "auditor"):
@@ -196,6 +252,9 @@ def run_integration():
                                     assert f"private-{tenant}" in rendered_text
                             if kind == "executive" and fmt == "json":
                                 assert response.json()["total_documents"] == 1
+                                assert response.json()["compliance_score"] is None
+                                assert response.json()["compliance_status"] == "unassessed"
+                                assert response.json()["compliance_authoritative"] is False
                             if kind == "auditor" and fmt == "json":
                                 assert all(f"auditor-{15-tenant}" not in str(row) for row in response.json()["audit_logs"])
                 # Global sequence gaps caused by B's records are not corruption of A.
@@ -221,16 +280,17 @@ def run_integration():
                     assert conn.execute(text("SELECT count(*) FROM compliance_drift_alerts WHERE tenant_id=7")).scalar() == 0
                     assert conn.execute(text("UPDATE compliance_drift_alerts SET details='tampered' WHERE tenant_id=7")).rowcount == 0
                     assert conn.execute(text("DELETE FROM compliance_drift_alerts WHERE tenant_id=7")).rowcount == 0
-                # Execute the real background cloud-deletion path and its snapshot caller.
+                # Execute real cloud deletion; its retired snapshot hook cannot
+                # create new aggregate compliance measurements.
                 with tenant_context(8, request_id="monitor-worker", required=True), patch.object(monitoring, "WATCH_DIR", str(Path(temporary) / "watch")), patch.object(monitoring, "list_cloud_source_files", return_value=[]), patch.object(monitoring, "is_real_connectors_enabled", return_value=False):
                     monitoring.sync_sources()
                     with engine.connect() as conn:
                         assert conn.execute(text("SELECT status FROM documents WHERE id=8")).scalar() == "s3_deleted"
-                        assert conn.execute(text("SELECT count(*) FROM compliance_score_history")).scalar() == 6
+                        assert conn.execute(text("SELECT count(*) FROM compliance_score_history")).scalar() == 1
                 with owner.connect() as conn:
                     assert conn.execute(text("SELECT count(*) FROM agent.compliance_score_history WHERE tenant_id IS NULL")).scalar() == 1
                     assert conn.execute(text("SELECT count(*) FROM agent.compliance_drift_alerts WHERE tenant_id IS NULL")).scalar() == 1
-        verify_atomic_scoring(engine, drift, tenant_context)
+        verify_atomic_scoring(engine, tenant_context)
         print("tenant telemetry integration passed: middleware, reports, worker, migration, restricted-role RLS, concurrent scoring and rollback")
     finally:
         if "database" in sys.modules:
@@ -329,7 +389,7 @@ def verify_clickhouse_outages(client, tokens, engine, tenant_context):
             worker.join(timeout=5)
 
 
-def verify_atomic_scoring(engine, drift, tenant_context):
+def verify_atomic_scoring(engine, tenant_context):
     from services.compliance_evidence_engine import ComplianceEvidenceEngine
 
     service = ComplianceEvidenceEngine()
@@ -395,17 +455,18 @@ def verify_atomic_scoring(engine, drift, tenant_context):
         def database_outage(tenant, connection):
             connection.execute(text("SELECT 1/0"))
 
-        with patch.object(drift, "get_current_framework_scores", side_effect=database_outage), patch("document_processing.alerts.trigger_security_alert"), patch("document_processing.auditor.create_document_audit"):
+        with patch.object(service, "map_evidence", side_effect=database_outage):
             try:
-                drift.record_compliance_snapshot(7)
+                service.calculate_scores(7)
             except DBAPIError:
                 pass
             else:
                 raise AssertionError("source outage was swallowed")
         with engine.connect() as conn:
-            latest = conn.execute(text("SELECT score,details FROM compliance_score_history ORDER BY id DESC LIMIT 3")).all()
-            assert len(latest) == 3 and all(score is None and json.loads(details)["status"] == "unavailable" for score, details in latest)
-            assert conn.execute(text("SELECT count(*) FROM compliance_drift_alerts WHERE current_score IS NULL")).scalar() == 3
+            assert conn.execute(text("SELECT row_to_json(s)::text FROM compliance_control_scores s ORDER BY framework,control_id")).scalars().all() == before
+            assert conn.execute(text("SELECT count(*) FROM compliance_score_changes")).scalar() == history
+        recovered = service.calculate_scores(7)
+        assert recovered["status"] == "unassessed" and recovered["authoritative"] is False
 
 
 if __name__ == "__main__":

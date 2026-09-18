@@ -463,9 +463,17 @@ class ObservabilityService:
         return {"by_type": by_type}
 
     def _queue_lag(self, pipeline: Dict[str, Any]) -> Dict[str, Any]:
-        checkpoints = pipeline.get("checkpoints", [])
         unknown = {"status": "unknown", "max_lag_seconds": None, "pending_events": None,
                    "dead_letter_count": None, "alertable": True}
+        try:
+            threshold = int(os.getenv("AUTHCLAW_QUEUE_LAG_ALERT_SECONDS", "300"))
+            if threshold <= 0:
+                raise ValueError("Invalid queue threshold")
+        except ValueError:
+            return {**unknown, "status": "unavailable", "reason": "Invalid queue lag configuration"}
+        if not isinstance(pipeline, dict):
+            return unknown
+        checkpoints = pipeline.get("checkpoints", [])
         streams = pipeline.get("streams")
         if not isinstance(streams, dict):
             return unknown
@@ -480,16 +488,17 @@ class ObservabilityService:
                 unknown["status"] = "degraded"
         except AttributeError:
             return unknown
-        if not checkpoints or set(streams) - {cp.get("stream") for cp in checkpoints}:
+        if not isinstance(checkpoints, list) or not checkpoints or any(not isinstance(cp, dict) or not isinstance(cp.get("stream"), str) or not cp["stream"] for cp in checkpoints):
             return unknown
-        threshold = int(os.getenv("AUTHCLAW_QUEUE_LAG_ALERT_SECONDS", "300"))
+        if set(streams) - {cp["stream"] for cp in checkpoints}:
+            return unknown
         max_lag = dead_letters = pending = 0
         for checkpoint in checkpoints:
             try:
                 updated = datetime.fromisoformat(str(checkpoint["updated_at"]))
                 age = (datetime.now(timezone.utc) - updated.replace(tzinfo=updated.tzinfo or timezone.utc)).total_seconds()
-                lag, dead, queued = (int(checkpoint[key]) for key in ("lag_seconds", "dead_letter_count", "pending_events"))
-                if not 0 <= age <= threshold or min(lag, dead, queued) < 0:
+                lag, dead, queued = (checkpoint[key] for key in ("lag_seconds", "dead_letter_count", "pending_events"))
+                if any(type(value) is not int or value < 0 for value in (lag, dead, queued)) or not 0 <= age <= threshold:
                     return unknown
                 counts = streams.get(checkpoint["stream"], {})
                 if int(counts.get("dead_letter", 0)) != dead or int(counts.get("queued", 0)) + dead != queued:

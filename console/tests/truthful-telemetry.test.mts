@@ -17,9 +17,23 @@ function compile(path: string, overrides: Record<string, unknown>) {
   return exports as Record<string, (...args: unknown[]) => unknown>;
 }
 
+test("auditor trust summaries preserve unassessed scores as Unknown", () => {
+  const library = compile("../src/lib/trust-summary.ts", {});
+  const component = compile("../src/components/trust-summary.tsx", {
+    require: (name: string) => name === "@/lib/trust-summary" ? library : require(name),
+  });
+  const html = renderToStaticMarkup(React.createElement(component.TrustSummary as React.ComponentType<{ summary: unknown }>, { summary: {
+    generated_at: "2026-09-18T00:00:00Z", counts: { verified: 0, in_progress: 0, planned: 1 }, verified: [], in_progress: [],
+    planned: [{ id: "CC6.1", framework: "SOC2", name: "Unassessed access control", score: null, status: "insufficient_evidence" }],
+  } }));
+  assert.match(html, /Unassessed access control/); assert.match(html, /Unknown/);
+  assert.doesNotMatch(html, />%<|null%|0%/);
+});
+
 test("overview clears stale values after an outage and renders an explicit alert", async () => {
   const states: unknown[] = [], refs: Array<{ current: unknown }> = [];
   let cursor = 0, refCursor = 0, refresh: () => Promise<void>, failed = false;
+  let failedSource = "", health = "healthy", score: number | null = 72;
   let delayed = false;
   const pending: Array<() => void> = [];
   const react = { ...React,
@@ -29,18 +43,34 @@ test("overview clears stale values after an outage and renders an explicit alert
     useCallback: (callback: () => Promise<void>) => (refresh = callback), useEffect: () => {},
   };
   const page = compile("../src/app/(console)/overview/page.tsx", {
-    require: (name: string) => name === "react" ? react : name === "next/link"
+    require: (name: string) => name === "react" ? react : name === "@/lib/trust-summary" ? compile("../src/lib/trust-summary.ts", {})
+      : name === "@/lib/ui-format" ? compile("../src/lib/ui-format.ts", {}) : name === "next/link"
       ? ({ children, ...props }: React.PropsWithChildren) => React.createElement("a", props, children) : require(name),
     fetch: async (url: string) => {
-      const response = { ok: !failed, status: failed ? 503 : 200,
-        json: async () => url.includes("dashboard") ? { totalRequests: 12345, redactions24h: 0, openApprovals: 0, recentActivity: [] } : { frameworks: [] } };
+      const unavailable = failed || !!failedSource && url.includes(failedSource);
+      const response = { ok: !unavailable, status: unavailable ? 503 : 200,
+        json: async () => url.includes("dashboard") ? { status: health, totalRequests: 12345, redactions24h: 0, openApprovals: 0,
+          metricStates: { p99LatencyMs: "unknown" }, sources: { audit: { status: "healthy" } }, recentActivity: [] }
+          : { generated_at: "2026-09-18T00:00:00Z", frameworks: [{ framework: "SOC2", score, readiness_level: "insufficient_evidence", metrics: { evidence_count: 0, open_findings: 0 } }] } };
       if (delayed) await new Promise<void>((resolve) => pending.push(resolve));
       return response;
     },
   });
   const render = () => { cursor = 0; refCursor = 0; return renderToStaticMarkup(React.createElement(page.default as React.ComponentType)); };
   render(); await refresh!(); assert.match(render(), /12345/);
+  failedSource = "compliance-scores"; await refresh!();
+  assert.match(render(), /12345/); assert.match(render(), /Current compliance assessment unavailable/);
+  failedSource = "dashboard"; await refresh!();
+  assert.doesNotMatch(render(), /12345/); assert.match(render(), /72%/);
+  failedSource = "";
+  for (health of ["healthy", "degraded", "unknown", "unavailable", "not_applicable"]) {
+    await refresh!(); assert.match(render(), new RegExp(`Telemetry ${health}`));
+    assert.match(render(), /No recent audit activity\./, "A successful empty activity source must survive another source's failure");
+  }
+  health = "unknown"; score = null; await refresh!();
+  assert.doesNotMatch(render(), /null%/); assert.match(render(), /Unknown/);
   delayed = true; const staleRefresh = refresh!();
+  assert.doesNotMatch(render(), /12345/, "Pending refresh must not relabel old-window totals as current observations");
   delayed = false; failed = true; await refresh!();
   pending.forEach((resolve) => resolve()); await staleRefresh;
   const html = render();
@@ -50,44 +80,57 @@ test("overview clears stale values after an outage and renders an explicit alert
     `<!doctype html><meta charset="utf-8"><title>ENT-019 synthetic outage dashboard export</title>${html}`);
 });
 
-test("dashboard BFF rejects outages and malformed payloads; measured zero latency remains zero", async () => {
-  const outcome = { actor_type: "gateway", request_id: "request-1", idempotency_key: "gateway:request-1:provider_outcome" };
-  let payload: unknown = { records: [{ ...outcome, duration_ms: 0, duration: 42, timestamp: new Date().toISOString() }] };
-  let ok = true;
+test("dashboard uses the complete canonical aggregate, independent of audit mirror serialization", async () => {
+  const metrics = { source: "postgres", complete: true, totalRequests: 201, redactions24h: 1,
+    requestsPerSec: 201 / 86400, p99LatencyMs: 0, windowStart: "2026-09-17T00:00:00Z", windowEnd: "2026-09-18T00:00:00Z" };
+  let auditSource = "postgres", failure = "", malformed = "";
+  const calls: string[] = [];
   const route = compile("../src/app/api/dashboard/route.ts", {
     require: (name: string) => name === "next/server" ? { NextResponse: { json: (body: unknown) => body } } : {
       getSessionContext: async () => ({ session: { apiKey: "synthetic" } }),
       handleApiError: () => ({ status: "unavailable" }),
     }, process: { env: {} }, URL,
-    fetch: async (url: string) => ({ ok, json: async () => url.includes("approvals") ? [] : payload }),
+    fetch: async (url: string) => {
+      calls.push(url);
+      if (url.includes(failure) && failure) throw new Error("synthetic outage");
+      return { ok: true, json: async () => url.includes(malformed) && malformed ? {} : url.includes("approvals") ? [{ status: "PENDING" }]
+        : url.includes("/metrics?") ? metrics : { source: auditSource, total: 409, records: [{
+          record_id: "record-1", timestamp: "2026-09-18T00:00:00Z", actor_type: "gateway", request_id: "request-1",
+          idempotency_key: auditSource === "postgres" ? "gateway:request-1:provider_outcome" : "record-1", action: "allow", duration_ms: 20,
+        }] } };
+    },
   });
   const request = { url: "http://local/api/dashboard" };
-  assert.equal((await route.GET(request) as { p99LatencyMs: number }).p99LatencyMs, 0);
-  payload = { records: [
-    { ...outcome, duration_ms: 10, timestamp: new Date().toISOString() },
-    { ...outcome, duration_ms: 20, timestamp: new Date(Date.now() - 1000).toISOString() },
-  ] };
-  const sampled = await route.GET(request) as { p99LatencyMs: number; requestsPerSec: number };
-  assert.equal(sampled.p99LatencyMs, 20); assert.equal(sampled.requestsPerSec, 2);
-  for (const metadata of [
-    { actor_type: "backend", action: "remediation_completed" },
-    { ...outcome, idempotency_key: "gateway:request-1:provider_attempt" },
-    { ...outcome, idempotency_key: "gateway:request-1:decision:block" },
-    {},
-  ]) {
-    payload = { records: [{ ...metadata, duration_ms: 0, timestamp: new Date().toISOString() }] };
-    assert.equal((await route.GET(request) as { p99LatencyMs: number | null }).p99LatencyMs, null,
-      "Unmeasured audit placeholders must not become gateway latency");
+  for (auditSource of ["postgres", "clickhouse"]) {
+    const result = await route.GET(request) as typeof metrics & { openApprovals: number };
+    assert.equal(result.totalRequests, 201); assert.equal(result.redactions24h, 1);
+    assert.equal(result.requestsPerSec, 201 / 86400); assert.equal(result.p99LatencyMs, 0);
+    assert.equal(result.openApprovals, 1);
   }
-  payload = {}; assert.equal((await route.GET(request) as { status: string }).status, "unavailable");
-  payload = { records: [{ timestamp: "invalid" }] };
-  assert.equal((await route.GET(request) as { status: string }).status, "unavailable");
-  ok = false; assert.equal((await route.GET(request) as { status: string }).status, "unavailable");
+  assert.ok(calls.some((url) => url.endsWith("/audit-logs/metrics?hours=24")));
+  assert.ok(calls.some((url) => url.endsWith("/audit-logs?limit=8")));
+  for (const source of ["approvals", "/metrics?", "audit-logs?limit"]) {
+    failure = source;
+    const result = await route.GET(request) as { status: string; openApprovals: number | null; totalRequests: number | null; sources: Record<string, { status: string }> };
+    assert.equal(result.status, "unavailable");
+    assert.equal(result.openApprovals, source === "approvals" ? null : 1);
+    assert.equal(result.totalRequests, source === "/metrics?" ? null : 201);
+    assert.equal(Object.values(result.sources).filter((item) => item.status === "unavailable").length, 1);
+  }
+  failure = ""; malformed = "/metrics?";
+  const malformedResult = await route.GET(request) as { totalRequests: number | null; openApprovals: number };
+  assert.equal(malformedResult.totalRequests, null); assert.equal(malformedResult.openApprovals, 1);
+  malformed = "";
+  Object.assign(metrics, { p99LatencyMs: null });
+  const noLatency = await route.GET(request) as { status: string; metricStates: Record<string, string>; totalRequests: number };
+  assert.equal(noLatency.status, "unknown"); assert.equal(noLatency.metricStates.p99LatencyMs, "unknown");
+  assert.equal(noLatency.totalRequests, 201);
 });
 
 test("compliance score and history failures render unknown inputs; recovery preserves measured zero", async () => {
   const states: unknown[] = [], refs: Array<{ current: unknown }> = [];
   let cursor = 0, refCursor = 0, callbacks: Array<() => Promise<void>> = [], failedSource = "";
+  const history: Array<{ framework: string; snapshot_date: string; overall_score: number | null }> = [];
   const react = { ...React,
     useState: (initial: unknown) => { const index = cursor++; if (!(index in states)) states[index] = initial;
       return [states[index], (value: unknown) => { states[index] = value; }]; },
@@ -99,12 +142,13 @@ test("compliance score and history failures render unknown inputs; recovery pres
     generated_at: "2026-09-18T00:00:00Z", readiness_level: "needs_attention", controls: [],
     metrics: { evidence_count: 2, audit_event_count: 5, audit_hash_count: 5, redaction_count: 0, open_findings: 7, critical_findings: 3 } }] };
   const page = compile("../src/app/(console)/compliance/page.tsx", {
-    require: (name: string) => name === "react" ? react : name === "@/lib/clipboard" ? { flashCopy: () => {} }
+    require: (name: string) => name === "react" ? react : name === "@/lib/trust-summary" ? compile("../src/lib/trust-summary.ts", {})
+      : name === "@/lib/clipboard" ? { flashCopy: () => {} }
       : name === "@/lib/errors" ? { getErrorMessage: (error: Error) => error.message }
       : name === "@/lib/ui-format" ? { readinessLabel: (value: string) => value }
       : name === "@/components/trust-summary" ? { TrustSummary: () => null } : require(name),
     fetch: async (url: string) => ({ ok: !failedSource || !url.includes(failedSource), status: failedSource && url.includes(failedSource) ? 503 : 200,
-      json: async () => url.includes("history") ? { items: [] } : scores }),
+      json: async () => url.includes("history") ? { items: history } : scores }),
   });
   const render = () => { cursor = 0; refCursor = 0; callbacks = [];
     return renderToStaticMarkup(React.createElement(page.default as React.ComponentType)); };
@@ -115,9 +159,17 @@ test("compliance score and history failures render unknown inputs; recovery pres
     const html = render();
     for (const label of ["Open Findings", "Critical Findings", "Evidence Records", "Redaction Records"])
       assert.match(html, new RegExp(`${label}</span><span[^>]*>Unknown</span>`));
-    assert.match(html, /Score history unavailable/); assert.match(html, /Control scores unavailable/);
+    assert.match(html, /Score history unavailable/); assert.match(html, /Current compliance assessment unavailable/);
     assert.doesNotMatch(html, /No score snapshots yet|animate-spin|0 controls/);
     failedSource = ""; await callbacks[0]();
     assert.match(render(), /Redaction Records<\/span><span[^>]*>0<\/span>/);
   }
+  Object.assign(scores.frameworks[0], { score: null, controls: [{ id: "CC6.1", name: "Access", score: null,
+    status: "insufficient_evidence", evidence: [], gaps: [] }] });
+  history.push({ framework: "SOC2", snapshot_date: "2026-09-18", overall_score: null });
+  await callbacks[0]();
+  const unknown = render();
+  assert.match(unknown, /text-slate-500[^>]*>INSUFFICIENT EVIDENCE - Unknown/);
+  assert.match(unknown, /30-Day Score History[\s\S]*Unknown/);
+  assert.doesNotMatch(unknown, /null%|42%/);
 });

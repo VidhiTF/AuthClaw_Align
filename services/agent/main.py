@@ -1834,18 +1834,9 @@ def verify_audit(authorization: Optional[str] = Header(None)):
     from verify_audit import verify_audit_chain
     res = verify_audit_chain(tenant_id=tenant_id)
 
-    if res["valid"]:
-        log_audit_event(
-            event="audit_verification_passed",
-            correlation_id=correlation_id,
-            extra={"records_checked": res["records_checked"]}
-        )
-    else:
-        log_audit_event(
-            event="audit_verification_failed",
-            correlation_id=correlation_id,
-            extra={"records_checked": res["records_checked"]}
-        )
+    outcome = "passed" if res["valid"] is True else "failed" if res["valid"] is False else "unknown"
+    log_audit_event(event=f"audit_verification_{outcome}", correlation_id=correlation_id,
+                    extra={"records_checked": res["records_checked"]})
     return res
 
 
@@ -2307,7 +2298,6 @@ def get_metrics():
                 risk_dist[lvl if lvl in risk_dist else "UNKNOWN"] += row[1]
                     
             # Framework scores are calculated by the canonical compliance API, not this counter endpoint.
-            compliance_score = None
             from services.event_pipeline import EventPipeline
             from verify_audit import verify_audit_chain
             event_pipeline_metrics = EventPipeline().delivery_metrics()
@@ -2319,6 +2309,7 @@ def get_metrics():
         return JSONResponse(status_code=503, content={
             "status": "unavailable", "error": "telemetry_source_unavailable",
             "avg_latency": None, "gateway_latency_ms": None, "compliance_score": None,
+            "compliance_status": "unavailable", "compliance_authoritative": False,
             "audit_chain_status": {"status": "unavailable", "valid": None, "records_checked": None},
         })
 
@@ -2358,7 +2349,11 @@ def get_metrics():
         "active_tenants": active_tenants,
         "active_routes": active_routes,
         "active_policies": active_policies,
-        "compliance_score": compliance_score,
+        "compliance_score": None,
+        "compliance_authoritative": False,
+        "compliance_score_kind": "diagnostic",
+        "compliance_calculation_version": "agent-diagnostic-v2",
+        "compliance_evidence_gaps": ["Aggregate activity metrics do not qualify control assessments."],
         "open_findings": open_findings,
         "active_workers": active_workers,
         
@@ -3959,6 +3954,13 @@ def _compact_framework_scores(scores: Dict[str, Any]) -> Dict[str, Any]:
                 "failed": value.get("failed", 0),
                 "watch": value.get("watch", 0),
                 "unknown": value.get("unknown", 0),
+                "unassessed": value.get("unassessed", 0),
+                "status": value.get("status", "unassessed"),
+                "authoritative": False,
+                "score_kind": "diagnostic",
+                "calculation_version": value.get("calculation_version"),
+                "evidence_status": value.get("evidence_status", "unsupported"),
+                "evidence_gaps": value.get("evidence_gaps", []),
                 "items": [
                     {
                         "framework": item.get("framework"),
@@ -3971,6 +3973,11 @@ def _compact_framework_scores(scores: Dict[str, Any]) -> Dict[str, Any]:
                         "reason": item.get("reason"),
                         "source_event": item.get("source_event"),
                         "calculated_at": item.get("calculated_at"),
+                        "authoritative": False,
+                        "score_kind": "diagnostic",
+                        "calculation_version": item.get("calculation_version"),
+                        "evidence_status": item.get("evidence_status", "unsupported"),
+                        "evidence_gaps": item.get("evidence_gaps", []),
                     }
                     for item in value.get("items", [])
                 ],
@@ -3993,6 +4000,7 @@ def get_compliance_framework_explorer(
     try:
         controls = engine.catalog(framework)
         scores = engine.calculate_scores(tenant_id)
+
         evidence_rows = engine.evidence_export_rows(tenant_id, framework=framework, refresh_scores=False, limit=300)
         changes = engine.score_changes(tenant_id, framework=framework, limit=50)
     except Exception as exc:
@@ -4013,9 +4021,10 @@ def get_compliance_framework_explorer(
         "controls": [
             {
                 **control,
+                **engine.diagnostic_metadata(),
                 "score": score_items.get(control["control_id"], {}).get("score"),
                 "status": score_items.get(control["control_id"], {}).get("status", "catalog_only"),
-                "risk": "UNKNOWN" if score_items.get(control["control_id"], {}).get("score") is None else "LOW" if score_items[control["control_id"]]["score"] >= 85 else "MEDIUM",
+                "risk": "UNASSESSED",
                 "evidence": evidence_by_control.get(control["control_id"], []),
                 "linked_audit_logs": [
                     item for item in evidence_by_control.get(control["control_id"], [])

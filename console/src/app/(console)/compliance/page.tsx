@@ -19,7 +19,7 @@ import {
 import { flashCopy } from "@/lib/clipboard";
 import { getErrorMessage } from "@/lib/errors";
 import { TrustSummary } from "@/components/trust-summary";
-import type { TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
+import { calculationVersion, evidenceAssessmentLabel, scoreHistoryEntries, type ActivityDiagnostics, type EvidenceAssessment, type TrustSummary as TrustSummaryData } from "@/lib/trust-summary";
 import { readinessLabel } from "@/lib/ui-format";
 
 type FrameworkId = "SOC2" | "GDPR" | "HIPAA";
@@ -58,10 +58,12 @@ interface ControlScore {
   name: string;
   description: string;
   weight: number;
-  score: number;
-  status: "compliant" | "partial" | "non_compliant";
+  score: number | null;
+  status: "compliant" | "partial" | "non_compliant" | "insufficient_evidence";
   evidence: string[];
   gaps: string[];
+  evidence_assessment?: EvidenceAssessment;
+  activity_diagnostics?: ActivityDiagnostics;
   exceptions?: Array<{
     status: "open" | "closed";
     type: "evidence_gap" | "missing_evidence";
@@ -76,8 +78,9 @@ interface ControlScore {
 }
 
 interface FrameworkScore {
+  calculation_version?: string;
   framework: FrameworkId;
-  score: number;
+  score: number | null;
   readiness_level: string;
   controls: ControlScore[];
   metrics: {
@@ -98,10 +101,10 @@ interface FrameworkScore {
 }
 
 interface ComplianceScoreState {
-  calculation_version: string;
+  calculation_version?: string;
   evidence_timestamp: string | null;
   missing_control_treatment: string;
-  overall_score: number;
+  overall_score: number | null;
   readiness_level: string;
   frameworks: FrameworkScore[];
   generated_at: string;
@@ -109,9 +112,11 @@ interface ComplianceScoreState {
 }
 
 interface ScoreHistoryItem {
+  id?: string;
+  calculation_version?: string;
   framework: FrameworkId;
   snapshot_date: string;
-  overall_score: number;
+  overall_score: number | null;
   readiness_level: string;
   evidence_count: number;
   audit_event_count: number;
@@ -160,6 +165,7 @@ const frameworkMeta: Record<FrameworkId, { name: string; desc: string; accent: s
 };
 
 const statusClass = (status: ControlScore["status"]) => {
+  if (status === "insufficient_evidence") return "bg-slate-500/10 border-slate-500/20 text-slate-500";
   if (status === "compliant") return "bg-emerald-500/10 border-emerald-500/20 text-emerald-300";
   if (status === "partial") return "bg-amber-500/10 border-amber-500/20 text-amber-200";
   return "bg-red-500/10 border-red-500/20 text-red-300";
@@ -223,11 +229,13 @@ export default function FrameworksPage() {
   });
 
   const fetchScores = useCallback(async () => {
-    const sequence = ++scoreRequest.current;
+    const request = ++scoreRequest.current;
     setLoading(true);
     setError(null);
+    setScores(null);
+    setHistory([]);
     try {
-      const scoreRes = await fetch("/api/compliance-scores?persist_snapshot=false", { signal: AbortSignal.timeout(15000) });
+      const scoreRes = await fetch("/api/compliance-scores?persist_snapshot=false", { cache: "no-store", signal: AbortSignal.timeout(15000) });
       if (scoreRes.status === 401) {
         window.location.href = "/login";
         return;
@@ -236,26 +244,29 @@ export default function FrameworksPage() {
       const scoreData = await scoreRes.json() as ComplianceScoreState;
       const frameworkData = scoreData.frameworks.find((item) => item.framework === activeFramework);
       if (!frameworkData || frameworkData.generated_at !== scoreData.generated_at
-        || (scoreData.trust_summary && scoreData.trust_summary.generated_at !== scoreData.generated_at)) {
+        || calculationVersion(frameworkData.calculation_version) !== calculationVersion(scoreData.calculation_version)
+        || (scoreData.trust_summary && (scoreData.trust_summary.generated_at !== scoreData.generated_at
+          || calculationVersion(scoreData.trust_summary.calculation_version) !== calculationVersion(scoreData.calculation_version)))) {
         throw new Error("Compliance snapshot mismatch");
       }
-      const historyRes = await fetch(`/api/compliance-scores/history?framework=${activeFramework}&days=30`, { signal: AbortSignal.timeout(15000) });
+      const historyRes = await fetch(`/api/compliance-scores/history?framework=${activeFramework}&days=30`, { cache: "no-store", signal: AbortSignal.timeout(15000) });
       if (historyRes.status === 401) {
         window.location.href = "/login";
         return;
       }
-      if (!historyRes.ok) throw new Error("Compliance history unavailable");
+      if (!historyRes.ok) throw new Error("Failed to load score history; refresh to retrieve a complete view");
       const historyData = await historyRes.json();
-      if (sequence !== scoreRequest.current) return;
-      setScores(scoreData); setHistory(historyData.items || []);
+      if (request !== scoreRequest.current) return;
+      setScores(scoreData);
+      setHistory(historyData.items || []);
     } catch (err: unknown) {
-      if (sequence !== scoreRequest.current) return;
+      if (request !== scoreRequest.current) return;
       const message = getErrorMessage(err, "Failed to load compliance scoring data");
       setScores(null); setHistory([]);
       console.warn("Frameworks fetchScores failed:", message);
       setError(message);
     } finally {
-      if (sequence === scoreRequest.current) setLoading(false);
+      if (request === scoreRequest.current) setLoading(false);
     }
   }, [activeFramework]);
 
@@ -279,7 +290,7 @@ export default function FrameworksPage() {
     const timer = window.setTimeout(() => {
       void fetchScores();
     }, 0);
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); scoreRequest.current += 1; };
   }, [fetchScores]);
 
   useEffect(() => {
@@ -389,12 +400,13 @@ export default function FrameworksPage() {
             Compliance Frameworks
           </h1>
           <p className="text-[#6B7488] text-sm mt-1">
-            Live readiness scores from evidence, findings, audit-chain events, redactions, policies, and approvals.
+            Scores require current reviewed evidence. Unknown means evidence is insufficient; 0% means a reviewed control failed. Activity counts cannot establish compliance.
           </p>
         </div>
 
         <button
           onClick={fetchScores}
+          disabled={loading}
           className="self-start sm:self-center p-2 rounded-lg bg-[#F5F7FA] hover:bg-[#EEF1F6] text-[#475069] border border-[#E6E9F0] transition"
           title="Refresh framework statistics"
         >
@@ -408,7 +420,7 @@ export default function FrameworksPage() {
           <p>{error}</p>
         </div>
       )}
-      {scores && <p className="text-xs text-[#475069]">Calculation: {scores.calculation_version}. Latest framework evidence: {scores.evidence_timestamp || "Unknown"}. {scores.missing_control_treatment}</p>}
+      {scores && <p className="text-xs text-[#475069]">Calculation: {scores.calculation_version}. Evidence timestamp: {scores.evidence_timestamp || "Unknown"}. {scores.missing_control_treatment}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {(Object.keys(frameworkMeta) as FrameworkId[]).map((framework) => {
@@ -431,7 +443,7 @@ export default function FrameworksPage() {
 
                 <div className="text-right">
                   <span className={`text-2xl font-black ${frameworkMeta[framework].accent}`}>
-                    {loading ? "-" : score ? `${score.score}%` : "Unknown"}
+                    {loading ? "—" : score?.score == null ? "Unknown" : `${score.score}%`}
                   </span>
                   <span className="block text-[8px] text-[#6B7488] font-bold uppercase tracking-wider mt-0.5">
                     {score ? readinessLabel(score.readiness_level) : "NO DATA"}
@@ -441,6 +453,7 @@ export default function FrameworksPage() {
 
               <h3 className="text-sm font-bold text-[#0E1726] mt-4 group-hover:text-indigo-300 transition">{frameworkMeta[framework].name}</h3>
               <p className="text-[#6B7488] text-xs mt-1 leading-relaxed">{frameworkMeta[framework].desc}</p>
+              {score && <p className="mt-2 text-[10px] text-[#6B7488]">Calculation version: {calculationVersion(score.calculation_version)}</p>}
 
               <div className="w-full bg-[#F5F7FA]/60 h-1.5 rounded-full mt-4 overflow-hidden">
                 <div
@@ -453,6 +466,7 @@ export default function FrameworksPage() {
         })}
       </div>
 
+      {scores && <p className="text-xs text-[#6B7488]">As of {new Date(scores.generated_at).toLocaleString()} · Calculation version: {calculationVersion(scores.calculation_version)}{calculationVersion(scores.calculation_version) === "legacy_unversioned" && " · Legacy results do not establish current evidence qualification."}</p>}
       <TrustSummary summary={scores?.trust_summary} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -461,18 +475,18 @@ export default function FrameworksPage() {
             <div className="px-6 py-4 border-b border-[#E6E9F0] bg-[#F5F7FA] flex items-center justify-between">
               <h3 className="text-sm font-bold text-[#0E1726] uppercase tracking-wider flex items-center gap-2">
                 <ShieldCheck className="w-4.5 h-4.5 text-indigo-400" />
-                {activeFramework} Live Control Scores
+                {activeFramework} Control Assessments
               </h3>
               <span className="text-[10px] text-[#6B7488] font-bold">
                 {activeScore?.controls.length ?? "Unknown"} controls
               </span>
             </div>
 
-            {loading || !activeScore ? (
+            {loading ? (
               <div className="p-8 flex justify-center">
-                {loading ? <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500" /> : <p className="text-xs text-[#6B7488]">Control scores unavailable</p>}
+                <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500" />
               </div>
-            ) : (
+            ) : !activeScore ? <p className="p-8 text-sm text-[#6B7488]">Current compliance assessment unavailable. Refresh to try again.</p> : (
               <div className="divide-y divide-[#E6E9F0]/60">
                 {activeScore.controls.map((control) => (
                   <div key={control.id} className="p-6 space-y-3 hover:bg-[#F5F7FA]/10 transition-colors">
@@ -488,7 +502,7 @@ export default function FrameworksPage() {
                         {control.status === "compliant" && <CheckCircle2 className="w-3 h-3" />}
                         {control.status === "partial" && <AlertCircle className="w-3 h-3" />}
                         {control.status === "non_compliant" && <XCircle className="w-3 h-3" />}
-                        {control.status.replace("_", " ").toUpperCase()} - {control.score}%
+                        {control.status.replaceAll("_", " ").toUpperCase()} - {control.score == null ? "Unknown" : `${control.score}%`}
                       </span>
                     </div>
 
@@ -518,12 +532,12 @@ export default function FrameworksPage() {
                     </div>
 
                     <div className="h-1.5 w-full rounded-full bg-[#F5F7FA] overflow-hidden">
-                      <div className="h-full rounded-full bg-indigo-500" style={{ width: `${control.score}%` }} />
+                      {control.score != null && <div className="h-full rounded-full bg-indigo-500" style={{ width: `${control.score}%` }} />}
                     </div>
 
                     <div className="grid gap-3 md:grid-cols-2">
                       <div>
-                        <p className="text-[10px] font-bold text-[#6B7488] uppercase tracking-wider">Evidence Signals</p>
+                        <p className="text-[10px] font-bold text-[#6B7488] uppercase tracking-wider">Evidence references</p>
                         <div className="mt-1.5 flex flex-col gap-1.5">
                           {(control.evidence.length ? control.evidence : ["No evidence signal yet"]).map((item) => (
                             <div key={item} className="flex items-center gap-2 text-xs text-[#475069]">
@@ -550,6 +564,16 @@ export default function FrameworksPage() {
                         </div>
                       </div>
                     </div>
+
+                    <div className="rounded-lg border border-[#E6E9F0] p-3 text-xs text-[#475069]">
+                      <p className="font-semibold">{evidenceAssessmentLabel(control.evidence_assessment)}</p>
+                      {control.evidence_assessment && <><p className="mt-1">As of {new Date(control.evidence_assessment.as_of).toLocaleString()}{control.evidence_assessment.valid_until && ` · Valid until ${new Date(control.evidence_assessment.valid_until).toLocaleString()}`}</p><p className="mt-1">{control.evidence_assessment.reason_codes.join(", ")}</p></>}
+                    </div>
+                    {control.activity_diagnostics?.authoritative === false && <div className="rounded-lg border border-[#E6E9F0] p-3 text-xs text-[#475069]">
+                      <p>Activity diagnostic score: {control.activity_diagnostics.score}% (not readiness)</p>
+                      <p>{control.activity_diagnostics.evidence.join(" · ")}</p>
+                      <p>{control.activity_diagnostics.gaps.join(" · ")}</p>
+                    </div>}
 
                     {(control.exceptions ?? []).length > 0 && (
                       <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-3">
@@ -616,7 +640,7 @@ export default function FrameworksPage() {
           <div className="rounded-[20px] border border-[#E6E9F0] bg-white p-5 shadow-xl space-y-4">
             <h3 className="text-xs font-bold uppercase tracking-wider text-[#6B7488] flex items-center gap-1.5">
               <FileCheck className="w-4 h-4 text-indigo-400" />
-              Live Score Inputs
+              Activity Diagnostics
             </h3>
             <div className="space-y-3 text-xs">
               {[
@@ -641,14 +665,16 @@ export default function FrameworksPage() {
               {history.length === 0 ? (
                 <div className="text-xs text-[#6B7488]">{loading ? "Loading score history..." : error ? "Score history unavailable" : "No score snapshots yet."}</div>
               ) : (
-                history.map((item) => (
-                  <div key={`${item.framework}-${item.snapshot_date}`} className="rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] p-3">
+                scoreHistoryEntries(history).map(({ item, key, version, methodChanged }) => (
+                  <div key={key} className="rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] p-3">
+                    {methodChanged && <p className="mb-2 border-b border-amber-300 pb-2 text-xs text-amber-800">Calculation method changed. Scores across this boundary are not comparable.</p>}
                     <div className="flex justify-between text-xs">
                       <span className="text-[#6B7488]">{item.snapshot_date}</span>
-                      <span className="font-bold text-[#0E1726]">{item.overall_score}%</span>
+                      <span className="font-bold text-[#0E1726]">{item.overall_score == null ? "Unknown" : `${item.overall_score}%`}</span>
                     </div>
+                    <p className="mt-1 text-[10px] text-[#6B7488]">Calculation version: {version}</p>
                     <div className="mt-2 h-1.5 rounded-full bg-[#F5F7FA] overflow-hidden">
-                      <div className="h-full rounded-full bg-indigo-500" style={{ width: `${item.overall_score}%` }} />
+                      {item.overall_score != null && <div className="h-full rounded-full bg-indigo-500" style={{ width: `${item.overall_score}%` }} />}
                     </div>
                   </div>
                 ))

@@ -1,6 +1,8 @@
 """Current delivery failures outrank missing queue checkpoint observations."""
 import sys
+import os
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,6 +11,23 @@ from services.observability_service import ObservabilityService
 
 
 class QueueHealthTests(unittest.TestCase):
+    def test_malformed_pipeline_and_checkpoints_never_raise(self):
+        malformed = [None, [], "bad", 7]
+        malformed += [{"streams": {}, "checkpoints": value} for value in (None, {}, "bad", 2, [None], [[]], [{"stream": []}], [{"stream": None}])]
+        for pipeline in malformed:
+            with self.subTest(pipeline=pipeline):
+                result = ObservabilityService()._queue_lag(pipeline)
+                self.assertEqual(result["status"], "unknown")
+                self.assertTrue(result["alertable"])
+                self.assertIsNone(result["max_lag_seconds"])
+
+    def test_invalid_threshold_is_unavailable(self):
+        for threshold in ("", "bad", "-1", "0", "1.5"):
+            with self.subTest(threshold=threshold), patch.dict(os.environ, AUTHCLAW_QUEUE_LAG_ALERT_SECONDS=threshold):
+                result = ObservabilityService()._queue_lag({"streams": {}, "checkpoints": []})
+                self.assertEqual(result["status"], "unavailable")
+                self.assertTrue(result["alertable"])
+
     def checkpoint(self, **changes):
         return {"stream": "audit", "updated_at": datetime.now(timezone.utc),
                 "lag_seconds": 0, "dead_letter_count": 1, "pending_events": 3,
