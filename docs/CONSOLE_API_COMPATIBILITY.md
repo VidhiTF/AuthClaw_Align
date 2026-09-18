@@ -61,6 +61,40 @@ Center clients render the returned buckets without deriving status. Public Trust
 packages filter the generated arrays to the share's allowed frameworks and recalculate only
 their counts. Missing `trust_summary` remains supported during rolling deployment.
 
+## Workflow response contracts (T13 / Claim 17)
+
+The backend defines named nested schemas for workflow findings, remediation
+plans/actions, execution summaries, and rollback summaries on create, list,
+detail, resume, approve, reject, and remediate responses. The `/api/v1` aliases
+retain the same behavior. Recovery and gateway-approval contracts are separate.
+The existing console plan rendering and action/rollback timeline use unchanged
+field names and value shapes; no client regeneration is required by this console.
+
+Nested fields remain sparse: omitted keys are omitted, explicit nulls remain
+null, and empty arrays/objects remain empty. Top-level defaults are unchanged.
+Current connector payloads, partial results and legacy mutation snapshots are
+supported. Unknown nested properties and incorrect primitive types now fail
+response validation instead of being accepted or silently discarded. The
+`diff.terraform` member is reserved for an empty list until a producer defines
+a nonempty contract. No new enum, UUID or timestamp restrictions are introduced.
+
+Models are used only for responses. Stored JSON, graph execution, recovery state,
+approval canonicalization/hashes, authorization and external-service defaults
+are unchanged. There is no database migration or dependency upgrade. Validation
+failures produce a generic 500 and a payload-free diagnostic, including resume;
+they never become a misleading 404. A malformed row fails the list as a whole.
+
+Before release, validate sanitized historical payloads against these schemas,
+including sparse records, unknown fields, primitive types and mutation versions.
+Current-producer tests do not establish compatibility with all deployed data.
+Obtain backend/security and console consumer review, plus governance review for
+CI changes. Publish the OpenAPI refinement with the backend release; generated
+external clients should be reviewed before adoption during a mixed-version rollout.
+Monitor workflow validation errors and 5xx rates. If previously readable records
+fail, revert the response-schema release. A response error can occur after a
+committed action: inspect persisted workflow state before retrying; reverting
+the API cannot reverse an already executed S3 mutation.
+
 ## Verification evidence
 
 - [Pull request #16](https://github.com/AgentsArchitects/AuthClaw/pull/16) passed console

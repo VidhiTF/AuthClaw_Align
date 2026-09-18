@@ -1,0 +1,216 @@
+"""Real workflow routes and SQLite persistence; PostgreSQL RLS is tested separately.
+
+Identity injection, MFA, throttling, notifications and graph execution are test
+boundaries. Tenant filters, approval binding, commits and serialization run here.
+"""
+
+from contextlib import nullcontext
+from copy import deepcopy
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import Mock
+from uuid import uuid4
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import ARRAY, create_engine
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from app.api.v1.endpoints import workflows
+from app.core.auth import get_tenant_db
+from app.db.models import ApprovalAudit, ComplianceWorkflow, PendingApproval, Tenant, User
+from app.orchestrator import runner
+from tests.test_acl18_remediation_approval import _plan
+from tests.test_workflow_response_contract import FIELDS, workflow
+
+
+@compiles(ARRAY, "sqlite")
+def sqlite_array(_type, _compiler, **_kw):
+    return "JSON"
+
+
+@pytest.fixture
+def api(monkeypatch):
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    for model in (Tenant, User, PendingApproval, ComplianceWorkflow, ApprovalAudit):
+        model.__table__.create(engine)
+    tenant, user = uuid4(), uuid4()
+    payload = workflow(
+        findings=[{"control": "doc", "evidence": "Entities: EMAIL_ADDRESS", "entity_count": 1}],
+        remediation_plan=_plan(),
+        remediation_actions=[],
+        execution_result={},
+        rollback_result={},
+    )
+    payload["tenant_id"] = str(tenant)
+    with Session(engine) as db:
+        db.add(Tenant(id=tenant, name="contract-test"))
+        db.add(
+            User(id=user, tenant_id=tenant, email="reviewer@example.invalid", role="admin", is_active=True)
+        )
+        db.add(
+            ComplianceWorkflow(
+                id=uuid4(),
+                tenant_id=tenant,
+                workflow_id=payload["workflow_id"],
+                framework="HIPAA",
+                current_state="COMPLETE",
+                execution_status="COMPLETED",
+                findings=payload["findings"],
+                remediation_plan=payload["remediation_plan"],
+                execution_result={},
+                state_data=deepcopy(payload),
+            )
+        )
+        db.commit()
+    identity = dict(tenant_id=tenant, user_id=user, scopes=["admin"])
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def identify(request, call_next):
+        for key, value in identity.items():
+            setattr(request.state, key, value)
+        return await call_next(request)
+
+    def database():
+        with Session(engine) as db:
+            yield db
+
+    app.dependency_overrides[get_tenant_db] = database
+    app.include_router(workflows.router, prefix="/v1/workflows")
+    app.include_router(workflows.router, prefix="/api/v1/workflows", include_in_schema=False)
+    monkeypatch.setattr(workflows, "check_worker_throttle", lambda *_args, **_kw: (True, 0))
+    monkeypatch.setattr(workflows, "create_notification", lambda *_args, **_kw: None)
+    monkeypatch.setattr(
+        workflows, "_verify_mfa_if_enabled", lambda *_args, **_kw: (True, datetime.now(timezone.utc))
+    )
+    monkeypatch.setattr(runner, "emit_audit_event", lambda *_args, **_kw: None)
+    monkeypatch.setattr(runner, "workflow_advisory_lock", lambda *_args: nullcontext())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        yield SimpleNamespace(client=client, engine=engine, identity=identity, payload=payload)
+    engine.dispose()
+
+
+OPERATIONS = ("create", "list", "get", "resume", "approve", "reject", "remediate")
+
+
+def request_operation(api, prefix, operation):
+    url = f"{prefix}/workflows"
+    if operation == "create":
+        return api.client.post(url, json={"framework": "HIPAA"})
+    if operation == "list":
+        return api.client.get(url)
+    url += "/" + api.payload["workflow_id"]
+    return api.client.get(url) if operation == "get" else api.client.post(url + "/" + operation)
+
+
+@pytest.mark.parametrize("prefix", ["/v1", "/api/v1"])
+@pytest.mark.parametrize("operation", OPERATIONS)
+@pytest.mark.parametrize("invalid", [False, True])
+def test_route_contract_and_sanitized_post_commit_errors(
+    api, monkeypatch, caplog, prefix, operation, invalid
+):
+    if operation in {"approve", "reject"}:
+        assert request_operation(api, prefix, "remediate").status_code == 200
+    payload = deepcopy(api.payload)
+    if invalid:
+        payload["findings"] = [{"entity_count": "private-marker"}]
+        with Session(api.engine) as db:
+            row = db.query(ComplianceWorkflow).one()
+            row.findings = payload["findings"]
+            db.commit()
+    execution = Mock(return_value=payload)
+    monkeypatch.setattr(runner.ComplianceWorkflowRunner, "start", execution)
+    monkeypatch.setattr(runner.ComplianceWorkflowRunner, "resume", execution)
+    response = request_operation(api, prefix, operation)
+    if invalid:
+        assert response.status_code == 500, response.text
+        assert response.json() == {"detail": "Internal server error"}
+        assert "private-marker" not in caplog.text + response.text
+        assert "Workflow response contract validation failed" in caplog.text
+    else:
+        assert response.status_code == (201 if operation == "create" else 200), response.text
+        result = response.json()[0] if operation == "list" else response.json()
+        if operation in {"create", "resume", "approve", "reject"}:
+            expected = payload
+        else:
+            with Session(api.engine) as db:
+                expected = runner.ComplianceWorkflowRunner(db).get_status(
+                    payload["workflow_id"], payload["tenant_id"]
+                )
+        for field in FIELDS:
+            assert result[field] == expected[field]
+    if operation in {"create", "resume", "approve", "reject"}:
+        assert execution.call_count == 1  # Serialization must never retry execution.
+    if operation in {"approve", "reject", "remediate"}:
+        with Session(api.engine) as db:
+            approval = db.query(PendingApproval).one()
+            assert (
+                approval.status
+                == {"approve": "APPROVED", "reject": "REJECTED", "remediate": "PENDING"}[operation]
+            )
+            assert db.query(ApprovalAudit).count() == (0 if operation == "remediate" else 1)
+
+
+def test_status_snapshot_fallback_and_malformed_list_row(api):
+    with Session(api.engine) as db:
+        row = db.query(ComplianceWorkflow).one()
+        row.state_data = {"remediation_actions": [], "rollback_result": {}}
+        row.execution_result = {
+            "actions": [{"id": "legacy", "status": "SUCCEEDED"}],
+            "remediation_state": "SUCCEEDED",
+        }
+        db.commit()
+    result = request_operation(api, "/v1", "get").json()
+    assert result["remediation_actions"] == [{"id": "legacy", "status": "SUCCEEDED"}]
+    assert result["rollback_result"] == {}
+    with Session(api.engine) as db:
+        db.add(
+            ComplianceWorkflow(
+                id=uuid4(),
+                tenant_id=api.identity["tenant_id"],
+                workflow_id=str(uuid4()),
+                framework="HIPAA",
+                current_state="COMPLETE",
+                execution_status="COMPLETED",
+                findings=["malformed"],
+            )
+        )
+        db.commit()
+    response = request_operation(api, "/v1", "list")
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error"}
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+def test_missing_scope_is_denied_before_execution(api, operation):
+    api.identity["scopes"] = []
+    assert request_operation(api, "/v1", operation).status_code == 403
+
+
+@pytest.mark.parametrize("operation", ["list", "get", "resume", "approve", "reject", "remediate"])
+def test_other_tenant_cannot_read_or_change_workflow(api, operation):
+    api.identity["tenant_id"] = uuid4()
+    response = request_operation(api, "/v1", operation)
+    assert response.status_code == (200 if operation == "list" else 404), response.text
+    if operation == "list":
+        assert response.json() == []
+    with Session(api.engine) as db:
+        assert db.query(ComplianceWorkflow).one().execution_status == "COMPLETED"
+        assert db.query(PendingApproval).count() == 0
+
+
+def test_fresh_mfa_denial_still_precedes_approval(api, monkeypatch):
+    assert request_operation(api, "/v1", "remediate").status_code == 200
+    monkeypatch.setattr(workflows, "_verify_mfa_if_enabled", lambda *_args, **_kw: (False, None))
+    assert request_operation(api, "/v1", "approve").status_code == 403
+    with Session(api.engine) as db:
+        assert db.query(PendingApproval).one().status == "PENDING"
+
+
+def test_missing_workflow_on_resume_keeps_404(api):
+    api.payload["workflow_id"] = str(uuid4())
+    assert request_operation(api, "/v1", "resume").status_code == 404
