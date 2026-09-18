@@ -1,0 +1,48 @@
+{
+  "connector": "aws_s3",
+  "control": "tenant-a/doc.txt",
+  "target": {
+    "provider": "aws",
+    "type": "s3_object",
+    "bucket": "authclaw-test",
+    "object_key": "tenant-a/doc.txt",
+    "uri": "s3://authclaw-test/tenant-a/doc.txt"
+  },
+  "status": "failed",
+  "details": "Post-mutation verification failed: verification read unavailable",
+  "mutation_id": "v3",
+  "before_verification": {
+    "entity_counts": {
+      "EMAIL_ADDRESS": 1,
+      "PHONE_NUMBER": 1
+    },
+    "total": 2
+  },
+  "after_verification": {
+    "error": "Post-mutation verification failed: verification read unavailable"
+  },
+  "before_sha256": "940f334e80eda0938c4e91900dd250756eff6a47b1685c0aa28d47917154760f",
+  "after_sha256": "",
+  "cli_diff": {
+    "kind": "cli",
+    "summary": "Redact detected sensitive entities in tenant-a/doc.txt",
+    "commands": [
+      "aws s3 cp s3://authclaw-test/tenant-a/doc.txt ./before.txt",
+      "# AuthClaw redacts detected sensitive values locally",
+      "aws s3 cp ./after.txt s3://authclaw-test/tenant-a/doc.txt"
+    ],
+    "preview": [
+      "- sensitive data in tenant-a/doc.txt: Entities: EMAIL_ADDRESS, PHONE_NUMBER",
+      "+ sensitive data in tenant-a/doc.txt: redacted placeholders"
+    ],
+    "terraform": []
+  },
+  "rollback_ref": {
+    "bucket": "authclaw-test",
+    "backup_key": ".authclaw-rollback/workflow-1/action-1/tenant-a/doc.txt",
+    "target_key": "tenant-a/doc.txt",
+    "content_type": "text/plain",
+    "before_version_id": "v1",
+    "after_version_id": null
+  }
+}

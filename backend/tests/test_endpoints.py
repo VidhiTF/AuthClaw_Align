@@ -96,6 +96,8 @@ def test_public_health(client: TestClient):
     openapi_resp = client.get("/openapi.json")
     assert openapi_resp.status_code == status.HTTP_200_OK
     assert "paths" in openapi_resp.json()
+    from tests.test_workflow_response_contract import assert_workflow_openapi
+    assert_workflow_openapi(openapi_resp.json())
 
     docs_resp = client.get("/docs")
     assert docs_resp.status_code == status.HTTP_200_OK
