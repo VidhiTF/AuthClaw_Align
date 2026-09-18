@@ -75,6 +75,16 @@ Final integrated verification against master `1a3970c`:
   one-step MFA enrollment. The final immutable source archive and CI results are
   linked to the pushed SHA in PR #58; earlier scan results are not substituted.
 
+CI run `35346052709` passed all selected technical jobs except one PostgreSQL
+fixture: `test_request_dependency_uses_single_connection_and_resets_write_isolation`
+provided no authenticated user ID. The now-required canonical actor comparison
+correctly rejected it. Its fixture now supplies the actual identity's user ID;
+the complete local `test_t10_postgres.py` rerun is **18 passed, 1 skipped**. The
+skip is the existing opt-in synthetic performance measurement, not an MFA test.
+The previous CI PostgreSQL selection was **133 passed, 1 failed, 1 skipped**;
+this failure is retained here and is superseded only by the final-head rerun.
+No production code changed in this final fixture correction.
+
 Operational consequences: recovery invalidates all target-owned API keys,
 including integrations, which need newly issued keys. Deploy all backend workers
 before treating the new policy as effective. Rolling back would reopen the

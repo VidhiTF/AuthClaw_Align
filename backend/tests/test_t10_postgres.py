@@ -221,7 +221,7 @@ def test_request_dependency_uses_single_connection_and_resets_write_isolation(po
     tenant = harness.create_identity("t10-one-connection")
     pool = create_engine(harness.app_engine.url, pool_size=1, max_overflow=0, pool_timeout=2)
     monkeypatch.setattr(dependencies, "SessionLocal", sessionmaker(bind=pool, expire_on_commit=False))
-    request = SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id,
+    request = SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id, user_id=tenant.user_id,
         credential_kind="session", credential_hash=tenant.session_hash))
     dependency = dependencies.get_score_db()
     db = next(dependency)
