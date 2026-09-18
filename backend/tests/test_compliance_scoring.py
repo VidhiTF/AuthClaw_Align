@@ -176,6 +176,33 @@ def test_readiness_levels_are_stable():
     assert compliance_scoring.readiness_level(20) == "insufficient_evidence"
 
 
+def test_score_provenance_and_missing_evidence(monkeypatch):
+    from app.api.v1.endpoints.compliance_scores import ComplianceScoreResponse
+    for timestamp in (None, "2026-09-17T10:00:00+00:00"):
+        monkeypatch.setattr(compliance_scoring, "collect_metrics", lambda _db, _tenant, framework:
+                            _metrics(framework=framework, evidence_timestamp=timestamp))
+        result = ComplianceScoreResponse.model_validate(compliance_scoring.score_all_frameworks(
+            object(), "00000000-0000-0000-0000-000000000001", persist=False, include_traceability=False))
+        assert result.calculation_version == "control-signals-v1"
+        assert result.evidence_timestamp == timestamp
+        assert "source errors abort" in result.missing_control_treatment
+        assert all(item.evidence_timestamp == timestamp for item in result.frameworks)
+
+
+def test_historical_snapshot_does_not_invent_calculation_provenance():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    db = MagicMock()
+    row = SimpleNamespace(framework="SOC2", snapshot_date="2026-09-01", overall_score=75,
+                          readiness_level="monitor", evidence_count=2, audit_event_count=3,
+                          open_findings=1, critical_findings=0, generated_at=None, control_scores={})
+    db.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = [row]
+    result = compliance_scoring.score_history(db, "00000000-0000-0000-0000-000000000001")[0]
+    assert result["calculation_version"] is None
+    assert result["evidence_timestamp"] is None
+    assert result["missing_control_treatment"] is None
+
+
 def test_trust_summary_maps_existing_control_statuses_once():
     frameworks = [
         {

@@ -1,6 +1,6 @@
-import os
 import json
 import logging
+from fastapi import HTTPException
 from datetime import datetime, timezone
 from sqlalchemy import text
 from database import engine
@@ -17,12 +17,12 @@ def get_current_framework_scores() -> dict:
             tenant_rows = conn.execute(text("SELECT id FROM tenants WHERE COALESCE(status, 'active') = 'active' ORDER BY id ASC")).fetchall()
         tenant_id = tenant_rows[0][0] if tenant_rows else None
         if tenant_id is None:
-            return {"SOC2": 100, "GDPR": 100, "HIPAA": 100}
-        result = ComplianceEvidenceEngine().calculate_scores(int(tenant_id))
-        return {"SOC2": result["soc2"], "GDPR": result["gdpr"], "HIPAA": result["hipaa"]}
-    except Exception as e:
-        logger.error(f"Failed to calculate live framework scores: {e}")
-        return {"SOC2": 100, "GDPR": 100, "HIPAA": 100}
+            raise HTTPException(status_code=503, detail="Compliance telemetry unknown: no active tenant")
+        return ComplianceEvidenceEngine().calculate_scores(int(tenant_id))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Compliance telemetry unavailable") from exc
 
 def record_compliance_snapshot():
     """
@@ -33,7 +33,11 @@ def record_compliance_snapshot():
     
     try:
         with engine.connect() as conn:
-            for framework, score in scores.items():
+            for framework in ("SOC2", "GDPR", "HIPAA"):
+                score = scores[framework.lower()]
+                if score is None:
+                    logger.warning("Compliance telemetry unknown for %s; snapshot skipped", framework)
+                    continue
                 # 1. Fetch previous score for the framework to calculate drift
                 prev = conn.execute(
                     text("""
@@ -54,11 +58,11 @@ def record_compliance_snapshot():
                         "ts": timestamp,
                         "fw": framework,
                         "score": score,
-                        "details": f"Snapshot score is {score}%"
+                        "details": json.dumps({key: scores[key] for key in ("calculation_version", "evidence_timestamp", "missing_control_treatment")})
                     }
                 )
                 
-                if prev:
+                if prev and prev[0] is not None:
                     prev_score = prev[0]
                     score_drop = prev_score - score
                     

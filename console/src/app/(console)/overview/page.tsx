@@ -7,7 +7,6 @@ import {
   Clock,
   ArrowUpRight,
   RefreshCw,
-  CheckCircle2,
   UserRound,
 } from "lucide-react";
 import Link from "next/link";
@@ -51,30 +50,38 @@ export default function OverviewPage() {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [complianceScores, setComplianceScores] = useState<ComplianceScoreState | null>(null);
   const [recentActivity, setRecentActivity] = useState<RecentAuditRecord[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const requestSequence = useRef(0);
   const [loading, setLoading] = useState(true); const [trafficRange, setTrafficRange] = useState(24); const trafficRangeRef = useRef(24);
 
   const fetchMetrics = useCallback(async (full = true, hours = trafficRangeRef.current) => {
+    const sequence = ++requestSequence.current;
     try {
       if (full) setLoading(true);
-      const scoresPromise = full ? fetch("/api/compliance-scores?persist_snapshot=false") : Promise.resolve(null);
-      const dashboardRes = await fetch(`/api/dashboard?hours=${hours}`);
+      const [dashboardRes, scoresRes] = await Promise.all([
+        fetch(`/api/dashboard?hours=${hours}`, { signal: AbortSignal.timeout(15000) }),
+        fetch("/api/compliance-scores?persist_snapshot=false", { signal: AbortSignal.timeout(15000) }),
+      ]);
+      if (sequence !== requestSequence.current) return;
       if (dashboardRes.status === 401) {
         window.location.href = "/login";
         return;
       }
       if (!dashboardRes.ok) throw new Error("Failed to load metrics");
-      const data = await dashboardRes.json();
-      setMetrics(data); setRecentActivity(data.recentActivity || []); if (full) setLoading(false);
-      const scoresRes = await scoresPromise;
       if (scoresRes?.status === 401) { window.location.href = "/login"; return; }
-      if (scoresRes?.ok) {
-        setComplianceScores(await scoresRes.json());
-      }
+      if (!scoresRes.ok) throw new Error("Compliance telemetry unavailable");
+      const [data, scores] = await Promise.all([dashboardRes.json(), scoresRes.json()]);
+      if (sequence !== requestSequence.current) return;
+      setMetrics(data); setRecentActivity(data.recentActivity || []);
+      setComplianceScores(scores); setError(null);
     } catch (err: unknown) {
+      if (sequence !== requestSequence.current) return;
+      setMetrics(null); setComplianceScores(null); setRecentActivity([]);
+      setError("Telemetry unavailable — source checks failed. Values are unknown.");
       const message = err instanceof Error ? err.message : "Could not retrieve real-time metrics";
       console.warn("Overview fetch metrics failed:", message);
     } finally {
-      if (full) setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
   }, []);
 
@@ -99,6 +106,7 @@ export default function OverviewPage() {
 
   return (
     <div className="ac-page ac-page-overview mx-auto max-w-none space-y-5">
+      {error && <div role="alert" className="rounded-md border border-red-300 bg-red-50 p-4 text-red-800">{error}</div>}
       {/* Page Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -117,9 +125,8 @@ export default function OverviewPage() {
             <RefreshCw className="w-3.5 h-3.5" />
             Refresh
           </button>
-          <div className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
-            System Live
+          <div role="status" className="px-3 py-2 rounded-lg border text-xs font-semibold">
+            {error ? "Telemetry unavailable" : metrics ? "Telemetry loaded" : "Telemetry unknown"}
           </div>
         </div>
       </div>
@@ -134,7 +141,7 @@ export default function OverviewPage() {
             <div>
               <p className="text-[10px] uppercase tracking-widest font-bold text-[#6B7488]">Traffic Logged</p>
               <h3 className="text-2xl font-bold text-[#0E1726] mt-2">
-                {loading ? "..." : metrics?.totalRequests ?? 0}
+                {loading ? "..." : metrics?.totalRequests ?? "Unknown"}
               </h3>
             </div>
             <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
@@ -142,7 +149,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <div className="mt-4 flex items-center justify-between text-xs">
-            <span className="text-[#6B7488]">Total API calls intercepted</span>
+            <span className="text-[#6B7488]">Requests in latest 100 audit records</span>
             <Link href="/audit" className="text-indigo-400 hover:text-indigo-300 flex items-center gap-0.5 font-medium transition">
               Logs <ArrowUpRight className="w-3 h-3" />
             </Link>
@@ -156,7 +163,7 @@ export default function OverviewPage() {
             <div>
               <p className="text-[10px] uppercase tracking-widest font-bold text-[#6B7488]">PII Redactions</p>
               <h3 className="text-2xl font-bold text-[#0E1726] mt-2">
-                {loading ? "..." : metrics?.redactions24h ?? 0}
+                {loading ? "..." : metrics?.redactions24h ?? "Unknown"}
               </h3>
             </div>
             <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
@@ -165,7 +172,7 @@ export default function OverviewPage() {
           </div>
           <div className="mt-4 flex items-center justify-between text-xs">
             <span className="text-[#6B7488]">Masked or hashed ({trafficRange === 24 ? "last 24h" : trafficRange === 168 ? "last 7d" : "last 30d"})</span>
-            <span className="text-emerald-400 font-semibold">Active Engine</span>
+            <span className="text-[#6B7488]">Engine health not measured</span>
           </div>
         </div>
 
@@ -176,7 +183,7 @@ export default function OverviewPage() {
             <div>
               <p className="text-[10px] uppercase tracking-widest font-bold text-[#6B7488]">Open Approvals</p>
               <h3 className="text-2xl font-bold text-[#0E1726] mt-2">
-                {loading ? "..." : metrics?.openApprovals ?? 0}
+                {loading ? "..." : metrics?.openApprovals ?? "Unknown"}
               </h3>
             </div>
             <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400">
@@ -201,7 +208,7 @@ export default function OverviewPage() {
                 ) : metrics?.p99LatencyMs !== null && metrics?.p99LatencyMs !== undefined ? (
                   `${metrics.p99LatencyMs} ms`
                 ) : (
-                  <span className="text-sm font-medium text-[#6B7488]">No data available yet</span>
+                  <span className="text-sm font-medium text-[#6B7488]">{error ? "Unavailable" : "Unknown — no measurements"}</span>
                 )}
               </h3>
             </div>
@@ -227,18 +234,18 @@ export default function OverviewPage() {
             <div className="mt-5 grid min-h-44 place-items-center border-y border-[#EEF1F6] bg-[linear-gradient(#EEF1F6_1px,transparent_1px),linear-gradient(90deg,#EEF1F6_1px,transparent_1px)] bg-[size:100%_25%,12.5%_100%]">
               <div className="rounded-md bg-white/90 px-4 py-3 text-center text-xs text-[#6B7488]"><Activity className="mx-auto mb-2 h-5 w-5 text-[#6D28D9]"/>Historical traffic appears as real gateway telemetry accumulates.</div>
             </div>
-            <div className="mt-4 grid grid-cols-3 gap-3 text-xs"><div><span className="text-[#6D28D9]">●</span> Total requests<strong className="mt-1 block text-sm">{metrics?.totalRequests ?? 0}</strong></div><div><span className="text-[#E9A93C]">●</span> Redactions<strong className="mt-1 block text-sm">{metrics?.redactions24h ?? 0}</strong></div><div><span className="text-[#94A3B8]">●</span> Throughput<strong className="mt-1 block text-sm">{metrics?.requestsPerSec == null ? "—" : `${metrics.requestsPerSec}/s`}</strong></div></div>
+            <div className="mt-4 grid grid-cols-3 gap-3 text-xs"><div><span className="text-[#6D28D9]">●</span> Total requests<strong className="mt-1 block text-sm">{metrics?.totalRequests ?? "Unknown"}</strong></div><div><span className="text-[#E9A93C]">●</span> Redactions<strong className="mt-1 block text-sm">{metrics?.redactions24h ?? "Unknown"}</strong></div><div><span className="text-[#94A3B8]">●</span> Throughput<strong className="mt-1 block text-sm">{metrics?.requestsPerSec == null ? "—" : `${metrics.requestsPerSec}/s`}</strong></div></div>
           </section>
 
           <section className="overflow-hidden rounded-md border border-[#DCE1E9] bg-white">
             <div className="flex items-center justify-between px-5 py-4"><div><h3 className="text-lg font-bold">Compliance readiness</h3><p className="text-xs text-[#6B7488]">Policy coverage and control status across key frameworks.</p></div><Link href="/compliance" className="text-xs font-semibold text-[#6D28D9]">View details →</Link></div>
-            <table className="w-full text-left text-xs"><thead><tr><th className="px-5 py-2">Framework</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Coverage</th><th className="px-4 py-2">Evidence</th><th className="px-5 py-2">Open issues</th></tr></thead><tbody>{complianceReadiness.length === 0 ? <tr><td colSpan={5} className="px-5 py-8 text-center text-[#6B7488]">Compliance scores will appear after the live scoring endpoint responds.</td></tr> : complianceReadiness.map((framework) => { const meta = frameworkLabels[framework.framework]; return <tr key={framework.framework} className="border-t border-[#EEF1F6]"><td className="px-5 py-3 font-semibold">{meta.name}</td><td className="px-4 py-3 text-emerald-700"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5"/>{framework.readiness_level}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><span>{framework.score}%</span><span className="h-1.5 w-20 overflow-hidden rounded-full bg-[#EEF1F6]"><span className="block h-full bg-[#6D28D9]" style={{width:`${framework.score}%`}}/></span></div></td><td className="px-4 py-3">{framework.metrics.evidence_count}</td><td className="px-5 py-3">{framework.metrics.open_findings}</td></tr>; })}</tbody></table>
+            <table className="w-full text-left text-xs"><thead><tr><th className="px-5 py-2">Framework</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Coverage</th><th className="px-4 py-2">Evidence</th><th className="px-5 py-2">Open issues</th></tr></thead><tbody>{complianceReadiness.length === 0 ? <tr><td colSpan={5} className="px-5 py-8 text-center text-[#6B7488]">Compliance scores will appear after the live scoring endpoint responds.</td></tr> : complianceReadiness.map((framework) => { const meta = frameworkLabels[framework.framework]; return <tr key={framework.framework} className="border-t border-[#EEF1F6]"><td className="px-5 py-3 font-semibold">{meta.name}</td><td className="px-4 py-3 text-[#475069]">{framework.readiness_level}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><span>{framework.score}%</span><span className="h-1.5 w-20 overflow-hidden rounded-full bg-[#EEF1F6]"><span className="block h-full bg-[#6D28D9]" style={{width:`${framework.score}%`}}/></span></div></td><td className="px-4 py-3">{framework.metrics.evidence_count}</td><td className="px-5 py-3">{framework.metrics.open_findings}</td></tr>; })}</tbody></table>
           </section>
         </div>
 
         <aside className="rounded-md border border-[#DCE1E9] bg-white p-5">
           <div className="flex items-center justify-between"><h3 className="text-lg font-bold">Recent activity</h3><Link href="/audit" className="text-xs font-semibold text-[#6D28D9]">View all →</Link></div>
-          <div className="mt-3 divide-y divide-[#EEF1F6]">{recentActivity.length === 0 ? <div className="py-10 text-center text-xs text-[#6B7488]">No recent audit activity.</div> : recentActivity.map((record, index) => <Link href="/audit" key={record.record_id} className="flex gap-3 py-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${index % 3 === 0 ? "bg-[#6D28D9]" : index % 3 === 1 ? "bg-emerald-500" : "bg-[#E9A93C]"}`}/><span className="min-w-0"><strong className="block truncate text-xs">{record.action.replaceAll("_", " ")}</strong><span className="mt-0.5 block truncate text-[10px] text-[#6B7488]">{record.provider || "AuthClaw"}{record.model ? ` · ${record.model}` : ""}</span></span><time className="ml-auto shrink-0 text-[9px] text-[#6B7488]">{new Date(record.timestamp).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</time></Link>)}</div>
+          <div className="mt-3 divide-y divide-[#EEF1F6]">{recentActivity.length === 0 ? <div className="py-10 text-center text-xs text-[#6B7488]">{error ? "Audit activity unavailable" : "No recent audit activity."}</div> : recentActivity.map((record, index) => <Link href="/audit" key={record.record_id} className="flex gap-3 py-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${index % 3 === 0 ? "bg-[#6D28D9]" : index % 3 === 1 ? "bg-emerald-500" : "bg-[#E9A93C]"}`}/><span className="min-w-0"><strong className="block truncate text-xs">{record.action.replaceAll("_", " ")}</strong><span className="mt-0.5 block truncate text-[10px] text-[#6B7488]">{record.provider || "AuthClaw"}{record.model ? ` · ${record.model}` : ""}</span></span><time className="ml-auto shrink-0 text-[9px] text-[#6B7488]">{new Date(record.timestamp).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</time></Link>)}</div>
         </aside>
       </div>
     </div>

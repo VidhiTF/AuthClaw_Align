@@ -3,6 +3,7 @@ import csv
 import json
 from datetime import datetime, timezone
 from sqlalchemy import text
+from fastapi import HTTPException
 from database import engine
 
 from reportlab.lib.pagesizes import letter
@@ -13,17 +14,22 @@ from reportlab.lib import colors
 def get_live_stats() -> dict:
     """Helper to query live stats for reports."""
     from document_processing.drift import get_current_framework_scores
+    scores = get_current_framework_scores()
+    frameworks = {key: scores[key.lower()] for key in ("SOC2", "GDPR", "HIPAA")}
+    if any(score is None for score in frameworks.values()):
+        raise HTTPException(status_code=503, detail="Compliance telemetry unknown: missing evidence")
     stats = {
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "total_documents": 0,
         "scanned_today": 0,
         "critical_findings": 0,
         "open_approvals": 0,
-        "compliance_score": 100,
+        "compliance_score": sum(frameworks.values()) // len(frameworks),
         "drift_alerts": 0,
         "secret_leaks": 0,
         "pii_violations": 0,
-        "frameworks": get_current_framework_scores()
+        "frameworks": frameworks,
+        **{key: scores[key] for key in ("calculation_version", "evidence_timestamp", "missing_control_treatment")},
     }
     try:
         with engine.connect() as conn:
@@ -45,13 +51,9 @@ def get_live_stats() -> dict:
             ).scalar() or 0
             
             # Open approvals
-            from main import get_all_approvals
-            stats["open_approvals"] = sum(1 for a in get_all_approvals().values() if a["status"] == "pending")
-            
-            avg_score = sum(stats["frameworks"].values()) // len(stats["frameworks"])
-            stats["compliance_score"] = avg_score
-    except Exception as e:
-        logging.getLogger("authclaw.reports").error(f"Failed to fetch live stats for report: {e}")
+            stats["open_approvals"] = conn.execute(text("SELECT COUNT(*) FROM gateway_approvals WHERE lower(status) = 'pending'")).scalar()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Report telemetry unavailable") from exc
     return stats
 
 # -------------------------------------------------------------------------
@@ -68,6 +70,8 @@ def generate_executive_summary_report(fmt: str) -> bytes:
         writer = csv.writer(output)
         writer.writerow(["AuthClaw Executive Compliance Summary"])
         writer.writerow(["Generated At", stats["timestamp"]])
+        for key in ("calculation_version", "evidence_timestamp", "missing_control_treatment"):
+            writer.writerow([key, stats[key]])
         writer.writerow([])
         writer.writerow(["Metric", "Value"])
         writer.writerow(["Global Compliance Score", f"{stats['compliance_score']}%"])
@@ -116,11 +120,13 @@ def generate_executive_summary_report(fmt: str) -> bytes:
         
         intro_text = (
             f"This compliance report summarizes the overall data security and framework compliance status "
-            f"for all corporate repositories. Active monitoring is online. The organization's global compliance "
+            f"from recorded evidence. The organization's global compliance "
             f"index is currently assessed at {stats['compliance_score']}%. There are {stats['critical_findings']} critical "
             f"vulnerabilities and {stats['open_approvals']} actions awaiting human override approval."
         )
         story.append(Paragraph(intro_text, styles['BodyText']))
+        for key in ("calculation_version", "evidence_timestamp", "missing_control_treatment"):
+            story.append(Paragraph(f"{key}: {stats[key]}", styles['BodyText']))
         story.append(Spacer(1, 10))
         
         story.append(Paragraph("Key Posture Metrics", section_style))
@@ -198,8 +204,8 @@ def generate_technical_findings_report(fmt: str) -> bytes:
                     "impact": r[5] or "N/A",
                     "recommendation": r[6] or "N/A"
                 })
-    except Exception as e:
-        logging.getLogger("authclaw.reports").error(f"Failed to fetch technical findings: {e}")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Findings telemetry unavailable") from exc
         
     if fmt == "json":
         return json.dumps(findings, indent=2).encode("utf-8")
@@ -283,11 +289,10 @@ def generate_technical_findings_report(fmt: str) -> bytes:
 # -------------------------------------------------------------------------
 def generate_auditor_evidence_report(fmt: str) -> bytes:
     audits = []
-    verification_passed = True
     try:
         from verify_audit import verify_audit_chain
         res_verify = verify_audit_chain()
-        verification_passed = res_verify.get("valid", True)
+        verification_passed = res_verify.get("valid")
         
         with engine.connect() as conn:
             rows = conn.execute(text("""
@@ -305,11 +310,11 @@ def generate_auditor_evidence_report(fmt: str) -> bytes:
                     "hash": r[5] or "N/A",
                     "prev_hash": r[6] or "N/A"
                 })
-    except Exception as e:
-        logging.getLogger("authclaw.reports").error(f"Failed to fetch auditor evidence logs: {e}")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Audit telemetry unavailable") from exc
         
     payload = {
-        "chain_verification": "VALID" if verification_passed else "CORRUPTED",
+        "chain_verification": "UNKNOWN" if verification_passed is None else "VALID" if verification_passed else "CORRUPTED",
         "records_count": len(audits),
         "audit_logs": audits
     }
@@ -355,12 +360,11 @@ def generate_auditor_evidence_report(fmt: str) -> bytes:
         
         story = []
         story.append(Paragraph("AuthClaw - Compliance Auditor Evidence Package", title_style))
-        story.append(Paragraph(f"Generated at: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Verification Status: {'✅ VALID CHAIN' if verification_passed else '❌ CORRUPTED'}", subtitle_style))
+        story.append(Paragraph(f"Generated at: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Verification Status: {payload['chain_verification']}", subtitle_style))
         
         intro_text = (
             f"This package lists the immutable ledger history of gateway approvals and transactions. "
-            f"The cryptographically chained SHA-256 links have been scanned and verified. "
-            f"Current status: {'VALID' if verification_passed else 'FAILED/TAMPERED'}."
+            f"Current status: {payload['chain_verification']}."
         )
         story.append(Paragraph(intro_text, styles["BodyText"]))
         story.append(Spacer(1, 10))

@@ -134,8 +134,8 @@ def build_public_trust_state(*, force_refresh: bool = False) -> Dict[str, Any]:
         "audit_chain": audit_chain,
         "corpus": evidence_engine.corpus_status(),
         "runtime": {
-            "backend": {"status": "operational"},
-            "gateway": {"status": "operational"},
+            "backend": {"status": "unknown"},
+            "gateway": {"status": "unknown"},
             "metrics": _metrics_summary(tenant_id),
             "audit_status": audit_chain,
             "provider_status": _provider_status(tenant_id),
@@ -171,7 +171,7 @@ def trust_runtime_health() -> Dict[str, Any]:
         state = build_public_trust_state()
         runtime = state.get("payload", {}).get("runtime", {})
         return {
-            "status": "healthy" if state.get("verification", {}).get("valid") else "degraded",
+            "status": "degraded" if state.get("verification", {}).get("valid") is not True or runtime.get("audit_status", {}).get("valid") is False else "unknown",
             "trust_center": {
                 "published": state.get("status") == "published",
                 "signature_valid": state.get("verification", {}).get("valid") is True,
@@ -179,5 +179,5 @@ def trust_runtime_health() -> Dict[str, Any]:
             },
             "runtime": runtime,
         }
-    except Exception as exc:
-        return {"status": "unhealthy", "error": str(exc)}
+    except Exception:
+        return {"status": "unavailable", "error": "Trust telemetry source unavailable"}

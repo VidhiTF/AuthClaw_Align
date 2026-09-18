@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Award,
@@ -98,6 +98,9 @@ interface FrameworkScore {
 }
 
 interface ComplianceScoreState {
+  calculation_version: string;
+  evidence_timestamp: string | null;
+  missing_control_treatment: string;
   overall_score: number;
   readiness_level: string;
   frameworks: FrameworkScore[];
@@ -199,6 +202,7 @@ function TraceList({ title, items, empty }: { title: string; items: TraceItem[];
 
 export default function FrameworksPage() {
   const [scores, setScores] = useState<ComplianceScoreState | null>(null);
+  const scoreRequest = useRef(0);
   const [history, setHistory] = useState<ScoreHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -219,10 +223,11 @@ export default function FrameworksPage() {
   });
 
   const fetchScores = useCallback(async () => {
+    const sequence = ++scoreRequest.current;
     setLoading(true);
     setError(null);
     try {
-      const scoreRes = await fetch("/api/compliance-scores?persist_snapshot=false");
+      const scoreRes = await fetch("/api/compliance-scores?persist_snapshot=false", { signal: AbortSignal.timeout(15000) });
       if (scoreRes.status === 401) {
         window.location.href = "/login";
         return;
@@ -234,22 +239,23 @@ export default function FrameworksPage() {
         || (scoreData.trust_summary && scoreData.trust_summary.generated_at !== scoreData.generated_at)) {
         throw new Error("Compliance snapshot mismatch");
       }
-      setScores(scoreData);
-      const historyRes = await fetch(`/api/compliance-scores/history?framework=${activeFramework}&days=30`);
+      const historyRes = await fetch(`/api/compliance-scores/history?framework=${activeFramework}&days=30`, { signal: AbortSignal.timeout(15000) });
       if (historyRes.status === 401) {
         window.location.href = "/login";
         return;
       }
-      if (historyRes.ok) {
-        const historyData = await historyRes.json();
-        setHistory(historyData.items || []);
-      }
+      if (!historyRes.ok) throw new Error("Compliance history unavailable");
+      const historyData = await historyRes.json();
+      if (sequence !== scoreRequest.current) return;
+      setScores(scoreData); setHistory(historyData.items || []);
     } catch (err: unknown) {
+      if (sequence !== scoreRequest.current) return;
       const message = getErrorMessage(err, "Failed to load compliance scoring data");
+      setScores(null); setHistory([]);
       console.warn("Frameworks fetchScores failed:", message);
       setError(message);
     } finally {
-      setLoading(false);
+      if (sequence === scoreRequest.current) setLoading(false);
     }
   }, [activeFramework]);
 
@@ -402,6 +408,7 @@ export default function FrameworksPage() {
           <p>{error}</p>
         </div>
       )}
+      {scores && <p className="text-xs text-[#475069]">Calculation: {scores.calculation_version}. Latest framework evidence: {scores.evidence_timestamp || "Unknown"}. {scores.missing_control_treatment}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {(Object.keys(frameworkMeta) as FrameworkId[]).map((framework) => {
@@ -424,7 +431,7 @@ export default function FrameworksPage() {
 
                 <div className="text-right">
                   <span className={`text-2xl font-black ${frameworkMeta[framework].accent}`}>
-                    {loading ? "-" : `${score?.score ?? 0}%`}
+                    {loading ? "-" : score ? `${score.score}%` : "Unknown"}
                   </span>
                   <span className="block text-[8px] text-[#6B7488] font-bold uppercase tracking-wider mt-0.5">
                     {score ? readinessLabel(score.readiness_level) : "NO DATA"}

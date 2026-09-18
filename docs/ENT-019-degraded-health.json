@@ -1,0 +1,9 @@
+{
+  "status": "degraded",
+  "audit_chain_active": null,
+  "hitl_enabled": null,
+  "policy_enforcement_enabled": null,
+  "redaction_enabled": null,
+  "provider_status": "unknown",
+  "database_status": "healthy"
+}

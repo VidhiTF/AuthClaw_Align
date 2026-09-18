@@ -366,7 +366,8 @@ def verify_audit_chain(tenant_id: int = None) -> dict:
 
     if not rows:
         return {
-            "valid": True,
+            "valid": None,
+            "status": "unknown",
             "records_checked": 0,
             "chain_started_at": None
         }
@@ -381,7 +382,8 @@ def verify_audit_chain(tenant_id: int = None) -> dict:
     if start_index == -1:
         # No chained records exist yet (all are legacy)
         return {
-            "valid": True,
+            "valid": None,
+            "status": "unknown",
             "records_checked": 0,
             "chain_started_at": None
         }

@@ -33,6 +33,9 @@ class ControlScoreResponse(BaseModel):
 
 
 class FrameworkScoreResponse(BaseModel):
+    calculation_version: str
+    evidence_timestamp: str | None
+    missing_control_treatment: str
     framework: str
     score: float
     readiness_level: str
@@ -64,6 +67,9 @@ class TrustSummaryResponse(BaseModel):
 
 
 class ComplianceScoreResponse(BaseModel):
+    calculation_version: str
+    evidence_timestamp: str | None
+    missing_control_treatment: str
     overall_score: float
     readiness_level: str
     frameworks: list[FrameworkScoreResponse]

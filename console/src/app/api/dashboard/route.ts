@@ -21,53 +21,36 @@ export async function GET(request: Request) {
     const [approvalsResponse, auditResponse] = await Promise.all([fetch(`${apiUrl}/v1/workflows/approvals`, { headers, cache: "no-store", signal: AbortSignal.timeout(15000) }), fetch(`${apiUrl}/v1/audit-logs?limit=100`, { headers, cache: "no-store", signal: AbortSignal.timeout(15000) })]);
     if (!approvalsResponse.ok || !auditResponse.ok) throw new Error("Dashboard backend request failed");
     const [approvals, auditMetrics] = await Promise.all([approvalsResponse.json() as Promise<Array<{ status: string }>>, auditResponse.json() as Promise<AuditMetricResponse>]);
+    if (!Array.isArray(approvals) || approvals.some((item) => typeof item?.status !== "string") || !Array.isArray(auditMetrics.records)) throw new Error("Dashboard source payload unavailable");
+    if (auditMetrics.records.some((record) => !Number.isFinite(new Date(record?.timestamp || record?.created_at || "").getTime()))) throw new Error("Audit timestamps unavailable");
     const openApprovals = approvals.filter((item) => item.status === "PENDING").length;
-    const redactions24h = (auditMetrics.records || []).filter((record) => record.action === "redact" && new Date(record.timestamp || record.created_at || "").getTime() >= Date.now() - hours * 3600000).length;
-
+    const records = auditMetrics.records.filter((record) => new Date(record.timestamp || record.created_at || "").getTime() >= Date.now() - hours * 3600000);
+    const redactions24h = records.filter((record) => record.action === "redact").length;
     let requestsPerSec: number | null = null;
     let p99LatencyMs: number | null = null;
-    let totalRequests = 0;
-
-    try {
-      const logsData = auditMetrics;
-      const records = (logsData.records || []).filter((record) => new Date(record.timestamp || record.created_at || "").getTime() >= Date.now() - hours * 3600000); if (records.length > 0) {
-        totalRequests = records.length;
-        const latencies = records
-          .map((record) => record.duration_ms || record.duration)
-          .filter((latency): latency is number => latency !== undefined && latency !== null)
-          .sort((a: number, b: number) => a - b);
-
-        if (latencies.length > 0) {
-          const p99Index = Math.min(
-            latencies.length - 1,
-            Math.ceil(latencies.length * 0.99) - 1
-          );
-          p99LatencyMs = latencies[p99Index];
-        }
-
-        const timestamps = records
-          .map((record) => new Date(record.timestamp || record.created_at || "").getTime())
-          .filter((t: number) => !isNaN(t));
-
-        if (timestamps.length > 1) {
-          const maxTime = Math.max(...timestamps);
-          const minTime = Math.min(...timestamps);
-          const diffSeconds = (maxTime - minTime) / 1000;
-          if (diffSeconds > 0) {
-            requestsPerSec = Number((timestamps.length / diffSeconds).toFixed(2));
-          }
-        }
+    const totalRequests = records.length;
+    if (records.length > 0) {
+      const latencies = records
+        .map((record) => record.duration_ms ?? record.duration)
+        .filter((latency): latency is number => typeof latency === "number" && Number.isFinite(latency) && latency >= 0)
+        .sort((a: number, b: number) => a - b);
+      if (latencies.length > 0) {
+        p99LatencyMs = latencies[Math.ceil(latencies.length * 0.99) - 1];
       }
-    } catch (err) {
-      console.warn("Failed to fetch traffic metrics from ClickHouse/Postgres audit logs:", err);
+      const timestamps = records.map((record) => new Date(record.timestamp || record.created_at || "").getTime());
+      const diffSeconds = (Math.max(...timestamps) - Math.min(...timestamps)) / 1000;
+      if (diffSeconds > 0) {
+        requestsPerSec = Number((timestamps.length / diffSeconds).toFixed(2));
+      }
     }
 
     return NextResponse.json({
+      status: "healthy", sampleLimit: 100, generatedAt: new Date().toISOString(),
       openApprovals,
       redactions24h,
       totalRequests,
       requestsPerSec,
-      p99LatencyMs, recentActivity: (auditMetrics.records || []).slice(0, 8),
+      p99LatencyMs, recentActivity: auditMetrics.records.slice(0, 8),
     });
   } catch (error: unknown) {
     console.error("Dashboard API Error:", error);

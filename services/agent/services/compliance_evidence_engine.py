@@ -155,6 +155,8 @@ SEVERITY_PENALTY = {"CRITICAL": 30, "HIGH": 22, "MEDIUM": 12, "LOW": 6}
 
 class ComplianceEvidenceEngine:
     corpus_version = "2026.07"
+    calculation_version = "evidence-impact-v2"
+    missing_control_treatment = "Missing controls are unknown and contribute zero to the full weighted denominator; frameworks without evidence have no score."
 
     def ensure_catalog(self) -> None:
         with engine.connect() as conn:
@@ -281,17 +283,19 @@ class ComplianceEvidenceEngine:
             items = evidence_by_control.get(control["control_id"], [])
             negative = [item for item in items if int(item.get("impact") or 0) < 0]
             positive = [item for item in items if int(item.get("impact") or 0) >= 0]
-            score = 100
+            score = 100 if items else 0
             score += sum(int(item.get("impact") or 0) for item in negative)
             score = max(0, min(100, score))
-            status = "passing" if score >= 85 else ("watch" if score >= 65 else "failing")
+            status = "unknown" if not items else "passing" if score >= 85 else ("watch" if score >= 65 else "failing")
             reason = self._score_reason(control, positive, negative, score)
             source_event = items[-1]["source_type"] if items else "catalog_baseline"
+            evidence_timestamp = max((item["created_at"].isoformat() for item in items if item.get("created_at")), default=None)
             control_scores.append({
                 "framework": control["framework"],
                 "control_id": control["control_id"],
                 "title": control["title"],
-                "score": score,
+                "score": score if items else None,
+                "evidence_timestamp": evidence_timestamp,
                 "status": status,
                 "evidence_count": len(items),
                 "negative_findings": len(negative),
@@ -300,21 +304,25 @@ class ComplianceEvidenceEngine:
                 "evidence": items,
                 "calculated_at": datetime.now(timezone.utc).isoformat(),
             })
-            self._persist_control_score(tenant_id, control, score, status, len(items), len(negative), reason, source_event, previous)
+            self._persist_control_score(tenant_id, control, score, status, len(items), len(negative), reason, source_event, previous, evidence_timestamp)
 
         frameworks = {}
         for framework in sorted({item["framework"] for item in controls}):
             fw_controls = [item for item in control_scores if item["framework"] == framework]
             weighted_total = sum(self._control_weight(item["control_id"]) for item in fw_controls) or 1
-            weighted_score = sum(item["score"] * self._control_weight(item["control_id"]) for item in fw_controls) / weighted_total
-            frameworks[framework.lower()] = round(weighted_score)
+            weighted_score = sum((item["score"] or 0) * self._control_weight(item["control_id"]) for item in fw_controls) / weighted_total
+            frameworks[framework.lower()] = round(weighted_score) if any(item["evidence_count"] for item in fw_controls) else None
             frameworks[f"{framework.lower()}_controls"] = {
                 "passed": sum(1 for item in fw_controls if item["status"] == "passing"),
                 "failed": sum(1 for item in fw_controls if item["status"] == "failing"),
                 "watch": sum(1 for item in fw_controls if item["status"] == "watch"),
+                "unknown": sum(1 for item in fw_controls if item["status"] == "unknown"),
                 "items": fw_controls,
             }
         frameworks["corpus_version"] = self.corpus_version
+        frameworks["calculation_version"] = self.calculation_version
+        frameworks["evidence_timestamp"] = max((item["evidence_timestamp"] for item in control_scores if item["evidence_timestamp"]), default=None)
+        frameworks["missing_control_treatment"] = self.missing_control_treatment
         return frameworks
 
     def evidence_export_rows(
@@ -387,10 +395,12 @@ class ComplianceEvidenceEngine:
         payload["production_vector_backend"] = os.getenv("AUTHCLAW_VECTOR_BACKEND", "postgres_json")
         return payload
 
-    def _persist_control_score(self, tenant_id: int, control: Dict[str, Any], score: int, status: str, evidence_count: int, negative_findings: int, reason: str, source_event: str, previous: Dict[tuple, int]) -> None:
+    def _persist_control_score(self, tenant_id: int, control: Dict[str, Any], score: int, status: str, evidence_count: int, negative_findings: int, reason: str, source_event: str, previous: Dict[tuple, int], evidence_timestamp: str = None) -> None:
         key = (control["framework"], control["control_id"])
         previous_score = previous.get(key)
-        metadata = {"title": control["title"], "corpus_version": self.corpus_version}
+        metadata = {"title": control["title"], "corpus_version": self.corpus_version,
+                    "calculation_version": self.calculation_version, "evidence_timestamp": evidence_timestamp,
+                    "missing_control_treatment": self.missing_control_treatment}
         with engine.connect() as conn:
             conn.execute(
                 text("""

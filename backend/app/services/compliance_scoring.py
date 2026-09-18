@@ -25,6 +25,8 @@ from app.services.notifications import create_notification
 
 FRAMEWORKS = ("SOC2", "GDPR", "HIPAA")
 RESOLVED_STATUSES = ("RESOLVED", "FALSE_POSITIVE", "ACCEPTED_RISK")
+CALCULATION_VERSION = "control-signals-v1"
+MISSING_CONTROL_TREATMENT = "Missing signals retain catalog penalties; evidence gaps cap controls below compliant; source errors abort scoring."
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,7 @@ class FrameworkMetrics:
     approval_evidence_count: int
     remediation_audit_count: int
     policy_evidence_count: int
+    evidence_timestamp: str | None = None
 
 
 CONTROL_CATALOG: dict[str, list[dict[str, Any]]] = {
@@ -249,6 +252,8 @@ def collect_metrics(db: Session, tenant_id: str, framework: str) -> FrameworkMet
 
     return FrameworkMetrics(
         framework=framework,
+        evidence_timestamp=_iso(db.query(func.max(EvidenceRecord.created_at)).filter(
+            EvidenceRecord.tenant_id == tid, EvidenceRecord.framework == framework).scalar()) or None,
         evidence_count=_safe_count(evidence_q),
         audit_event_count=_safe_count(db.query(AuditLogMetadata).filter(AuditLogMetadata.tenant_id == tid)),
         framework_audit_event_count=_framework_audit_count(db, tid, framework),
@@ -546,6 +551,9 @@ def score_framework(
         framework_readiness = "monitor"
     return {
         "framework": framework,
+        "calculation_version": CALCULATION_VERSION,
+        "evidence_timestamp": metrics.evidence_timestamp,
+        "missing_control_treatment": MISSING_CONTROL_TREATMENT,
         "score": overall,
         "readiness_level": framework_readiness,
         "controls": controls,
@@ -606,6 +614,8 @@ def upsert_score_snapshot(db: Session, tenant_id: str, framework_score: dict[str
     snapshot.overall_score = float(framework_score["score"])
     snapshot.readiness_level = framework_score["readiness_level"]
     snapshot.control_scores = {control["id"]: control for control in framework_score["controls"]}
+    snapshot.control_scores["_calculation"] = {key: framework_score.get(key) for key in (
+        "calculation_version", "evidence_timestamp", "missing_control_treatment")}
     snapshot.evidence_count = int(metrics["evidence_count"])
     snapshot.audit_event_count = int(metrics["audit_event_count"])
     snapshot.open_findings = int(metrics["open_findings"])
@@ -654,6 +664,9 @@ def score_all_frameworks(
     trust_summary["generated_at"] = generated_at
     return {
         "overall_score": overall,
+        "calculation_version": CALCULATION_VERSION,
+        "evidence_timestamp": min(item["evidence_timestamp"] for item in frameworks) if all(item["evidence_timestamp"] for item in frameworks) else None,
+        "missing_control_treatment": MISSING_CONTROL_TREATMENT,
         "readiness_level": overall_readiness,
         "frameworks": frameworks,
         "trust_summary": trust_summary,
@@ -706,6 +719,8 @@ def score_history(db: Session, tenant_id: str, framework: str | None = None, day
             "framework": row.framework,
             "snapshot_date": row.snapshot_date,
             "overall_score": row.overall_score,
+            **{key: (row.control_scores or {}).get("_calculation", {}).get(key) for key in (
+                "calculation_version", "evidence_timestamp", "missing_control_treatment")},
             "readiness_level": row.readiness_level,
             "evidence_count": row.evidence_count,
             "audit_event_count": row.audit_event_count,
