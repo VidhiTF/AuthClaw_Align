@@ -364,7 +364,7 @@ jobs:
           --health-retries 12
     env:
       ENT018_REDIS_URL: redis://localhost:6379
-      ENT022_AGENT_POSTGRES_URL: postgresql+psycopg://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
+      ENT022_AGENT_POSTGRES_URL: postgresql+psycopg2://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
       QUOTA_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
