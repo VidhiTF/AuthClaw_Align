@@ -4,6 +4,66 @@ Date: 2026-09-17
 Branch: `security/ent-022-privileged-mfa`
 Repository baseline: `align/master` at `45976f0`
 
+## Interactive-credential recovery follow-up (2026-09-18)
+
+The reported API-key recovery takeover was confirmed: the generic tenant
+dependency mapped an active key's creator to the user, and owner recovery left
+that key usable for factor enrollment. The new credential-purpose matrix failed
+all 18 cases before the patch because no session-only boundary existed.
+
+The existing tenant binder is now reusable for post-lock revalidation, matching
+both immutable user and tenant IDs. All five MFA lifecycle mutations and agent
+assertion issuance require a tenant session. Recovery revokes target-owned API
+keys as well as sessions in the same factor/audit transaction. API-key issuance
+and rotation acquire the creator lock and revalidate, preventing a waiting
+request from minting a surviving key after recovery. Existing tenant RLS,
+encryption, factor verification, Redis controls and outbox append are reused;
+there is no new migration, factor authority or credential protocol.
+
+The real database test also demonstrated that top-level `subject_id` was not
+part of the canonical persisted audit payload. Lifecycle events now include the
+subject in the existing `execution_trace` field, preserving both recovery actor
+and target without changing the audit schema.
+
+Fresh verification on this patch before latest-master integration:
+
+- Full Backend Security and Compliance CI selection: **538 passed**, no skips.
+- `pytest -p no:cacheprovider -q tests/test_mfa_recovery_postgres.py`:
+  **8 passed**, real migrated PostgreSQL with restricted runtime RLS and Redis.
+  Six cases observe actual PostgreSQL lock waits before recovery commits, then
+  require 401 for stale session/key requests. HTTP cases require 403 for active
+  API keys on every MFA mutation/assertion endpoint, 401 after revocation,
+  target-only credential invalidation, cross-tenant 404, durable actor/target
+  audit, and rollback after an actual SQL audit-write error. A fresh session
+  completes enrollment, confirmation, recovery-code rotation and assertion.
+- Recovery plus `test_agent_mfa_assertion_postgres.py`: **9 passed**; the latter
+  includes three console-signed agent approval/execution timezone scenarios.
+- `python -m unittest scripts.test_repository_policy -q`: **27 passed**.
+- Python compilation, `git diff --check`, Tokei 12.1.2 line budgets: **passed**.
+- Gitleaks 8.24.3 `dir . --config .gitleaks.toml --redact`: **no leaks**,
+  893,488,887 bytes scanned. The final pushed head still requires its own CI scan.
+
+Actual synthetic recovery audit rows are emitted as `backend-recovery-audit.json`
+and uploaded by CI with the checkout SHA/run in the artifact name. They are test
+evidence, not production audit records. The independent candidate source reviewer
+reported no concrete surviving bypass/regression; its local test process was
+permission-blocked, so executable evidence above comes from the implementer.
+
+Compatibility work is separately recorded: the first legacy HTTP invocation
+used a noncanonical definer role and correctly failed startup. After fixing only
+the disposable test setup, seven cases passed and the workflow approval case
+failed its final COMPLETE-state assertion. Master concurrently advanced to
+`1a3970c` (workflow response contracts), creating PR conflicts. Integration and
+post-integration results must supersede this preliminary compatibility result.
+
+Operational consequences: recovery invalidates all target-owned API keys,
+including integrations, which need newly issued keys. Deploy all backend workers
+before treating the new policy as effective. Rolling back would reopen the
+reported boundary; prefer roll-forward and never reactivate revoked keys.
+Already-issued agent assertions retain their existing maximum 60-second lifetime
+and single-use rules; immediate cross-service assertion revocation is not claimed.
+The optional console factor-replacement UX suggestion is not changed here.
+
 ## Current verification scope (2026-09-18 follow-up)
 
 The earlier sections below are historical results, not claims about the newest

@@ -6,14 +6,14 @@ from typing import List
 from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 
-from app.db.models import APIKey
+from app.db.models import APIKey, User
 from app.schemas.models import (
     APIKeyCreate,
     APIKeyResponse,
     APIKeyRotate,
     PLATFORM_API_KEY_SCOPES,
 )
-from app.core.auth import get_tenant_db, hash_key, require_roles, require_scopes
+from app.core.auth import get_tenant_db, hash_key, require_roles, require_scopes, revalidate_tenant_credential
 from app.services.notifications import create_notification
 
 router = APIRouter()
@@ -86,6 +86,11 @@ def generate_api_key(
     tenant_id = request.state.tenant_id
     user_id = request.state.user_id
 
+    # Serialize issuance with owner recovery, then reject credentials revoked
+    # while waiting. A foreign-key lock alone would allow post-reset issuance.
+    db.query(User).filter(User.tenant_id == tenant_id, User.id == user_id).with_for_update().first()
+    revalidate_tenant_credential(request, db)
+
     # Generate a raw api key
     raw_key = _new_raw_key()
     key_hash = _hash_key(raw_key)
@@ -141,6 +146,8 @@ def rotate_api_key(
     """Rotate an API key by revoking the old key and returning a new secret once."""
     tenant_id = request.state.tenant_id
     user_id = request.state.user_id
+    db.query(User).filter(User.tenant_id == tenant_id, User.id == user_id).with_for_update().first()
+    revalidate_tenant_credential(request, db)
     old_key = db.query(APIKey).filter(APIKey.tenant_id == tenant_id, APIKey.id == id).first()
     if not old_key:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API Key not found")

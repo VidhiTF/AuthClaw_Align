@@ -193,7 +193,7 @@ jobs:
           .ci-backend/bin/python -m pip install --require-hashes -r backend/requirements-test.txt
           cd backend
           ../.ci-backend/bin/python -m pytest -p no:cacheprovider -q \
-            tests/test_auth_baseline.py tests/test_mfa_replay.py tests/test_ent022_mfa_security.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
+            tests/test_auth_baseline.py tests/test_mfa_replay.py tests/test_ent022_mfa_security.py tests/test_mfa_credential_purpose.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
             tests/test_client_ip.py tests/test_bff_client_ip.py tests/test_release4_abuse_controls.py \
             tests/test_oidc_transactions.py \
             tests/test_reset_abuse_security.py tests/test_review_logging_and_event_identity.py \
@@ -285,6 +285,8 @@ jobs:
           tests/test_review_otp_postgres.py
       - name: Run destructive PostgreSQL suites serially
         working-directory: backend
+        env:
+          ENT022_EVIDENCE_DIR: ../ent022-recovery-evidence
         run: >-
           ../.ci-backend-integration/bin/python -m pytest -p no:cacheprovider -q
           tests/test_db_safety.py
@@ -300,6 +302,16 @@ jobs:
           tests/test_worker_lifecycle_postgres.py
           tests/test_workflow_advisory_lock_postgres.py
           tests/test_t10_postgres.py
+          tests/test_mfa_recovery_postgres.py
+
+      - name: Preserve MFA recovery audit evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ent022-recovery-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ent022-recovery-evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

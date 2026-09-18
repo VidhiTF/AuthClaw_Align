@@ -35,7 +35,8 @@ def test_backend_totp_assertions_complete_signed_agent_actions(postgres, monkeyp
         db.commit()
 
     request = SimpleNamespace(
-        state=SimpleNamespace(user_id=identity.user_id, tenant_id=identity.tenant_id),
+        state=SimpleNamespace(user_id=identity.user_id, tenant_id=identity.tenant_id,
+                              credential_kind="session", credential_hash=identity.session_hash),
         headers={"x-request-id": "ent022-cross-service"},
     )
     bundle = {"actor": str(identity.user_id), "tenant": str(identity.tenant_id), "role": role}

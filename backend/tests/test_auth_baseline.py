@@ -55,6 +55,8 @@ def test_internal_exception_detail_is_sanitized():
 
 @pytest.fixture
 def persisted_mfa_identity(monkeypatch):
+    # SQLite tests exercise factor behavior; PostgreSQL tests cover authn/RLS.
+    monkeypatch.setattr(user_endpoints, "revalidate_tenant_credential", lambda *_: None)
     monkeypatch.setattr(user_endpoints, "_get_redis", lambda: None)
     for name in ("mfa_backup_codes", "mfa_pending_backup_codes"):
         column = User.__table__.c[name]
@@ -70,6 +72,7 @@ def persisted_mfa_identity(monkeypatch):
         db.commit()
         monkeypatch.setattr(db, "commit", MagicMock(wraps=db.commit))
         request = MagicMock()
+        request.state.credential_kind = "session"
         request.state.user_id, request.state.tenant_id = user.id, user.tenant_id
         yield db, user, request, secret
     engine.dispose()
@@ -142,6 +145,7 @@ def test_totp_counter_is_consumed_once(persisted_mfa_identity):
 
 
 def test_privileged_user_cannot_self_disable_mfa(monkeypatch):
+    monkeypatch.setattr(user_endpoints, "revalidate_tenant_credential", lambda *_: None)
     user = MagicMock(
         id="00000000-0000-4000-8000-000000000001",
         tenant_id="00000000-0000-4000-8000-000000000002",
@@ -151,6 +155,7 @@ def test_privileged_user_cannot_self_disable_mfa(monkeypatch):
         mfa_secret=pyotp.random_base32(),
     )
     request = MagicMock()
+    request.state.credential_kind = "session"
     request.state.user_id = user.id
     request.state.tenant_id = user.tenant_id
     db = MagicMock()

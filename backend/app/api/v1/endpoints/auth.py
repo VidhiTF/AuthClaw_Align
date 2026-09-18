@@ -32,7 +32,8 @@ from app.api.v1.endpoints.onboarding import (
 from app.core.passwords import hash_password, validate_password, verify_password
 from app.core.crypto import get_session_key_ring
 from app.core.bff_client_ip import authenticate_bff_client_ip
-from app.core.auth import get_tenant_db, hash_key as _api_key_hash, require_roles, require_scopes
+from app.core.auth import (get_tenant_db, hash_key as _api_key_hash, require_roles,
+                           require_scopes, require_interactive_session, revalidate_tenant_credential)
 from app.db.models import APIKey, OnboardingEmailOTP, Tenant, TenantOIDCConfig, User
 from app.services.email_service import EmailDeliveryError
 
@@ -663,10 +664,12 @@ def create_agent_mfa_assertion(
     db: Session = Depends(get_tenant_db),
 ):
     """Verify the control-plane factor before the console signs an agent action."""
+    require_interactive_session(request)
     user = db.query(User).filter(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
     ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
     if not user or not user.mfa_enabled or not user.mfa_secret:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

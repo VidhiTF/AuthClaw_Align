@@ -17,6 +17,8 @@ from app.core.auth import (
     hash_key,
     require_roles,
     require_scopes,
+    require_interactive_session,
+    revalidate_tenant_credential,
 )
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.api.v1.endpoints.onboarding import (
@@ -102,7 +104,8 @@ def _commit_mfa_audit(
         provider="totp",
         request_id=request_id,
         actor_id=str(request.state.user_id),
-        trace=[],
+        # The canonical outbox persists execution_trace, not top-level extras.
+        trace=[f"subject_id:{subject_id}"],
     )
     event["subject_id"] = str(subject_id)
     event["result"] = "success"
@@ -150,10 +153,12 @@ def setup_my_mfa(
     db: Session = Depends(get_tenant_db),
 ):
     """Enable TOTP MFA for approval-sensitive console actions."""
+    require_interactive_session(request)
     user = db.query(User).filter(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
     ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if user.mfa_enabled:
@@ -212,10 +217,12 @@ def confirm_my_mfa(
     db: Session = Depends(get_tenant_db),
 ):
     """Confirm possession of a pending TOTP factor before activating it."""
+    require_interactive_session(request)
     user = db.query(User).filter(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
     ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     now = datetime.now(timezone.utc)
@@ -264,10 +271,12 @@ def confirm_my_mfa(
 @router.post("/me/mfa/disable", response_model=MFASecurityResponse)
 def disable_my_mfa(body: MFADisableRequest, request: Request, db: Session = Depends(get_tenant_db)):
     """Disable TOTP MFA for the current console principal."""
+    require_interactive_session(request)
     user = db.query(User).filter(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
     ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if not user.mfa_enabled or not user.mfa_secret:
@@ -315,10 +324,12 @@ def regenerate_my_mfa_recovery_codes(
     db: Session = Depends(get_tenant_db),
 ):
     """Replace recovery codes after a rate-limited fresh MFA challenge."""
+    require_interactive_session(request)
     user = db.query(User).filter(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
     ).with_for_update().first()
+    revalidate_tenant_credential(request, db)
     if not user or not user.mfa_enabled or not user.mfa_secret:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="MFA is not enabled")
     if not verify_mfa_challenge(
@@ -350,7 +361,8 @@ def reset_user_mfa(
     request: Request,
     db: Session = Depends(get_tenant_db),
 ):
-    """Reset another user's lost factor after owner step-up and revoke sessions."""
+    """Reset a lost factor and revoke the target's sessions and API keys atomically."""
+    require_interactive_session(request)
     actor_id = UUID(str(request.state.user_id))
     if id == actor_id:
         raise HTTPException(
@@ -361,12 +373,13 @@ def reset_user_mfa(
         User.tenant_id == request.state.tenant_id,
         User.id.in_([actor_id, id]),
     ).order_by(User.id).with_for_update().all()
+    revalidate_tenant_credential(request, db)
     users_by_id = {user.id: user for user in locked_users}
     actor = users_by_id.get(actor_id)
     target = users_by_id.get(id)
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    if not actor or not actor.mfa_enabled or not actor.mfa_secret:
+    if not actor or actor.role != "owner" or not actor.mfa_enabled or not actor.mfa_secret:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner MFA is required")
     if not verify_mfa_challenge(
         _get_redis(), actor, body.code.strip(),
@@ -387,6 +400,14 @@ def reset_user_mfa(
     db.execute(
         text("SELECT authn.revoke_user_sessions(:tenant_id, :user_id)"),
         {"tenant_id": target.tenant_id, "user_id": target.id},
+    )
+    db.query(APIKey).filter(
+        APIKey.tenant_id == target.tenant_id,
+        APIKey.created_by == target.id,
+        APIKey.is_active.is_(True),
+    ).update(
+        {"is_active": False, "revoked_at": datetime.now(timezone.utc)},
+        synchronize_session=False,
     )
     _commit_mfa_audit(
         db, request, action="recovery_reset", subject_id=target.id,

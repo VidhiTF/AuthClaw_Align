@@ -44,6 +44,8 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
         mfa_secret=encrypt_secret("JBSWY3DPEHPK3PXP"),
     )
     request = MagicMock(headers={"x-request-id": "request-agent-mfa"})
+    request.state.credential_kind = "session"
+    monkeypatch.setattr(auth, "revalidate_tenant_credential", lambda *_: None)
     request.state.tenant_id = tenant_id
     request.state.user_id = user_id
     db = MagicMock()
@@ -297,6 +299,8 @@ def test_pending_factor_requires_confirmation_before_activation(monkeypatch):
         mfa_enrolled_at=None,
     )
     request = MagicMock(headers={"x-request-id": "req-confirm"})
+    request.state.credential_kind = "session"
+    monkeypatch.setattr(users, "revalidate_tenant_credential", lambda *_: None)
     request.state.user_id = user_id
     request.state.tenant_id = tenant_id
     db = MagicMock()
@@ -338,6 +342,8 @@ def test_separate_owner_recovery_revokes_sessions(monkeypatch):
         mfa_pending_expires_at=None, mfa_enrolled_at=datetime.now(timezone.utc),
     )
     request = MagicMock(headers={"x-request-id": "req-recovery"})
+    request.state.credential_kind = "session"
+    monkeypatch.setattr(users, "revalidate_tenant_credential", lambda *_: None)
     request.state.user_id = actor_id
     request.state.tenant_id = tenant_id
     db = MagicMock()
@@ -355,4 +361,7 @@ def test_separate_owner_recovery_revokes_sessions(monkeypatch):
     assert target.mfa_backup_codes is None
     statement = str(db.execute.call_args.args[0])
     assert "authn.revoke_user_sessions" in statement
+    revoked = db.query.return_value.filter.return_value.update.call_args
+    assert revoked.args[0]["is_active"] is False
+    assert revoked.args[0]["revoked_at"] is not None
     db.commit.assert_called_once()

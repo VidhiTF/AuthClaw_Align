@@ -1063,12 +1063,18 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
 
     legacy_setup = client.post("/v1/workflows/mfa/setup", headers=approver_headers)
     assert legacy_setup.status_code == status.HTTP_410_GONE
-    mfa_setup = client.post("/v1/users/me/mfa/setup", headers=approver_headers)
+    session_token = "acl_session_" + uuid4().hex
+    db_session.execute(text("""SELECT authn.create_session(
+        :hash, :tenant, :user, 'mfa-test', now()+interval '10 minutes', '{}'::jsonb)"""),
+        {"hash": hash_key(session_token), "tenant": tenant_id, "user": approver_id})
+    db_session.commit()
+    mfa_headers = {"Authorization": f"Bearer {session_token}"}
+    mfa_setup = client.post("/v1/users/me/mfa/setup", headers=mfa_headers)
     assert mfa_setup.status_code == status.HTTP_200_OK
     backup_code = mfa_setup.json()["backup_codes"][0]
     mfa_confirm = client.post(
         "/v1/users/me/mfa/confirm",
-        headers=approver_headers,
+        headers=mfa_headers,
         json={"code": pyotp.TOTP(mfa_setup.json()["mfa_secret"]).now()},
     )
     assert mfa_confirm.status_code == status.HTTP_200_OK

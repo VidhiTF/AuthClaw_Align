@@ -329,6 +329,18 @@ def get_tenant_db(
     request: Request, db: Session = Depends(get_db)
 ) -> Generator[Session, None, None]:
     """Re-bind the vetted credential inside the handler transaction."""
+    revalidate_tenant_credential(request, db)
+    yield db
+
+
+def require_interactive_session(request: Request) -> None:
+    """Machine credentials must not manage or attest an interactive factor."""
+    if getattr(request.state, "credential_kind", None) != "session":
+        raise HTTPException(status_code=403, detail="Interactive tenant session required")
+
+
+def revalidate_tenant_credential(request: Request, db: Session) -> None:
+    """Check revocation again after waiting on a credential-owner row lock."""
     kind = getattr(request.state, "credential_kind", None)
     credential_hash = getattr(request.state, "credential_hash", None)
     expected_tenant = getattr(request.state, "tenant_id", None)
@@ -342,17 +354,17 @@ def get_tenant_db(
         else "authn.bind_api_key_context"
     )
     bound = db.execute(
-        text(f"SELECT tenant_id FROM {resolver}(:credential_hash)"),
+        text(f"SELECT tenant_id, user_id FROM {resolver}(:credential_hash)"),
         {"credential_hash": credential_hash},
     ).first()
-    if not bound or str(bound.tenant_id) != str(expected_tenant):
+    if (not bound or str(bound.tenant_id) != str(expected_tenant)
+            or str(bound.user_id) != str(getattr(request.state, "user_id", None))):
         db.rollback()
         raise HTTPException(status_code=401, detail="Authentication context expired")
     # Retain only the already-validated request credential for same-request
     # transactions that must be re-bound after a commit (for example, audit
     # appends).  This is cleared with the request-scoped SQLAlchemy session.
     db.info["authclaw_database_auth_context"] = (kind, credential_hash)
-    yield db
 
 
 def get_tenant_score_db(request: Request, db: Session = Depends(get_score_db)) -> Generator[Session, None, None]:

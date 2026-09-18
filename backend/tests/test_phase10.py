@@ -100,9 +100,13 @@ def _create_tenant_approver(db_session: Session, tenant_id, email: str, api_key_
         name="Separate Approver Key", scopes=["admin", "read", "write"],
         is_active=True, created_by=user_id,
     ))
+    session_token = "acl_session_" + uuid.uuid4().hex
+    db_session.execute(text("""SELECT authn.create_session(
+        :hash, :tenant, :user, 'mfa-test', now()+interval '10 minutes', '{}'::jsonb)"""),
+        {"hash": hash_key(session_token), "tenant": tenant_id, "user": user_id})
     db_session.commit()
     db_session.execute(text("SET app.current_tenant_id = ''"))
-    return user_id, {"Authorization": f"Bearer {api_key_raw}"}
+    return user_id, {"Authorization": f"Bearer {session_token}"}
 
 
 def _enroll_mfa(client: TestClient, headers: dict[str, str]):

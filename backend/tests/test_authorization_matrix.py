@@ -238,7 +238,8 @@ def test_tenant_admin_cannot_create_platform_key():
     assert exc.value.status_code == 403
 
 
-def test_tenant_owner_cannot_rotate_or_revoke_platform_key():
+def test_tenant_owner_cannot_rotate_or_revoke_platform_key(monkeypatch):
+    monkeypatch.setattr(apikey_endpoints, "revalidate_tenant_credential", lambda *_: None)
     tenant_id = uuid4()
     key = APIKey(
         id=uuid4(),
