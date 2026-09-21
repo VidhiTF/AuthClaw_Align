@@ -399,6 +399,7 @@ def verify_alert_outage_and_retry(client, tokens, engine, tenant_context):
             assert conn.execute(text("SELECT status FROM documents WHERE id=7")).scalar() == "alert_delivery_failed"
             scan = conn.execute(text("SELECT status,outputs_json FROM document_scans WHERE document_id=7 ORDER BY id DESC LIMIT 1")).one()
             assert scan.status == "alert_delivery_failed" and json.loads(scan.outputs_json)["alert_delivery"]["event_id"] == event_id
+            assert json.loads(scan.outputs_json)["health"] == "degraded"
             record = conn.execute(text("SELECT payload,error_message,status FROM event_delivery_records WHERE event_id=:id"), {"id": event_id}).one()
             assert "never-email" not in record.payload and "private-transport" not in record.error_message
         metrics = EventPipeline().delivery_metrics()
@@ -419,6 +420,7 @@ def verify_alert_outage_and_retry(client, tokens, engine, tenant_context):
         assert smtp.return_value.__enter__.return_value.send_message.call_count == sent
         with engine.connect() as conn:
             assert conn.execute(text("SELECT status FROM documents WHERE id=7")).scalar() == "pending_approval"
+            assert json.loads(conn.execute(text("SELECT outputs_json FROM document_scans WHERE document_id=7 ORDER BY id DESC LIMIT 1")).scalar())["health"] == "healthy"
             assert conn.execute(text("SELECT resolved_at IS NOT NULL FROM event_dead_letters WHERE event_id=:id"), {"id": event_id}).scalar() is True
         assert EventPipeline().delivery_metrics()["security_alerts"]["status"] == "healthy"
         assert ObservabilityService()._queue_lag(EventPipeline().delivery_metrics())["status"] == "healthy"
@@ -448,9 +450,13 @@ def verify_alert_outage_and_retry(client, tokens, engine, tenant_context):
         assert smtp.return_value.__enter__.return_value.send_message.call_count == sent
         with engine.begin() as conn:
             conn.execute(text("UPDATE tenant_users SET email_verified=TRUE WHERE email='verified@tenant-a.test'"))
+            conn.execute(text("""UPDATE document_scans SET outputs_json=(outputs_json::jsonb - 'provider_review')::text
+                WHERE document_id=(SELECT id FROM documents WHERE filename='retryable.txt')"""))
         assert EventPipeline().retry_dead_letters()["delivered"] == 1
         with engine.connect() as conn:
             assert conn.execute(text("SELECT status FROM documents WHERE filename='retryable.txt'")).scalar() == "pending_approval"
+            assert conn.execute(text("""SELECT outputs_json::jsonb ->> 'health' FROM document_scans
+                WHERE document_id=(SELECT id FROM documents WHERE filename='retryable.txt')""")).scalar() == "unknown"
         with engine.connect() as conn:
             assert conn.execute(text("SELECT status FROM document_scans WHERE document_id=7 ORDER BY id DESC LIMIT 1")).scalar() == "pending_approval"
 

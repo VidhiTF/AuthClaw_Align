@@ -148,6 +148,7 @@ def run_document_scan_pipeline(doc_id: int, file_bytes: bytes, filename: str, so
     model = "gemini-2.5-flash-lite"
     
     is_key_valid = api_key and api_key not in ("dummy", "dummy-api-key", "")
+    provider_review = {"status": "unavailable" if is_key_valid else "not_applicable"}
     
     if is_key_valid:
         try:
@@ -201,10 +202,13 @@ Do not include markdown packaging like ```json.
                 ai_data = json.loads(ai_text)
                 
                 # Merge AI review insights
-                gemini_summary = ai_data.get("summary", "")
+                gemini_summary = ai_data.get("summary")
                 ai_findings = ai_data.get("ai_findings", [])
+                if not isinstance(gemini_summary, str) or not gemini_summary.strip() or not isinstance(ai_findings, list):
+                    raise ValueError("Invalid Gemini document review response")
                 if ai_findings:
                     all_findings.extend(ai_findings)
+                provider_review = {"status": "healthy"}
             else:
                 logger.warning("Gemini document review failed: status=%s", res.status_code)
         except (QuotaExceeded, QuotaUnavailable):
@@ -292,6 +296,7 @@ Do not include markdown packaging like ```json.
     # 9. Save results to database
     duration_ms = int((time.perf_counter() - start_time) * 1000)
     scan_status = status
+    health = "degraded" if provider_review["status"] == "unavailable" else "healthy"
     with engine.connect() as conn:
         # Commit the retryable alert and its scan together, before network I/O.
         if any(f.get("risk_level", "LOW").upper() in ("CRITICAL", "HIGH") for f in all_findings):
@@ -332,7 +337,8 @@ Do not include markdown packaging like ```json.
                 "duration": duration_ms,
                 "findings_json": json.dumps(all_findings),
                 "status": status,
-                "outputs": json.dumps({"alert_delivery": alert_delivery, "scan_status": scan_status}),
+                "outputs": json.dumps({"alert_delivery": alert_delivery, "scan_status": scan_status,
+                                        "health": health, "provider_review": provider_review}),
             }
         )
         
@@ -362,6 +368,8 @@ Do not include markdown packaging like ```json.
     if alert_delivery["status"] == "queued":
         alert_delivery = EventPipeline().deliver_event(event_id)
         status = scan_status if alert_delivery["status"] == "delivered" else "alert_delivery_failed"
+        if status == "alert_delivery_failed":
+            health = "degraded"
 
     create_document_audit(doc_id, "scan_completed", "system", f"Analysis completed in {duration_ms}ms. Risk Score: {risk_score} ({severity}). Findings Count: {len(all_findings)}", tenant_id=tenant_id)
     logger.info("Completed scan for doc %s: %s", doc_id, status)
@@ -379,6 +387,8 @@ Do not include markdown packaging like ```json.
         "risk_score": risk_score,
         "severity": severity,
         "status": status,
+        "health": health,
+        "provider_review": provider_review,
         "alert_delivery": alert_delivery,
         "duration_ms": duration_ms,
         "findings": all_findings,

@@ -89,7 +89,7 @@ test("overview clears stale values after an outage and renders an explicit alert
 test("dashboard honors canonical coverage and state, independent of audit mirror serialization", async () => {
   const metrics = { source: "postgres", status: "healthy", complete: true, totalRequests: 201, redactions24h: 1,
     requestsPerSec: 201 / 86400, p99LatencyMs: 0, windowStart: "2026-09-17T00:00:00Z", windowEnd: "2026-09-18T00:00:00Z" };
-  let auditSource = "postgres", failure = "", malformed = "", emptyAudit = false;
+  let auditSource = "postgres", failure = "", malformed = "", emptyAudit = false, approvalComplete = true;
   const calls: string[] = [];
   const route = compile("../src/app/api/dashboard/route.ts", {
     require: (name: string) => name === "next/server" ? { NextResponse: { json: (body: unknown) => body } } : {
@@ -99,7 +99,7 @@ test("dashboard honors canonical coverage and state, independent of audit mirror
     fetch: async (url: string) => {
       calls.push(url);
       if (url.includes(failure) && failure) throw new Error("synthetic outage");
-      return { ok: true, json: async () => url.includes(malformed) && malformed ? {} : url.includes("approvals") ? [{ status: "PENDING" }]
+      return { ok: true, json: async () => url.includes(malformed) && malformed ? {} : url.includes("approvals/pending-count") ? { count: 61, complete: approvalComplete }
         : url.includes("/metrics?") ? metrics : { source: auditSource, total: emptyAudit ? 0 : 409, records: emptyAudit ? [] : [{
           record_id: "record-1", timestamp: "2026-09-18T00:00:00Z", actor_type: "gateway", request_id: "request-1",
           idempotency_key: auditSource === "postgres" ? "gateway:request-1:provider_outcome" : "record-1", action: "allow", duration_ms: 20,
@@ -111,7 +111,7 @@ test("dashboard honors canonical coverage and state, independent of audit mirror
     const result = await route.GET(request) as typeof metrics & { openApprovals: number; recentActivity: unknown[]; sources: Record<string, { status: string }> };
     assert.equal(result.totalRequests, 201); assert.equal(result.redactions24h, 1);
     assert.equal(result.requestsPerSec, 201 / 86400); assert.equal(result.p99LatencyMs, 0);
-    assert.equal(result.openApprovals, 1);
+    assert.equal(result.openApprovals, 61);
     assert.equal(result.status, auditSource === "postgres" ? "healthy" : "unknown");
     assert.equal(result.sources.audit.status, auditSource === "postgres" ? "healthy" : "unknown");
     assert.equal(result.recentActivity.length, 1, "Unverified coverage must not hide observed events");
@@ -130,13 +130,21 @@ test("dashboard honors canonical coverage and state, independent of audit mirror
     failure = source;
     const result = await route.GET(request) as { status: string; openApprovals: number | null; totalRequests: number | null; sources: Record<string, { status: string }> };
     assert.equal(result.status, "unavailable");
-    assert.equal(result.openApprovals, source === "approvals" ? null : 1);
+    assert.equal(result.openApprovals, source === "approvals" ? null : 61);
     assert.equal(result.totalRequests, source === "/metrics?" ? null : 201);
     assert.equal(Object.values(result.sources).filter((item) => item.status === "unavailable").length, 1);
   }
   failure = ""; malformed = "/metrics?";
   const malformedResult = await route.GET(request) as { totalRequests: number | null; openApprovals: number };
-  assert.equal(malformedResult.totalRequests, null); assert.equal(malformedResult.openApprovals, 1);
+  assert.equal(malformedResult.totalRequests, null); assert.equal(malformedResult.openApprovals, 61);
+  malformed = ""; approvalComplete = false;
+  const incompleteApprovals = await route.GET(request) as { status: string; openApprovals: number | null; sources: Record<string, { status: string }> };
+  assert.equal(incompleteApprovals.status, "unknown"); assert.equal(incompleteApprovals.openApprovals, null);
+  assert.equal(incompleteApprovals.sources.approvals.status, "unknown");
+  approvalComplete = true; malformed = "approvals/pending-count";
+  const malformedApprovals = await route.GET(request) as { status: string; openApprovals: number | null; sources: Record<string, { status: string }> };
+  assert.equal(malformedApprovals.status, "unavailable"); assert.equal(malformedApprovals.openApprovals, null);
+  assert.equal(malformedApprovals.sources.approvals.status, "unavailable");
   malformed = "";
   Object.assign(metrics, { p99LatencyMs: null });
   const noLatency = await route.GET(request) as { status: string; metricStates: Record<string, string>; totalRequests: number };

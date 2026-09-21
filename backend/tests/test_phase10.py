@@ -265,3 +265,27 @@ def test_phase10_approval_expiration(client: TestClient, db_session: Session):
     assert audit is not None
     assert audit.mfa_verified is False
     db_session.execute(text("SET app.current_tenant_id = ''"))
+
+
+def test_pending_approval_count_is_complete_and_excludes_expired(client: TestClient, db_session: Session):
+    tenant_id, user_id, headers = _create_admin_tenant(
+        db_session, "Approval Count Tenant", "count@example.com", "approval_count_key")
+    now = datetime.now(timezone.utc)
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+    for index in range(62):
+        db_session.add(PendingApproval(
+            tenant_id=tenant_id, action_id=f"pending-{index}", action_type="gateway_policy_egress",
+            action_description="Pending request", action_payload={}, status="PENDING",
+            requester_id=user_id, expires_at=now + timedelta(minutes=30),
+        ))
+    db_session.add(PendingApproval(
+        tenant_id=tenant_id, action_id="expired", action_type="gateway_policy_egress",
+        action_description="Expired request", action_payload={}, status="PENDING",
+        requester_id=user_id, expires_at=now - timedelta(minutes=1),
+    ))
+    db_session.commit()
+    db_session.execute(text("SET app.current_tenant_id = ''"))
+
+    response = client.get("/v1/workflows/approvals/pending-count", headers=headers)
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == {"count": 62, "complete": True}

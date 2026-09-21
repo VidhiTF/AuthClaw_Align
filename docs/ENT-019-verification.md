@@ -606,3 +606,21 @@ services, not application data. No live cloud-provider, deployed browser/outage,
 AWS/SMTP configuration, complete-repository security clearance or merge readiness
 is asserted. Human current-head owner/risk reviews and rollout verification remain
 required; these results establish the bounded eight-finding remediation.
+
+## Scanner and approval-count follow-up (2026-09-21)
+
+Two retained integration defects were reproduced and fixed. A configured Gemini
+HTTP 503 now leaves the usable local scan result intact while recording provider
+review `unavailable` and overall scan health `degraded`; manual/background sync
+propagates that health without rescanning completed documents. The dashboard now
+uses a tenant-scoped, unexpired pending-approval aggregate with explicit complete
+metadata instead of counting a latest-50 mixed-status list. The degraded sample's
+diagnostic compliance state was corrected from healthy to unknown.
+
+Fresh evidence: Agent **191 passed and 120 subtests passed** using isolated
+PostgreSQL/Redis; backend affected suites **124 passed, one optional performance
+test skipped**, plus **6 PostgreSQL approval integration tests passed**; console
+**54 passed** and TypeScript passed. A post-review real PostgreSQL regression also
+verified degraded alert failure recovers to healthy after successful retry while
+provider degradation is retained. Provider outage used an HTTP boundary double;
+no live Gemini or deployed environment was exercised.

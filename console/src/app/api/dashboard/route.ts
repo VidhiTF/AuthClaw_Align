@@ -11,14 +11,15 @@ export async function GET(request: Request) {
     const headers = { Authorization: `Bearer ${context.session.apiKey}` };
     const apiUrl = process.env.API_URL || "http://localhost:8000";
     const results = await Promise.allSettled([
-      "/v1/workflows/approvals", `/v1/audit-logs/metrics?hours=${hours}`, "/v1/audit-logs?limit=8",
+      "/v1/workflows/approvals/pending-count", `/v1/audit-logs/metrics?hours=${hours}`, "/v1/audit-logs?limit=8",
     ].map(async (path) => {
       const response = await fetch(`${apiUrl}${path}`, { headers, cache: "no-store", signal: AbortSignal.timeout(15000) });
       if (!response.ok) throw new Error("Dashboard source unavailable");
       return response.json();
     }));
     const [approvals, gateway, audit] = results.map((result) => result.status === "fulfilled" ? result.value : null);
-    const approvalValid = Array.isArray(approvals) && approvals.every((item) => typeof item?.status === "string");
+    const approvalValid = approvals?.complete === true && Number.isInteger(approvals.count) && approvals.count >= 0;
+    const approvalState = approvalValid ? "healthy" : approvals?.complete === false ? "unknown" : "unavailable";
     const metricNames = ["totalRequests", "redactions24h", "requestsPerSec", "p99LatencyMs"] as const;
     const gatewayValid = gateway?.source === "postgres" && typeof gateway.complete === "boolean"
       && ["healthy", "degraded", "unknown", "unavailable", "not_applicable"].includes(gateway.status)
@@ -28,7 +29,7 @@ export async function GET(request: Request) {
       typeof record?.record_id === "string" && typeof record.action === "string" && typeof record.timestamp === "string" && Number.isFinite(Date.parse(record.timestamp)));
     const generatedAt = new Date().toISOString();
     const sources = {
-      approvals: { status: approvalValid ? "healthy" : "unavailable", source: "postgres", observedAt: generatedAt },
+      approvals: { status: approvalState, source: "postgres", observedAt: generatedAt },
       gateway: { status: !gatewayValid ? "unavailable" : gateway.status, source: "postgres", observedAt: gatewayValid ? gateway.windowEnd : generatedAt },
       audit: { status: !auditValid ? "unavailable" : audit.source === "postgres" ? "healthy" : "unknown", source: auditValid ? audit.source : null, observedAt: generatedAt },
     };
@@ -45,7 +46,7 @@ export async function GET(request: Request) {
       coverageReason: gatewayValid && !gateway.complete ? (typeof gateway.reason === "string" ? gateway.reason : "Gateway collection coverage is unverified.") : null,
       complete: gatewayValid ? gateway.complete : false,
       windowStart: gatewayValid ? gateway.windowStart : null, windowEnd: gatewayValid ? gateway.windowEnd : null,
-      openApprovals: approvalValid ? approvals.filter((item) => item.status === "PENDING").length : null,
+      openApprovals: approvalValid ? approvals.count : null,
       ...metrics, recentActivity: auditValid ? audit.records.slice(0, 8) : [],
     });
   } catch (error: unknown) {

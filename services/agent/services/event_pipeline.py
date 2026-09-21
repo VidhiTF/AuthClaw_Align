@@ -166,10 +166,19 @@ class EventPipeline:
                 scans = conn.execute(text("""
                     UPDATE document_scans SET status = CASE WHEN :delivered THEN outputs_json::jsonb ->> 'scan_status'
                         ELSE 'alert_delivery_failed' END,
-                        outputs_json = jsonb_set(outputs_json::jsonb, '{alert_delivery,status}', CAST(:status AS jsonb))::text
+                        outputs_json = jsonb_set(
+                            jsonb_set(outputs_json::jsonb, '{alert_delivery,status}', CAST(:status AS jsonb)),
+                            '{health}', CASE WHEN :delivered THEN CASE outputs_json::jsonb #>> '{provider_review,status}'
+                                WHEN 'unavailable' THEN '"degraded"'::jsonb
+                                WHEN 'healthy' THEN '"healthy"'::jsonb
+                                WHEN 'not_applicable' THEN '"healthy"'::jsonb
+                                ELSE '"unknown"'::jsonb END
+                                ELSE CAST(:health AS jsonb) END)::text
                     WHERE tenant_id = :tenant AND document_id = :document AND outputs_json::jsonb #>> '{alert_delivery,event_id}' = :id
                     RETURNING id, document_id, status
-                """), {"tenant": record["tenant_id"], "document": event["document_id"], "id": event_id, "delivered": delivered, "status": json.dumps(status)}).all()
+                """), {"tenant": record["tenant_id"], "document": event["document_id"], "id": event_id,
+                         "delivered": delivered, "status": json.dumps(status),
+                         "health": json.dumps("degraded")}).all()
                 for scan in scans:
                     conn.execute(text("""
                         UPDATE documents SET status = :status WHERE id = :document AND tenant_id = :tenant

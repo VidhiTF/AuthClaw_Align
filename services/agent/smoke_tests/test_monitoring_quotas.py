@@ -17,7 +17,7 @@ class MonitoringQuotaTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / "document_processing/monitoring.py"
         nodes = [node for node in ast.parse(source.read_text()).body
                  if isinstance(node, ast.FunctionDef) and node.name in
-                 {"sync_sources", "_sync_sources", "trigger_manual_sync", "start_background_monitoring", "_monitor_loop"}]
+                 {"_scan_failed", "sync_sources", "_sync_sources", "trigger_manual_sync", "start_background_monitoring", "_monitor_loop"}]
         self.conn = Mock()
         self.conn.execute.return_value.fetchone.return_value = (1, 2, "completed")
         self.conn.execute.return_value.fetchall.return_value = []
@@ -139,6 +139,29 @@ class MonitoringQuotaTests(unittest.TestCase):
                             with tenant_context(7):
                                 self.assertEqual(self.ns["trigger_manual_sync"]()["status"], "success")
                             self.ns["run_document_scan_pipeline"].assert_called_once()
+
+    def test_degraded_scan_health_propagates_to_manual_and_background_sync(self):
+        for background in (False, True):
+            with self.subTest(background=background):
+                self.setUp()
+                self.conn.execute.return_value.fetchone.side_effect = [None, (1,)]
+                self.ns["run_document_scan_pipeline"].return_value = {
+                    "status": "completed", "health": "degraded"}
+                self.ns["last_sync_time"] = "previous success"
+                self.monitor_state["last_success_timestamp"] = 123
+                if background:
+                    observed = []
+                    self.ns["_stop_event"].is_set.return_value = False
+                    self.ns["_stop_event"].wait.side_effect = lambda seconds: (
+                        observed.append(dict(self.monitor_state)) or True)
+                    self.ns["_monitor_loop"]("7")
+                    self.assertEqual(observed[0]["status"], "degraded")
+                    self.assertEqual(observed[0]["last_success_timestamp"], 123)
+                else:
+                    with tenant_context(7), self.assertRaisesRegex(
+                            RuntimeError, "Document synchronization incomplete"):
+                        self.ns["trigger_manual_sync"]()
+                self.assertEqual(self.ns["last_sync_time"], "previous success")
 
     def test_source_failure_preserves_success_time_and_recovery(self):
         self.engine.connect.side_effect = ConnectionError("database unavailable")

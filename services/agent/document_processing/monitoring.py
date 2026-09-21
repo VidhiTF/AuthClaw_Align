@@ -33,6 +33,11 @@ _monitor_thread = None
 # Track last sync time globally for stats APIs
 last_sync_time = "N/A"
 
+
+def _scan_failed(result):
+    return result["status"] == "alert_delivery_failed" or result.get("health") in {"degraded", "unavailable"}
+
+
 def get_watched_directory() -> str:
     if not os.path.exists(WATCH_DIR):
         os.makedirs(WATCH_DIR)
@@ -121,7 +126,7 @@ def _sync_sources(tenant_id):
                     doc_id = res.fetchone()[0]
                     conn.commit()
                 with open(filepath, "rb") as f:
-                    if run_document_scan_pipeline(doc_id, f.read(), filename, source="watched", tenant_id=tenant_id)["status"] == "alert_delivery_failed":
+                    if _scan_failed(run_document_scan_pipeline(doc_id, f.read(), filename, source="watched", tenant_id=tenant_id)):
                         failures.add("local")
             elif doc[1] != size or doc[2] in {"pending", "scanning"}:
                 # Rescan modified
@@ -132,7 +137,7 @@ def _sync_sources(tenant_id):
                     )
                     conn.commit()
                 with open(filepath, "rb") as f:
-                    if run_document_scan_pipeline(doc[0], f.read(), filename, source="watched", tenant_id=tenant_id)["status"] == "alert_delivery_failed":
+                    if _scan_failed(run_document_scan_pipeline(doc[0], f.read(), filename, source="watched", tenant_id=tenant_id)):
                         failures.add("local")
     except (QuotaExceeded, QuotaUnavailable):
         raise
@@ -298,7 +303,7 @@ def _sync_sources(tenant_id):
                         logger.error(f"Failed to fetch content for {filename} from {src}: {fetch_err}")
                         raise
                         
-                    if run_document_scan_pipeline(doc_id, file_bytes, filename, source=src, tenant_id=tenant_id)["status"] == "alert_delivery_failed":
+                    if _scan_failed(run_document_scan_pipeline(doc_id, file_bytes, filename, source=src, tenant_id=tenant_id)):
                         failures.add(src)
                         
                 elif doc[1] != size or doc[2] in {"pending", "scanning"}:
@@ -328,7 +333,7 @@ def _sync_sources(tenant_id):
                         logger.error(f"Failed to fetch updated content for {filename} from {src}: {fetch_err}")
                         raise
                         
-                    if run_document_scan_pipeline(doc[0], file_bytes, filename, source=src, tenant_id=tenant_id)["status"] == "alert_delivery_failed":
+                    if _scan_failed(run_document_scan_pipeline(doc[0], file_bytes, filename, source=src, tenant_id=tenant_id)):
                         failures.add(src)
                         
         except (QuotaExceeded, QuotaUnavailable):
