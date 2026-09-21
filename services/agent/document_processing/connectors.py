@@ -5,8 +5,6 @@ import re
 import base64
 import time
 from typing import Dict, List, Any
-from fastapi import HTTPException
-from services.tenant_context import validate_tenant_id
 
 logger = logging.getLogger("authclaw.document_processing.connectors")
 
@@ -24,7 +22,9 @@ def require_source_tenant() -> None:
     """Bind process-wide source credentials and watched files to one tenant."""
     owner = os.getenv("AUTHCLAW_CONNECTOR_TENANT_ID") or os.getenv("AUTHCLAW_BACKGROUND_MONITOR_TENANT_ID", "")
     if not owner.isascii() or not owner.isdigit() or int(owner) <= 0:
+        from fastapi import HTTPException
         raise HTTPException(503, "Document source tenant is not configured")
+    from services.tenant_context import validate_tenant_id
     validate_tenant_id(int(owner))
 
 
