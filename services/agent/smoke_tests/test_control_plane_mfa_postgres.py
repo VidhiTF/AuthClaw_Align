@@ -165,7 +165,7 @@ def test_signed_control_plane_principal_completes_mfa_approval_and_execution_und
         execute_approval=lambda **kwargs: SimpleNamespace(
             result={"response": "test execution"}, request_id="execution-test", provider="test",
             provider_operation_id="execution-test", model="test", route_id="test",
-            decision="ALLOW", trace=[],
+            decision="ALLOW", trace=[], outcome=main.GatewayExecutionOutcome.SUCCEEDED,
         ),
     ))
     monkeypatch.setattr(main, "get_policy", lambda: {"approval": {
@@ -216,7 +216,12 @@ def test_signed_control_plane_principal_completes_mfa_approval_and_execution_und
         assert response.status_code == 200, response.text
         with tenant_one.connect() as conn:
             assert conn.execute(text("SELECT array_agg(action ORDER BY id) FROM approval_audit_events")).scalar() == ["approved", "executing", "executed"]
-            assert conn.execute(text("SELECT status FROM gateway_approvals")).scalar_one() == "executed"
+            execution = conn.execute(text(
+                "SELECT status, execution_outcome FROM gateway_approvals"
+            )).mappings().one()
+            assert execution["status"] == "executed"
+            assert json.loads(execution["execution_outcome"])["outcome"] == "succeeded"
+            assert json.loads(execution["execution_outcome"])["executed"] is True
             assert conn.execute(text("SELECT count(*) FROM approval_audit_events WHERE actor=:actor AND mfa_verified"), {"actor": actor}).scalar_one() == 3
             if evidence_dir := os.getenv("ENT022_EVIDENCE_DIR"):
                 zone = conn.execute(text("SHOW timezone")).scalar_one().replace("/", "-")
@@ -225,7 +230,13 @@ def test_signed_control_plane_principal_completes_mfa_approval_and_execution_und
                     "FROM approval_audit_events ORDER BY id"
                 )).mappings()]
                 Path(evidence_dir, f"agent-{zone}-audit.json").write_text(
-                    json.dumps(events, indent=2, default=str), encoding="utf-8",
+                    json.dumps({
+                        "gateway_approval": {
+                            "status": execution["status"],
+                            "execution_outcome": json.loads(execution["execution_outcome"]),
+                        },
+                        "audit_events": events,
+                    }, indent=2, default=str), encoding="utf-8",
                 )
         # RBAC and tenant checks are exercised through the same signed HTTP boundary.
         for options, expected in [({"role": "viewer"}, 403), ({"tenant_id": str(uuid4())}, 404)]:

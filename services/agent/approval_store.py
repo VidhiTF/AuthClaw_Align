@@ -709,6 +709,7 @@ def approve_approval_atomic(
     execution_expires_at: datetime,
     comment: str = None,
     audit_metadata: dict = None,
+    connection=None,
 ) -> PersistentApprovalRecord:
     """Commit the single-use pending-to-approved decision and audit atomically."""
     approval_id = record.get("approval_id")
@@ -716,7 +717,8 @@ def approve_approval_atomic(
     conflict_status = None
     updated_record = None
     try:
-        with engine.begin() as conn:
+        context = nullcontext(connection) if connection is not None else engine.begin()
+        with context as conn:
             row = conn.execute(
                 text(
                     """
@@ -805,7 +807,7 @@ def approve_approval_atomic(
     except Exception as exc:
         raise ApprovalPersistenceError("Atomic approval transition failed") from exc
 
-    if updated_record is not None:
+    if updated_record is not None and connection is None:
         _approvals[approval_id] = updated_record
     if conflict_status is not None:
         raise ApprovalStateConflict(conflict_status)
@@ -925,6 +927,7 @@ def begin_approval_execution_atomic(
     mfa_counter: int,
     comment: str = None,
     audit_metadata: dict = None,
+    connection=None,
 ) -> PersistentApprovalRecord:
     """Consume one approved execution and persist its audit in one transaction."""
     approval_id = record.get("approval_id")
@@ -932,7 +935,8 @@ def begin_approval_execution_atomic(
     conflict_status = None
     updated_record = None
     try:
-        with engine.begin() as conn:
+        context = nullcontext(connection) if connection is not None else engine.begin()
+        with context as conn:
             row = conn.execute(
                 text(
                     """
@@ -1034,7 +1038,7 @@ def begin_approval_execution_atomic(
     except Exception as exc:
         raise ApprovalPersistenceError("Atomic approval execution transition failed") from exc
 
-    if updated_record is not None:
+    if updated_record is not None and connection is None:
         _approvals[approval_id] = updated_record
     if conflict_status is not None:
         raise ApprovalStateConflict(conflict_status)

@@ -108,7 +108,7 @@ def test_atomic_increment_concurrency_leaves_positive_ttl():
         client.delete(key)
 
 
-def test_mfa_isolated_by_user_and_operation_and_success_resets(monkeypatch):
+def test_mfa_failures_and_success_share_factor_wide_budget(monkeypatch):
     client = FakeRedis()
     user = SimpleNamespace(id="user-1")
     monkeypatch.setattr(
@@ -124,8 +124,33 @@ def test_mfa_isolated_by_user_and_operation_and_success_resets(monkeypatch):
     )
     disable_keys = abuse_controls._mfa_keys("tenant-1", "user-1", "mfa_disable")
     approval_keys = abuse_controls._mfa_keys("tenant-1", "user-1", "gateway_approval")
-    assert client.values.get(disable_keys[0]) == 2
+    assert disable_keys == approval_keys
     assert all(key not in client.values for key in approval_keys)
+
+
+def test_mfa_factor_wide_lockout_carries_across_operations(monkeypatch):
+    client = FakeRedis()
+    user = SimpleNamespace(id="user-1")
+    monkeypatch.setattr(
+        "app.core.auth.verify_mfa_code_result",
+        lambda *_args: MFAVerification(False),
+    )
+    monkeypatch.setenv("MFA_FAILURE_THRESHOLD", "2")
+
+    assert not abuse_controls.verify_mfa_challenge(
+        client, user, "bad", tenant_id="tenant-1", operation="mfa_disable"
+    )
+    with pytest.raises(HTTPException) as lockout:
+        abuse_controls.verify_mfa_challenge(
+            client, user, "bad", tenant_id="tenant-1", operation="gateway_approval"
+        )
+    assert lockout.value.status_code == 429
+
+    with pytest.raises(HTTPException) as blocked:
+        abuse_controls.verify_mfa_challenge(
+            client, user, "bad", tenant_id="tenant-1", operation="workflow_approval"
+        )
+    assert blocked.value.status_code == 429
 
 
 def test_success_admitted_before_cooldown_cannot_clear_new_cooldown(monkeypatch):

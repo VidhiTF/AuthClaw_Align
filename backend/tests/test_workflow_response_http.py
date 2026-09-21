@@ -90,6 +90,9 @@ def api(monkeypatch):
     app.include_router(workflows.router, prefix="/api/v1/workflows", include_in_schema=False)
     monkeypatch.setattr(workflows, "check_worker_throttle", lambda *_args, **_kw: (True, 0))
     monkeypatch.setattr(workflows, "create_notification", lambda *_args, **_kw: None)
+    # Exact credential revocation is exercised against PostgreSQL in
+    # test_t10_postgres; this SQLite contract fixture has no authn schema.
+    monkeypatch.setattr(workflows, "revalidate_tenant_credential", lambda *_args: None)
     monkeypatch.setattr(
         workflows, "_verify_mfa_if_enabled", lambda *_args, **_kw: (True, datetime.now(timezone.utc))
     )

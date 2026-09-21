@@ -113,8 +113,10 @@ def atomic_increment(
 
 def _mfa_keys(tenant_id: str, user_id: str, operation: str) -> tuple[str, str, str]:
     subject = hashlib.sha256(f"{tenant_id}:{user_id}".encode("utf-8")).hexdigest()[:32]
-    operation_name = operation.replace("_", "-")
-    prefix = f"authclaw:mfa:v2:{{{subject}}}:{operation_name}"
+    # A TOTP/recovery factor is shared by every privileged operation. The
+    # primary guessing budget must therefore be factor-wide; operation remains
+    # audit context, not a way to obtain another independent attempt budget.
+    prefix = f"authclaw:mfa:v3:{{{subject}}}:factor"
     return f"{prefix}:attempts", f"{prefix}:level", f"{prefix}:cooldown"
 
 
@@ -171,7 +173,7 @@ def verify_mfa_challenge(
     request_id: str = "",
     pending_enrollment: bool = False,
 ) -> bool:
-    """Verify MFA with an atomic, per-user/per-operation bounded cooldown."""
+    """Verify MFA with an atomic, factor-wide per-user bounded cooldown."""
     attempts_key, level_key, cooldown_key = _mfa_keys(
         tenant_id, str(user.id), operation
     )

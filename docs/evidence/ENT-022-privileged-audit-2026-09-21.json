@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "generated_from": {
+    "reviewed_base": "47c30c79d9e61c384a514b8b17a86774d7242c90",
+    "runtime_test": "services/agent/smoke_tests/test_control_plane_mfa_postgres.py",
+    "terminal_contract_test": "services/agent/smoke_tests/test_agent_execution_authorization.py::AgentExecutionAuthorizationTests::test_execution_terminal_state_and_audit_match_provider_outcome",
+    "runtime_result": "9 passed",
+    "terminal_contract_result": "passed for policy_denied, execution_error, provider_unavailable, and succeeded"
+  },
+  "postgres_runtime_audit": {
+    "gateway_approval": {
+      "status": "executed",
+      "execution_outcome": {
+        "allowed": true,
+        "decision": "ALLOW",
+        "executed": true,
+        "outcome": "succeeded",
+        "provider": "test",
+        "status": "succeeded"
+      }
+    },
+    "audit_events": [
+      {
+        "action": "approved",
+        "actor": "2a79037c-2c99-4f7d-a305-80e30fa9ef92",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-21 09:40:03.841114"
+      },
+      {
+        "action": "executing",
+        "actor": "2a79037c-2c99-4f7d-a305-80e30fa9ef92",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-21 09:40:04.361187"
+      },
+      {
+        "action": "executed",
+        "actor": "2a79037c-2c99-4f7d-a305-80e30fa9ef92",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-21 09:40:04.374627"
+      }
+    ]
+  },
+  "exercised_terminal_contracts": [
+    {
+      "scenario": "policy_denied",
+      "http_status": 403,
+      "final_status": "execution_failed",
+      "execution_outcome": {
+        "status": "denied",
+        "outcome": "policy_denied",
+        "allowed": false,
+        "executed": false
+      }
+    },
+    {
+      "scenario": "execution_error",
+      "http_status": 502,
+      "final_status": "execution_failed",
+      "execution_outcome": {
+        "status": "failed",
+        "outcome": "execution_error",
+        "allowed": false,
+        "executed": false
+      }
+    },
+    {
+      "scenario": "provider_unavailable",
+      "http_status": 503,
+      "final_status": "execution_indeterminate",
+      "execution_outcome": {
+        "status": "indeterminate",
+        "outcome": "provider_unavailable",
+        "allowed": false,
+        "executed": false
+      }
+    },
+    {
+      "scenario": "succeeded",
+      "http_status": 200,
+      "final_status": "executed",
+      "execution_outcome": {
+        "status": "succeeded",
+        "outcome": "succeeded",
+        "allowed": true,
+        "executed": true
+      }
+    }
+  ]
+}

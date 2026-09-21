@@ -403,9 +403,13 @@ jobs:
             smoke_tests/test_control_plane_auth.py smoke_tests/test_agent_execution_authorization.py \
             smoke_tests/test_control_plane_mfa_postgres.py \
             smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py \
+            smoke_tests/test_gateway_provider.py smoke_tests/test_privileged_policy_invariants.py \
+            smoke_tests/test_runtime_context_regressions.py \
             smoke_tests/test_quota_service.py smoke_tests/test_quota_http_boundary.py \
             smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py \
             smoke_tests/test_quota_redis.py smoke_tests/test_compliance_diagnostics.py -q
+        env:
+          ENT022_EVIDENCE_DIR: ${{ github.workspace }}/ent022-mfa-evidence
       - name: Verify real backend TOTP through signed agent approval and execution
         env:
           ENT022_EVIDENCE_DIR: ${{ github.workspace }}/ent022-mfa-evidence

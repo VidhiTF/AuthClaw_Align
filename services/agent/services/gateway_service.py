@@ -5,6 +5,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable, Dict, Optional
 
 from database import engine
@@ -34,6 +35,13 @@ class GatewayProviderUnavailableError(Exception):
         self.trace = trace or []
 
 
+class GatewayExecutionOutcome(str, Enum):
+    SUCCEEDED = "succeeded"
+    POLICY_DENIED = "policy_denied"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    EXECUTION_ERROR = "execution_error"
+
+
 @dataclass
 class GatewayExecution:
     request_id: str
@@ -46,6 +54,7 @@ class GatewayExecution:
     route_id: Optional[str]
     decision: Optional[str]
     provider_operation_id: Optional[str] = None
+    outcome: GatewayExecutionOutcome = GatewayExecutionOutcome.EXECUTION_ERROR
 
 
 class GatewayService:
@@ -177,6 +186,13 @@ class GatewayService:
             route_id=resolved_route_id,
             decision=decision,
             provider_operation_id=request_id,
+            outcome=(
+                GatewayExecutionOutcome.SUCCEEDED
+                if allowed and result.get("provider_status") == "ok"
+                else GatewayExecutionOutcome.POLICY_DENIED
+                if not allowed
+                else GatewayExecutionOutcome.EXECUTION_ERROR
+            ),
         )
 
     def execute_approval(
@@ -228,6 +244,10 @@ class GatewayService:
                     "model": model,
                 }
             )
+            if result.get("provider_status") == "offline_fallback":
+                raise RuntimeError(
+                    "Approved execution did not receive an upstream provider response"
+                )
         except (QuotaExceeded, QuotaUnavailable):
             raise
         except ValueError as e:
@@ -249,18 +269,30 @@ class GatewayService:
             )
             trace = self.get_trace(request_id=request_id, session_id=resolved_session_id, tenant_id=tenant_id)
             self.persist_latest_message_trace(resolved_session_id, trace)
-            raise GatewayProviderUnavailableError(str(e), request_id=request_id, trace=trace) from e
+            raise GatewayProviderUnavailableError(
+                str(e),
+                request_id=request_id,
+                provider_operation_id=request_id,
+                trace=trace,
+            ) from e
         finally:
             clear_agent_event_context(token)
 
         latency_ms = int((time.perf_counter() - start) * 1000)
-        allowed = result.get("allowed", True)
+        allowed = result.get("allowed") is True
         risk_level = result.get("risk_level", approval_record.get("risk_level", "LOW"))
         status = "allowed" if allowed else "blocked"
         resolved_route_id = result.get("route_id")
         resolved_provider = result.get("provider") or provider
         resolved_model = result.get("model") or model
         decision = result.get("decision")
+        outcome = (
+            GatewayExecutionOutcome.POLICY_DENIED
+            if not allowed
+            else GatewayExecutionOutcome.SUCCEEDED
+            if result.get("provider_status") == "ok"
+            else GatewayExecutionOutcome.EXECUTION_ERROR
+        )
 
         RegistrarService().register_gateway_request(
             risk_level=risk_level,
@@ -289,6 +321,8 @@ class GatewayService:
             model=resolved_model,
             route_id=resolved_route_id,
             decision=decision,
+            provider_operation_id=request_id if outcome == GatewayExecutionOutcome.SUCCEEDED else None,
+            outcome=outcome,
         )
 
     def format_chat_response(self, execution: GatewayExecution) -> Dict[str, Any]:

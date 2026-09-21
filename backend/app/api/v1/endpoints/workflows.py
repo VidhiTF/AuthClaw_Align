@@ -21,6 +21,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.auth import (
     get_tenant_db,
+    revalidate_tenant_credential,
     require_scopes,
 )
 from app.api.v1.endpoints.onboarding import _get_redis
@@ -557,7 +558,7 @@ def approve_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).first()
+    ).with_for_update().first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
@@ -571,6 +572,10 @@ def approve_gateway_approval(
     ).with_for_update().first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
+    # Authentication happens before handler-level lock waits. Re-bind the exact
+    # session/API key after all authorization rows are locked so revocation wins
+    # the race before MFA consumption or the privileged state transition.
+    revalidate_tenant_credential(request, db)
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
         user, request, body, required=True, operation="gateway_approval"
     )
@@ -803,6 +808,10 @@ def approve_workflow(
     ).with_for_update().first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
+
+    # Close the authenticate/wait/revoke/commit race using the credential that
+    # authenticated this request, after the approval and user locks are held.
+    revalidate_tenant_credential(request, db)
 
     requires_fresh_mfa = _approval_requires_fresh_mfa(approval)
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(

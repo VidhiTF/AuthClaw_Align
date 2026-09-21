@@ -1,1 +1,68 @@
-[]
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-21T09:52:00Z",
+  "scanner": {
+    "name": "gitleaks",
+    "version": "8.24.3",
+    "container_image": "ghcr.io/gitleaks/gitleaks:v8.24.3",
+    "container_digest": "sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055"
+  },
+  "configuration": ".gitleaks.toml",
+  "scans": [
+    {
+      "input": "current production, policy, CI, and infrastructure snapshot",
+      "command": "gitleaks dir --redact --config=/repo/.gitleaks.toml <target>",
+      "targets": [
+        "backend/app",
+        "backend/alembic",
+        "services/agent",
+        "console/src",
+        "gateway",
+        "audit_consumer",
+        "infra",
+        ".github"
+      ],
+      "exit_status": 0,
+      "summary": "all listed current-snapshot targets scanned; no leaks found"
+    },
+    {
+      "input": "reviewed commit 47c30c79d9e61c384a514b8b17a86774d7242c90",
+      "command": "gitleaks git --redact --config=/repo/.gitleaks.toml --log-opts=47c30c79d9e61c384a514b8b17a86774d7242c90^..47c30c79d9e61c384a514b8b17a86774d7242c90 /repo",
+      "exit_status": 0,
+      "summary": "1 commit scanned; no leaks found"
+    },
+    {
+      "input": "git diff --binary --no-ext-diff from reviewed commit 47c30c79d9e61c384a514b8b17a86774d7242c90",
+      "command": "git diff --binary --no-ext-diff | gitleaks stdin --redact --config=/repo/.gitleaks.toml",
+      "exit_status": 0,
+      "summary": "final working diff scanned; no leaks found"
+    }
+  ],
+  "focused_mfa_default_scan": {
+    "scope": [
+      "backend/app",
+      "services/agent",
+      "console/src",
+      "gateway",
+      "audit_consumer",
+      ".github"
+    ],
+    "excluded": [
+      "tests",
+      "smoke_tests",
+      "virtual environments",
+      "node_modules",
+      "Markdown"
+    ],
+    "patterns": [
+      "default_mfa_code",
+      "disable_mfa_for_testing",
+      "authclaw_allow_test_mfa_bypass",
+      "non-empty AUTHCLAW_LITE_DEMO_TOTP_SECRET assignment",
+      "quoted literal 123456"
+    ],
+    "matches": 0,
+    "summary": "No static MFA approval code, environment-default bypass, or privileged fallback value found."
+  },
+  "findings": []
+}

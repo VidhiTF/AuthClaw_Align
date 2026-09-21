@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from threading import Barrier
+from threading import Barrier, Event
 from time import perf_counter
 import tracemalloc
 from types import SimpleNamespace
@@ -24,12 +24,13 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import ApprovalAudit, ComplianceScoreSnapshot, Notification, PendingApproval, TrustCenterAccessLog, TrustCenterShare, User
+from app.db.models import ApprovalAudit, ComplianceScoreSnapshot, ComplianceWorkflow, Notification, PendingApproval, TrustCenterAccessLog, TrustCenterShare, User
 from app.db import dependencies, session as database_session
 from app.core.auth import get_tenant_score_db, set_mfa_credentials
 from app.services import abuse_controls, audit_store, compliance_scoring, control_assessments, event_backbone, evidence_service, trust_center
 from app.api.v1.endpoints.trust_center import get_public_trust_center
 from app.api.v1.endpoints import compliance_scores
+from app.api.v1.endpoints import workflows as workflow_endpoints
 from starlette.requests import Request
 from tests.db_safety import destructive_test_urls
 from tests.test_tenant_isolation import Identity, IsolationHarness
@@ -115,6 +116,146 @@ def reviewer(harness, requester):
             now()+interval '10 minutes','{}'::jsonb)"""),
             {"hash": identity.session_hash, "tenant": identity.tenant_id, "user": identity.user_id})
     return identity
+
+
+def _approval_request(identity):
+    request = SimpleNamespace(headers={}, query_params={}, state=SimpleNamespace())
+    request.state.tenant_id = identity.tenant_id
+    request.state.user_id = identity.user_id
+    request.state.credential_kind = "session"
+    request.state.credential_hash = identity.session_hash
+    return request
+
+
+def _assert_revocation_wins_post_lock_race(
+    postgres, monkeypatch, *, remediation: bool
+):
+    harness, _, _ = postgres
+    requester = harness.create_identity(
+        "revocation-race-remediation" if remediation else "revocation-race-gateway"
+    )
+    approver = reviewer(harness, requester)
+    approval_id = uuid4()
+    workflow_id = f"workflow-{uuid4()}"
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    action_payload = (
+        workflow_endpoints.build_action_payload(workflow_id, [])
+        if remediation
+        else {"request": "gateway egress"}
+    )
+    action_hash = workflow_endpoints.compute_action_hash(
+        tenant_id=str(requester.tenant_id),
+        action_payload=action_payload,
+        expires_at=expires_at,
+    )
+    with harness.session_for(requester) as db:
+        db.add(PendingApproval(
+            id=approval_id,
+            tenant_id=requester.tenant_id,
+            action_id=workflow_id if remediation else f"gateway-{uuid4()}",
+            action_type="remediation" if remediation else "gateway_policy_egress",
+            action_description="Post-lock revocation regression",
+            action_payload=action_payload,
+            action_hash=action_hash,
+            status="PENDING",
+            requester_id=requester.user_id,
+            expires_at=expires_at,
+        ))
+        if remediation:
+            db.add(ComplianceWorkflow(
+                tenant_id=requester.tenant_id,
+                workflow_id=workflow_id,
+                framework="SOC2",
+                current_state="HUMAN_APPROVAL",
+                remediation_plan=[],
+                approval_id=approval_id,
+                approval_status="PENDING",
+                execution_status="PAUSED",
+            ))
+        db.commit()
+
+    monkeypatch.setattr(
+        workflow_endpoints,
+        "_verify_mfa_if_enabled",
+        lambda *_args, **_kwargs: (True, datetime.now(timezone.utc)),
+    )
+    if remediation:
+        monkeypatch.setattr(
+            workflow_endpoints.ComplianceWorkflowRunner,
+            "get_status",
+            lambda *_args, **_kwargs: {
+                "execution_status": "PAUSED",
+                "approval_id": str(approval_id),
+            },
+        )
+
+    lock_requested = Event()
+
+    def observe_user_lock(_conn, _cursor, statement, _parameters, _context, _many):
+        normalized = " ".join(statement.upper().split())
+        if "FROM USERS" in normalized and "FOR UPDATE" in normalized:
+            lock_requested.set()
+
+    event.listen(harness.app_engine, "before_cursor_execute", observe_user_lock)
+    blocker = harness.owner_engine.connect()
+    transaction = blocker.begin()
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        blocker.execute(
+            text("SELECT id FROM users WHERE id=:id FOR UPDATE"),
+            {"id": approver.user_id},
+        )
+
+        def approve():
+            with harness.session_for(approver) as db:
+                request = _approval_request(approver)
+                body = workflow_endpoints.ApprovalRequest(totp_code="000000")
+                if remediation:
+                    return workflow_endpoints.approve_workflow(
+                        workflow_id, request, body, db
+                    )
+                return workflow_endpoints.approve_gateway_approval(
+                    str(approval_id), request, body, db
+                )
+
+        future = executor.submit(approve)
+        assert lock_requested.wait(timeout=10), "approval never reached the locked user row"
+        assert blocker.execute(
+            text("SELECT authn.revoke_session(:credential_hash)"),
+            {"credential_hash": approver.session_hash},
+        ).scalar_one()
+        transaction.commit()
+        with pytest.raises(HTTPException) as rejected:
+            future.result(timeout=15)
+        assert rejected.value.status_code == 401
+    finally:
+        if transaction.is_active:
+            transaction.rollback()
+        blocker.close()
+        executor.shutdown(wait=True, cancel_futures=True)
+        event.remove(harness.app_engine, "before_cursor_execute", observe_user_lock)
+
+    with harness.owner_engine.connect() as conn:
+        assert conn.execute(
+            text("SELECT status FROM pending_approvals WHERE id=:id"),
+            {"id": approval_id},
+        ).scalar_one() == "PENDING"
+        assert conn.execute(
+            text("SELECT count(*) FROM approval_audit WHERE approval_id=:id"),
+            {"id": approval_id},
+        ).scalar_one() == 0
+
+
+def test_gateway_approval_cannot_commit_after_blocked_session_is_revoked(
+    postgres, monkeypatch
+):
+    _assert_revocation_wins_post_lock_race(postgres, monkeypatch, remediation=False)
+
+
+def test_remediation_approval_cannot_resume_after_blocked_session_is_revoked(
+    postgres, monkeypatch
+):
+    _assert_revocation_wins_post_lock_race(postgres, monkeypatch, remediation=True)
 
 
 def pending_assessment(harness, requester):

@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import hashlib
+import json
 import os
 import threading
 import unittest
@@ -891,6 +892,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             result={"response": "effect applied"}, request_id="provider-operation-17",
             provider_operation_id="approval-exec-operation-crash-17",
             provider="test", model="test", route_id="route", decision="ALLOW", trace=[],
+            outcome=main.GatewayExecutionOutcome.SUCCEEDED,
         ))
         request = SimpleNamespace(headers={"Authorization": "Bearer test"})
 
@@ -920,6 +922,120 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             provider.call_args.kwargs["idempotency_key"], "operation-crash-17"
         )
         provider.assert_called_once()
+
+    def test_execution_terminal_state_and_audit_match_provider_outcome(self):
+        import main
+
+        base = {
+            "approval_id": "approval-truthful-outcome",
+            "request_id": "request-truthful-outcome",
+            "correlation_id": "correlation-truthful-outcome",
+            "tenant_id": 42,
+            "status": "approved",
+            "requested_by": "oidc|requester",
+            "approved_by": "oidc|checker",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "execution_expires_at": "2099-01-01T00:10:00+00:00",
+            "metadata": {},
+            "query": "Apply the approved change",
+            "risk_level": "HIGH",
+        }
+        request = SimpleNamespace(headers={"Authorization": "Bearer test"})
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield object()
+
+        scenarios = (
+            ("policy_denied", main.GatewayExecutionOutcome.POLICY_DENIED, None, "execution_failed", 403, False),
+            ("execution_error", main.GatewayExecutionOutcome.EXECUTION_ERROR, None, "execution_failed", 502, False),
+            ("provider_unavailable", None, main.GatewayProviderUnavailableError(
+                "offline fallback", request_id="request-offline",
+                provider_operation_id="provider-offline", trace=["offline_fallback"],
+            ), "execution_indeterminate", 503, False),
+            ("succeeded", main.GatewayExecutionOutcome.SUCCEEDED, None, "executed", None, True),
+        )
+        evidence = []
+        for label, outcome, provider_error, expected_status, response_status, expected_executed in scenarios:
+            dispatched = {
+                **base,
+                "status": "executing",
+                "execution_operation_id": f"operation-{label}",
+            }
+            execution = SimpleNamespace(
+                result={"response": "effect applied"},
+                request_id=f"request-{label}",
+                provider_operation_id=(
+                    f"provider-{label}" if expected_executed else None
+                ),
+                provider="test",
+                model="test",
+                route_id="route",
+                decision="ALLOW" if expected_executed else "DENY",
+                trace=[],
+                outcome=outcome,
+            )
+            terminal_calls = []
+
+            def finish(record, **kwargs):
+                terminal_calls.append(kwargs)
+                return {
+                    **record,
+                    "status": kwargs["final_status"],
+                    "executed_at": "2026-01-01T00:05:00+00:00",
+                }
+
+            with (
+                self.subTest(outcome=label),
+                patch("database.engine", Engine()),
+                patch.object(main, "get_approval", return_value=dict(base)),
+                patch.object(main, "_approval_authenticated_payload", return_value={
+                    "sub": "oidc|checker", "tenant_id": 42,
+                }),
+                patch.object(main, "parse_approval_action_payload", AsyncMock(return_value={
+                    "_body_present": True, "mfa_code": "redacted",
+                })),
+                patch.object(main, "_verify_approval_stage_mfa", return_value=(True, "binding", 7)),
+                patch.object(main, "begin_approval_execution_atomic", return_value=dispatched),
+                patch.object(main, "get_gateway_service", return_value=SimpleNamespace(
+                    execute_approval=Mock(
+                        return_value=execution if provider_error is None else None,
+                        side_effect=provider_error,
+                    ),
+                )),
+                patch.object(main, "finish_approval_execution_atomic", side_effect=finish),
+                patch("startup.audit.log_approval_event"),
+                patch("verify_audit.create_audit_block"),
+            ):
+                response = asyncio.run(main.execute_request(base["approval_id"], request))
+
+            terminal = terminal_calls[0]
+            self.assertEqual(terminal["final_status"], expected_status)
+            self.assertEqual(terminal["execution_outcome"]["allowed"], expected_executed)
+            self.assertEqual(terminal["execution_outcome"]["executed"], expected_executed)
+            self.assertEqual(terminal["audit_metadata"]["allowed"], expected_executed)
+            self.assertEqual(terminal["audit_metadata"]["executed"], expected_executed)
+            if response_status is None:
+                self.assertEqual(response["message"], "Executed Successfully")
+                self.assertEqual(terminal["audit_metadata"]["outcome"], "succeeded")
+            else:
+                self.assertEqual(response.status_code, response_status)
+                self.assertEqual(terminal["audit_metadata"]["outcome"], label)
+            evidence.append({
+                "scenario": label,
+                "http_status": response_status or 200,
+                "final_status": terminal["final_status"],
+                "execution_outcome": terminal["execution_outcome"],
+                "immutable_audit_metadata": terminal["audit_metadata"],
+            })
+
+        if evidence_dir := os.getenv("ENT022_EVIDENCE_DIR"):
+            Path(evidence_dir).mkdir(parents=True, exist_ok=True)
+            Path(evidence_dir, "agent-terminal-outcomes.json").write_text(
+                json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8"
+            )
 
     def test_create_approval_failure_never_enters_process_cache(self):
         import approval_store
@@ -1073,6 +1189,86 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             )
 
         self.assertEqual(counter, 123)
+
+    def test_inactive_suspended_and_mfa_disabled_users_cannot_approve_or_execute(self):
+        import main
+
+        class EmptyResult:
+            def mappings(self):
+                return self
+
+            def first(self):
+                return None
+
+        class Connection:
+            def __init__(self):
+                self.statements = []
+
+            def execute(self, statement, _parameters=None):
+                self.statements.append(" ".join(str(statement).split()).lower())
+                return EmptyResult()
+
+        connection = Connection()
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield connection
+
+        base = {
+            "approval_id": "approval-current-state",
+            "request_id": "request-current-state",
+            "correlation_id": "correlation-current-state",
+            "tenant_id": 42,
+            "requested_by": "oidc|requester",
+            "approved_by": "oidc|approver",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "execution_expires_at": "2099-01-01T00:10:00+00:00",
+            "metadata": {},
+            "query": "perform privileged action",
+            "risk_level": "HIGH",
+        }
+        identity = {"sub": "oidc|approver", "user_id": "17", "tenant_id": 42}
+        request = SimpleNamespace(headers={})
+
+        for account_state in ("disabled", "suspended", "mfa_disabled"):
+            for stage in ("approval", "execution"):
+                record = {
+                    **base,
+                    "status": "pending" if stage == "approval" else "approved",
+                }
+                transition = Mock()
+                with (
+                    self.subTest(account_state=account_state, stage=stage),
+                    patch("database.engine", Engine()),
+                    patch.object(main, "get_approval", return_value=record),
+                    patch.object(main, "_approval_authenticated_payload", return_value=identity),
+                    patch.object(main, "parse_approval_action_payload", AsyncMock(return_value={
+                        "_body_present": True, "mfa_code": "654321",
+                    })),
+                    patch.object(main, "get_policy", return_value={"approval": {
+                        "require_mfa": True, "require_separate_approver": True,
+                    }}),
+                    patch.object(main, "approve_approval_atomic", transition)
+                    if stage == "approval"
+                    else patch.object(main, "begin_approval_execution_atomic", transition),
+                    patch.object(main, "append_approval_audit"),
+                    patch("startup.audit.log_approval_event"),
+                ):
+                    response = asyncio.run(
+                        main.approve_request(record["approval_id"], request)
+                        if stage == "approval"
+                        else main.execute_request(record["approval_id"], request)
+                    )
+
+                self.assertEqual(response.status_code, 400)
+                transition.assert_not_called()
+
+        user_queries = [sql for sql in connection.statements if "from tenant_users" in sql]
+        self.assertTrue(user_queries)
+        self.assertTrue(all("u.status = 'active'" in sql for sql in user_queries))
+        self.assertTrue(all("u.mfa_enabled is true" in sql for sql in user_queries))
 
     def test_control_plane_assertion_satisfies_agent_mfa_without_local_user_mapping(self):
         import main
