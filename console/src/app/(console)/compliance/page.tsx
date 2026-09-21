@@ -455,12 +455,12 @@ export default function FrameworksPage() {
               <p className="text-[#6B7488] text-xs mt-1 leading-relaxed">{frameworkMeta[framework].desc}</p>
               {score && <p className="mt-2 text-[10px] text-[#6B7488]">Calculation version: {calculationVersion(score.calculation_version)}</p>}
 
-              <div className="w-full bg-[#F5F7FA]/60 h-1.5 rounded-full mt-4 overflow-hidden">
+              {score?.score != null && <div className="w-full bg-[#F5F7FA]/60 h-1.5 rounded-full mt-4 overflow-hidden">
                 <div
                   className="bg-indigo-500 h-full rounded-full transition-all duration-500"
-                  style={{ width: `${score?.score ?? 0}%` }}
+                  style={{ width: `${score.score}%` }}
                 />
-              </div>
+              </div>}
             </button>
           );
         })}

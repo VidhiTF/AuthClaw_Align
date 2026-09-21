@@ -203,7 +203,8 @@ def test_public_signed_trust_state_preserves_unassessed_scores(scoring, monkeypa
     ))
     namespace = load_functions("build_public_trust_state", relative_path="services/trust_center_runtime.py",
         os=os, time=time, _CACHE_LOCK=nullcontext(), _CACHE={},
-        _active_tenant_row=lambda: SimpleNamespace(id=42, name="Fixture", domain="example.test"),
+        get_current_tenant_id=lambda: "42", validate_tenant_id=lambda _: None,
+        _active_tenant_row=lambda _: SimpleNamespace(id=42, name="Fixture", domain="example.test"),
         _metrics_summary=lambda _: {}, _provider_status=lambda _: {}, _certificate_status=lambda: {})
     result = namespace["build_public_trust_state"](force_refresh=True)
     scores = result["payload"]["framework_scores"]

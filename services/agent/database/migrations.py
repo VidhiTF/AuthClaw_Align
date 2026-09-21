@@ -106,6 +106,8 @@ def run_startup_migrations():
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS provider VARCHAR(50);
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS model VARCHAR(50);
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS latency INTEGER;
+    ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS latency_recorded BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE gateway_requests ALTER COLUMN latency DROP DEFAULT;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS tokens_in INTEGER;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS tokens_out INTEGER;
     -- Legacy counts may be synthetic; preserve them but never aggregate them as measured.

@@ -28,6 +28,7 @@ class MonitoringQuotaTests(unittest.TestCase):
         self.ns = {"get_current_tenant_id": get_current_tenant_id,
                    "QuotaExceeded": QuotaExceeded, "QuotaUnavailable": QuotaUnavailable,
                    "record_unavailable": Mock(), "engine": self.engine, "text": lambda value: value,
+                   "require_source_tenant": Mock(),
                    "get_watched_directory": Mock(), "WATCH_DIR": "fixture",
                    "os": Mock(), "open": mock_open(read_data=b"data"),
                    "run_document_scan_pipeline": Mock(return_value={"status": "completed"}), "logger": Mock(),
@@ -186,6 +187,17 @@ class MonitoringQuotaTests(unittest.TestCase):
         with tenant_context(7):
             self.assertEqual(self.ns["trigger_manual_sync"]()["status"], "success")
         self.ns["run_document_scan_pipeline"].assert_called_once()
+
+    def test_source_owner_is_checked_before_sync_io(self):
+        from fastapi import HTTPException
+        from document_processing.connectors import require_source_tenant
+        self.ns["require_source_tenant"] = require_source_tenant
+        with patch.dict("os.environ", AUTHCLAW_CONNECTOR_TENANT_ID="8"), tenant_context(7):
+            with self.assertRaises(HTTPException) as failure:
+                self.ns["trigger_manual_sync"]()
+            self.assertEqual(failure.exception.status_code, 403)
+        self.engine.connect.assert_not_called()
+        self.ns["os"].listdir.assert_not_called()
 
     def test_clean_bucket_scan_clears_only_matching_tenant_findings(self):
         self.ns["os"].listdir.return_value = []

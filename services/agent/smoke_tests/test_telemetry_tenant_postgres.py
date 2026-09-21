@@ -62,6 +62,7 @@ def run_integration():
         AUTHCLAW_RATE_LIMIT_KEY_RPM="1000", AUTHCLAW_RATE_LIMIT_EXPENSIVE_MODEL_RPM="1000",
         REDIS_URL="", SMTP_HOST="", SKIP_EMAIL_DELIVERY_FOR_TESTING="true",
         AUTHCLAW_CLICKHOUSE_ENABLED="false",
+        AUTHCLAW_CONNECTOR_TENANT_ID="8",
     )
     sys.path.insert(0, str(AGENT))
     sys.path.insert(0, str(ROOT / "backend/scripts"))
@@ -77,6 +78,11 @@ def run_integration():
                 conn.execute(text("CREATE ROLE ent019_runtime LOGIN PASSWORD 'ent019-test-only' NOSUPERUSER NOBYPASSRLS"))
             ensure_agent_auth_definer_role(conn)
             seed_legacy_checkpoint(conn)
+            conn.execute(text("""
+                CREATE TABLE agent.gateway_requests (id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP, tenant_id VARCHAR(50), latency INTEGER DEFAULT 0);
+                INSERT INTO agent.gateway_requests(timestamp,tenant_id) VALUES (NOW(),'7');
+            """))
             # Characterize upgrade from legacy tables with unattributed rows.
             conn.execute(text("""
                 CREATE TABLE agent.compliance_score_history
@@ -92,6 +98,9 @@ def run_integration():
             """))
         run_startup_migrations()
         with owner.begin() as conn:
+            assert tuple(conn.execute(text("SELECT latency,latency_recorded FROM agent.gateway_requests")).one()) == (0, False)
+            assert conn.execute(text("INSERT INTO agent.gateway_requests(timestamp,tenant_id) VALUES (NOW(),'7') RETURNING latency")).scalar() is None
+            conn.execute(text("DELETE FROM agent.gateway_requests"))
             conn.execute(text("INSERT INTO agent.tenants(id,name,status,subscription_tier,plan,tier) VALUES (7,'Tenant A','active','professional','professional','professional'),(8,'Tenant B','active','professional','professional','professional'),(9,'Empty tenant','active','professional','professional','professional')"))
             conn.execute(text("""
                 INSERT INTO agent.compliance_control_scores
@@ -227,6 +236,23 @@ def run_integration():
                 client = TestClient(main.app)  # No lifespan: do not start provider/cloud workers.
                 assert client.get("/reports/executive/json").status_code == 401
                 tokens = {tenant: {"Authorization": "Bearer " + main.create_jwt({"tenant_id": tenant, "sub": f"auditor-{tenant}", "role": "owner", "exp": int(time.time()) + 300})} for tenant in (7, 8)}
+                for tenant in (7, 8, 7):
+                    response = client.get("/trust/public", headers=tokens[tenant])
+                    assert response.status_code == 200, response.text
+                    assert response.json()["payload"]["tenant_id"] == tenant, response.text
+                    assert response.json()["manifest"]["tenant"] == str(tenant)
+                    health = client.get("/trust/public/health", headers=tokens[tenant])
+                    assert health.json()["checks"]["compliance_evidence"] == "unknown", health.text
+                    assert client.get("/metrics", headers=tokens[tenant]).json()["active_tenants"] == 1
+                assert client.get("/trust/public").status_code == 401
+                with owner.begin() as conn:
+                    conn.execute(text("UPDATE agent.tenants SET status='inactive' WHERE id=7"))
+                revoked = client.get("/trust/public", headers=tokens[7])
+                # Restricted DB tenant binding rejects inactive tenants in quota middleware first.
+                assert revoked.status_code == 503 and revoked.json() == {"error": "rate_limit_unavailable"}, revoked.text
+                with owner.begin() as conn:
+                    conn.execute(text("UPDATE agent.tenants SET status='active' WHERE id=7"))
+                assert client.get("/trust/public", headers=tokens[7]).status_code == 200
                 for endpoint in ("/metrics", "/analytics/governance"):
                     response = client.get(endpoint, headers=tokens[7])
                     assert response.status_code == 200, response.text
@@ -309,8 +335,8 @@ def run_integration():
                         response = client.post("/cloud/connectors/sync", headers=tokens[8])
                         assert response.status_code == 503, response.text
                         work.assert_not_called()
-                        assert client.post("/cloud/connectors/sync", headers=tokens[7]).status_code == 200
-                        work.assert_called_once_with("7")
+                        assert client.post("/cloud/connectors/sync", headers=tokens[7]).status_code == 403
+                        work.assert_not_called()
                 with patch.object(monitoring, "_sync_sources") as work:
                     assert client.post("/cloud/connectors/sync", headers=tokens[8]).status_code == 200
                     work.assert_called_once_with("8")
@@ -461,7 +487,7 @@ def verify_clickhouse_outages(client, tokens, engine, tenant_context):
     for tenant in (7, 8):
         with tenant_context(tenant, request_id="gateway-fixture", required=True), engine.begin() as conn:
             for number in range(tenant - 6):
-                conn.execute(text("INSERT INTO gateway_requests(tenant_id,request_id,timestamp,allowed,duration_ms) VALUES (:tenant,:request,NOW(),true,17)"),
+                conn.execute(text("INSERT INTO gateway_requests(tenant_id,request_id,timestamp,allowed,duration_ms,latency_recorded) VALUES (:tenant,:request,NOW(),true,17,true)"),
                              {"tenant": str(tenant), "request": f"clickhouse-{tenant}-{number}"})
 
     def check_fallback(expected="unavailable"):

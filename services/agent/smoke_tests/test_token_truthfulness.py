@@ -31,7 +31,8 @@ def telemetry(monkeypatch):
             timestamp TEXT, created_at TEXT, risk_level TEXT, allowed BOOLEAN,
             status TEXT, request_id TEXT, tenant_id TEXT, route_id TEXT, provider TEXT,
             model TEXT, latency INTEGER, tokens_in INTEGER, tokens_out INTEGER,
-            decision TEXT, duration_ms INTEGER, token_usage_recorded BOOLEAN DEFAULT FALSE)"""))
+            decision TEXT, duration_ms INTEGER, token_usage_recorded BOOLEAN DEFAULT FALSE,
+            latency_recorded BOOLEAN DEFAULT FALSE)"""))
     dependencies = {"database": SimpleNamespace(engine=engine)}
     audit = load_module("token_audit", "verify_audit.py", dependencies)
     dependencies["verify_audit"] = audit
@@ -84,6 +85,20 @@ def test_registrar_passes_measured_usage(telemetry):
         assert tuple(conn.execute(text("SELECT tokens_in, tokens_out FROM gateway_requests")).one()) == (0, 4)
 
 
+@pytest.mark.parametrize("latency", [None, 0, 12, -1, True])
+def test_latency_requires_recorded_measurement(telemetry, latency):
+    engine, audit, service, mirrored, _ = telemetry
+    expected = latency if type(latency) is int and latency >= 0 else None
+    audit.record_gateway_request("LOW", True, "allowed", tenant_id="7", latency=latency)
+    with engine.begin() as conn:
+        assert service._gateway_summary(conn, "7")["avg_duration_ms"] == expected
+        assert service._provider_usage(conn, "7")[0]["avg_duration_ms"] == expected
+        conn.execute(text("INSERT INTO gateway_requests(tenant_id,provider,latency) VALUES ('7','OpenAI',0)"))
+        assert service._gateway_summary(conn, "7")["avg_duration_ms"] is None
+        assert service._provider_usage(conn, "7")[0]["avg_duration_ms"] is None
+    assert mirrored[0]["duration_ms"] == expected
+
+
 def assert_postgres_token_provenance(engine):
     """Run under the restricted runtime role; rollback isolated tenant test data."""
     from services.observability_service import ObservabilityService
@@ -105,6 +120,13 @@ def assert_postgres_token_provenance(engine):
                 assert service._gateway_summary(conn, "7")["tokens_total"] is None
                 assert service._provider_usage(conn, "7")[0]["tokens_total"] is None
                 savepoint.rollback()
+        conn.execute(text("DELETE FROM gateway_requests WHERE tenant_id = '7'"))
+        assert service._gateway_summary(conn, "7")["avg_duration_ms"] is None
+        conn.execute(text("INSERT INTO gateway_requests(timestamp,tenant_id,provider,latency,latency_recorded) VALUES (CURRENT_TIMESTAMP,'7','test',0,TRUE)"))
+        assert service._gateway_summary(conn, "7")["avg_duration_ms"] == 0
+        conn.execute(text("INSERT INTO gateway_requests(timestamp,tenant_id,provider,latency) VALUES (CURRENT_TIMESTAMP,'7','test',0)"))
+        assert service._gateway_summary(conn, "7")["avg_duration_ms"] is None
+        assert service._provider_usage(conn, "7")[0]["avg_duration_ms"] is None
         conn.rollback()
 
 

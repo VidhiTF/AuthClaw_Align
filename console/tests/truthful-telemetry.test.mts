@@ -185,6 +185,7 @@ test("compliance score and history failures render unknown inputs; recovery pres
       assert.match(html, new RegExp(`${label}</span><span[^>]*>Unknown</span>`));
     assert.match(html, /Score history unavailable/); assert.match(html, /Current compliance assessment unavailable/);
     assert.doesNotMatch(html, /No score snapshots yet|animate-spin|0 controls/);
+    assert.doesNotMatch(html, /style="width:0%"/);
     failedSource = ""; await callbacks[0]();
     assert.match(render(), /Redaction Records<\/span><span[^>]*>0<\/span>/);
   }
@@ -196,4 +197,43 @@ test("compliance score and history failures render unknown inputs; recovery pres
   assert.match(unknown, /text-slate-500[^>]*>INSUFFICIENT EVIDENCE - Unknown/);
   assert.match(unknown, /30-Day Score History[\s\S]*Unknown/);
   assert.doesNotMatch(unknown, /null%|42%/);
+  assert.doesNotMatch(unknown, /style="width:0%"/);
+  Object.assign(scores.frameworks[0], { score: 0 });
+  await callbacks[0]();
+  assert.match(render(), /style="width:0%"/, "Measured zero retains its progress bar");
+});
+
+test("public Trust Center renders score provenance and unknown legacy metadata", async () => {
+  const states: unknown[] = [];
+  let cursor = 0, load: (access: string) => Promise<void>;
+  const scores = { overall_score: null, readiness_level: "insufficient_evidence", frameworks: [{
+    framework: "SOC2", score: null as number | null, readiness_level: "insufficient_evidence", controls: [], metrics: {},
+  }],
+    calculation_version: "evidence-v2", evidence_timestamp: "2026-09-18T06:00:00Z",
+    missing_control_treatment: "Unassessed controls remain unknown", generated_at: "2026-09-21T00:00:00Z" };
+  const react = { ...React,
+    useState: (initial: unknown) => { const index = cursor++; if (!(index in states)) states[index] = initial;
+      return [states[index], (value: unknown) => { states[index] = value; }]; },
+    useRef: () => ({ current: null }), useEffect: () => {}, useMemo: (callback: () => unknown) => callback(),
+    useCallback: (callback: typeof load) => (load = callback),
+  };
+  const page = compile("../src/app/trust-center/[token]/page.tsx", {
+    require: (name: string) => name === "react" ? react : name === "next/navigation" ? { useParams: () => ({ token: "fixture" }) }
+      : name === "@/lib/trust-summary" ? compile("../src/lib/trust-summary.ts", {})
+      : name === "@/components/trust-summary" ? { TrustSummary: () => null } : require(name),
+    fetch: async () => ({ ok: true, json: async () => ({ scores, tenant: { name: "Fixture" },
+      share: { frameworks: ["SOC2"], expires_at: "2026-10-01T00:00:00Z" }, generated_at: scores.generated_at, verification_guide: [] }) }),
+  });
+  const render = () => { cursor = 0; return renderToStaticMarkup(React.createElement(page.default as React.ComponentType)); };
+  render(); await load!("fixture-access");
+  assert.match(render(), /Evidence timestamp: 2026-09-18T06:00:00Z/);
+  assert.match(render(), /Missing-control treatment: Unassessed controls remain unknown/);
+  assert.doesNotMatch(render(), /rounded-full bg-slate-800 overflow-hidden/);
+  scores.frameworks[0].score = 0;
+  await load!("fixture-access");
+  assert.match(render(), /style="width:0%"/);
+  Object.assign(scores, { evidence_timestamp: null, missing_control_treatment: undefined });
+  await load!("fixture-access");
+  assert.match(render(), /Evidence timestamp: Unknown/);
+  assert.match(render(), /Missing-control treatment: Unknown/);
 });

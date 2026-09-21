@@ -519,3 +519,90 @@ No tenant authorization, SQL, schema, or locking paths changed. Risk: stricter
 acknowledgements can expose nonconforming proxies as failed delivery, intentionally.
 Rollback reverts the seven validation lines but restores the false-success risk.
 All follow-up fixes remain local; publication and human owner approvals are pending.
+
+## Consolidated eight-finding audit and remediation (2026-09-21)
+
+Reviewed `2569214` against base `1a3970c`, tracing each supplied finding through
+its active producer, authorization boundary, persistence and consumer. These
+dispositions supersede the earlier claim that no in-scope defects remained.
+T01 activation was freshly verified active before this work. PR #60 stays unmerged.
+
+| Finding | Disposition and origin | Fix and evidence |
+| --- | --- | --- |
+| 1. Cross-tenant Trust Center | Confirmed High; tenant selection and shared-cache flaw predated the PR. | Validate authenticated tenant before lookup; select its active row and check cache tenant. Alternating/concurrent tenant regressions and actual authenticated PostgreSQL requests return only their own signed packages. |
+| 2. Diagnostic compliance reported healthy | Confirmed Medium; numeric reducer introduced by PR, while base already conflated signing with health. | The diagnostic-only producer's compliance health remains unknown, including numeric/zero scores. Imported-producer and authenticated HTTP tests verify this. |
+| 3. Correlation changes canonical audit action | Confirmed Medium; inherited prefix classification moved to correlation in PR. | Delete the untrusted special classification; record the actual allow outcome. Ordinary and connect-test-prefixed calls through real auth middleware, proxy, Redis and local upstream preserve correlation but both emit allow. |
+| 4. Shared connector source identity | Confirmed Medium; inherited shared credentials/watch-directory design remained unsafe despite tenant-scoped destinations. | Bind process sources to configured owner before source I/O and local sync. Baseline reproduction returned owner-7 inventory to tenant 8. New tests deny other/missing tenants before provider or filesystem I/O; real middleware denies tenant 7 while owner 8 retains sync/locking/recovery behavior. |
+| 5. Unproven latency zero | Confirmed Medium; legacy default and reader provenance gap inherited and retained by PR. | Add latency_recorded default false, remove legacy default, mark validated measurements in both current writers. Aggregate only complete recorded observations; missing/legacy/invalid values remain null, genuine zero stays zero. Five baseline cases failed; SQLite recorder and restricted PostgreSQL migration/aggregate checks now cover them. |
+| 6. Platform tenant count in tenant metrics | Confirmed Low; inherited unscoped query. | Filter by authenticated tenant. Baseline SQL returned three active tenants where caller scope contains one; authenticated PostgreSQL metrics return one for each tenant. |
+| 7. Unknown score rendered as zero-width bar | Confirmed Low; inherited visual fallback. | Reuse overview's conditional rendering: omit the entire track for unknown, retain measured zero. Actual component-render outage/unknown/zero assertions failed before and pass after. |
+| 8. Public score provenance omitted | Confirmed Medium integration gap; old view omitted fields added by ENT-019 producer. | Render evidence timestamp and missing-control treatment alongside calculation version, with Unknown for legacy payloads. Public component test reproduces supplied metadata disappearing before the fix. |
+
+Independent adversarial review additionally reproduced same-tenant cache
+deactivation: active tenant 7 warmed the cache, became inactive, and still got a
+published package. Moving the existing active-row check before cache lookup fixes
+that same authorization boundary; denial and reactivation recovery are covered.
+The scoped cache remains one bounded slot; switching tenants rebuilds instead of
+growing a global per-tenant cache. No new cache abstraction was introduced.
+
+Reuse and minimality: use existing tenant ContextVar/validator, source validator,
+monitor failure state, recorded-token provenance pattern, existing recorder and
+SQL aggregates, and existing UI conditionals. Trust production delta is net zero;
+gateway deletes five net lines, UI adds three net lines. Total production
+Python/Go/TypeScript delta versus `2569214`: **52 added / 37 removed, net +15**,
+using git numstat excluding test paths/suffixes. Configuration and tests are
+separate. Existing CI selections now include the new trust-boundary suite.
+
+Rollout and compatibility:
+
+- Apply existing agent startup migrations before new latency readers/writers.
+  The additive latency_recorded flag defaults false; old stored latency remains
+  preserved but unverified. Do not backfill true from plausible numbers. Unknown
+  historical rows keep complete-history averages unknown until qualified data or
+  existing retention changes that input set. Keep the additive column on rollback.
+- Configure `AUTHCLAW_CONNECTOR_TENANT_ID` for the tenant owning the process's
+  upstream credentials and watched files. Existing explicit
+  `AUTHCLAW_BACKGROUND_MONITOR_TENANT_ID` can supply the owner when the connector
+  setting is absent. A different tenant is denied; missing ownership fails closed.
+  Compose and environment examples expose both settings. Supporting different
+  upstream accounts per tenant in one process is not claimed; separate owner-bound
+  processes or a future tenant credential registry are required.
+- Connection-test requests still execute and retain correlation metadata. New
+  canonical actions reflect policy outcome, not caller-supplied test labels;
+  consumers filtering only test_request must use correlation metadata instead.
+- Old public score payloads remain readable and show Unknown provenance. Reverting
+  these guards would restore the reported defects; preserve tenant boundaries,
+  nullable values and evidence rather than clearing failures by deleting data.
+
+Fresh integrated checks:
+
+- Complete Agent CI selection with isolated PostgreSQL and Redis: **189 passed,
+  116 subtests passed, zero skips**. Restricted runtime and migrator roles exercise
+  legacy migration, repeated upgrades, RLS, concurrent persistence/checkpoints and
+  alert delivery/recovery. New authenticated routes exercise tenant-switched
+  signed packages, diagnostic health, scoped metrics and source-owner denial.
+- Backend affected audit/scoring/assessment/schema/API/trust suites: **125 passed**,
+  including real PostgreSQL audit aggregation. No backend production code changed.
+- Console: **54 unit tests**, TypeScript and targeted ESLint passed; three existing
+  navigation warnings remain. Tests render real components with upstream doubles.
+- Gateway: **10 tests and eight subtests passed** with actual isolated Redis and
+  local HTTP providers, including payload-fidelity and audit failure regressions.
+- Repository/Compose policy: **27 tests passed**. Whitespace passed. Conservative
+  nonempty physical-line upper bounds in every configured component stayed below
+  10,000 (maximum 2,132); a fresh Tokei run is not claimed.
+- Independent cross-review checked tenant/cache, source ownership, provenance,
+  audit outcome and UI changes, and reverified the cache-deactivation correction.
+
+Test failures were resolved without weakening production controls: a prior latency
+fixture needed to mark its explicitly measured 17ms as recorded; the Redis replay
+test requires localhost spelling instead of 127.0.0.1. Legacy migration now proves
+an old default-zero row stays unrecorded and newly omitted latency is null.
+The revoked-tenant HTTP test initially expected the service's 404; restricted
+PostgreSQL binding actually denies the inactive tenant earlier in quota middleware
+with 503 rate_limit_unavailable. The test now asserts that exact fail-closed
+response, while direct service tests independently verify cached-payload denial.
+Existing dependency deprecation warnings remain. Tests use disposable loopback
+services, not application data. No live cloud-provider, deployed browser/outage,
+AWS/SMTP configuration, complete-repository security clearance or merge readiness
+is asserted. Human current-head owner/risk reviews and rollout verification remain
+required; these results establish the bounded eight-finding remediation.

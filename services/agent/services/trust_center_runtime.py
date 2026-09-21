@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 
 from database import engine
+from services.tenant_context import get_current_tenant_id, validate_tenant_id
 
 
 _CACHE: Dict[str, Any] = {"expires_at": 0.0, "payload": None}
@@ -88,26 +89,31 @@ def _metrics_summary(tenant_id: int) -> Dict[str, Any]:
     }
 
 
-def _active_tenant_row():
+def _active_tenant_row(tenant_id: int):
     with engine.connect() as conn:
         return conn.execute(
             text(
                 """
                 SELECT id, name, domain
                 FROM tenants
-                WHERE COALESCE(status, 'active') = 'active'
-                ORDER BY id ASC
-                LIMIT 1
+                WHERE id = :tenant_id AND COALESCE(status, 'active') = 'active'
                 """
-            )
+            ), {"tenant_id": tenant_id},
         ).fetchone()
 
 
 def build_public_trust_state(*, force_refresh: bool = False) -> Dict[str, Any]:
+    tenant_id = get_current_tenant_id()
+    validate_tenant_id(tenant_id)
+    tenant_id = int(tenant_id)
+    row = _active_tenant_row(tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="No active tenant trust state is available")
     ttl_seconds = max(5, int(os.getenv("AUTHCLAW_TRUST_CENTER_CACHE_SECONDS", "60")))
     now = time.time()
     with _CACHE_LOCK:
-        if not force_refresh and _CACHE["payload"] and now < float(_CACHE["expires_at"]):
+        if (not force_refresh and _CACHE["payload"] and now < float(_CACHE["expires_at"])
+                and _CACHE["payload"]["payload"]["tenant_id"] == tenant_id):
             cached = dict(_CACHE["payload"])
             cached["cache"] = {"hit": True, "ttl_seconds": ttl_seconds}
             return cached
@@ -117,11 +123,6 @@ def build_public_trust_state(*, force_refresh: bool = False) -> Dict[str, Any]:
     from services.secret_manager import SecretManager
     from verify_audit import create_signed_export_package, verify_audit_chain, verify_signed_export_package
 
-    row = _active_tenant_row()
-    if not row:
-        raise HTTPException(status_code=404, detail="No active tenant trust state is available")
-
-    tenant_id = int(row.id)
     evidence_engine = ComplianceEvidenceEngine()
     audit_chain = verify_audit_chain(tenant_id=tenant_id)
     payload = {
@@ -173,11 +174,10 @@ def trust_runtime_health() -> Dict[str, Any]:
         state = build_public_trust_state(force_refresh=True)
         runtime = state.get("payload", {}).get("runtime", {})
         audit_valid = runtime.get("audit_status", {}).get("valid")
-        scores = state.get("payload", {}).get("framework_scores", {})
         checks = {
             "publication": "healthy" if state.get("status") == "published" and state.get("verification", {}).get("valid") is True else "degraded",
             "audit": "unknown" if audit_valid is None else "healthy" if audit_valid else "degraded",
-            "compliance_evidence": "healthy" if all(scores.get(framework) is not None for framework in ("soc2", "gdpr", "hipaa")) else "unknown",
+            "compliance_evidence": "unknown",  # Agent activity scores are diagnostic, never qualified control assessments.
             "queue": ObservabilityService()._queue_lag(runtime.get("event_pipeline", {}))["status"],
         }
         return {

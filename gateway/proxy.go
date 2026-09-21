@@ -731,18 +731,13 @@ func (p *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(startTime).Milliseconds()
 
 	// Emit Allow Audit Event
-	auditAction := "allow"
-	correlationID, _ := r.Context().Value(CorrelationIDContextKey).(string)
-	if strings.HasPrefix(correlationID, "connect-test-") {
-		auditAction = "test_request"
-	}
 	event := &AuditEvent{
 		ID:             generateID(),
 		RequestID:      requestID,
 		Timestamp:      startTime,
 		TenantID:       tenantID,
 		PolicyID:       policyID,
-		Action:         auditAction,
+		Action:         "allow",
 		DecisionReason: finalAllowReason,
 		Provider:       provider,
 		Model:          model,

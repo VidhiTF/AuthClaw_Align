@@ -187,7 +187,7 @@ class ObservabilityService:
                     SUM(CASE WHEN allowed = TRUE OR upper(COALESCE(decision, '')) = 'ALLOW' THEN 1 ELSE 0 END) AS allowed_requests,
                     SUM(CASE WHEN allowed = FALSE OR upper(COALESCE(decision, status, '')) = 'BLOCK' THEN 1 ELSE 0 END) AS blocked_requests,
                     SUM(CASE WHEN upper(COALESCE(decision, status, '')) IN ('REQUIRE_APPROVAL', 'PENDING_APPROVAL') THEN 1 ELSE 0 END) AS pending_requests,
-                    AVG(COALESCE(duration_ms, latency)) AS avg_duration_ms,
+                    CASE WHEN COUNT(*) = COUNT(CASE WHEN latency_recorded THEN COALESCE(duration_ms, latency) END) THEN AVG(COALESCE(duration_ms, latency)) END AS avg_duration_ms,
                     CASE WHEN COUNT(*) = COUNT(CASE WHEN token_usage_recorded THEN tokens_in END) THEN COALESCE(SUM(tokens_in), 0) END AS tokens_in,
                     CASE WHEN COUNT(*) = COUNT(CASE WHEN token_usage_recorded THEN tokens_out END) THEN COALESCE(SUM(tokens_out), 0) END AS tokens_out
                 FROM gateway_requests
@@ -216,7 +216,7 @@ class ObservabilityService:
                     COALESCE(NULLIF(provider, ''), 'unknown') AS provider_name,
                     COUNT(*) AS request_count,
                     SUM(CASE WHEN allowed = FALSE OR upper(COALESCE(decision, status, '')) = 'BLOCK' THEN 1 ELSE 0 END) AS blocked_count,
-                    AVG(COALESCE(duration_ms, latency)) AS avg_duration_ms,
+                    CASE WHEN COUNT(*) = COUNT(CASE WHEN latency_recorded THEN COALESCE(duration_ms, latency) END) THEN AVG(COALESCE(duration_ms, latency)) END AS avg_duration_ms,
                     CASE WHEN COUNT(*) = COUNT(CASE WHEN token_usage_recorded THEN tokens_in + tokens_out END) THEN SUM(tokens_in + tokens_out) END AS tokens_total,
                     MAX(COALESCE(created_at, timestamp)) AS last_seen
                 FROM gateway_requests
@@ -533,7 +533,7 @@ class ObservabilityService:
             text(
                 """
                 SELECT request_id, provider, model, risk_level, decision, status,
-                       COALESCE(duration_ms, latency), COALESCE(created_at, timestamp)
+                       CASE WHEN latency_recorded THEN COALESCE(duration_ms, latency) END, COALESCE(created_at, timestamp)
                 FROM gateway_requests
                 WHERE tenant_id = :tenant_id
                 ORDER BY COALESCE(created_at, timestamp) DESC

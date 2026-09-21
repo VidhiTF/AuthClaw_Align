@@ -12,6 +12,7 @@ from services.document_monitor_status import monitor_status, update_monitor_stat
 from document_processing.orchestrator import run_document_scan_pipeline
 from document_processing.auditor import create_document_audit
 from document_processing.connectors import (
+    require_source_tenant,
     is_real_connectors_enabled,
     discover_s3_buckets,
     scan_s3_bucket_security,
@@ -51,7 +52,6 @@ def start_background_monitoring(tenant_id=None):
         update_monitor_status(enabled=False, status="disabled", tenant_configured=False)
         raise ValueError("Background document monitoring requires an explicitly authorized positive tenant ID")
 
-    get_watched_directory()
     _stop_event.clear()
     update_monitor_status(enabled=True, status="starting", tenant_configured=True, last_error_type=None)
     _monitor_thread = threading.Thread(
@@ -80,6 +80,7 @@ def sync_sources():
     if tenant_id is None:
         record_unavailable()
         raise QuotaUnavailable("Document synchronization requires a verified tenant")
+    require_source_tenant()
     with engine.begin() as guard:
         if not guard.execute(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
                              {"key": f"document-sync:{tenant_id}"}).scalar_one():

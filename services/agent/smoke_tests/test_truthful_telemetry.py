@@ -280,10 +280,16 @@ class TruthfulTelemetryTests(unittest.TestCase):
             for latency in (None, 0):
                 engine.connect.return_value.__enter__.return_value.execute.side_effect = (
                     lambda sql, *params: (
-                        MagicMock(scalar=lambda: latency) if "AVG(latency)" in str(sql) else result
+                        MagicMock(scalar=lambda: latency) if "latency_recorded" in str(sql) else result
                     )
                 )
                 payload = scope["get_metrics"]()
+                tenant_queries = [call for call in engine.connect.return_value.__enter__.return_value.execute.call_args_list
+                                  if "FROM tenants" in str(call.args[0])]
+                self.assertTrue(tenant_queries)
+                for call in tenant_queries:
+                    self.assertIn("id = :tenant_id", str(call.args[0]))
+                    self.assertEqual(call.args[1], {"tenant_id": "7"})
                 self.assertEqual(payload["avg_latency"], latency)
                 self.assertEqual(payload["status"], "degraded")
                 self.assertEqual(payload["compliance_status"], "unknown")
@@ -576,7 +582,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "services/observability_service.py", {"aggregate_health"}
         )["aggregate_health"]
         observability.ObservabilityService.return_value._queue_lag.return_value = {"status": "healthy"}
-        for valid, expected in ((False, "degraded"), (None, "unknown"), (True, "healthy")):
+        for valid, expected in ((False, "degraded"), (None, "unknown"), (True, "unknown")):
             builder.return_value = {
                 "status": "published",
                 "verification": {"valid": True},
@@ -593,7 +599,7 @@ class TruthfulTelemetryTests(unittest.TestCase):
         with patch.dict(sys.modules, {"services.observability_service": observability}):
             for score, queue, signature, expected in (
                 (None, "healthy", True, "unknown"),
-                (0, "healthy", True, "healthy"),
+                (0, "healthy", True, "unknown"),
                 (90, "unknown", True, "unknown"),
                 (90, "degraded", True, "degraded"),
                 (90, "unavailable", True, "unavailable"),

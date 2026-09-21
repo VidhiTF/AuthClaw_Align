@@ -2250,12 +2250,12 @@ def get_metrics():
         with engine.connect() as conn:
             total_requests = conn.execute(text("SELECT COUNT(*) FROM gateway_requests")).scalar() or 0
             blocked_requests = conn.execute(text("SELECT COUNT(*) FROM gateway_requests WHERE allowed = FALSE")).scalar() or 0
-            avg_latency = conn.execute(text("SELECT AVG(latency) FROM gateway_requests")).scalar()
+            avg_latency = conn.execute(text("SELECT CASE WHEN COUNT(*) = COUNT(CASE WHEN latency_recorded THEN COALESCE(duration_ms, latency) END) THEN AVG(COALESCE(duration_ms, latency)) END FROM gateway_requests")).scalar()
             avg_latency = float(avg_latency) if avg_latency is not None else None
             
             token_consumption = conn.execute(text("SELECT CASE WHEN COUNT(*) = COUNT(CASE WHEN token_usage_recorded THEN tokens_in + tokens_out END) THEN COALESCE(SUM(tokens_in + tokens_out), 0) END FROM gateway_requests")).scalar()
             
-            active_tenants = conn.execute(text("SELECT COUNT(*) FROM tenants WHERE status = 'active'")).scalar() or 0
+            active_tenants = conn.execute(text("SELECT COUNT(*) FROM tenants WHERE status = 'active' AND id = :tenant_id"), {"tenant_id": get_current_tenant_id()}).scalar() or 0
             active_routes = conn.execute(text("SELECT COUNT(*) FROM gateway_routes WHERE enabled = TRUE")).scalar() or 0
             active_policies = conn.execute(text("SELECT COUNT(*) FROM policies WHERE enabled = TRUE")).scalar() or 0
             open_findings = conn.execute(text("SELECT COUNT(*) FROM remediation_findings WHERE approval_status = 'pending'")).scalar() or 0
@@ -3095,12 +3095,12 @@ async def redact_gateway_document(
             text("""
                 INSERT INTO gateway_requests (
                     timestamp, risk_level, allowed, status, request_id, tenant_id,
-                    route_id, provider, model, latency, tokens_in, tokens_out,
+                    route_id, provider, model, latency, latency_recorded, tokens_in, tokens_out,
                     created_at, decision, duration_ms
                 )
                 VALUES (
                     NOW(), :risk_level, :allowed, :status, :request_id, :tenant_id,
-                    :route_id, :provider, :model, :latency, NULL, NULL,
+                    :route_id, :provider, :model, :latency, TRUE, NULL, NULL,
                     NOW(), :decision, :duration_ms
                 )
             """),
@@ -5043,7 +5043,7 @@ def sync_cloud_connectors():
     from document_processing.monitoring import trigger_manual_sync
     try:
         return trigger_manual_sync()
-    except (QuotaExceeded, QuotaUnavailable):
+    except (QuotaExceeded, QuotaUnavailable, HTTPException):
         raise
     except Exception:
         return JSONResponse(status_code=503, content={"status": "unavailable", "error": "Document synchronization incomplete"})

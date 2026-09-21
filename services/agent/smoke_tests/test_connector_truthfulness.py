@@ -5,10 +5,12 @@ import pytest
 import requests
 
 from document_processing import connectors as c
+from services.tenant_context import tenant_context
 
 
 @pytest.fixture(autouse=True)
 def connector_io(monkeypatch):
+    monkeypatch.setenv("AUTHCLAW_CONNECTOR_TENANT_ID", "7")
     monkeypatch.setenv("ENABLE_REAL_CONNECTORS", "true")
     monkeypatch.setenv("SHAREPOINT_SITE_ID", "site")
     for name in ("validate_aws_connector_config", "validate_gcp_connector_config",
@@ -16,6 +18,35 @@ def connector_io(monkeypatch):
         monkeypatch.setattr(c, name, lambda *args: {"valid": True})
     monkeypatch.setattr(c, "_ms_graph_access_token", lambda: "token")
     monkeypatch.setattr(c, "_google_drive_headers", lambda: {})
+    with tenant_context(7):
+        yield
+
+
+@pytest.mark.parametrize("tenant", [None, 8])
+def test_other_tenants_cannot_read_process_sources(monkeypatch, tenant):
+    from fastapi import HTTPException
+    request = Mock(side_effect=AssertionError("Unauthorized source I/O"))
+    monkeypatch.setattr(requests, "get", request)
+    monkeypatch.setattr(requests, "post", request)
+    monkeypatch.setattr(c, "_aws_session", request)
+    with tenant_context(tenant):
+        for source in ("s3", "gdrive", "onedrive", "sharepoint", "dropbox"):
+            with pytest.raises(HTTPException) as failure:
+                c.list_cloud_source_files(source)
+            assert failure.value.status_code == 403
+            args = ("scope", "item") if source in {"s3", "sharepoint"} else ("item",)
+            with pytest.raises(HTTPException):
+                getattr(c, f"fetch_{source}_document")(*args)
+    request.assert_not_called()
+
+
+def test_unconfigured_source_owner_fails_closed(monkeypatch):
+    from fastapi import HTTPException
+    monkeypatch.delenv("AUTHCLAW_CONNECTOR_TENANT_ID")
+    monkeypatch.delenv("AUTHCLAW_BACKGROUND_MONITOR_TENANT_ID", raising=False)
+    with pytest.raises(HTTPException) as failure:
+        c.list_cloud_source_files("gdrive")
+    assert failure.value.status_code == 503
 
 
 @pytest.mark.parametrize("source,key,payload", [

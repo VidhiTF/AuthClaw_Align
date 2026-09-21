@@ -54,6 +54,8 @@ interface TrustCenterPackage {
   };
   scores: {
     calculation_version?: string;
+    evidence_timestamp?: string | null;
+    missing_control_treatment?: string;
     overall_score: number | null;
     readiness_level: string;
     frameworks: FrameworkScore[];
@@ -305,6 +307,7 @@ export default function TrustCenterPage() {
             </p>
             <p className="mt-2 text-xs text-slate-400">Calculation version: {calculationVersion(data.scores.calculation_version)} · Scores require current reviewed evidence. Unknown means evidence is insufficient; 0% means a reviewed control failed. Activity counts cannot establish compliance.</p>
             {calculationVersion(data.scores.calculation_version) === "legacy_unversioned" && <p className="mt-1 text-xs text-amber-200">Legacy results do not establish current evidence qualification.</p>}
+            <p className="mt-2 text-xs text-slate-400">Evidence timestamp: {data.scores.evidence_timestamp || "Unknown"} · Missing-control treatment: {data.scores.missing_control_treatment || "Unknown"}</p>
           </div>
           <div className="rounded-2xl border border-slate-800 bg-[#09090d] p-5 min-w-[220px]">
             <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Qualified evidence coverage</div>
@@ -337,9 +340,9 @@ export default function TrustCenterPage() {
                 </div>
                 <div className="text-2xl font-black text-indigo-200">{framework.score == null ? "Unknown" : `${framework.score}%`}</div>
               </div>
-              <div className="mt-4 h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                {framework.score != null && <div className="h-full rounded-full bg-indigo-500" style={{ width: `${framework.score}%` }} />}
-              </div>
+              {framework.score != null && <div className="mt-4 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                <div className="h-full rounded-full bg-indigo-500" style={{ width: `${framework.score}%` }} />
+              </div>}
               <div className="mt-3 text-xs text-slate-500">
                 Activity diagnostics: {framework.metrics.evidence_count} records - {framework.metrics.audit_event_count} audit events - {framework.metrics.open_findings} open findings
               </div>
