@@ -679,6 +679,8 @@ Fresh focused verification after these changes:
 ```text
 backend MFA/API-key/security selection: 102 passed, 31 deprecation warnings
 agent authorization/provider/graph selection: 43 passed, 21 subtests passed
+agent exact CI selection after AST-isolated test seam update: 125 passed,
+  15 environment-gated skips, 61 subtests passed
 console unit contracts: 52 passed
 console TypeScript: passed
 console ESLint: 0 errors, 14 pre-existing warnings

@@ -103,6 +103,8 @@ class ProviderQuotaTests(unittest.TestCase):
             "copy_context": copy_context, "concurrent": concurrent, "time": time,
             "QuotaExceeded": QuotaExceeded, "QuotaUnavailable": QuotaUnavailable,
             "_build_prompt": lambda state: "hello", "_resolve_provider": lambda state: provider,
+            "_provider_call_kwargs": lambda state: {},
+            "_provider_error_metadata": lambda exc: {"code": "provider_failure"},
             "log_agent_event": Mock(), "_offline_provider_fallback": Mock(),
         }
         exec(compile(ast.Module(body=[node], type_ignores=[]), "llm_node.py", "exec"), namespace)
