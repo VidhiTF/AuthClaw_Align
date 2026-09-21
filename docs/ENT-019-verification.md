@@ -656,3 +656,27 @@ pipeline and reducer code with provider/vector/network seams. No live Gemini,
 Kafka, ClickHouse or deployed outage was exercised. Rollback reverts this follow-up
 but restores false healthy and delivered states; human current-head owner/risk
 approval and deployment verification remain required.
+
+## Configured embedding failure follow-up (2026-09-21)
+
+The retained embedding boundary was reproduced through the actual document scan,
+vector-store and embedding functions: configured `embedContent` HTTP 503 plus a
+successful document review stored a deterministic local vector and returned
+`completed` / `healthy`. Configured embedding failures now raise into the existing
+indexing cleanup, which persists indexing unavailable and scan health degraded.
+Deterministic local embeddings remain available only when explicitly disabled or
+when no remote key is configured.
+
+The obsolete process-global provider-disable latch was deleted so a transient
+failure does not prevent recovery until restart. A 503 followed by a valid response
+now retries and succeeds. The direct RAG upload reuses one database transaction for
+the document and chunks, so an embedding exception rolls back the whole upload
+instead of leaving a false indexed row. No new status, dependency or retry path was
+added. Production delta is **6 added / 19 removed physical lines, net -13**.
+
+Fresh verification: focused embedding/pipeline tests **13 passed, 21 subtests
+passed**; complete affected Agent selection against disposable PostgreSQL and
+Redis **198 passed, 130 subtests passed**, including restricted-role migrations,
+RLS, concurrency and direct upload rollback; repository/Compose contracts **27
+passed, 27 subtests passed**. The existing Starlette deprecation warning remains.
+HTTP used controlled test responses; no live Gemini or deployed outage was tested.

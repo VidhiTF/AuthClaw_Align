@@ -161,6 +161,16 @@ def run_integration():
                 else:
                     conn.execute(text("INSERT INTO document_findings(tenant_id,document_id,finding_type,matched_pattern,matched_text,risk_level,recommendation) VALUES (8,8,'Regulatory','SOC2 GDPR HIPAA','private-8','CRITICAL','fix')"))
 
+        from rag import embeddings
+        with tenant_context(7, request_id="failed-rag-upload", required=True), \
+                patch.object(main, "resolve_tenant", return_value=7), \
+                patch.object(embeddings, "generate_embedding", side_effect=RuntimeError("embedding unavailable")):
+            with unittest.TestCase().assertRaisesRegex(RuntimeError, "embedding unavailable"):
+                main.create_document(main.DocumentUploadRequest(
+                    name="failed-index.txt", type="TXT", size_bytes=1))
+            with engine.connect() as conn:
+                assert conn.execute(text("SELECT count(*) FROM knowledge_documents WHERE name='failed-index.txt'")).scalar() == 0
+
         # Independent database boundary: omit application WHERE predicates on purpose.
         for tenant in (7, 8):
             with tenant_context(tenant, request_id="rls-negative", required=True):

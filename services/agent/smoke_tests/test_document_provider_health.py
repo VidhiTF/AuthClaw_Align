@@ -5,6 +5,7 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 from document_processing import orchestrator
+from rag import embeddings, vector_store
 from services.quota_service import QuotaUnavailable
 from services.tenant_context import tenant_context
 
@@ -103,6 +104,36 @@ class DocumentProviderHealthTests(unittest.TestCase):
         self.assertEqual(result["extraction"], {"status": "not_applicable"})
         self.assertEqual(result["indexing"], {"status": "not_applicable"})
         save_chunks.assert_not_called()
+
+    def test_configured_embedding_outage_degrades_indexing(self):
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.return_value = (1,)
+        database = MagicMock()
+        database.connect.return_value.__enter__.return_value = connection
+        response = MagicMock(status_code=503)
+        review = MagicMock(status_code=200)
+        review.json.return_value = {"candidates": [{"content": {"parts": [{"text": json.dumps(
+            {"summary": "Review complete", "ai_findings": []})}]}}]}
+        remote = lambda url, **kwargs: response if url.endswith(":embedContent") else review
+        content = "mfa rbac audit log retention consent erase patient ephi credit card routing"
+        with tenant_context(7), patch.dict(os.environ, {"GOOGLE_API_KEY": "configured-key",
+                "GOOGLE_API_URL": "http://provider.invalid", "AUTHCLAW_DISABLE_REMOTE_EMBEDDINGS": "false"}), \
+                patch.object(orchestrator, "engine", database), patch.object(vector_store, "engine", database), \
+                patch.object(orchestrator, "extract_document_text", return_value=content), \
+                patch.object(orchestrator, "extract_file_metadata", return_value={}), \
+                patch.object(orchestrator, "split_text_into_chunks", return_value=[content]), \
+                patch.object(orchestrator, "scan_text_for_sensitive_data", return_value=[]), \
+                patch.object(orchestrator, "admit_provider_call"), patch.object(embeddings, "admit_provider_call"), \
+                patch.object(orchestrator, "create_document_audit"), \
+                patch.object(embeddings.requests, "post", side_effect=remote), \
+                patch("document_processing.drift.record_compliance_snapshot"):
+            result = orchestrator.run_document_scan_pipeline(1, content.encode(), "policy.txt", tenant_id=7)
+
+        self.assertEqual(result["health"], "degraded")
+        self.assertEqual(result["indexing"], {"status": "unavailable"})
+        self.assertEqual(result["provider_review"], {"status": "healthy"})
+        self.assertFalse(any("INSERT INTO knowledge_chunks" in str(call.args[0])
+                             for call in connection.execute.call_args_list))
 
 
 if __name__ == "__main__":

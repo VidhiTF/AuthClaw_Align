@@ -2822,7 +2822,7 @@ def create_document(
     tenant_id = resolve_tenant(x_api_key, authorization)
     today = datetime.now(timezone.utc).date().isoformat()
     chunks_count = max(1, int(doc.size_bytes // 50000))
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         res = conn.execute(
             text("""
             INSERT INTO knowledge_documents (tenant_id, name, type, size_bytes, status, last_indexed, chunks_count)
@@ -2839,7 +2839,6 @@ def create_document(
             }
         )
         inserted_id = res.fetchone()[0]
-        conn.commit()
 
         # Insert chunks and generate actual embeddings
         for i in range(chunks_count):
@@ -2858,7 +2857,6 @@ def create_document(
                     "vec": json.dumps(vector)
                 }
             )
-        conn.commit()
     create_audit_block(
         query=f"Upload Knowledge Document: {doc.name}",
         response=f"Document uploaded and indexed successfully into {chunks_count} vector chunks.",
