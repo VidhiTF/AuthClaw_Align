@@ -289,11 +289,45 @@ def run_integration():
                     assert conn.execute(text("DELETE FROM compliance_drift_alerts WHERE tenant_id=7")).rowcount == 0
                 # Execute real cloud deletion; its retired snapshot hook cannot
                 # create new aggregate compliance measurements.
+                for tenant in (7, 8):
+                    with tenant_context(tenant, request_id="bucket-recovery-seed", required=True), engine.begin() as conn:
+                        conn.execute(text("INSERT INTO documents(id,tenant_id,filename,source,size_bytes,status) VALUES (:id,:tenant,'s3://one/configuration','s3_config',0,'completed')"), {"id": tenant * 1000, "tenant": tenant})
+                        conn.execute(text("INSERT INTO document_findings(tenant_id,document_id,finding_type,matched_pattern,matched_text,risk_level,recommendation) VALUES (:tenant,:id,'Regulatory','prior bucket finding','test','HIGH','fix')"), {"id": tenant * 1000, "tenant": tenant})
+                with tenant_context(8, request_id="bucket-recovery", required=True), patch.object(monitoring, "get_watched_directory"), patch.object(monitoring.os, "listdir", return_value=[]), patch.object(monitoring, "is_real_connectors_enabled", return_value=True), patch.object(monitoring, "discover_s3_buckets", return_value=["one"]), patch.object(monitoring, "scan_s3_bucket_security", return_value=[]), patch.object(monitoring, "list_cloud_source_files", side_effect=ConnectionError("inventory unavailable")):
+                    try:
+                        monitoring.sync_sources()
+                    except RuntimeError:
+                        pass
+                    else:
+                        raise AssertionError("Failed inventory was treated as a successful sync")
+                for tenant in (7, 8):
+                    with tenant_context(tenant, request_id="bucket-recovery-check", required=True), engine.connect() as conn:
+                        assert conn.execute(text("SELECT count(*) FROM document_findings WHERE document_id=:id"), {"id": tenant * 1000}).scalar() == (1 if tenant == 7 else 0)
+                with tenant_context(8, request_id="sync-lock", required=True), engine.begin() as guard:
+                    guard.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('document-sync:8',0))"))
+                    with patch.object(monitoring, "_sync_sources") as work:
+                        response = client.post("/cloud/connectors/sync", headers=tokens[8])
+                        assert response.status_code == 503, response.text
+                        work.assert_not_called()
+                        assert client.post("/cloud/connectors/sync", headers=tokens[7]).status_code == 200
+                        work.assert_called_once_with("7")
+                with patch.object(monitoring, "_sync_sources") as work:
+                    assert client.post("/cloud/connectors/sync", headers=tokens[8]).status_code == 200
+                    work.assert_called_once_with("8")
                 with tenant_context(8, request_id="monitor-worker", required=True), patch.object(monitoring, "WATCH_DIR", str(Path(temporary) / "watch")), patch.object(monitoring, "list_cloud_source_files", return_value=[]), patch.object(monitoring, "is_real_connectors_enabled", return_value=False):
+                    with patch.object(monitoring, "list_cloud_source_files", side_effect=ConnectionError("source unavailable")):
+                        response = client.post("/cloud/connectors/sync", headers=tokens[8])
+                        assert response.status_code == 503 and response.json()["status"] == "unavailable", response.text
+                        with engine.connect() as conn:
+                            assert conn.execute(text("SELECT status FROM documents WHERE id=8")).scalar() == "scanned"
                     monitoring.sync_sources()
                     with engine.connect() as conn:
                         assert conn.execute(text("SELECT status FROM documents WHERE id=8")).scalar() == "s3_deleted"
                         assert conn.execute(text("SELECT count(*) FROM compliance_score_history")).scalar() == 1
+                with patch("document_processing.connectors.is_real_connectors_enabled", return_value=True), patch("document_processing.connectors.list_cloud_source_files", side_effect=ConnectionError("source unavailable")):
+                    response = client.get("/cloud/connectors/status", headers=tokens[7])
+                    assert response.status_code == 200, response.text
+                    assert all(item["status"] == "unavailable" and item["files_count"] is None and item["files"] is None for item in response.json()["connectors"])
                 with owner.connect() as conn:
                     assert conn.execute(text("SELECT count(*) FROM agent.compliance_score_history WHERE tenant_id IS NULL")).scalar() == 1
                     assert conn.execute(text("SELECT count(*) FROM agent.compliance_drift_alerts WHERE tenant_id IS NULL")).scalar() == 1

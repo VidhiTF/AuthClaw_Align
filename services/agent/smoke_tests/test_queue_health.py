@@ -2,15 +2,66 @@
 import sys
 import os
 import unittest
-from unittest.mock import patch
+import io
+import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services.observability_service import ObservabilityService
+from services.event_pipeline import EventPipeline
 
 
 class QueueHealthTests(unittest.TestCase):
+    def test_kafka_acknowledgement_controls_delivery_and_health(self):
+        acknowledged = {"partition": 0, "offset": 0, "error_code": None, "error": None}
+        rejected = {"partition": None, "offset": None, "error_code": 50003, "error": "Broker unavailable"}
+        malformed = [None, {}, [], {"offsets": None}, {"offsets": []},
+                     {"offsets": [acknowledged, acknowledged]}, {"offsets": [None]}]
+        malformed += [{"offsets": [{**acknowledged, key: value}]}
+                      for key, value in (("error_code", 50003), ("error", "rejected"),
+                                         ("offset", None), ("offset", -1), ("offset", True),
+                                         ("partition", "0"), ("partition", -1))]
+        malformed += [{"offsets": [{"partition": 0}]}, {"offsets": [rejected]}]
+        cases = [(json.dumps(body).encode(), False) for body in malformed]
+        cases += [(b"not json", False), (json.dumps({"offsets": [acknowledged]}).encode(), True)]
+        for body, succeeds in cases:
+            with self.subTest(body=body):
+                database = MagicMock()
+                conn = database.begin.return_value.__enter__.return_value
+                record = {"status": "queued", "stream": "audit", "tenant_id": 7,
+                          "payload": "{}", "attempts": 0, "topic": "audit", "error_message": None}
+                conn.execute.return_value.fetchone.return_value = SimpleNamespace(_mapping=record)
+                def response(*args, **kwargs):
+                    result = io.BytesIO(body)
+                    result.status = 200
+                    return result
+                with patch.dict(os.environ, KAFKA_REST_URL="http://kafka.invalid", AGENT_AUDIT_STREAM_TRANSPORT="kafka",
+                                AUTHCLAW_CLICKHOUSE_ENABLED="false", AUTHCLAW_EVENT_DELIVERY_ATTEMPTS="2"), \
+                     patch("services.event_pipeline.engine", database), \
+                     patch("services.audit_transport.urllib.request.urlopen", side_effect=response) as request, \
+                     patch.object(EventPipeline, "refresh_checkpoint"), patch("services.event_pipeline.time.sleep"):
+                    pipeline = EventPipeline()
+                    result = pipeline.deliver_event("event-1")
+                    self.assertEqual(result["status"], "delivered" if succeeds else "dead_letter")
+                    self.assertEqual(request.call_count, 1 if succeeds else 2)
+                    updates = [call.args[1] for call in conn.execute.call_args_list
+                               if "UPDATE event_delivery_records" in str(call.args[0])]
+                    self.assertEqual(updates[-1]["status"], result["status"])
+                    self.assertEqual(any("INSERT INTO event_dead_letters" in str(call.args[0])
+                                         for call in conn.execute.call_args_list), not succeeds)
+                    dead = int(not succeeds)
+                    health = ObservabilityService()._queue_lag({"streams": {"audit": {"queued": 0, "dead_letter": dead}},
+                        "checkpoints": [self.checkpoint(dead_letter_count=dead, pending_events=dead)]})
+                    self.assertEqual(health["status"], "healthy" if succeeds else "degraded")
+                    self.assertEqual(health["alertable"], not succeeds)
+                    if not succeeds:
+                        record.update(status="dead_letter", attempts=2)
+                        body = json.dumps({"offsets": [acknowledged]}).encode()
+                        self.assertEqual(pipeline.deliver_event("event-1", retry=True)["status"], "delivered")
+
     def test_security_alert_recovery_does_not_require_kafka_checkpoint(self):
         for audit in (False, True):
             for queued, dead, expected in ((0, 0, "healthy"), (1, 0, "unknown"), (0, 1, "degraded")):

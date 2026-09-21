@@ -30,7 +30,7 @@ export async function GET(request: Request) {
     const sources = {
       approvals: { status: approvalValid ? "healthy" : "unavailable", source: "postgres", observedAt: generatedAt },
       gateway: { status: !gatewayValid ? "unavailable" : gateway.status, source: "postgres", observedAt: gatewayValid ? gateway.windowEnd : generatedAt },
-      audit: { status: auditValid ? "healthy" : "unavailable", source: auditValid ? audit.source : null, observedAt: generatedAt },
+      audit: { status: !auditValid ? "unavailable" : audit.source === "postgres" ? "healthy" : "unknown", source: auditValid ? audit.source : null, observedAt: generatedAt },
     };
     const metrics = Object.fromEntries(metricNames.map((name) => [name, gatewayValid && gateway.complete && gateway.status === "healthy" ? gateway[name] : null]));
     const metricStates = {

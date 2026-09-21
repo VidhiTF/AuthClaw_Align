@@ -404,3 +404,118 @@ The final backend/agent images were then activated, with application data retain
 The automated PostgreSQL fixture now also runs two prepare/migrate/finalize cycles
 with a non-superuser, non-BYPASSRLS migrator before its tenant isolation assertions;
 that upgraded-schema integration passed. Repository/Compose policy tests: 27 passed.
+
+## Source-failure and recovery follow-up (2026-09-21, after 6a812ea)
+
+The code-work/code-verification cycle addressed the three remaining review findings:
+
+- Dashboard audit records from an unverified mirror remain unknown, including an
+  empty reachable mirror. Observed records remain visible with a coverage warning;
+  another source's outage cannot turn unknown audit activity into a definite empty
+  result. Reused the existing BFF source-state envelope and UI instead of adding
+  another backend endpoint. Regression assertions failed before the fix.
+- Document synchronization accumulates ordinary source failures and cannot advance
+  the last-success timestamp after a failed pass. Manual failure returns structured
+  HTTP 503. Pending/interrupted scans retry even when size is unchanged. Independent
+  review caught a retry race; the existing PostgreSQL advisory-lock pattern now
+  serializes complete sync passes per authenticated tenant across workers.
+- Real connector discovery, listing, download, and security-check errors cannot
+  return mock evidence. Explicit mock mode remains labeled mock. Missing inventories
+  have null counts, not zero. Incomplete pagination, malformed entries, partial S3
+  enumeration, and unavailable sizes fail closed before unsafe reconciliation or
+  document writes. Drive explicitly requests size/completeness fields. Successful
+  empty data and measured zero remain valid. A clean bucket scan clears only that
+  tenant/bucket's old findings; failed checks preserve them.
+
+Reused connector validators, source functions, monitor state, tenant context,
+database locking, and existing test harnesses. No dependency or schema changes.
+Connector production code is five lines smaller. The five production files total
+326 additions / 301 deletions (net +25 physical lines versus 6a812ea); most diff
+churn is dedenting real connector branches after removing exception swallowing.
+Tests cover the necessary extra failure, isolation, and concurrency boundaries.
+
+Fresh verification on the final implementation:
+
+- Exact Agent CI selection, extended with `test_connector_truthfulness.py`, using
+  disposable PostgreSQL 16.10 and Redis 7.4.7: **170 passed, 90 subtests passed**.
+  Real middleware/restricted-role tests verify sync 503, no false document deletion,
+  unavailable connector counts, same-tenant lock contention, another tenant's
+  progress, lock release, and tenant-isolated clean-scan recovery. Existing RLS,
+  migrations, queue, audit, token, and quota regressions also pass.
+- Console: **53 unit tests passed**, TypeScript passed, targeted ESLint zero errors.
+  Existing auth-navigation lint and Starlette dependency deprecation warnings remain.
+- Repository/Compose policy: **27 tests passed**. Diff whitespace checks passed.
+- Agent and console production Docker builds passed; the final agent image also
+  passed syntax verification in a read-only, network-isolated container.
+- Independent review found the retry race and malformed Graph-item filtering gap;
+  both were corrected, regression-tested, and independently re-reviewed.
+
+The new database fixture initially omitted required request identity and non-null
+seed fields. Those fixture failures were corrected without weakening database
+guards, followed by a passing focused run and the full final suite. Native Windows
+Turbopack rejected the worktree's external node_modules junction; the normal Docker
+build with image-local dependencies passed without changing bundler configuration.
+
+Compatibility/limits: connector status now uses health states plus an explicit
+`mode`; unavailable inventory/counts are null. Paginated/incomplete inventories
+and files without measured size are explicitly unavailable, not partially processed
+or assigned invented values. Completing provider pagination/export support is not
+claimed. No live cloud-provider or AWS deployment proof was collected. This local
+follow-up does not constitute a push, human approval, or application rollout.
+
+## Returned pipeline failure follow-up (2026-09-21)
+
+Confirmed the remaining PR #60 defect with eight failing regression cases: new
+and modified watched/cloud documents through manual and background synchronization
+all ignored `alert_delivery_failed`. Reused `_sync_sources`' existing failure set
+and final exception at all four scan calls; no helper, dependency, schema, or retry
+path was added. Production delta for this follow-up is 8 added / 4 removed physical
+lines (net +4), outside the configured component line-budget scopes.
+
+Manual synchronization now raises through the existing failure response and the
+worker records degraded health without advancing success timestamps. Further
+passes do not rescan unchanged completed or alert-pending/failed documents; the
+outbox retains retry ownership. Existing tenant scoping and locking are unchanged.
+The focused suite passed 15 tests including all eight new regression cases.
+The broader agent selection passed 164 tests and 98 subtests, with one skip and
+the existing Starlette deprecation warning. Diff whitespace checks passed.
+
+T01 activation was freshly verified active: merged commit
+`1e40bdb5c8fd6b4e28c827035ab7d06645530ccb`, effective
+`2026-09-16T12:57:25Z`, active ruleset 21141288 with zero bypass actors.
+No fresh PostgreSQL/Redis integration or deployed outage verification was run for
+this follow-up; the regression harness uses the actual monitoring functions with
+I/O seams. Earlier evidence above is historical, not a fresh deployment claim.
+Risk is limited to synchronization reporting; rollback reverts the four returned
+status checks. Changes remain local and require the existing human review process.
+
+## Kafka acknowledgement follow-up (2026-09-21)
+
+Confirmed HTTP 200 record rejection becomes `delivered` in the existing publisher
+and pipeline. Seventeen negative regression cases reproduce false success before
+the fix. Reuse `KafkaRestAuditPublisher.publish`, `EventPipeline.deliver_event`'s
+retry/dead-letter handling, and the existing queue-health test suite/CI selection.
+The publisher lacks record acknowledgement validation; a small inline check is
+necessary before returning success. No new helper, dependency, schema, or retry
+path is needed. T01 was freshly verified active at merged commit
+`1e40bdb5c8fd6b4e28c827035ab7d06645530ccb`, effective `2026-09-16T12:57:25Z`.
+
+Final delta for this follow-up: seven added production lines in `audit_transport.py`,
+outside the configured component budget scopes; no deletion or new abstraction.
+Missing/malformed responses and record-level errors raise into existing retries;
+successful partition/offset zero remains valid. The existing CI-selected queue
+tests exercise actual publisher/pipeline code with HTTP/database seams, persistence
+parameters, degraded health, retry exhaustion and recovery. An actual loopback
+HTTP server also verified HTTP 200 record rejection and subsequent successful
+acknowledgement through the publisher. No external Kafka service was used.
+
+Fresh full Agent CI selection (`pytest --noconftest -p no:cacheprovider`, file list
+in `.github/workflows/ci.yml`): **165 passed, 116 subtests passed, seven skipped**;
+existing Starlette deprecation warning. Independent bounded review found no
+confirmed issues and independently passed the queue suite. Diff whitespace passed.
+Docker's Linux daemon is unavailable; real PostgreSQL/Redis integration and
+deployed outage checks remain unverified. Historical evidence is not a fresh run.
+No tenant authorization, SQL, schema, or locking paths changed. Risk: stricter
+acknowledgements can expose nonconforming proxies as failed delivery, intentionally.
+Rollback reverts the seven validation lines but restores the false-success risk.
+All follow-up fixes remain local; publication and human owner approvals are pending.

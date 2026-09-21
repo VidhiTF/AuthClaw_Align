@@ -5007,10 +5007,12 @@ def get_cloud_connectors_status():
     connectors = []
     
     for src in sources:
+        status = "healthy" if is_real else "not_applicable"
         try:
             files = list_cloud_source_files(src)
         except Exception:
-            files = []
+            files = None
+            status = "unavailable"
         
         name_map = {
             "s3": "AWS S3 Bucket",
@@ -5024,8 +5026,9 @@ def get_cloud_connectors_status():
             "name": name_map.get(src, src),
             "key": src,
             "enabled": is_real,
-            "status": "Active (Real)" if is_real else "Simulated (Mock)",
-            "files_count": len(files),
+            "status": status,
+            "mode": "real" if is_real else "mock",
+            "files_count": len(files) if files is not None else None,
             "files": files
         })
         
@@ -5038,8 +5041,12 @@ def get_cloud_connectors_status():
 @app.post("/cloud/connectors/sync")
 def sync_cloud_connectors():
     from document_processing.monitoring import trigger_manual_sync
-    res = trigger_manual_sync()
-    return res
+    try:
+        return trigger_manual_sync()
+    except (QuotaExceeded, QuotaUnavailable):
+        raise
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "unavailable", "error": "Document synchronization incomplete"})
 
 # 10. ONBOARDING & TENANT MANAGEMENT ENDPOINTS
 

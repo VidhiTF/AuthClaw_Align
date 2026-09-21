@@ -15,7 +15,29 @@ _ms_graph_token_cache = {"token": None, "expires_at": 0}
 
 
 class ConnectorValidationError(RuntimeError):
-    """Raised only when strict connector validation is enabled."""
+    """Raised when a real connector cannot safely perform an operation."""
+
+
+def _require_connector(source: str) -> None:
+    if not validate_connector_config(source).get("valid"):
+        raise ConnectorValidationError(f"{source} connector configuration is invalid.")
+
+
+def _complete_listing(response, key: str) -> list:
+    if response.status_code != 200:
+        raise RuntimeError(f"Connector listing returned HTTP {response.status_code}.")
+    payload = response.json()
+    if any(payload.get(field) for field in ("nextPageToken", "@odata.nextLink", "has_more", "incompleteSearch")):
+        raise RuntimeError("Connector inventory is incomplete; reconciliation is unsafe.")
+    if not isinstance(payload[key], list):
+        raise RuntimeError("Connector inventory is not a list.")
+    if any(not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip() or
+           (not isinstance(item.get("id"), str) or not item["id"].strip()
+            if key != "entries" else item.get(".tag") not in {"file", "folder", "deleted"}) or
+           (key == "value" and not any(isinstance(item.get(facet), dict) for facet in ("file", "folder")))
+           for item in payload[key]):
+        raise RuntimeError("Connector inventory contains malformed entries.")
+    return payload[key]
 
 
 def is_real_connectors_enabled() -> bool:
@@ -295,37 +317,27 @@ def connector_validation_report() -> Dict[str, Dict[str, Any]]:
 def discover_s3_buckets() -> List[str]:
     """
     Lists available S3 buckets via boto3.
-    Falls back to mock list if empty or errors out.
+    Mock inventories are returned only when real connectors are disabled.
     """
-    buckets = []
-    if is_real_connectors_enabled() and validate_aws_connector_config().get("valid"):
-        try:
-            import boto3
-            s3 = _aws_session().client("s3")
-            response = s3.list_buckets()
-            buckets = [b["Name"] for b in response.get("Buckets", [])]
-        except Exception as e:
-            logger.error(f"S3 bucket discovery failed: {str(e)}")
-            
-    if not buckets:
-        buckets = ["company-compliance-docs", "security-policies", "vendor-documents", "audit-evidence"]
-    return buckets
+    if is_real_connectors_enabled():
+        _require_connector("s3")
+        response = _aws_session().client("s3").list_buckets()
+        if response.get("ContinuationToken") or response.get("NextToken"):
+            raise RuntimeError("S3 bucket inventory is incomplete.")
+        if not isinstance(response["Buckets"], list):
+            raise RuntimeError("S3 bucket inventory is not a list.")
+        return [b["Name"] for b in response["Buckets"]]
+    return ["company-compliance-docs", "security-policies", "vendor-documents", "audit-evidence"]
 
 def fetch_s3_document(bucket_name: str, object_key: str) -> bytes:
     """
     Fetches a document from an AWS S3 bucket.
-    Falls back to mock payload if ENABLE_REAL_CONNECTORS is false or boto3 is not installed.
+    Returns mock content only when ENABLE_REAL_CONNECTORS is false.
     """
-    if is_real_connectors_enabled() and validate_aws_connector_config().get("valid"):
-        try:
-            import boto3
-            s3 = _aws_session().client("s3")
-            response = s3.get_object(Bucket=bucket_name, Key=object_key)
-            return response["Body"].read()
-        except ImportError:
-            logger.warning("boto3 not installed. Falling back to S3 mock mode.")
-        except Exception as e:
-            logger.error(f"S3 fetch failed: {str(e)}. Falling back to S3 mock mode.")
+    if is_real_connectors_enabled():
+        _require_connector("s3")
+        response = _aws_session().client("s3").get_object(Bucket=bucket_name, Key=object_key)
+        return response["Body"].read()
 
     # S3 mock fallback
     dummy_aws_key = "AKIA" + "IOSFODNN7EXAMPLE"
@@ -346,20 +358,19 @@ def fetch_gdrive_document(file_id: str) -> bytes:
     """
     Fetches a document from Google Drive.
     """
-    if is_real_connectors_enabled() and validate_gcp_connector_config().get("valid"):
-        try:
-            import requests
-            api_key = os.getenv("GOOGLE_API_KEY")
-            if api_key:
-                url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
-                res = requests.get(url, timeout=15)
-            else:
-                url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-                res = requests.get(url, headers=_google_drive_headers(), timeout=15)
-            if res.status_code == 200:
-                return res.content
-        except Exception as e:
-            logger.error(f"Google Drive fetch failed: {str(e)}. Falling back to GDrive mock mode.")
+    if is_real_connectors_enabled():
+        _require_connector("gdrive")
+        import requests
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if api_key:
+            url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={api_key}"
+            res = requests.get(url, timeout=15)
+        else:
+            url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+            res = requests.get(url, headers=_google_drive_headers(), timeout=15)
+        if res.status_code == 200:
+            return res.content
+        raise RuntimeError(f"Google Drive fetch returned HTTP {res.status_code}.")
 
     # GDrive mock fallback
     mock_content = (
@@ -376,17 +387,16 @@ def fetch_onedrive_document(item_id: str) -> bytes:
     """
     Fetches a document from Microsoft OneDrive.
     """
-    if is_real_connectors_enabled() and validate_ms_graph_connector_config().get("valid"):
-        try:
-            import requests
-            token = _ms_graph_access_token()
-            headers = {"Authorization": f"Bearer {token}"}
-            url = f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/content"
-            res = requests.get(url, headers=headers, timeout=15)
-            if res.status_code == 200:
-                return res.content
-        except Exception as e:
-            logger.error(f"OneDrive fetch failed: {str(e)}. Falling back to OneDrive mock mode.")
+    if is_real_connectors_enabled():
+        _require_connector("onedrive")
+        import requests
+        token = _ms_graph_access_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/content"
+        res = requests.get(url, headers=headers, timeout=15)
+        if res.status_code == 200:
+            return res.content
+        raise RuntimeError(f"OneDrive fetch returned HTTP {res.status_code}.")
 
     # OneDrive mock fallback
     dummy_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
@@ -405,17 +415,16 @@ def fetch_sharepoint_document(site_id: str, item_id: str) -> bytes:
     """
     Fetches a document from SharePoint Online.
     """
-    if is_real_connectors_enabled() and validate_ms_graph_connector_config().get("valid"):
-        try:
-            import requests
-            token = _ms_graph_access_token()
-            headers = {"Authorization": f"Bearer {token}"}
-            url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}/content"
-            res = requests.get(url, headers=headers, timeout=15)
-            if res.status_code == 200:
-                return res.content
-        except Exception as e:
-            logger.error(f"SharePoint fetch failed: {str(e)}. Falling back to SharePoint mock mode.")
+    if is_real_connectors_enabled():
+        _require_connector("sharepoint")
+        import requests
+        token = _ms_graph_access_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{item_id}/content"
+        res = requests.get(url, headers=headers, timeout=15)
+        if res.status_code == 200:
+            return res.content
+        raise RuntimeError(f"SharePoint fetch returned HTTP {res.status_code}.")
 
     # SharePoint mock fallback
     mock_content = (
@@ -433,20 +442,19 @@ def fetch_dropbox_document(file_path: str) -> bytes:
     """
     Fetches a document from Dropbox.
     """
-    if is_real_connectors_enabled() and validate_connector_config("dropbox").get("valid"):
-        try:
-            import requests
-            token = os.getenv("DROPBOX_ACCESS_TOKEN")
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Dropbox-API-Arg": json.dumps({"path": file_path})
-            }
-            url = "https://content.dropboxapi.com/2/files/download"
-            res = requests.post(url, headers=headers, timeout=15)
-            if res.status_code == 200:
-                return res.content
-        except Exception as e:
-            logger.error(f"Dropbox fetch failed: {str(e)}. Falling back to Dropbox mock mode.")
+    if is_real_connectors_enabled():
+        _require_connector("dropbox")
+        import requests
+        token = os.getenv("DROPBOX_ACCESS_TOKEN")
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Dropbox-API-Arg": json.dumps({"path": file_path})
+        }
+        url = "https://content.dropboxapi.com/2/files/download"
+        res = requests.post(url, headers=headers, timeout=15)
+        if res.status_code == 200:
+            return res.content
+        raise RuntimeError(f"Dropbox fetch returned HTTP {res.status_code}.")
 
     # Dropbox mock fallback
     dummy_openai_key = "sk-prod-" + "1234567890abcdef1234567890abcdef"
@@ -463,119 +471,108 @@ def fetch_dropbox_document(file_path: str) -> bytes:
 def list_cloud_source_files(source: str) -> List[Dict[str, Any]]:
     """
     Returns a list of files from the cloud source.
-    Lists real files if ENABLE_REAL_CONNECTORS is true, otherwise returns fallback lists.
+    Lists complete real inventories or raises; disabled connectors use mock data.
     """
     if is_real_connectors_enabled():
-        try:
-            if source == "s3":
-                if not validate_aws_connector_config().get("valid"):
-                    raise ConnectorValidationError("AWS S3 connector config is invalid.")
-                import boto3
-                s3 = _aws_session().client("s3")
-                buckets = discover_s3_buckets()
-                file_list = []
-                for b in buckets:
-                    try:
-                        resp = s3.list_objects_v2(Bucket=b)
-                        for obj in resp.get("Contents", []):
-                            key = obj["Key"]
-                            if key.lower().endswith((".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx")):
-                                file_list.append({
-                                    "id": f"{b}/{key}",
-                                    "name": os.path.basename(key) or key,
-                                    "size_bytes": obj["Size"],
-                                    "location": f"s3://{b}/{key}"
-                                })
-                    except Exception as e:
-                        logger.warning(f"Failed to list objects in bucket {b}: {e}")
-                if file_list:
-                    return file_list
+        _require_connector(source)
+        if source == "s3":
+            s3 = _aws_session().client("s3")
+            buckets = discover_s3_buckets()
+            file_list = []
+            for b in buckets:
+                resp = s3.list_objects_v2(Bucket=b)
+                if resp.get("IsTruncated"):
+                    raise RuntimeError("S3 object inventory is incomplete.")
+                objects = resp.get("Contents", [])
+                if not isinstance(objects, list) or type(resp.get("KeyCount")) is not int or resp["KeyCount"] != len(objects):
+                    raise RuntimeError("S3 object inventory is malformed.")
+                for obj in objects:
+                    key = obj["Key"]
+                    if key.lower().endswith((".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx")):
+                        file_list.append({
+                            "id": f"{b}/{key}",
+                            "name": os.path.basename(key) or key,
+                            "size_bytes": obj["Size"],
+                            "location": f"s3://{b}/{key}"
+                        })
+            return file_list
 
-            elif source == "gdrive":
-                if not validate_gcp_connector_config().get("valid"):
-                    raise ConnectorValidationError("Google Drive connector config is invalid.")
-                import requests
-                api_key = os.getenv("GOOGLE_API_KEY")
-                folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-                query = "mimeType != 'application/vnd.google-apps.folder'"
-                if folder_id:
-                    query = f"'{folder_id}' in parents and {query}"
-                if api_key:
-                    url = f"https://www.googleapis.com/drive/v3/files?q={query}&key={api_key}"
-                    res = requests.get(url, timeout=15)
-                else:
-                    url = "https://www.googleapis.com/drive/v3/files"
-                    res = requests.get(url, headers=_google_drive_headers(), params={"q": query}, timeout=15)
-                if res.status_code == 200:
-                    files = res.json().get("files", [])
-                    return [{
-                        "id": f["id"],
-                        "name": f["name"],
-                        "size_bytes": 10240, # Drive API lists metadata, mock size
-                        "location": f"Google Drive / {f['name']}"
-                    } for f in files]
+        elif source == "gdrive":
+            import requests
+            api_key = os.getenv("GOOGLE_API_KEY")
+            folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+            query = "mimeType != 'application/vnd.google-apps.folder'"
+            if folder_id:
+                query = f"'{folder_id}' in parents and {query}"
+            if api_key:
+                url = f"https://www.googleapis.com/drive/v3/files?q={query}&key={api_key}&fields=nextPageToken,incompleteSearch,files(id,name,size)"
+                res = requests.get(url, timeout=15)
+            else:
+                url = "https://www.googleapis.com/drive/v3/files"
+                res = requests.get(url, headers=_google_drive_headers(), params={"q": query, "fields": "nextPageToken,incompleteSearch,files(id,name,size)"}, timeout=15)
+            if res.status_code == 200:
+                files = _complete_listing(res, "files")
+                return [{
+                    "id": f["id"],
+                    "name": f["name"],
+                    "size_bytes": int(f["size"]) if f.get("size") is not None else None,
+                    "location": f"Google Drive / {f['name']}"
+                } for f in files]
 
-            elif source == "onedrive":
-                if not validate_ms_graph_connector_config().get("valid"):
-                    raise ConnectorValidationError("OneDrive connector config is invalid.")
-                import requests
-                token = _ms_graph_access_token()
-                folder_id = os.getenv("ONEDRIVE_FOLDER_ID", "root")
+        elif source == "onedrive":
+            import requests
+            token = _ms_graph_access_token()
+            folder_id = os.getenv("ONEDRIVE_FOLDER_ID", "root")
+            headers = {"Authorization": f"Bearer {token}"}
+            url = f"https://graph.microsoft.com/v1.0/me/drive/items/{folder_id}/children"
+            res = requests.get(url, headers=headers, timeout=15)
+            if res.status_code == 200:
+                items = _complete_listing(res, "value")
+                return [{
+                    "id": item["id"],
+                    "name": item["name"],
+                    "size_bytes": item.get("size"),
+                    "location": f"OneDrive / {item['name']}"
+                } for item in items if "file" in item]
+
+        elif source == "sharepoint":
+            import requests
+            token = _ms_graph_access_token()
+            site_id = os.getenv("SHAREPOINT_SITE_ID")
+            folder_id = os.getenv("SHAREPOINT_FOLDER_ID", "root")
+            if site_id:
                 headers = {"Authorization": f"Bearer {token}"}
-                url = f"https://graph.microsoft.com/v1.0/me/drive/items/{folder_id}/children"
+                url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{folder_id}/children"
                 res = requests.get(url, headers=headers, timeout=15)
                 if res.status_code == 200:
-                    items = res.json().get("value", [])
+                    items = _complete_listing(res, "value")
                     return [{
-                        "id": item["id"],
+                        "id": f"{site_id}/{item['id']}",
                         "name": item["name"],
-                        "size_bytes": item.get("size", 2048),
-                        "location": f"OneDrive / {item['name']}"
+                        "size_bytes": item.get("size"),
+                        "location": f"SharePoint / {item['name']}"
                     } for item in items if "file" in item]
 
-            elif source == "sharepoint":
-                if not validate_ms_graph_connector_config().get("valid"):
-                    raise ConnectorValidationError("SharePoint connector config is invalid.")
-                import requests
-                token = _ms_graph_access_token()
-                site_id = os.getenv("SHAREPOINT_SITE_ID")
-                folder_id = os.getenv("SHAREPOINT_FOLDER_ID", "root")
-                if site_id:
-                    headers = {"Authorization": f"Bearer {token}"}
-                    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{folder_id}/children"
-                    res = requests.get(url, headers=headers, timeout=15)
-                    if res.status_code == 200:
-                        items = res.json().get("value", [])
-                        return [{
-                            "id": f"{site_id}/{item['id']}",
-                            "name": item["name"],
-                            "size_bytes": item.get("size", 2048),
-                            "location": f"SharePoint / {item['name']}"
-                        } for item in items if "file" in item]
+        elif source == "dropbox":
+            import requests
+            token = os.getenv("DROPBOX_ACCESS_TOKEN")
+            folder_path = os.getenv("DROPBOX_FOLDER_PATH", "")
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            url = "https://api.dropboxapi.com/2/files/list_folder"
+            res = requests.post(url, headers=headers, json={"path": folder_path}, timeout=15)
+            if res.status_code == 200:
+                entries = _complete_listing(res, "entries")
+                return [{
+                    "id": entry["path_lower"],
+                    "name": entry["name"],
+                    "size_bytes": entry.get("size"),
+                    "location": f"Dropbox{entry['path_display']}"
+                } for entry in entries if entry.get(".tag") == "file"]
 
-            elif source == "dropbox":
-                if not validate_connector_config("dropbox").get("valid"):
-                    raise ConnectorValidationError("Dropbox connector config is invalid.")
-                import requests
-                token = os.getenv("DROPBOX_ACCESS_TOKEN")
-                folder_path = os.getenv("DROPBOX_FOLDER_PATH", "")
-                headers = {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json"
-                }
-                url = "https://api.dropboxapi.com/2/files/list_folder"
-                res = requests.post(url, headers=headers, json={"path": folder_path}, timeout=15)
-                if res.status_code == 200:
-                    entries = res.json().get("entries", [])
-                    return [{
-                        "id": entry["path_lower"],
-                        "name": entry["name"],
-                        "size_bytes": entry.get("size", 4096),
-                        "location": f"Dropbox{entry['path_display']}"
-                    } for entry in entries if entry.get(".tag") == "file"]
-
-        except Exception as e:
-            logger.error(f"Real cloud listing failed for source {source}: {e}")
+        raise RuntimeError(f"Real {source} inventory could not be collected.")
 
     # Mock Fallback lists
     if source == "s3":
@@ -609,114 +606,112 @@ def scan_s3_bucket_security(bucket_name: str) -> List[Dict[str, Any]]:
     Checks: Block Public Access, SSE Default Encryption, Versioning, Access Logging, Public Policy.
     """
     findings = []
-    if is_real_connectors_enabled() and validate_aws_connector_config().get("valid"):
-        try:
-            import boto3
-            from botocore.exceptions import ClientError
-            s3 = _aws_session().client("s3")
-            
-            # 1. Block Public Access Check
-            try:
-                pab = s3.get_public_access_block(Bucket=bucket_name)
-                cfg = pab.get("PublicAccessBlockConfiguration", {})
-                is_public_blocked = all([
-                    cfg.get("BlockPublicAcls", False),
-                    cfg.get("IgnorePublicAcls", False),
-                    cfg.get("BlockPublicPolicy", False),
-                    cfg.get("RestrictPublicBuckets", False)
-                ])
-            except ClientError:
-                is_public_blocked = False
-                
-            if not is_public_blocked:
-                findings.append({
-                    "finding_type": "Regulatory",
-                    "matched_pattern": "S3_PUBLIC_ACCESS_ENABLED",
-                    "matched_text": f"S3 Bucket '{bucket_name}' has public access enabled or block public access is not fully configured.",
-                    "risk_level": "CRITICAL",
-                    "recommendation": "[SOC2/ISO27001] Enable Block Public Access at the bucket level to prevent unauthorized data exposure.",
-                    "impact": "Exposed critical infrastructure or customer records to the public internet.",
-                    "priority": "P1"
-                })
-                
-            # 2. Encryption Check
-            try:
-                enc = s3.get_bucket_encryption(Bucket=bucket_name)
-                rules = enc.get("ServerSideEncryptionConfiguration", {}).get("Rules", [])
-                has_encryption = len(rules) > 0
-            except ClientError:
-                has_encryption = False
-                
-            if not has_encryption:
-                findings.append({
-                    "finding_type": "Regulatory",
-                    "matched_pattern": "S3_ENCRYPTION_DISABLED",
-                    "matched_text": f"S3 Bucket '{bucket_name}' does not have default server-side encryption enabled.",
-                    "risk_level": "HIGH",
-                    "recommendation": "[SOC2/HIPAA] Enable default AES-256 server-side encryption (SSE-S3 or SSE-KMS) for the bucket.",
-                    "impact": "Data is stored on physical media in plaintext, violating data privacy compliance mandates.",
-                    "priority": "P1"
-                })
-                
-            # 3. Versioning Check
-            try:
-                ver = s3.get_bucket_versioning(Bucket=bucket_name)
-                status = ver.get("Status", "Disabled")
-                has_versioning = status == "Enabled"
-            except ClientError:
-                has_versioning = False
-                
-            if not has_versioning:
-                findings.append({
-                    "finding_type": "Regulatory",
-                    "matched_pattern": "S3_VERSIONING_DISABLED",
-                    "matched_text": f"S3 Bucket '{bucket_name}' versioning is disabled.",
-                    "risk_level": "MEDIUM",
-                    "recommendation": "[ISO27001] Enable S3 bucket versioning to allow recovery from accidental deletion or modification.",
-                    "impact": "Inability to retrieve historical record states or recover from data override incidents.",
-                    "priority": "P2"
-                })
-                
-            # 4. Access Logging Check
-            try:
-                log = s3.get_bucket_logging(Bucket=bucket_name)
-                has_logging = "LoggingEnabled" in log
-            except ClientError:
-                has_logging = False
-                
-            if not has_logging:
-                findings.append({
-                    "finding_type": "Regulatory",
-                    "matched_pattern": "S3_LOGGING_DISABLED",
-                    "matched_text": f"S3 Bucket '{bucket_name}' access logging is disabled.",
-                    "risk_level": "MEDIUM",
-                    "recommendation": "[SOC2/HIPAA] Enable server access logging to audit data access and operations.",
-                    "impact": "Auditors cannot verify access trails to individual objects, decreasing compliance trust.",
-                    "priority": "P2"
-                })
-                
-            # 5. Public Policy Status Check
-            try:
-                policy_status = s3.get_bucket_policy_status(Bucket=bucket_name)
-                is_public_policy = policy_status.get("PolicyStatus", {}).get("IsPublic", False)
-            except ClientError:
-                is_public_policy = False
-                
-            if is_public_policy:
-                findings.append({
-                    "finding_type": "Regulatory",
-                    "matched_pattern": "S3_PUBLIC_POLICY_EXPOSED",
-                    "matched_text": f"S3 Bucket '{bucket_name}' has an overly permissive public bucket policy.",
-                    "risk_level": "CRITICAL",
-                    "recommendation": "[SOC2/ISO27001] Remove wildcard (*) principal access rules from the bucket policy.",
-                    "impact": "Allows external third parties to download and view all objects inside the bucket.",
-                    "priority": "P1"
-                })
+    if is_real_connectors_enabled():
+        _require_connector("s3")
+        from botocore.exceptions import ClientError
+        s3 = _aws_session().client("s3")
 
-        except Exception as e:
-            logger.error(f"S3 config scan failed for bucket '{bucket_name}': {e}")
-            
-    # Mock misconfigurations if real checks are disabled or find nothing to ensure demonstrable verification
+        # 1. Block Public Access Check
+        try:
+            pab = s3.get_public_access_block(Bucket=bucket_name)
+            cfg = pab.get("PublicAccessBlockConfiguration", {})
+            is_public_blocked = all([
+                cfg.get("BlockPublicAcls", False),
+                cfg.get("IgnorePublicAcls", False),
+                cfg.get("BlockPublicPolicy", False),
+                cfg.get("RestrictPublicBuckets", False)
+            ])
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "NoSuchPublicAccessBlockConfiguration":
+                raise
+            is_public_blocked = False
+
+        if not is_public_blocked:
+            findings.append({
+                "finding_type": "Regulatory",
+                "matched_pattern": "S3_PUBLIC_ACCESS_ENABLED",
+                "matched_text": f"S3 Bucket '{bucket_name}' has public access enabled or block public access is not fully configured.",
+                "risk_level": "CRITICAL",
+                "recommendation": "[SOC2/ISO27001] Enable Block Public Access at the bucket level to prevent unauthorized data exposure.",
+                "impact": "Exposed critical infrastructure or customer records to the public internet.",
+                "priority": "P1"
+            })
+
+        # 2. Encryption Check
+        try:
+            enc = s3.get_bucket_encryption(Bucket=bucket_name)
+            rules = enc.get("ServerSideEncryptionConfiguration", {}).get("Rules", [])
+            has_encryption = len(rules) > 0
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ServerSideEncryptionConfigurationNotFoundError":
+                raise
+            has_encryption = False
+
+        if not has_encryption:
+            findings.append({
+                "finding_type": "Regulatory",
+                "matched_pattern": "S3_ENCRYPTION_DISABLED",
+                "matched_text": f"S3 Bucket '{bucket_name}' does not have default server-side encryption enabled.",
+                "risk_level": "HIGH",
+                "recommendation": "[SOC2/HIPAA] Enable default AES-256 server-side encryption (SSE-S3 or SSE-KMS) for the bucket.",
+                "impact": "Data is stored on physical media in plaintext, violating data privacy compliance mandates.",
+                "priority": "P1"
+            })
+
+        # 3. Versioning Check
+        ver = s3.get_bucket_versioning(Bucket=bucket_name)
+        status = ver.get("Status", "Disabled")
+        has_versioning = status == "Enabled"
+
+        if not has_versioning:
+            findings.append({
+                "finding_type": "Regulatory",
+                "matched_pattern": "S3_VERSIONING_DISABLED",
+                "matched_text": f"S3 Bucket '{bucket_name}' versioning is disabled.",
+                "risk_level": "MEDIUM",
+                "recommendation": "[ISO27001] Enable S3 bucket versioning to allow recovery from accidental deletion or modification.",
+                "impact": "Inability to retrieve historical record states or recover from data override incidents.",
+                "priority": "P2"
+            })
+
+        # 4. Access Logging Check
+        log = s3.get_bucket_logging(Bucket=bucket_name)
+        has_logging = "LoggingEnabled" in log
+
+        if not has_logging:
+            findings.append({
+                "finding_type": "Regulatory",
+                "matched_pattern": "S3_LOGGING_DISABLED",
+                "matched_text": f"S3 Bucket '{bucket_name}' access logging is disabled.",
+                "risk_level": "MEDIUM",
+                "recommendation": "[SOC2/HIPAA] Enable server access logging to audit data access and operations.",
+                "impact": "Auditors cannot verify access trails to individual objects, decreasing compliance trust.",
+                "priority": "P2"
+            })
+
+        # 5. Public Policy Status Check
+        try:
+            policy_status = s3.get_bucket_policy_status(Bucket=bucket_name)
+            is_public_policy = policy_status.get("PolicyStatus", {}).get("IsPublic", False)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "NoSuchBucketPolicy":
+                raise
+            is_public_policy = False
+
+        if is_public_policy:
+            findings.append({
+                "finding_type": "Regulatory",
+                "matched_pattern": "S3_PUBLIC_POLICY_EXPOSED",
+                "matched_text": f"S3 Bucket '{bucket_name}' has an overly permissive public bucket policy.",
+                "risk_level": "CRITICAL",
+                "recommendation": "[SOC2/ISO27001] Remove wildcard (*) principal access rules from the bucket policy.",
+                "impact": "Allows external third parties to download and view all objects inside the bucket.",
+                "priority": "P1"
+            })
+
+        return findings
+
+    # Mock findings are limited to explicit mock mode.
     if not findings:
         findings = [
             {

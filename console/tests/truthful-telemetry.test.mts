@@ -33,7 +33,7 @@ test("auditor trust summaries preserve unassessed scores as Unknown", () => {
 test("overview clears stale values after an outage and renders an explicit alert", async () => {
   const states: unknown[] = [], refs: Array<{ current: unknown }> = [];
   let cursor = 0, refCursor = 0, refresh: () => Promise<void>, failed = false;
-  let failedSource = "", health = "healthy", score: number | null = 72;
+  let failedSource = "", health = "healthy", auditHealth = "healthy", score: number | null = 72;
   let delayed = false;
   const pending: Array<() => void> = [];
   const react = { ...React,
@@ -50,7 +50,7 @@ test("overview clears stale values after an outage and renders an explicit alert
       const unavailable = failed || !!failedSource && url.includes(failedSource);
       const response = { ok: !unavailable, status: unavailable ? 503 : 200,
         json: async () => url.includes("dashboard") ? { status: health, totalRequests: 12345, redactions24h: 0, openApprovals: 0,
-          coverageReason: "Gateway collection coverage is unverified.", metricStates: { p99LatencyMs: "unknown" }, sources: { audit: { status: "healthy" } }, recentActivity: [] }
+          coverageReason: "Gateway collection coverage is unverified.", metricStates: { p99LatencyMs: "unknown" }, sources: { audit: { status: auditHealth } }, recentActivity: [] }
           : { generated_at: "2026-09-18T00:00:00Z", frameworks: [{ framework: "SOC2", score, readiness_level: "insufficient_evidence", metrics: { evidence_count: 0, open_findings: 0 } }] } };
       if (delayed) await new Promise<void>((resolve) => pending.push(resolve));
       return response;
@@ -68,6 +68,11 @@ test("overview clears stale values after an outage and renders an explicit alert
     await refresh!(); assert.match(render(), new RegExp(`Telemetry ${health}`));
     assert.match(render(), /No recent audit activity\./, "A successful empty activity source must survive another source's failure");
   }
+  auditHealth = "unknown"; await refresh!();
+  assert.match(render(), /Audit activity unknown/); assert.match(render(), /Audit activity coverage is unverified/);
+  assert.doesNotMatch(render(), /No recent audit activity/);
+  health = "unavailable"; await refresh!();
+  assert.match(render(), /Audit activity unknown/, "Another source's failure must not change the audit source state");
   health = "unknown"; score = null; await refresh!();
   assert.doesNotMatch(render(), /null%/); assert.match(render(), /Unknown/);
   delayed = true; const staleRefresh = refresh!();
@@ -84,7 +89,7 @@ test("overview clears stale values after an outage and renders an explicit alert
 test("dashboard honors canonical coverage and state, independent of audit mirror serialization", async () => {
   const metrics = { source: "postgres", status: "healthy", complete: true, totalRequests: 201, redactions24h: 1,
     requestsPerSec: 201 / 86400, p99LatencyMs: 0, windowStart: "2026-09-17T00:00:00Z", windowEnd: "2026-09-18T00:00:00Z" };
-  let auditSource = "postgres", failure = "", malformed = "";
+  let auditSource = "postgres", failure = "", malformed = "", emptyAudit = false;
   const calls: string[] = [];
   const route = compile("../src/app/api/dashboard/route.ts", {
     require: (name: string) => name === "next/server" ? { NextResponse: { json: (body: unknown) => body } } : {
@@ -95,7 +100,7 @@ test("dashboard honors canonical coverage and state, independent of audit mirror
       calls.push(url);
       if (url.includes(failure) && failure) throw new Error("synthetic outage");
       return { ok: true, json: async () => url.includes(malformed) && malformed ? {} : url.includes("approvals") ? [{ status: "PENDING" }]
-        : url.includes("/metrics?") ? metrics : { source: auditSource, total: 409, records: [{
+        : url.includes("/metrics?") ? metrics : { source: auditSource, total: emptyAudit ? 0 : 409, records: emptyAudit ? [] : [{
           record_id: "record-1", timestamp: "2026-09-18T00:00:00Z", actor_type: "gateway", request_id: "request-1",
           idempotency_key: auditSource === "postgres" ? "gateway:request-1:provider_outcome" : "record-1", action: "allow", duration_ms: 20,
         }] } };
@@ -103,11 +108,22 @@ test("dashboard honors canonical coverage and state, independent of audit mirror
   });
   const request = { url: "http://local/api/dashboard" };
   for (auditSource of ["postgres", "clickhouse"]) {
-    const result = await route.GET(request) as typeof metrics & { openApprovals: number };
+    const result = await route.GET(request) as typeof metrics & { openApprovals: number; recentActivity: unknown[]; sources: Record<string, { status: string }> };
     assert.equal(result.totalRequests, 201); assert.equal(result.redactions24h, 1);
     assert.equal(result.requestsPerSec, 201 / 86400); assert.equal(result.p99LatencyMs, 0);
     assert.equal(result.openApprovals, 1);
+    assert.equal(result.status, auditSource === "postgres" ? "healthy" : "unknown");
+    assert.equal(result.sources.audit.status, auditSource === "postgres" ? "healthy" : "unknown");
+    assert.equal(result.recentActivity.length, 1, "Unverified coverage must not hide observed events");
   }
+  emptyAudit = true;
+  const stalled = await route.GET(request) as typeof metrics & { sources: Record<string, { status: string }>; recentActivity: unknown[] };
+  assert.equal(stalled.status, "unknown"); assert.equal(stalled.sources.audit.status, "unknown");
+  assert.equal(stalled.totalRequests, 201, "PostgreSQL observations survive an empty reachable audit mirror");
+  assert.equal(stalled.recentActivity.length, 0);
+  auditSource = "postgres";
+  assert.equal((await route.GET(request) as { status: string }).status, "healthy", "An authoritative empty result is valid");
+  emptyAudit = false; auditSource = "clickhouse";
   assert.ok(calls.some((url) => url.endsWith("/audit-logs/metrics?hours=24")));
   assert.ok(calls.some((url) => url.endsWith("/audit-logs?limit=8")));
   for (const source of ["approvals", "/metrics?", "audit-logs?limit"]) {

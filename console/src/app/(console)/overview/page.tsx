@@ -123,7 +123,7 @@ export default function OverviewPage() {
 
   const complianceReadiness = complianceScores?.frameworks || [];
   const emptyActivity = metrics?.sources?.audit?.status === "healthy" ? "No recent audit activity."
-    : metrics?.sources?.audit?.status === "unavailable" || error ? "Audit activity unavailable" : "Audit activity unknown";
+    : metrics?.sources?.audit?.status === "unavailable" || (!metrics && error) ? "Audit activity unavailable" : "Audit activity unknown";
   const telemetryStatus = error || scoresError ? "unavailable"
     : metrics?.status === "healthy" && (!complianceScores || complianceReadiness.some((framework) => framework.score == null)) ? "unknown"
     : metrics?.status || "unknown";
@@ -272,6 +272,7 @@ export default function OverviewPage() {
 
         <aside className="rounded-md border border-[#DCE1E9] bg-white p-5">
           <div className="flex items-center justify-between"><h3 className="text-lg font-bold">Recent activity</h3><Link href="/audit" className="text-xs font-semibold text-[#6D28D9]">View all →</Link></div>
+          {metrics?.sources?.audit?.status === "unknown" && <p role="status" className="mt-3 text-xs text-amber-800">Audit activity coverage is unverified; recorded observations may be incomplete.</p>}
           <div className="mt-3 divide-y divide-[#EEF1F6]">{recentActivity.length === 0 ? <div className="py-10 text-center text-xs text-[#6B7488]">{emptyActivity}</div> : recentActivity.map((record, index) => <Link href="/audit" key={record.record_id} className="flex gap-3 py-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${index % 3 === 0 ? "bg-[#6D28D9]" : index % 3 === 1 ? "bg-emerald-500" : "bg-[#E9A93C]"}`}/><span className="min-w-0"><strong className="block truncate text-xs">{record.action.replaceAll("_", " ")}</strong><span className="mt-0.5 block truncate text-[10px] text-[#6B7488]">{record.provider || "AuthClaw"}{record.model ? ` · ${record.model}` : ""}</span></span><time className="ml-auto shrink-0 text-[9px] text-[#6B7488]">{new Date(record.timestamp).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</time></Link>)}</div>
         </aside>
       </div>
