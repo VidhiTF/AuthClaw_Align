@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from database import engine
 from services.audit_transport import AuditTopics, make_audit_publisher
+from services.tenant_context import get_current_tenant_id, validate_tenant_id
 
 
 def _truthy(name: str, default: bool = False) -> bool:
@@ -39,7 +40,6 @@ class EventPipeline:
     def record_event(self, event: Dict[str, Any], stream: str = "audit", *, connection=None) -> str:
         topic = self.audit_topic if stream == "audit" else self.analytics_topic
         if stream == "security_alert":
-            from services.tenant_context import validate_tenant_id
             validate_tenant_id(event.get("tenant_id"))
             topic = "security_alert"
         event_id = self._event_id(event)
@@ -89,7 +89,6 @@ class EventPipeline:
             if record["status"] == "delivered":
                 return {"status": "delivered", "event_id": event_id}
             if record["stream"] == "security_alert":
-                from services.tenant_context import validate_tenant_id
                 validate_tenant_id(record["tenant_id"])
             event = json.loads(record["payload"])
             attempts = 0 if retry else int(record["attempts"] or 0)
@@ -206,65 +205,55 @@ class EventPipeline:
         return {"retried": len(rows), "delivered": delivered, "failed": failed}
 
     def refresh_checkpoint(self, stream: str) -> None:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text(
-                    """
-                    SELECT
-                        SUM(CASE WHEN status IN ('queued', 'dead_letter') THEN 1 ELSE 0 END) AS pending,
-                        SUM(CASE WHEN status = 'dead_letter' THEN 1 ELSE 0 END) AS dead_letters,
-                        EXTRACT(EPOCH FROM (
-                            NOW() - MIN(CASE WHEN status IN ('queued', 'dead_letter') THEN created_at ELSE NULL END)
-                        )) AS lag_seconds,
-                        MAX(delivered_at) AS last_delivered_at
-                    FROM event_delivery_records
-                    WHERE stream = :stream
-                    """
-                ),
-                {"stream": stream},
-            ).fetchone()
+        tenant_id = get_current_tenant_id()
+        validate_tenant_id(tenant_id)
+        with engine.begin() as conn:
+            # Acquire before reading counts, so concurrent refreshes cannot publish
+            # an older snapshot after a newer one for the same tenant and stream.
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                         {"key": f"checkpoint:{tenant_id}:{stream}"})
             conn.execute(
                 text(
                     """
                     INSERT INTO event_consumer_checkpoints (
-                        stream, consumer_group, pending_events, dead_letter_count,
+                        tenant_id, stream, consumer_group, pending_events, dead_letter_count,
                         lag_seconds, last_delivered_at, updated_at
                     )
-                    VALUES (
-                        :stream, :consumer_group, :pending_events, :dead_letter_count,
-                        :lag_seconds, :last_delivered_at, NOW()
-                    )
-                    ON CONFLICT (stream, consumer_group) DO UPDATE SET
+                    SELECT
+                        :tenant, :stream, 'authclaw-analytics-ingestor',
+                        COUNT(*) FILTER (WHERE status IN ('queued', 'dead_letter')),
+                        COUNT(*) FILTER (WHERE status = 'dead_letter'),
+                        COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() -
+                            MIN(created_at) FILTER (WHERE status IN ('queued', 'dead_letter'))))::integer, 0),
+                        MAX(delivered_at), clock_timestamp()
+                    FROM event_delivery_records
+                    WHERE tenant_id = :tenant AND stream = :stream
+                    ON CONFLICT (tenant_id, stream, consumer_group) DO UPDATE SET
                         pending_events = EXCLUDED.pending_events,
                         dead_letter_count = EXCLUDED.dead_letter_count,
                         lag_seconds = EXCLUDED.lag_seconds,
                         last_delivered_at = EXCLUDED.last_delivered_at,
-                        updated_at = NOW()
+                        updated_at = EXCLUDED.updated_at
                     """
                 ),
-                {
-                    "stream": stream,
-                    "consumer_group": "authclaw-analytics-ingestor",
-                    "pending_events": int(row.pending or 0),
-                    "dead_letter_count": int(row.dead_letters or 0),
-                    "lag_seconds": int(row.lag_seconds or 0),
-                    "last_delivered_at": row.last_delivered_at,
-                },
+                {"stream": stream, "tenant": tenant_id},
             )
-            conn.commit()
 
     def delivery_metrics(self) -> Dict[str, Any]:
+        tenant_id = get_current_tenant_id()
+        validate_tenant_id(tenant_id)
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
                     """
                     SELECT stream, status, COUNT(*), COALESCE(MAX(attempts), 0)
                     FROM event_delivery_records
+                    WHERE tenant_id = :tenant
                     GROUP BY stream, status
                     """
-                )
+                ), {"tenant": tenant_id},
             ).fetchall()
-            checkpoints = conn.execute(text("SELECT * FROM event_consumer_checkpoints ORDER BY stream")).fetchall()
+            checkpoints = conn.execute(text("SELECT * FROM event_consumer_checkpoints WHERE tenant_id = :tenant ORDER BY stream"), {"tenant": tenant_id}).fetchall()
         by_stream: Dict[str, Dict[str, Any]] = {}
         for stream, status, count, attempts in rows:
             by_stream.setdefault(stream, {"queued": 0, "delivered": 0, "dead_letter": 0, "max_attempts": 0})

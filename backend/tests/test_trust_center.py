@@ -106,7 +106,8 @@ def test_verify_artifact_wraps_audit_export_verifier(monkeypatch):
     assert trust_center.verify_artifact({"ok": True}) == {"verified": True}
 
 
-def test_public_package_filters_trust_summary_and_recalculates_counts(monkeypatch):
+@pytest.mark.parametrize("timestamp", [None, "2026-07-15T00:00:00+00:00"])
+def test_public_package_filters_trust_summary_and_recalculates_counts(monkeypatch, timestamp):
     tenant_id = uuid4()
     tenant = SimpleNamespace(id=tenant_id, name="Example", tier="enterprise")
     share = SimpleNamespace(
@@ -128,11 +129,12 @@ def test_public_package_filters_trust_summary_and_recalculates_counts(monkeypatc
 
     scores = {
         "overall_score": 80.0,
+        "evidence_timestamp": None,
         "readiness_level": "monitor",
         "generated_at": "2026-07-16T00:00:00+00:00",
         "frameworks": [
-            {"framework": "SOC2", "score": 90.0},
-            {"framework": "GDPR", "score": 70.0},
+            {"framework": "SOC2", "score": 90.0, "evidence_timestamp": timestamp},
+            {"framework": "GDPR", "score": 70.0, "evidence_timestamp": None},
         ],
         "trust_summary": {
             "generated_at": "2026-07-16T00:00:00+00:00",
@@ -155,6 +157,7 @@ def test_public_package_filters_trust_summary_and_recalculates_counts(monkeypatc
     package = trust_center.build_public_package(Database(), share)
 
     assert [item["framework"] for item in package["scores"]["frameworks"]] == ["SOC2"]
+    assert package["scores"]["evidence_timestamp"] == timestamp
     assert package["scores"]["trust_summary"]["counts"] == {
         "verified": 1,
         "in_progress": 0,

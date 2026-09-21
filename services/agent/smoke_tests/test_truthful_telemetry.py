@@ -353,6 +353,9 @@ class TruthfulTelemetryTests(unittest.TestCase):
         )
         service = scope["ObservabilityService"]()
         service._clickhouse_query_json = MagicMock()
+        service._clickhouse_query_json.return_value = [{"ok": 1}]
+        self.assertEqual(service._clickhouse_status()["status"], "unknown")
+        self.assertTrue(service._clickhouse_status()["alertable"])
         for rows in ([], [{}], [{"total_requests": 0}], [{"ok": 1}]):
             service._clickhouse_query_json.return_value = rows
             with self.assertRaises(HTTPException) as caught:

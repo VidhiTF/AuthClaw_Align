@@ -11,6 +11,20 @@ from services.observability_service import ObservabilityService
 
 
 class QueueHealthTests(unittest.TestCase):
+    def test_security_alert_recovery_does_not_require_kafka_checkpoint(self):
+        for audit in (False, True):
+            for queued, dead, expected in ((0, 0, "healthy"), (1, 0, "unknown"), (0, 1, "degraded")):
+                with self.subTest(audit=audit, queued=queued, dead=dead):
+                    streams = {"security_alert": {"delivered": 1, "queued": queued, "dead_letter": dead}}
+                    checkpoints = []
+                    if audit:
+                        streams["audit"] = {"delivered": 1, "queued": 0, "dead_letter": 0}
+                        checkpoints = [self.checkpoint(dead_letter_count=0, pending_events=0)]
+                    result = ObservabilityService()._queue_lag({"streams": streams, "checkpoints": checkpoints})
+                    self.assertEqual(result["status"], expected)
+                    self.assertEqual(result["pending_events"], queued + dead)
+                    self.assertEqual(result["alertable"], expected != "healthy")
+
     def test_malformed_pipeline_and_checkpoints_never_raise(self):
         malformed = [None, [], "bad", 7]
         malformed += [{"streams": {}, "checkpoints": value} for value in (None, {}, "bad", 2, [None], [[]], [{"stream": []}], [{"stream": None}])]
@@ -27,6 +41,15 @@ class QueueHealthTests(unittest.TestCase):
                 result = ObservabilityService()._queue_lag({"streams": {}, "checkpoints": []})
                 self.assertEqual(result["status"], "unavailable")
                 self.assertTrue(result["alertable"])
+
+    def test_pending_alert_does_not_hide_known_audit_lag_failure(self):
+        result = ObservabilityService()._queue_lag({
+            "streams": {"audit": {"queued": 1, "dead_letter": 0}, "security_alert": {"queued": 1, "dead_letter": 0}},
+            "checkpoints": [self.checkpoint(lag_seconds=600, pending_events=1, dead_letter_count=0)],
+        })
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["pending_events"], 2)
+        self.assertIsNone(result["max_lag_seconds"])
 
     def checkpoint(self, **changes):
         return {"stream": "audit", "updated_at": datetime.now(timezone.utc),

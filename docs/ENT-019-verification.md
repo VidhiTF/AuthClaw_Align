@@ -293,3 +293,114 @@ tenant administrators; disabled delivery is intentionally visible as failed.
 
 Verification above was completed before publication. PR merge and deployment
 remain separate; the running application's deployment was not changed.
+
+## Follow-up verification — 2026-09-21
+
+This section supersedes the earlier local deployment statement for this follow-up.
+The review's reachable-but-stale ClickHouse mirror and global checkpoint findings
+were confirmed in the existing analytics and event-pipeline paths and corrected:
+
+- Governance analytics always serves tenant-filtered PostgreSQL observations.
+  ClickHouse reachability remains `unknown`, mismatching aggregates are `degraded`,
+  and connection/query failures are `unavailable`; all three are alertable.
+  Matching aggregates do not prove complete ingestion. No watermark or total-traffic
+  coverage is claimed. Existing summary queries are reused; the mirror comparison
+  runs after releasing the PostgreSQL connection.
+- Checkpoints use the authenticated agent tenant key, tenant/stream/group uniqueness,
+  explicit query filters and FORCE RLS. Legacy unattributed rows stay NULL and hidden.
+  A per-tenant/stream transaction lock precedes aggregation so concurrent refreshes
+  cannot overwrite newer counts with an older read. Existing persistence is reused.
+- Backend checkout identity probes now roll back their own read transaction before
+  request isolation is configured. The real PostgreSQL request-dependency regression
+  attaches the production checkout hook; the rebuilt backend confirms REPEATABLE READ.
+
+Fresh verification:
+
+- Backend security/compliance CI unit selection: **624 passed**.
+- Backend `test_t10_postgres.py` and `test_db_safety.py`: **26 passed**, one optional
+  performance measurement skipped. Restricted roles, migrations and isolation ran.
+- Agent CI selection: **122 passed, 84 subtests passed**, including real PostgreSQL
+  middleware, two-tenant checkpoint reads/writes, forced RLS, legacy migration,
+  deterministic concurrent refresh, HTTP ClickHouse outages/stalled mirrors and Redis.
+- Post-simplification focused telemetry integration: **26 passed, 36 subtests passed**.
+- Rebuilt agent image, source from image and tests mounted read-only, network disabled:
+  **25 passed**. Backend and agent image builds passed.
+- Console: **53 tests passed**; TypeScript passed; ESLint exited successfully with
+  14 existing navigation warnings and no errors. Existing Python dependency
+  deprecation warnings remain outside this patch; they were not suppressed.
+- Python compilation, diff whitespace, live T01 activation and Tokei budgets passed.
+- Independent read-only adversarial review found no additional confirmed defects.
+  This is AI review, not the required independent human owner approval.
+
+Initial failures were test setup errors: the new checkpoint helper omitted the
+nonempty request ID required by signed database context, and the Redis replay test
+requires the literal `localhost` address. Both were corrected and suites rerun.
+
+Production changes relative to the pre-follow-up checkout: **54 added / 52 deleted
+physical lines, net +2**, across four production files (`git diff --numstat`).
+The checkpoint service itself is 11 lines smaller. Tests add realistic negative and
+concurrency evidence rather than replacing it with mocks. No new runtime dependency
+or abstraction was introduced. Code Work guidance drove scoped reuse and fresh tests.
+
+### Coordinated local rollout and release constraint
+
+Old checkpoint writers use a global conflict key and **cannot run with the new
+tenant-scoped constraint**. Stop old application writers, run the existing database
+security preparation job, backend and agent migration jobs, finalize grants and
+run the database security checker, then start
+the compatible agent image. Do not perform a mixed-version rolling agent deployment.
+Rollback must use a tenant-checkpoint-compatible image and retain RLS/schema; do not
+restore global checkpoints or guess tenant ownership of legacy rows.
+
+This sequence was exercised on the local Compose installation: old agent was stopped,
+migration and grants succeeded, identity/privilege/cross-schema/RLS verification passed,
+then backend/agent were recreated from rebuilt images and gateway restarted. Backend,
+agent readiness, gateway health and console login each returned HTTP 200. Application
+volumes were preserved. AWS deployment/outage evidence, remote CI for a future commit
+and independent human approvals remain separate release gates. No commit or push is
+claimed by this verification record.
+
+### Closure of the six published-head findings
+
+The remaining recorder, filtered-share metadata and alert-recovery findings are
+also fixed. Regression tests first reproduced the metadata and queue failures.
+The independent reviewer then found a mixed pending-SMTP/high-audit-lag case;
+its failing regression was added and the classifier corrected so a measured
+failure retains precedence over unknown SMTP lag.
+
+- Public trust packages recompute evidence timestamps after framework filtering.
+- Completed SMTP alerts no longer require a Kafka checkpoint. Pending or failed
+  alerts remain visible; a known lag failure elsewhere cannot become unknown.
+- Gateway recording removes string-length token guesses, word-count-as-token
+  estimates and the default 150ms latency. Zero remains zero; missing, negative,
+  boolean or non-integer usage is unknown. PostgreSQL and mirrored event payloads
+  receive the same validated values through existing registrar seams.
+- Additive `gateway_requests.token_usage_recorded` defaults false: historical
+  numeric values are preserved but cannot be asserted as measured. New writers
+  explicitly record provenance; aggregates return NULL when any contributing
+  count is unknown/unverified. Migration must precede deploying new writers.
+  Older writers remain compatible but their unmarked usage stays unknown.
+- Current provider adapters return text, not usage metadata. Their counts remain
+  intentionally unknown; this change does not claim to extract provider usage.
+  ClickHouse lacks that provenance, so diagnostic token fields stay unknown and
+  cannot create a false mirror mismatch. Count/latency discrepancy checks remain.
+
+Final integrated checks: **135 agent tests / 90 subtests**, including the real
+PostgreSQL fixture's migration, legacy/partial/zero token aggregates and alert
+recovery through `/metrics`; **143 backend tests, one optional benchmark skipped**;
+**53 console tests**, TypeScript, Python compilation and line budgets passed.
+The new token suite is included in the existing Agent CI selection. Independent
+review checked the integrated fixes; human owner approvals remain required.
+Production diff relative to the pre-follow-up checkout is **104 additions / 78
+deletions, net +26 physical lines** across nine files, measured with git numstat.
+The checkpoint service is 11 lines smaller. Test growth is necessary to cover
+the reported integration failures and requires the existing owner growth approval.
+
+The final local rollout initially omitted the preparation job and failed on the
+finalized authentication function permissions. This was an operator-sequence error,
+not a schema defect: the full existing prepare -> backend/agent migrations ->
+finalize grants -> security-check sequence passed using restricted migrator roles.
+The final backend/agent images were then activated, with application data retained.
+The automated PostgreSQL fixture now also runs two prepare/migrate/finalize cycles
+with a non-superuser, non-BYPASSRLS migrator before its tenant isolation assertions;
+that upgraded-schema integration passed. Repository/Compose policy tests: 27 passed.

@@ -108,6 +108,10 @@ def run_startup_migrations():
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS latency INTEGER;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS tokens_in INTEGER;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS tokens_out INTEGER;
+    -- Legacy counts may be synthetic; preserve them but never aggregate them as measured.
+    ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS token_usage_recorded BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE gateway_requests ALTER COLUMN tokens_in DROP DEFAULT;
+    ALTER TABLE gateway_requests ALTER COLUMN tokens_out DROP DEFAULT;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS decision VARCHAR(50);
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
@@ -945,15 +949,20 @@ def run_startup_migrations():
 
     CREATE TABLE IF NOT EXISTS event_consumer_checkpoints (
         id SERIAL PRIMARY KEY,
+        tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
         stream VARCHAR(50) NOT NULL,
         consumer_group VARCHAR(120) NOT NULL,
         pending_events INTEGER NOT NULL DEFAULT 0,
         dead_letter_count INTEGER NOT NULL DEFAULT 0,
         lag_seconds INTEGER NOT NULL DEFAULT 0,
         last_delivered_at TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(stream, consumer_group)
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    -- Unattributed legacy checkpoints remain NULL and inaccessible under RLS.
+    ALTER TABLE event_consumer_checkpoints ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;
+    ALTER TABLE event_consumer_checkpoints DROP CONSTRAINT IF EXISTS event_consumer_checkpoints_stream_consumer_group_key;
+    CREATE UNIQUE INDEX IF NOT EXISTS event_consumer_checkpoints_tenant_stream_group
+        ON event_consumer_checkpoints(tenant_id, stream, consumer_group);
 
     CREATE TABLE IF NOT EXISTS rate_limit_events (
         id SERIAL PRIMARY KEY,
@@ -1628,6 +1637,12 @@ def run_startup_migrations():
         USING (tenant_id::text = agent.agent_current_tenant_id())
         WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
+    ALTER TABLE event_consumer_checkpoints ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_event_consumer_checkpoints ON event_consumer_checkpoints;
+    CREATE POLICY tenant_isolation_event_consumer_checkpoints ON event_consumer_checkpoints
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
+
     ALTER TABLE event_dead_letters ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_event_dead_letters ON event_dead_letters;
     CREATE POLICY tenant_isolation_event_dead_letters ON event_dead_letters
@@ -1722,6 +1737,7 @@ def run_startup_migrations():
     ALTER TABLE compliance_score_history FORCE ROW LEVEL SECURITY;
     ALTER TABLE compliance_drift_alerts FORCE ROW LEVEL SECURITY;
     ALTER TABLE event_delivery_records FORCE ROW LEVEL SECURITY;
+    ALTER TABLE event_consumer_checkpoints FORCE ROW LEVEL SECURITY;
     ALTER TABLE event_dead_letters FORCE ROW LEVEL SECURITY;
     ALTER TABLE rate_limit_events FORCE ROW LEVEL SECURITY;
     ALTER TABLE worker_throttle_events FORCE ROW LEVEL SECURITY;

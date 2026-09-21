@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from urllib.parse import parse_qs, urlparse
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Thread
 from datetime import datetime, timezone
@@ -69,11 +70,13 @@ def run_integration():
         from bootstrap_database_security import Role, ensure_agent_auth_definer_role, secure_agent_authentication_boundary
         from database import engine, validate_database_security
         from database.migrations import run_startup_migrations
+        from smoke_tests.checkpoint_tenant_checks import seed_legacy_checkpoint, assert_tenant_checkpoints, assert_restricted_migration_upgrade
         with owner.begin() as conn:
             conn.execute(text("CREATE SCHEMA agent; CREATE EXTENSION pgcrypto"))
             if not conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname='ent019_runtime'")).scalar():
                 conn.execute(text("CREATE ROLE ent019_runtime LOGIN PASSWORD 'ent019-test-only' NOSUPERUSER NOBYPASSRLS"))
             ensure_agent_auth_definer_role(conn)
+            seed_legacy_checkpoint(conn)
             # Characterize upgrade from legacy tables with unattributed rows.
             conn.execute(text("""
                 CREATE TABLE agent.compliance_score_history
@@ -111,6 +114,10 @@ def run_integration():
             conn.execute(text("GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA agent TO ent019_runtime"))
             secure_agent_authentication_boundary(conn, Role(base.username, "", "agent"), Role("ent019_runtime", "", "agent"))
         validate_database_security()
+        assert_restricted_migration_upgrade(owner)
+        assert_tenant_checkpoints(owner, engine)
+        from smoke_tests.test_token_truthfulness import assert_postgres_token_provenance
+        assert_postgres_token_provenance(engine)
         from services.tenant_context import tenant_context
         from document_processing import drift, reports, monitoring, alerts
         from services.compliance_evidence_engine import CONTROL_CATALOG, ComplianceEvidenceEngine
@@ -354,6 +361,8 @@ def verify_alert_outage_and_retry(client, tokens, engine, tenant_context):
             assert conn.execute(text("SELECT status FROM documents WHERE id=7")).scalar() == "pending_approval"
             assert conn.execute(text("SELECT resolved_at IS NOT NULL FROM event_dead_letters WHERE event_id=:id"), {"id": event_id}).scalar() is True
         assert EventPipeline().delivery_metrics()["security_alerts"]["status"] == "healthy"
+        assert ObservabilityService()._queue_lag(EventPipeline().delivery_metrics())["status"] == "healthy"
+        assert client.get("/metrics", headers=tokens[7]).json()["queue_status"] == "healthy"
 
         # A retry immediately after commit sees the scan, not an unlinked event.
         original_delivery = EventPipeline.deliver_event
@@ -421,14 +430,16 @@ def verify_clickhouse_outages(client, tokens, engine, tenant_context):
                 conn.execute(text("INSERT INTO gateway_requests(tenant_id,request_id,timestamp,allowed,duration_ms) VALUES (:tenant,:request,NOW(),true,17)"),
                              {"tenant": str(tenant), "request": f"clickhouse-{tenant}-{number}"})
 
-    def check_fallback():
+    def check_fallback(expected="unavailable"):
         for tenant in (7, 8):
             response = client.get("/analytics/governance", headers=tokens[tenant])
             assert response.status_code == 200, response.text
             payload = response.json()
-            assert payload["status"] == payload["clickhouse_pipeline"]["status"] == "unavailable", payload
+            assert payload["status"] == payload["clickhouse_pipeline"]["status"] == expected, payload
             assert payload["clickhouse_pipeline"]["enabled"] is True
+            assert payload["clickhouse_pipeline"]["alertable"] is True
             assert payload["gateway"]["source"] == "postgresql"
+            assert payload["gateway"]["coverage"] == "persisted_gateway_events_only"
             assert payload["gateway"]["total_requests"] == tenant - 6
             assert payload["gateway"]["avg_duration_ms"] == 17
             assert "private-source-error" not in response.text
@@ -452,6 +463,10 @@ def verify_clickhouse_outages(client, tokens, engine, tenant_context):
             elif not health:
                 body = {} if self.mode == "malformed" else dict(total_requests=0, allowed_requests=0,
                     blocked_requests=0, pending_requests=0, tokens_in=0, tokens_out=0, avg_duration_ms=None)
+                if self.mode == "caught_up":
+                    query = parse_qs(urlparse(self.path).query)["query"][0]
+                    count = 1 if "= '7'" in query else 2
+                    body.update(total_requests=count, allowed_requests=count, avg_duration_ms=17)
             self.send_response(status)
             self.end_headers()
             self.wfile.write(json.dumps(body).encode())
@@ -468,13 +483,12 @@ def verify_clickhouse_outages(client, tokens, engine, tenant_context):
                     ClickHouseStub.mode, ClickHouseStub.queries = mode, []
                     check_fallback()
                     assert ClickHouseStub.queries == (["probe"] if mode == "probe_failure" else ["probe", "aggregate"]) * 2
-                ClickHouseStub.mode = "healthy"
-                response = client.get("/analytics/governance", headers=tokens[7])
-                assert response.status_code == 200, response.text
-                payload = response.json()
-                assert payload["clickhouse_pipeline"]["status"] == "healthy"
-                assert payload["gateway"]["source"] == "clickhouse" and payload["gateway"]["total_requests"] == 0
-                assert payload["gateway"]["avg_duration_ms"] is None
+                # A responding server can still have a stalled, empty mirror.
+                ClickHouseStub.mode = "stalled"
+                check_fallback("degraded")
+                # Matching aggregates do not prove complete ingestion either.
+                ClickHouseStub.mode = "caught_up"
+                check_fallback("unknown")
                 ClickHouseStub.mode, ClickHouseStub.queries = "probe_failure", []
                 failed_summary = Event()
 

@@ -2253,9 +2253,7 @@ def get_metrics():
             avg_latency = conn.execute(text("SELECT AVG(latency) FROM gateway_requests")).scalar()
             avg_latency = float(avg_latency) if avg_latency is not None else None
             
-            tokens_in = conn.execute(text("SELECT SUM(tokens_in) FROM gateway_requests")).scalar() or 0
-            tokens_out = conn.execute(text("SELECT SUM(tokens_out) FROM gateway_requests")).scalar() or 0
-            token_consumption = (tokens_in or 0) + (tokens_out or 0)
+            token_consumption = conn.execute(text("SELECT CASE WHEN COUNT(*) = COUNT(CASE WHEN token_usage_recorded THEN tokens_in + tokens_out END) THEN COALESCE(SUM(tokens_in + tokens_out), 0) END FROM gateway_requests")).scalar()
             
             active_tenants = conn.execute(text("SELECT COUNT(*) FROM tenants WHERE status = 'active'")).scalar() or 0
             active_routes = conn.execute(text("SELECT COUNT(*) FROM gateway_routes WHERE enabled = TRUE")).scalar() or 0
@@ -3102,7 +3100,7 @@ async def redact_gateway_document(
                 )
                 VALUES (
                     NOW(), :risk_level, :allowed, :status, :request_id, :tenant_id,
-                    :route_id, :provider, :model, :latency, :tokens_in, 0,
+                    :route_id, :provider, :model, :latency, NULL, NULL,
                     NOW(), :decision, :duration_ms
                 )
             """),
@@ -3116,7 +3114,6 @@ async def redact_gateway_document(
                 "provider": "authclaw",
                 "model": "document-redaction",
                 "latency": duration_ms,
-                "tokens_in": len(extracted_text.split()),
                 "decision": decision,
                 "duration_ms": duration_ms,
             },

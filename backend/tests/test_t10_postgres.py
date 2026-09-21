@@ -240,6 +240,8 @@ def test_request_dependency_uses_single_connection_and_resets_write_isolation(po
     harness, _, _ = postgres
     tenant = harness.create_identity("t10-one-connection")
     pool = create_engine(harness.app_engine.url, pool_size=1, max_overflow=0, pool_timeout=2)
+    monkeypatch.setenv("AUTHCLAW_RUNTIME_DB_ROLE", pool.url.username)
+    event.listen(pool, "checkout", database_session.verify_runtime_database_identity)
     monkeypatch.setattr(dependencies, "SessionLocal", sessionmaker(bind=pool, expire_on_commit=False))
     request = SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id,
         credential_kind="session", credential_hash=tenant.session_hash))
