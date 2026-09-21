@@ -65,7 +65,9 @@ def approval_database(monkeypatch, request):
                 execution_mfa_verified BOOLEAN DEFAULT FALSE, approval_mfa_binding_hash VARCHAR(64),
                 execution_mfa_binding_hash VARCHAR(64), approval_mfa_counter BIGINT,
                 execution_mfa_counter BIGINT, execution_token_hash VARCHAR(64),
-                execution_token_used_at TIMESTAMP, execution_expires_at TIMESTAMP
+                execution_token_used_at TIMESTAMP, execution_expires_at TIMESTAMP,
+                execution_operation_id VARCHAR(100), execution_provider_operation_id VARCHAR(255),
+                execution_outcome TEXT, execution_reconcile_after TIMESTAMP
             );
             CREATE TABLE approval_audit_events (
                 id SERIAL PRIMARY KEY, tenant_id INTEGER NOT NULL, approval_id VARCHAR(100),
@@ -162,7 +164,8 @@ def test_signed_control_plane_principal_completes_mfa_approval_and_execution_und
     monkeypatch.setattr(main, "get_gateway_service", lambda: SimpleNamespace(
         execute_approval=lambda **kwargs: SimpleNamespace(
             result={"response": "test execution"}, request_id="execution-test", provider="test",
-            model="test", route_id="test", decision="ALLOW", trace=[],
+            provider_operation_id="execution-test", model="test", route_id="test",
+            decision="ALLOW", trace=[],
         ),
     ))
     monkeypatch.setattr(main, "get_policy", lambda: {"approval": {
@@ -287,7 +290,9 @@ def test_concurrent_approval_is_single_use_and_audit_failure_rolls_back(approval
         with pytest.raises(approval_store.ApprovalPersistenceError):
             approval_store.begin_approval_execution_atomic(
                 approved, actor=winners[0], transition_at=datetime.now(timezone.utc),
-                execution_token_hash="b" * 64, mfa_binding_hash="c" * 64, mfa_counter=2,
+                execution_token_hash="b" * 64, execution_operation_id="operation-17",
+                reconcile_after=datetime.now(timezone.utc) + timedelta(minutes=1),
+                mfa_binding_hash="c" * 64, mfa_counter=2,
             )
     with tenant_one.connect() as conn:
         assert conn.execute(text("SELECT status FROM gateway_approvals")).scalar_one() == "approved"

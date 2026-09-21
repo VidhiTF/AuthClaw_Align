@@ -645,11 +645,19 @@ export default function SettingsPage() {
     setKeyError(null);
     setGeneratedKey(null);
 
+    const mfaCode = prompt("Enter your current TOTP or backup code to create this API key:")?.trim();
+    if (!mfaCode) {
+      setKeySubmitting(false);
+      setKeyError("MFA code is required to create an API key.");
+      return;
+    }
+
     try {
       const res = await fetch("/api/api-keys", jsonRequest("POST", {
         name: keyName,
         scopes: keyScopes,
-        expires_in_days: keyExpiresInDays
+        expires_in_days: keyExpiresInDays,
+        mfa_code: mfaCode
       }));
       const data = await responseJson<{ error?: string; api_key: string }>(res);
       if (!res.ok) {
@@ -671,8 +679,10 @@ export default function SettingsPage() {
   const handleRevokeKey = async (id: string) => {
     if (!isOwner) return;
     if (!confirm("Are you sure you want to revoke this API key? Systems utilizing this key will be rejected immediately.")) return;
+    const mfaCode = prompt("Enter your current TOTP or backup code to revoke this API key:")?.trim();
+    if (!mfaCode) return;
     try {
-      const res = await fetch(`/api/api-keys/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/api-keys/${id}`, jsonRequest("DELETE", { mfa_code: mfaCode }));
       if (!res.ok) throw new Error("Failed to revoke key");
       setApiKeys(apiKeys.filter((k) => k.id !== id));
     } catch (err: unknown) {
@@ -683,11 +693,14 @@ export default function SettingsPage() {
   const handleRotateKey = async (key: APIKeyItem) => {
     if (!isOwner) return;
     if (!confirm("Rotate this API key? The old secret will stop working immediately.")) return;
+    const mfaCode = prompt("Enter your current TOTP or backup code to rotate this API key:")?.trim();
+    if (!mfaCode) return;
     try {
       const res = await fetch(`/api/api-keys/${key.id}/rotate`, jsonRequest("POST", {
         name: key.name,
         scopes: key.scopes,
-        expires_in_days: 90
+        expires_in_days: 90,
+        mfa_code: mfaCode
       }));
       const data = await responseJson<{ error?: string; api_key: string }>(res);
       if (!res.ok) throw new Error(data.error || "Failed to rotate key");

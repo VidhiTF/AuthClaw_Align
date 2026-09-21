@@ -271,6 +271,10 @@ def _row_to_record(row) -> PersistentApprovalRecord:
         comments = json.loads(mapping.get("comments") or "[]")
     except Exception:
         comments = []
+    try:
+        execution_outcome = json.loads(mapping.get("execution_outcome") or "{}")
+    except Exception:
+        execution_outcome = {}
 
     return PersistentApprovalRecord(
         {
@@ -304,6 +308,10 @@ def _row_to_record(row) -> PersistentApprovalRecord:
             "execution_token_hash": mapping.get("execution_token_hash"),
             "execution_token_used_at": as_iso(mapping.get("execution_token_used_at")),
             "execution_expires_at": as_iso(mapping.get("execution_expires_at")),
+            "execution_operation_id": mapping.get("execution_operation_id"),
+            "execution_provider_operation_id": mapping.get("execution_provider_operation_id"),
+            "execution_outcome": execution_outcome,
+            "execution_reconcile_after": as_iso(mapping.get("execution_reconcile_after")),
             "last_action_at": as_iso(mapping.get("last_action_at")),
             "metadata": json.loads(mapping.get("metadata") or "{}"),
         }
@@ -459,6 +467,9 @@ def get_approval(approval_id: str, *, fresh: bool = False) -> Optional[dict]:
                 _approvals.pop(approval_id, None)
             return None
         _approvals[approval_id] = record
+    # Executing records are intentionally not reconciled from a read path. A
+    # provider call can still be live after the review deadline; only an
+    # explicit operator reconciliation may classify its outcome indeterminate.
     return _check_expiry(record)
 
 
@@ -471,8 +482,7 @@ def get_all_approvals(tenant_id: int = None) -> Dict[str, dict]:
     records = list(_approvals.values())
     if tenant_id is not None:
         records = [record for record in records if record.get("tenant_id") == tenant_id]
-    for record in records:
-        _check_expiry(record)
+    records = [_check_expiry(record) for record in records]
     if tenant_id is None:
         return _approvals
     return {record["approval_id"]: record for record in records}
@@ -909,6 +919,8 @@ def begin_approval_execution_atomic(
     actor: str,
     transition_at: datetime,
     execution_token_hash: str,
+    execution_operation_id: str,
+    reconcile_after: datetime,
     mfa_binding_hash: str,
     mfa_counter: int,
     comment: str = None,
@@ -928,6 +940,8 @@ def begin_approval_execution_atomic(
                     SET status = 'executing',
                         execution_token_hash = :token_hash,
                         execution_token_used_at = :transition_at,
+                        execution_operation_id = :operation_id,
+                        execution_reconcile_after = :reconcile_after,
                         execution_mfa_verified = TRUE,
                         execution_mfa_binding_hash = :binding_hash,
                         execution_mfa_counter = :counter,
@@ -949,6 +963,8 @@ def begin_approval_execution_atomic(
                     "actor": actor,
                     "transition_at": _parse_optional_dt(transition_at),
                     "token_hash": execution_token_hash,
+                    "operation_id": execution_operation_id,
+                    "reconcile_after": _parse_optional_dt(reconcile_after),
                     "binding_hash": mfa_binding_hash,
                     "counter": mfa_counter,
                 },
@@ -1033,10 +1049,12 @@ def finish_approval_execution_atomic(
     transition_at: datetime,
     comment: str = None,
     mfa_verified: bool = False,
+    provider_operation_id: str = None,
+    execution_outcome: dict = None,
     audit_metadata: dict = None,
 ) -> PersistentApprovalRecord:
     """Finalize an executing approval and its canonical audit atomically."""
-    if final_status not in {"executed", "execution_failed"}:
+    if final_status not in {"executed", "execution_failed", "execution_indeterminate"}:
         raise ValueError("Unsupported approval execution terminal status")
     approval_id = record.get("approval_id")
     tenant_id = record.get("tenant_id")
@@ -1051,7 +1069,9 @@ def finish_approval_execution_atomic(
                             WHEN CAST(:final_status AS VARCHAR) = 'executed' THEN :transition_at
                             ELSE executed_at
                         END,
-                        last_action_at = :transition_at
+                        last_action_at = :transition_at,
+                        execution_provider_operation_id = :provider_operation_id,
+                        execution_outcome = :execution_outcome
                     WHERE approval_id = :approval_id
                       AND tenant_id = :tenant_id
                       AND status = 'executing'
@@ -1067,6 +1087,8 @@ def finish_approval_execution_atomic(
                     "final_status": final_status,
                     "transition_at": _parse_optional_dt(transition_at),
                     "execution_token_hash": record.get("execution_token_hash"),
+                    "provider_operation_id": provider_operation_id,
+                    "execution_outcome": json.dumps(execution_outcome or {}, sort_keys=True),
                 },
             ).fetchone()
             if row is None:
@@ -1096,6 +1118,76 @@ def finish_approval_execution_atomic(
     except Exception as exc:
         raise ApprovalPersistenceError("Atomic approval execution finalization failed") from exc
 
+    _approvals[approval_id] = updated_record
+    return updated_record
+
+
+def reconcile_stale_approval_execution_atomic(
+    record: dict,
+    *,
+    actor: str,
+    transition_at: datetime,
+) -> PersistentApprovalRecord:
+    """Convert an abandoned dispatch into an explicit, audited unknown outcome."""
+    approval_id = record.get("approval_id")
+    tenant_id = record.get("tenant_id")
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE gateway_approvals
+                    SET status = 'execution_indeterminate',
+                        last_action_at = :transition_at,
+                        execution_outcome = :execution_outcome
+                    WHERE approval_id = :approval_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'executing'
+                      AND execution_reconcile_after <= :transition_at
+                      AND execution_operation_id = :operation_id
+                    RETURNING *
+                    """
+                ),
+                {
+                    "approval_id": approval_id,
+                    "tenant_id": tenant_id,
+                    "transition_at": _parse_optional_dt(transition_at),
+                    "operation_id": record.get("execution_operation_id"),
+                    "execution_outcome": json.dumps(
+                        {
+                            "status": "indeterminate",
+                            "error": "terminal_result_not_recorded_before_deadline",
+                            "execution_operation_id": record.get("execution_operation_id"),
+                        },
+                        sort_keys=True,
+                    ),
+                },
+            ).fetchone()
+            if row is None:
+                current_status = conn.execute(
+                    text(
+                        "SELECT status FROM gateway_approvals "
+                        "WHERE approval_id = :approval_id AND tenant_id = :tenant_id"
+                    ),
+                    {"approval_id": approval_id, "tenant_id": tenant_id},
+                ).scalar()
+                raise ApprovalStateConflict(str(current_status or "missing"))
+            updated_record = _row_to_record(row)
+            append_approval_audit(
+                updated_record,
+                action="execution_indeterminate",
+                actor=actor,
+                comment="Execution worker stopped before a terminal result was durably recorded.",
+                metadata={
+                    "execution_operation_id": record.get("execution_operation_id"),
+                    "control": "manual_reconciliation_required",
+                },
+                connection=conn,
+            )
+    except (ApprovalPersistenceError, ApprovalStateConflict):
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Stale execution reconciliation failed") from exc
     _approvals[approval_id] = updated_record
     return updated_record
 

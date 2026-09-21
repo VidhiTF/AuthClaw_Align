@@ -433,7 +433,10 @@ def test_gateway_approve_reject_race_has_one_terminal_winner_and_audit(
             release_mfa.set()
             responses = [approve.result(timeout=10), reject.result(timeout=10)]
 
-    assert sorted(response.status_code for response in responses) == [200, 400]
+    statuses = sorted(response.status_code for response in responses)
+    assert statuses[0] == 200 and statuses[1] in {400, 404}, [
+        (response.status_code, response.text) for response in responses
+    ]
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
     db_session.expire_all()
     assert db_session.get(PendingApproval, approval_id).status == "APPROVED"

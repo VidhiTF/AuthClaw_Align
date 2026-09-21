@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from providers.gateway_provider import GatewayProvider
 
@@ -16,6 +16,21 @@ class FakeResponse:
 
 
 class GatewayProviderTests(unittest.TestCase):
+    def test_approved_execution_identity_reaches_gateway_headers(self):
+        response = Mock(ok=True, status_code=200)
+        response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch("providers.gateway_provider.requests.post", return_value=response) as post:
+            result = GatewayProvider("tenant-key", "openai").generate(
+                "hello",
+                idempotency_key="operation-17",
+                request_id="approval-exec-operation-17",
+            )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(post.call_args.kwargs["headers"]["Idempotency-Key"], "operation-17")
+        self.assertEqual(post.call_args.kwargs["headers"]["X-Request-ID"], "approval-exec-operation-17")
+
     CASES = [
         ("openai", "/v1/chat/completions", {"choices": [{"message": {"content": "openai ok"}}]}, "openai ok"),
         ("anthropic", "/v1/messages", {"content": [{"type": "text", "text": "anthropic ok"}]}, "anthropic ok"),

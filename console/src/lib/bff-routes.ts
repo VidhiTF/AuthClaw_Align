@@ -11,6 +11,7 @@ const ALLOWED: Record<BffMethod, RegExp> = {
 
 const NO_BODY_POST = /^(users\/me\/mfa\/setup|notifications\/(?:read-all|[^/]+\/read)|policies\/[^/]+\/activate|ephemeral-workers\/tokens\/[^/]+\/revoke|workflows\/[^/]+\/(?:reject|remediate)|approvals\/[^/]+\/reject)$/;
 const OPTIONAL_BODY_POST = /^(workflows|approvals)\/[^/]+\/approve$/;
+const JSON_DELETE = /^api-keys\/[^/]+$/;
 const CREATED = /^(users|tenants|provider-credentials|red-team|gateways|ephemeral-workers\/tokens|api-keys(?:\/[^/]+\/rotate)?)$/;
 
 export function resolveBffRoute(method: BffMethod, path: string) {
@@ -28,7 +29,7 @@ export function resolveBffRoute(method: BffMethod, path: string) {
   }
 
   const body: BffBody = method !== "POST"
-    ? (method === "PUT" || method === "PATCH" ? "json" : "none")
+    ? (method === "PUT" || method === "PATCH" || (method === "DELETE" && JSON_DELETE.test(path)) ? "json" : "none")
     : OPTIONAL_BODY_POST.test(path)
       ? "optional-json"
       : NO_BODY_POST.test(path)

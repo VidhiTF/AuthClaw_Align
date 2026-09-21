@@ -7,7 +7,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from services.execution_auth import authorize_agent_operation
 from services.rbac_matrix import agent_operation_allowed, resolve_rule, role_allowed
@@ -666,6 +666,8 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
                 actor="oidc|checker",
                 transition_at=approval_store.datetime.now(approval_store.timezone.utc),
                 execution_token_hash="token-hash",
+                execution_operation_id="operation-17",
+                reconcile_after=approval_store.datetime.now(approval_store.timezone.utc),
                 mfa_binding_hash="binding",
                 mfa_counter=505,
             )
@@ -677,7 +679,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
     def test_terminal_audit_failure_rolls_back_success_and_failure_states(self):
         import approval_store
 
-        for final_status in ("executed", "execution_failed"):
+        for final_status in ("executed", "execution_failed", "execution_indeterminate"):
             with self.subTest(final_status=final_status):
                 shared = {
                     "approval_id": f"approval-terminal-{final_status}",
@@ -746,6 +748,178 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
 
                 self.assertEqual(shared["status"], "executing")
                 self.assertNotIn(shared["approval_id"], approval_store._approvals)
+
+    def test_stale_execution_is_audited_as_indeterminate(self):
+        import approval_store
+
+        shared = {
+            "approval_id": "approval-stale-execution",
+            "request_id": "request-stale-execution",
+            "tenant_id": 42,
+            "status": "executing",
+            "executed_by": "oidc|checker",
+            "execution_operation_id": "operation-stale-17",
+            "execution_reconcile_after": "2026-01-01T00:01:00+00:00",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "comments": "[]",
+            "metadata": "{}",
+        }
+        audit_rows = []
+
+        class Row:
+            @property
+            def _mapping(self):
+                return copy.deepcopy(shared)
+
+        class Result:
+            rowcount = 1
+
+            def fetchone(self):
+                return Row()
+
+            def scalar(self):
+                return shared["status"]
+
+        class Connection:
+            def execute(self, statement, parameters):
+                sql = " ".join(str(statement).split()).upper()
+                if sql.startswith(
+                    "UPDATE GATEWAY_APPROVALS SET STATUS = 'EXECUTION_INDETERMINATE'"
+                ):
+                    self.assert_operation(parameters)
+                    shared["status"] = "execution_indeterminate"
+                    return Result()
+                if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
+                    audit_rows.append(dict(parameters))
+                    return Result()
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET COMMENTS"):
+                    shared["comments"] = parameters["comments"]
+                    return Result()
+                raise AssertionError(sql)
+
+            @staticmethod
+            def assert_operation(parameters):
+                assert parameters["operation_id"] == "operation-stale-17"
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield Connection()
+
+        with (
+            patch.object(approval_store, "engine", Engine()),
+            patch.dict(approval_store._approvals, {}, clear=True),
+        ):
+            result = approval_store.reconcile_stale_approval_execution_atomic(
+                dict(shared),
+                actor="oidc|checker",
+                transition_at=approval_store.datetime(2026, 1, 1, 0, 2),
+            )
+
+        self.assertEqual(result["status"], "execution_indeterminate")
+        self.assertEqual([row["action"] for row in audit_rows], ["execution_indeterminate"])
+        self.assertIn("operation-stale-17", audit_rows[0]["metadata"])
+
+    def test_read_does_not_reconcile_a_live_execution(self):
+        import approval_store
+
+        record = {
+            "approval_id": "approval-live-execution",
+            "tenant_id": 42,
+            "status": "executing",
+            "execution_operation_id": "operation-live-17",
+            "execution_reconcile_after": "2026-01-01T00:01:00+00:00",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "comments": [],
+            "metadata": {},
+        }
+
+        with patch.dict(
+            approval_store._approvals,
+            {record["approval_id"]: record},
+            clear=True,
+        ):
+            result = approval_store.get_approval(record["approval_id"])
+
+        self.assertEqual(result["status"], "executing")
+
+    def test_execution_dispatch_fields_survive_database_reload(self):
+        import approval_store
+
+        mapping = {
+            "approval_id": "approval-dispatch-fields",
+            "tenant_id": 42,
+            "status": "executing",
+            "comments": "[]",
+            "metadata": "{}",
+            "execution_operation_id": "operation-42",
+            "execution_provider_operation_id": "provider-request-42",
+            "execution_outcome": '{"status":"succeeded"}',
+            "execution_reconcile_after": approval_store.datetime(2026, 1, 1, 0, 1),
+        }
+        row = SimpleNamespace(_mapping=mapping)
+
+        record = approval_store._row_to_record(row)
+
+        self.assertEqual(record["execution_operation_id"], "operation-42")
+        self.assertEqual(record["execution_provider_operation_id"], "provider-request-42")
+        self.assertEqual(record["execution_outcome"], {"status": "succeeded"})
+        self.assertEqual(record["execution_reconcile_after"], "2026-01-01T00:01:00")
+
+    def test_external_success_with_terminal_audit_failure_never_returns_success(self):
+        import main
+
+        record = {
+            "approval_id": "approval-crash-window",
+            "request_id": "request-crash-window",
+            "correlation_id": "correlation-crash-window",
+            "tenant_id": 42,
+            "status": "approved",
+            "requested_by": "oidc|requester",
+            "approved_by": "oidc|checker",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "execution_expires_at": "2099-01-01T00:10:00+00:00",
+            "metadata": {},
+            "query": "Apply the approved change",
+            "risk_level": "HIGH",
+        }
+        dispatched = {**record, "status": "executing", "execution_operation_id": "operation-crash-17"}
+        provider = Mock(return_value=SimpleNamespace(
+            result={"response": "effect applied"}, request_id="provider-operation-17",
+            provider_operation_id="approval-exec-operation-crash-17",
+            provider="test", model="test", route_id="route", decision="ALLOW", trace=[],
+        ))
+        request = SimpleNamespace(headers={"Authorization": "Bearer test"})
+
+        with (
+            patch.object(main, "get_approval", return_value=record),
+            patch.object(main, "_approval_authenticated_payload", return_value={
+                "sub": "oidc|checker", "tenant_id": 42,
+            }),
+            patch.object(main, "parse_approval_action_payload", AsyncMock(return_value={
+                "_body_present": True, "mfa_code": "redacted",
+            })),
+            patch.object(main, "_verify_approval_stage_mfa", return_value=(True, "binding", 7)),
+            patch.object(main, "begin_approval_execution_atomic", return_value=dispatched) as begin,
+            patch.object(main, "get_gateway_service", return_value=SimpleNamespace(
+                execute_approval=provider,
+            )),
+            patch.object(
+                main, "finish_approval_execution_atomic",
+                side_effect=main.ApprovalPersistenceError("audit unavailable"),
+            ),
+            self.assertRaises(main.ApprovalPersistenceError),
+        ):
+            asyncio.run(main.execute_request(record["approval_id"], request))
+
+        self.assertTrue(begin.call_args.kwargs["execution_operation_id"])
+        self.assertEqual(
+            provider.call_args.kwargs["idempotency_key"], "operation-crash-17"
+        )
+        provider.assert_called_once()
 
     def test_create_approval_failure_never_enters_process_cache(self):
         import approval_store

@@ -27,7 +27,7 @@ test("maps approved BFF routes and rejects broader proxy access", () => {
   assert.deepEqual(resolveBffRoute("POST", "data-subject-requests/r-1/verify"), { backendPath: "/v1/data-subject-requests/r-1/verify", body: "json", status: undefined });
   assert.deepEqual(resolveBffRoute("GET", "access-requests"), { backendPath: "/api/public/v1/access-requests", body: "none", status: undefined });
   assert.deepEqual(resolveBffRoute("PATCH", "access-requests/AR-123/status"), { backendPath: "/api/public/v1/access-requests/AR-123/status", body: "json", status: undefined });
-  assert.deepEqual(resolveBffRoute("DELETE", "api-keys/k-1"), { backendPath: "/v1/api-keys/k-1", body: "none", status: 204 });
+  assert.deepEqual(resolveBffRoute("DELETE", "api-keys/k-1"), { backendPath: "/v1/api-keys/k-1", body: "json", status: 204 });
   assert.equal(resolveBffRoute("DELETE", "access-requests/AR-123"), null);
   assert.equal(resolveBffRoute("DELETE", "users/me"), null);
   assert.equal(resolveBffRoute("POST", "auth/login"), null);

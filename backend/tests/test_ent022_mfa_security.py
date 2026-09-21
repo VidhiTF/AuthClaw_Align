@@ -7,7 +7,7 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from app.api.v1.endpoints import auth, users, workflows
+from app.api.v1.endpoints import apikeys, auth, users, workflows
 from app.core.auth import hash_key
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.db.models import PendingApproval
@@ -84,6 +84,138 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     }]
     assert "654321" not in str(event)
     db.commit.assert_called_once()
+
+
+def test_api_key_administration_requires_interactive_replay_protected_mfa(monkeypatch):
+    tenant_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    user = SimpleNamespace(
+        id=user_id,
+        tenant_id=tenant_id,
+        mfa_enabled=True,
+        mfa_secret="encrypted-factor",
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            credential_kind="session", tenant_id=tenant_id, user_id=user_id
+        ),
+        headers={"x-request-id": "api-key-mfa"},
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
+    verify = MagicMock(return_value=True)
+    monkeypatch.setattr(apikeys, "revalidate_tenant_credential", lambda *_: None)
+    monkeypatch.setattr(apikeys, "_get_redis", MagicMock(return_value=object()))
+    monkeypatch.setattr(apikeys, "verify_mfa_challenge", verify)
+
+    assert apikeys._verify_api_key_mfa(
+        request, db, code="654321", operation="api_key_issue"
+    ) is user
+    assert verify.call_args.args[2] == "654321"
+    assert verify.call_args.kwargs["operation"] == "api_key_issue"
+
+    request.state.credential_kind = "api_key"
+    with pytest.raises(HTTPException, match="Interactive tenant session") as exc:
+        apikeys._verify_api_key_mfa(
+            request, db, code="654321", operation="api_key_rotate"
+        )
+    assert exc.value.status_code == 403
+
+
+def test_api_key_audit_is_atomic_and_contains_no_factor_or_secret(monkeypatch):
+    tenant_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    request = SimpleNamespace(
+        state=SimpleNamespace(tenant_id=tenant_id, user_id=user_id),
+        headers={"x-request-id": "api-key-audit"},
+    )
+    key = SimpleNamespace(id=uuid.uuid4(), scopes=["admin", "read"])
+    published = MagicMock(return_value=None)
+    monkeypatch.setattr(apikeys.event_backbone, "publish_audit_event", published)
+
+    apikeys._commit_api_key_audit(
+        MagicMock(), request, key=key, action="issued"
+    )
+
+    event = published.call_args.args[2]
+    assert event["action"] == "api_key:issued"
+    assert event["mfa_verified"] is True
+    assert event["execution_trace"][0]["api_key_id"] == str(key.id)
+    assert "654321" not in str(event)
+    assert "ak_" not in str(event)
+
+
+def test_api_key_rotation_locks_the_target_credential(monkeypatch):
+    tenant_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    key_id = uuid.uuid4()
+    old_key = SimpleNamespace(
+        id=key_id,
+        tenant_id=tenant_id,
+        name="existing",
+        description=None,
+        scopes=["read"],
+        is_active=True,
+        revoked_at=None,
+        rotated_at=None,
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(tenant_id=tenant_id, user_id=user_id, api_key_id=None),
+        headers={"x-request-id": "rotation-lock"},
+    )
+    db = MagicMock()
+    query = db.query.return_value
+    query.filter.return_value.with_for_update.return_value.first.return_value = old_key
+    def assign_generated_fields():
+        new_key = db.add.call_args.args[0]
+        new_key.id = uuid.uuid4()
+        new_key.created_at = datetime.now(timezone.utc)
+
+    db.flush.side_effect = assign_generated_fields
+    monkeypatch.setattr(apikeys, "_verify_api_key_mfa", MagicMock())
+    monkeypatch.setattr(apikeys, "_commit_api_key_audit", MagicMock())
+    monkeypatch.setattr(apikeys, "create_notification", MagicMock())
+
+    apikeys.rotate_api_key(
+        key_id,
+        request,
+        apikeys.APIKeyRotate(mfa_code="654321"),
+        db,
+    )
+
+    query.filter.return_value.with_for_update.assert_called_once_with()
+    assert old_key.is_active is False
+
+
+def test_api_key_revocation_requires_mfa_locks_and_audits(monkeypatch):
+    tenant_id = uuid.uuid4()
+    key = SimpleNamespace(
+        id=uuid.uuid4(), tenant_id=tenant_id, name="revoke-me", scopes=["read"],
+        is_active=True, revoked_at=None, rotated_at=None,
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(tenant_id=tenant_id, user_id=uuid.uuid4(), api_key_id=None),
+        headers={"x-request-id": "revocation-lock"},
+    )
+    db = MagicMock()
+    query = db.query.return_value
+    query.filter.return_value.with_for_update.return_value.first.return_value = key
+    verify = MagicMock()
+    audit = MagicMock()
+    monkeypatch.setattr(apikeys, "_verify_api_key_mfa", verify)
+    monkeypatch.setattr(apikeys, "_commit_api_key_audit", audit)
+    monkeypatch.setattr(apikeys, "create_notification", MagicMock())
+
+    apikeys.revoke_api_key(
+        key.id, request, apikeys.APIKeyRevoke(mfa_code="654321"), db
+    )
+
+    assert verify.call_args.kwargs["operation"] == "api_key_revoke"
+    query.filter.return_value.with_for_update.assert_called_once_with()
+    audit.assert_called_once_with(db, request, key=key, action="revoked")
+    assert key.is_active is False
+    assert key.revoked_at is not None
+    db.commit.assert_not_called()
 
 
 def test_workflow_mfa_uses_only_json_body(monkeypatch):

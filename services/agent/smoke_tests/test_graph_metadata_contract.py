@@ -36,7 +36,7 @@ class GraphMetadataContractTests(unittest.TestCase):
         self.assertEqual(set(), inventoried - declared)
         for required in {
             "username", "requester_id", "approval_reason", "policy_versions", "audit_record_id",
-            "original_request_id", "provider_status", "provider_error",
+            "original_request_id", "provider_status", "provider_error", "idempotency_key",
         }:
             self.assertIn(required, declared)
             self.assertIn(required, inventoried)
@@ -144,6 +144,33 @@ class GraphMetadataContractTests(unittest.TestCase):
             result["provider_error"],
         )
         self.assertNotIn("sk-never-expose", serialized)
+
+    def test_approved_execution_identity_reaches_provider(self):
+        llm = load_node("llm", {
+            "memory": types.SimpleNamespace(get_history=lambda *_: []),
+            "providers": types.SimpleNamespace(get_provider=lambda: None),
+            "redaction": types.SimpleNamespace(stream_redact_sensitive_tokens=lambda stream, **_: stream),
+            "verify_audit": types.SimpleNamespace(log_agent_event=lambda **_: None),
+        })
+        calls = []
+
+        class Provider:
+            def generate(self, prompt, **kwargs):
+                calls.append((prompt, kwargs))
+                return "ok"
+
+        result = one_node_graph(llm).invoke({
+            "message": "execute", "allowed": True,
+            "provider_client": Provider(),
+            "request_id": "approval-exec-operation-17",
+            "idempotency_key": "operation-17",
+        })
+
+        self.assertEqual(result["provider_status"], "ok")
+        self.assertEqual(calls[0][1], {
+            "idempotency_key": "operation-17",
+            "request_id": "approval-exec-operation-17",
+        })
 
 
 if __name__ == "__main__":

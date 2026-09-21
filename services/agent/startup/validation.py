@@ -116,6 +116,16 @@ def load_and_validate_policy(filepath: str) -> dict:
     require_separate_approver = approval_raw.get("require_separate_approver", True)
     if not isinstance(require_separate_approver, bool):
         raise ValueError("approval.require_separate_approver must be a boolean (true or false).")
+    environment = os.getenv("AUTHCLAW_ENV", "").strip().lower()
+    isolated_environment = environment in {"development", "dev", "local", "test", "isolated-test"}
+    if not isolated_environment and not require_mfa:
+        raise ValueError(
+            "approval.require_mfa cannot be false outside an explicitly isolated environment."
+        )
+    if not isolated_environment and not require_separate_approver:
+        raise ValueError(
+            "approval.require_separate_approver cannot be false outside an explicitly isolated environment."
+        )
     expiry_minutes = approval_raw.get("expiry_minutes", 30)
     if not isinstance(expiry_minutes, (int, float)) or expiry_minutes <= 0:
         raise ValueError("approval.expiry_minutes must be a positive number.")

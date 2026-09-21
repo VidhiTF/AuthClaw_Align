@@ -27,9 +27,10 @@ class GatewayProviderConfigurationError(Exception):
 
 
 class GatewayProviderUnavailableError(Exception):
-    def __init__(self, message: str, *, request_id: Optional[str] = None, trace: Optional[list] = None):
+    def __init__(self, message: str, *, request_id: Optional[str] = None, provider_operation_id: Optional[str] = None, trace: Optional[list] = None):
         super().__init__(message)
         self.request_id = request_id
+        self.provider_operation_id = provider_operation_id
         self.trace = trace or []
 
 
@@ -44,6 +45,7 @@ class GatewayExecution:
     model: str
     route_id: Optional[str]
     decision: Optional[str]
+    provider_operation_id: Optional[str] = None
 
 
 class GatewayService:
@@ -101,6 +103,8 @@ class GatewayService:
                     "model": model,
                 }
             )
+            if result.get("provider_status") == "offline_fallback":
+                raise RuntimeError("Approved execution did not receive an upstream provider response")
         except (QuotaExceeded, QuotaUnavailable):
             raise
         except ValueError as e:
@@ -122,7 +126,12 @@ class GatewayService:
             )
             trace = self.get_trace(request_id=request_id, session_id=resolved_session_id, tenant_id=tenant_id)
             self.persist_latest_message_trace(resolved_session_id, trace)
-            raise GatewayProviderUnavailableError(str(e), request_id=request_id, trace=trace) from e
+            raise GatewayProviderUnavailableError(
+                str(e),
+                request_id=request_id,
+                provider_operation_id=request_id,
+                trace=trace,
+            ) from e
         finally:
             clear_agent_event_context(token)
 
@@ -167,6 +176,7 @@ class GatewayService:
             model=resolved_model,
             route_id=resolved_route_id,
             decision=decision,
+            provider_operation_id=request_id,
         )
 
     def execute_approval(
@@ -175,6 +185,7 @@ class GatewayService:
         approval_record: Dict[str, Any],
         authorization: Optional[str],
         x_api_key: Optional[str],
+        idempotency_key: str,
         username: Optional[str] = None,
         provider: str = "AuthClaw Gateway",
         model: str = "authclaw-gateway",
@@ -184,7 +195,7 @@ class GatewayService:
             tenant_id = self.resolve_tenant(x_api_key, authorization)
         tenant_id = int(tenant_id)
 
-        request_id = f"req-{uuid.uuid4()}"
+        request_id = f"approval-exec-{idempotency_key}"
         resolved_session_id = approval_record.get("correlation_id") or f"approval-{approval_record['approval_id']}"
         resolved_username = username or self._username_from_authorization(authorization)
 
@@ -212,6 +223,7 @@ class GatewayService:
                     "approval_id": approval_record["approval_id"],
                     "approval_status": "APPROVED",
                     "original_request_id": approval_record.get("request_id"),
+                    "idempotency_key": idempotency_key,
                     "provider": provider,
                     "model": model,
                 }

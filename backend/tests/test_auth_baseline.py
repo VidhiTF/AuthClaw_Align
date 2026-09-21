@@ -18,7 +18,7 @@ from app.core import oidc
 from app.core.crypto import decrypt_secret
 from app.core.passwords import hash_password, verify_password
 from app.db.models import User
-from app.schemas.models import APIKeyCreate, APIKeyRotate
+from app.schemas.models import APIKeyCreate, APIKeyRevoke, APIKeyRotate
 from app.services import oidc_sso
 from app.services.email_service import send_otp_email
 from app.api.v1.endpoints import auth as auth_endpoints
@@ -172,7 +172,7 @@ def test_privileged_user_cannot_self_disable_mfa(monkeypatch):
 
 def test_api_key_create_rejects_unknown_scope():
     try:
-        APIKeyCreate(name="bad", scopes=["read", "root"])
+        APIKeyCreate(name="bad", scopes=["read", "root"], mfa_code="654321")
     except ValueError as exc:
         assert "Unsupported API key scopes" in str(exc)
     else:
@@ -181,23 +181,33 @@ def test_api_key_create_rejects_unknown_scope():
 
 def test_tenant_api_key_schemas_reject_platform_scope():
     with pytest.raises(ValueError, match="Unsupported API key scopes"):
-        APIKeyCreate(name="platform", scopes=["platform.admin"])
+        APIKeyCreate(name="platform", scopes=["platform.admin"], mfa_code="654321")
     with pytest.raises(ValueError, match="Unsupported API key scopes"):
-        APIKeyRotate(scopes=["platform.admin"])
+        APIKeyRotate(scopes=["platform.admin"], mfa_code="654321")
 
 
 def test_api_key_create_normalizes_scopes_and_expiry():
-    key = APIKeyCreate(name="ci", scopes=["write", "read", "read"], expires_in_days=30)
+    key = APIKeyCreate(
+        name="ci", scopes=["write", "read", "read"], expires_in_days=30,
+        mfa_code="654321",
+    )
 
     assert key.scopes == ["read", "write"]
     assert key.expires_in_days == 30
+    assert "654321" not in repr(key)
 
 
 def test_api_key_rotate_inherits_scopes_when_omitted():
-    rotation = APIKeyRotate()
+    rotation = APIKeyRotate(mfa_code="654321")
 
     assert rotation.scopes is None
     assert rotation.expires_in_days == 90
+
+
+def test_api_key_revoke_factor_is_secret():
+    revocation = APIKeyRevoke(mfa_code="654321")
+
+    assert "654321" not in repr(revocation)
 
 
 def test_api_key_hash_uses_keyed_digest(monkeypatch):

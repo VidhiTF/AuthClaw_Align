@@ -499,7 +499,11 @@ def run_startup_migrations():
         execution_mfa_counter BIGINT,
         execution_token_hash VARCHAR(64),
         execution_token_used_at TIMESTAMP,
-        execution_expires_at TIMESTAMP
+        execution_expires_at TIMESTAMP,
+        execution_operation_id VARCHAR(100),
+        execution_provider_operation_id VARCHAR(255),
+        execution_outcome TEXT,
+        execution_reconcile_after TIMESTAMP
     );
 
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS approval_id VARCHAR(100);
@@ -534,6 +538,10 @@ def run_startup_migrations():
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_token_hash VARCHAR(64);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_token_used_at TIMESTAMP;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_expires_at TIMESTAMP;
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_operation_id VARCHAR(100);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_provider_operation_id VARCHAR(255);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_outcome TEXT;
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_reconcile_after TIMESTAMP;
 
     CREATE TABLE IF NOT EXISTS approval_audit_events (
         id SERIAL PRIMARY KEY,
@@ -1183,6 +1191,9 @@ def run_startup_migrations():
     CREATE INDEX IF NOT EXISTS idx_tenant_credentials_provider ON tenant_credentials(tenant_id, provider);
     CREATE INDEX IF NOT EXISTS idx_agent_events_tenant_id ON agent_events(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_gateway_approvals_tenant_id ON gateway_approvals(tenant_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_gateway_approval_execution_operation
+        ON gateway_approvals(tenant_id, execution_operation_id)
+        WHERE execution_operation_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_approval_audit_events_tenant_id ON approval_audit_events(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_approval_audit_events_approval_id ON approval_audit_events(approval_id);
     CREATE INDEX IF NOT EXISTS idx_policies_tenant_id ON policies(tenant_id);

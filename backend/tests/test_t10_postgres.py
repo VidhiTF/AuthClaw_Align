@@ -465,7 +465,7 @@ def real_mfa(postgres, monkeypatch):
             if script == abuse_controls.MFA_CHECK_LUA:
                 return -2
             if script == abuse_controls.MFA_RESET_LUA:
-                return 1
+                return 0
             if script == abuse_controls.MFA_FAILURE_LUA:
                 return [1, 0, 0]
             raise AssertionError("Unexpected Redis operation")

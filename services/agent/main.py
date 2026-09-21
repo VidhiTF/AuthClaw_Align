@@ -639,6 +639,9 @@ def approval_response_record(record: dict, tenant_id: int = None) -> dict:
         "approval_mfa_verified": bool(record.get("approval_mfa_verified", record.get("mfa_verified", False))),
         "execution_mfa_verified": bool(record.get("execution_mfa_verified", False)),
         "execution_expires_at": record.get("execution_expires_at"),
+        "execution_operation_id": record.get("execution_operation_id"),
+        "execution_provider_operation_id": record.get("execution_provider_operation_id"),
+        "execution_outcome": record.get("execution_outcome") or {},
         "last_action_at": record.get("last_action_at"),
         "history": get_approval_history(record["approval_id"], tenant_id=tenant_id),
         "metadata": record.get("metadata", {}),
@@ -1683,7 +1686,9 @@ async def execute_request(approval_id: str, request: Request):
     comment = (payload.get("comment") or "").strip() or None
 
     if record["status"] != "approved":
-        if record["status"] in {"executing", "executed", "execution_failed"}:
+        if record["status"] in {
+            "executing", "executed", "execution_failed", "execution_indeterminate"
+        }:
             append_approval_audit(
                 record,
                 action="replay_rejected",
@@ -1751,7 +1756,8 @@ async def execute_request(approval_id: str, request: Request):
             content={"error": "MFA_NOT_CONFIGURED", "message": "MFA is not configured for this tenant."}
         )
 
-    execution_token_hash = hashlib.sha256(secrets.token_urlsafe(32).encode("utf-8")).hexdigest()
+    execution_operation_id = secrets.token_hex(16)
+    execution_token_hash = hashlib.sha256(execution_operation_id.encode("utf-8")).hexdigest()
     transition_at = datetime.now(timezone.utc)
     try:
         record = begin_approval_execution_atomic(
@@ -1759,12 +1765,15 @@ async def execute_request(approval_id: str, request: Request):
             actor=approver,
             transition_at=transition_at,
             execution_token_hash=execution_token_hash,
+            execution_operation_id=execution_operation_id,
+            reconcile_after=transition_at + timedelta(seconds=60),
             mfa_binding_hash=execution_mfa_binding_hash,
             mfa_counter=execution_mfa_counter,
             comment=comment,
             audit_metadata={
                 "action_payload_hash": _approval_action_payload_hash(record),
                 "mfa_binding_hash": execution_mfa_binding_hash,
+                "execution_operation_id": execution_operation_id,
             },
         )
     except ApprovalStateConflict as exc:
@@ -1795,14 +1804,20 @@ async def execute_request(approval_id: str, request: Request):
     try:
         if (record.get("metadata") or {}).get("execution_target") == "remediation":
             from services.remediation_runtime import RemediationRuntime
-            remediation_result = RemediationRuntime().execute_approved_plan(record)
+            remediation_result = RemediationRuntime().execute_approved_plan(
+                record, idempotency_key=record["execution_operation_id"]
+            )
             result = {"response": remediation_result.get("summary", "Remediation executed."), "remediation": remediation_result}
             execution = type("RemediationExecution", (), {
-                "request_id": remediation_result.get("worker_run_id"),
+                "request_id": (
+                    remediation_result.get("evidence", {}).get("provider_request_id")
+                    or remediation_result.get("worker_run_id")
+                ),
                 "provider": remediation_result.get("provider"),
                 "model": "remediation-worker",
                 "route_id": remediation_result.get("connector_id"),
                 "decision": "EXECUTED",
+                "provider_operation_id": record["execution_operation_id"],
                 "trace": remediation_result.get("audit_events", []),
             })()
         else:
@@ -1811,6 +1826,7 @@ async def execute_request(approval_id: str, request: Request):
                 approval_record=record,
                 x_api_key=request.headers.get("X-API-Key"),
                 authorization=request.headers.get("Authorization"),
+                idempotency_key=record["execution_operation_id"],
             )
             result = execution.result
     except GatewayProviderConfigurationError as e:
@@ -1821,6 +1837,7 @@ async def execute_request(approval_id: str, request: Request):
             final_status="execution_failed",
             transition_at=datetime.now(timezone.utc),
             audit_metadata={"error": "provider_not_configured"},
+            execution_outcome={"status": "failed", "error": "provider_not_configured"},
         )
         return JSONResponse(
             status_code=500,
@@ -1831,9 +1848,15 @@ async def execute_request(approval_id: str, request: Request):
         record = finish_approval_execution_atomic(
             record,
             actor=approver,
-            final_status="execution_failed",
+            final_status="execution_indeterminate",
             transition_at=datetime.now(timezone.utc),
-            audit_metadata={"error": "provider_unavailable", "request_id": e.request_id},
+            audit_metadata={
+                "error": "provider_unavailable",
+                "request_id": e.request_id,
+                "execution_operation_id": record.get("execution_operation_id"),
+            },
+            provider_operation_id=e.provider_operation_id,
+            execution_outcome={"status": "indeterminate", "error": "provider_unavailable"},
         )
         return JSONResponse(
             status_code=503,
@@ -1850,9 +1873,13 @@ async def execute_request(approval_id: str, request: Request):
         record = finish_approval_execution_atomic(
             record,
             actor=approver,
-            final_status="execution_failed",
+            final_status="execution_indeterminate",
             transition_at=datetime.now(timezone.utc),
-            audit_metadata={"error": type(e).__name__},
+            audit_metadata={
+                "error": type(e).__name__,
+                "execution_operation_id": record.get("execution_operation_id"),
+            },
+            execution_outcome={"status": "indeterminate", "error": type(e).__name__},
         )
         raise
 
@@ -1863,11 +1890,18 @@ async def execute_request(approval_id: str, request: Request):
         transition_at=datetime.now(timezone.utc),
         comment=comment,
         mfa_verified=True,
+        provider_operation_id=execution.provider_operation_id,
+        execution_outcome={
+            "status": "succeeded",
+            "decision": execution.decision,
+            "provider": execution.provider,
+        },
         audit_metadata={
             "execution_request_id": execution.request_id,
             "provider": execution.provider,
             "model": execution.model,
             "execution_mfa_binding_hash": execution_mfa_binding_hash,
+            "execution_operation_id": record.get("execution_operation_id"),
         },
     )
     log_approval_event(

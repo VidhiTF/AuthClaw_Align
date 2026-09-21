@@ -272,7 +272,7 @@ def _expire_pending_approval(
             PendingApproval.action_hash,
             PendingApproval.action_id,
         )
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     ).first()
     if expired is None:
         return False
@@ -289,7 +289,7 @@ def _expire_pending_approval(
             execution_status="COMPLETED",
             updated_at=expired_at,
         )
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     )
     db.add(ApprovalAudit(
         id=uuid.uuid4(),
@@ -323,7 +323,7 @@ def _auto_expire_stale(db: Session, tenant_id: str, actor_id: uuid.UUID) -> int:
             PendingApproval.action_hash,
             PendingApproval.action_id,
         )
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     ).all()
     if not stale_ids:
         return 0
@@ -337,7 +337,7 @@ def _auto_expire_stale(db: Session, tenant_id: str, actor_id: uuid.UUID) -> int:
             ComplianceWorkflow.approval_status == "PENDING",
         )
         .values(approval_status="EXPIRED", execution_status="COMPLETED", updated_at=now)
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     )
     for row in stale_ids:
         db.add(ApprovalAudit(
@@ -557,7 +557,7 @@ def approve_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).with_for_update().first()
+    ).first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
@@ -593,7 +593,7 @@ def approve_gateway_approval(
             mfa_timestamp=mfa_timestamp,
         )
         .returning(PendingApproval.id)
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     ).scalar_one_or_none()
     if transitioned is None:
         _commit_expiry_or_raise_conflict(
@@ -636,7 +636,7 @@ def reject_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).with_for_update().first()
+    ).first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
@@ -658,7 +658,7 @@ def reject_gateway_approval(
             updated_at=decision_at,
         )
         .returning(PendingApproval.id)
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     ).scalar_one_or_none()
     if transitioned is None:
         _commit_expiry_or_raise_conflict(
@@ -834,7 +834,7 @@ def approve_workflow(
             mfa_timestamp=mfa_timestamp,
         )
         .returning(PendingApproval.id)
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     ).scalar_one_or_none()
     if transitioned is None:
         _commit_expiry_or_raise_conflict(
@@ -950,7 +950,7 @@ def reject_workflow(
             updated_at=decision_at,
         )
         .returning(PendingApproval.id)
-        .execution_options(synchronize_session=False)
+        .execution_options(synchronize_session="fetch")
     ).scalar_one_or_none()
     if transitioned is None:
         _commit_expiry_or_raise_conflict(

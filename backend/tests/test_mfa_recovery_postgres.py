@@ -19,7 +19,7 @@ from app.core import auth as authentication
 from app.db.dependencies import get_db
 from app.db import session as database_session
 from app.db.models import APIKey, AuditOutbox, User
-from app.schemas.models import APIKeyCreate, APIKeyRotate
+from app.schemas.models import APIKeyCreate, APIKeyRevoke, APIKeyRotate
 from tests.test_t10_postgres import postgres, reviewer
 
 
@@ -166,7 +166,6 @@ def test_recovery_audit_failure_rolls_back_credentials(recovery_case, monkeypatc
 @pytest.mark.parametrize("operation,kind", [
     ("setup", "session"), ("assertion", "session"),
     ("issue", "session"), ("rotate", "session"),
-    ("issue", "api_key"), ("rotate", "api_key"),
 ])
 def test_recovery_rejects_pre_authenticated_requests_after_lock(recovery_case, operation, kind, monkeypatch):
     case = recovery_case
@@ -212,9 +211,21 @@ def test_recovery_rejects_pre_authenticated_requests_after_lock(recovery_case, o
                         code=pyotp.TOTP(case.secrets[target.user_id]).now(), method="POST",
                         path="/approve/test", body_sha256="a" * 64), request, db)
                 elif operation == "issue":
-                    apikeys.generate_api_key(request, APIKeyCreate(name="racing-key", scopes=["read"]), db)
+                    apikeys.generate_api_key(
+                        request,
+                        APIKeyCreate(
+                            name="racing-key", scopes=["read"],
+                            mfa_code=pyotp.TOTP(case.secrets[target.user_id]).now(),
+                        ),
+                        db,
+                    )
                 else:
-                    apikeys.rotate_api_key(key_id, request, APIKeyRotate(), db)
+                    apikeys.rotate_api_key(
+                        key_id,
+                        request,
+                        APIKeyRotate(mfa_code=pyotp.TOTP(case.secrets[target.user_id]).now()),
+                        db,
+                    )
             except HTTPException as exc:
                 return exc.status_code
             return 200
@@ -230,3 +241,40 @@ def test_recovery_rejects_pre_authenticated_requests_after_lock(recovery_case, o
     with case.harness.session_for(case.owner) as db:
         assert db.query(APIKey).filter(APIKey.created_by == target.user_id, APIKey.is_active.is_(True)).count() == 0
         assert db.get(User, target.user_id).mfa_pending_secret is None
+
+
+@pytest.mark.parametrize("operation", ["issue", "rotate", "revoke"])
+def test_api_key_credentials_cannot_administer_api_keys(recovery_case, operation):
+    case = recovery_case
+    target = case.target
+    request = request_for(
+        target,
+        "api_key",
+        authentication.hash_key(case.keys[target.user_id]),
+    )
+    with case.harness.session_for(target) as db:
+        key = db.query(APIKey).filter(APIKey.created_by == target.user_id).one()
+        with pytest.raises(HTTPException, match="Interactive tenant session") as exc:
+            if operation == "issue":
+                apikeys.generate_api_key(
+                    request,
+                    APIKeyCreate(name="denied-key", scopes=["read"], mfa_code="654321"),
+                    db,
+                )
+            elif operation == "rotate":
+                apikeys.rotate_api_key(
+                    key.id,
+                    request,
+                    APIKeyRotate(mfa_code="654321"),
+                    db,
+                )
+            else:
+                apikeys.revoke_api_key(
+                    key.id,
+                    request,
+                    APIKeyRevoke(mfa_code="654321"),
+                    db,
+                )
+        assert exc.value.status_code == 403
+        assert db.query(APIKey).filter(APIKey.created_by == target.user_id).count() == 1
+        assert key.is_active

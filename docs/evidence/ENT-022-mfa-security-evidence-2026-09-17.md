@@ -4,6 +4,148 @@ Date: 2026-09-17
 Branch: `security/ent-022-privileged-mfa`
 Repository baseline: `align/master` at `45976f0`
 
+## Final pre-push credential-rotation review (2026-09-21)
+
+A fresh security-diff architecture pass found one surviving credential race in
+the uncommitted reviewer-remediation tree: API-key rotation serialized on the
+acting user's row, but two different tenant owners lock different user rows and
+could both read the same old API key as active. That could create two active
+rotation descendants from one credential.
+
+Rotation now acquires a PostgreSQL `FOR UPDATE` lock on the tenant-qualified
+target API-key row before checking active/revoked/rotated state. Different owners
+therefore serialize on the credential itself; the second transaction observes
+the committed inactive/rotated state and is rejected. The existing interactive
+session, fresh MFA, tenant predicate/RLS, one-time plaintext response, and atomic
+credential-audit transaction remain unchanged.
+
+Fresh focused verification:
+
+```text
+AUTHCLAW_ENV=test backend/.venv/Scripts/python.exe -m pytest -p no:cacheprovider -q \
+  tests/test_ent022_mfa_security.py tests/test_auth_baseline.py
+72 passed, 0 skipped, 31 warnings in 4.02s
+```
+
+The regression test requires the target-key query to use `with_for_update()` and
+confirms the old key is deactivated. The prior invocation with the host's stale
+`AUTHCLAW_ENV=demo` was rejected during collection by the production-environment
+guard; rerunning with the explicit supported test environment passed. A new
+current-head CI run and human owner/risk approvals remain mandatory after push.
+
+Additional final-tree checks:
+
+- Agent CI authorization/policy selection, including the new privileged-policy
+  invariant file: **126 passed, 15 environment-gated skips, 71 subtests passed**.
+- Console unit contracts: **52 passed**; TypeScript passed; ESLint reported
+  **0 errors and 14 pre-existing navigation warnings**.
+- Repository policy selection: **122 passed**.
+- T01 live activation verifier: active PR #52 / reviewed `b8b239` / merged
+  `1e40bdb5c8fd6b4e28c827035ab7d06645530ccb` / effective
+  `2026-09-16T12:57:25Z`; ruleset 21141288 active with zero bypass actors.
+
+The exact backend CI selection was also started locally after the focused pass,
+but without the disposed Redis/PostgreSQL services its timeout-path cases reached
+only 10% after ten minutes. It was stopped and is not reported as a pass or
+failure. The earlier disposable-service results below remain the integration
+evidence; the pushed current-head CI run must supersede them.
+
+## Docker-backed final local verification (2026-09-21)
+
+The verified working-tree base is `93c8531d2ef88e4d20bfc9f88111dbea0f332e73`.
+The tree remains uncommitted, so it has no immutable final commit SHA yet; these
+results bind to that base plus the current diff and must be repeated by current-head
+CI after commit. T01 activation verification passed against GitHub: PR #52, reviewed
+head `b8b23993a7a467396598eefdd23b97da83d47042`, merged commit
+`1e40bdb5c8fd6b4e28c827035ab7d06645530ccb`, effective
+`2026-09-16T12:57:25Z`, active ruleset 21141288, zero bypass actors.
+
+Docker Desktop 4.82.0 / Engine 29.6.1 ran isolated disposable PostgreSQL 16.10
+and Redis 7.4.7 containers on non-default host ports. `TEST_OWNER_DATABASE_URL`,
+`TEST_DATABASE_URL`, `OWNER_DATABASE_URL`, and `DATABASE_URL` all explicitly
+targeted `authclaw_local_test`; the runtime role was restricted and migrations used
+the dedicated migrator role. No development or production database was used and no
+safety guard was bypassed.
+
+Fresh results on the current working tree:
+
+```text
+backend/.venv/Scripts/python.exe -m pytest -p no:cacheprovider -q tests/test_mfa_recovery_postgres.py
+8 passed, 0 skipped, 110 warnings in 23.70s
+
+Exact Backend PostgreSQL Integration pytest selection from .github/workflows/ci.yml
+137 passed, 1 skipped, 0 failed, 677 warnings in 264.88s
+The sole skip is the existing opt-in synthetic performance measurement; no MFA,
+PostgreSQL, Redis, recovery, race, rollback, or tenant-isolation case skipped.
+
+Focused backend MFA/API-key authorization selection
+136 passed, 0 skipped, 31 warnings in 16.28s
+
+Agent authorization, PostgreSQL MFA, and privileged-policy selection
+46 passed, 0 skipped, 26 subtests passed in 16.06s
+
+Console unit contracts: 52 passed
+Console TypeScript: passed
+Changed settings-page ESLint: 0 errors, 4 pre-existing navigation warnings
+Repository-policy unit tests: 27 passed
+Tokei 12.1.2 archive SHA-256 verified; repository line-budget gate: passed
+```
+
+The Docker run reproduced the pushed-head PostgreSQL failures before correction:
+stale ORM identity-map state left workflow responses at `PENDING`, the concurrent
+gateway loser could return a non-success response while the durable winner remained
+correct, and the real-MFA test adapter returned the old Redis reset-script contract.
+ORM synchronization now follows each status-qualified database transition; the race
+asserts exactly one successful durable transition and one audit row; the test adapter
+models the current atomic cooldown reset result. Recovery evidence separately proves
+that machine credentials are denied API-key administration before mutation, while
+interactive-session issuance and rotation remain serialized against recovery.
+
+## PR #58 final review remediation (2026-09-21)
+
+The four reported findings at reviewed head `ff78de4dccf9d59821e00cee6c3971881410189d`
+were rechecked against the active branch and closed without introducing a second
+MFA verifier, approval authority, or audit transport.
+
+- Privileged dispatch now writes a unique operation identifier and reconciliation
+  deadline in the same transaction as the `executing` state and canonical audit.
+  Gateway and remediation execution receive that stable idempotency identity.
+  Provider identifiers and bounded non-secret outcomes are retained on terminal
+  transitions. Unknown provider outcomes are never reported as success; they
+  become `execution_indeterminate`, and abandoned dispatches are lazily reconciled
+  to the same explicit state with durable `manual_reconciliation_required` audit.
+- Policy loading rejects disabled MFA or separation of duties in every shared or
+  production-like environment. The exception is limited to explicitly named
+  local/test environments; an unset environment fails closed.
+- API-key issuance and rotation now require an interactive user session plus a
+  fresh factor through the existing replay, rate-limit, and lockout controls.
+  The user row lock keeps recovery and credential administration serialized.
+  Key mutation and a non-secret credential-administration audit/outbox row commit
+  atomically. MFA input uses `SecretStr` and neither the code nor raw key is audited.
+- The earlier rejection race/audit finding was already corrected on the active
+  branch: pending and unexpired conditions are enforced by the database transition,
+  with state and immutable audit committed together.
+
+Fresh local evidence for this final working tree:
+
+```text
+T01 activation verifier: active; PR #52; reviewed b8b239; merged 1e40bdb5c8fd6b4e28c827035ab7d06645530ccb; effective 2026-09-16T12:57:25Z
+backend MFA/auth/abuse selection: 125 passed, 4 environment-gated skips
+agent authorization/policy/provider selection: 39 passed, 29 subtests passed
+console TypeScript: passed
+console changed-file ESLint: 0 errors, 4 pre-existing window.location warnings
+Tokei 12.1.2 line-budget gate: passed
+Python compilation and git diff --check: passed
+Gitleaks 8.24.3 PR range, working diff, and new-file scans: no leaks
+```
+
+The PostgreSQL recovery selection was intentionally refused by its safety guard
+because this host has no explicit `TEST_OWNER_DATABASE_URL` and
+`TEST_DATABASE_URL` ending in `_test`; eight cases did not execute. Docker is not
+available to provision the disposable database. The PR's current-head PostgreSQL,
+Redis, secret-scan, and independent owner/risk review gates remain mandatory and
+are not represented as locally satisfied.
+
 ## Review finding remediation (2026-09-21)
 
 The final review findings were reproduced from the reported source paths and
@@ -508,6 +650,46 @@ existing PostgreSQL 16 service and a temporary non-superuser role/schema that
 the test removed afterward.
 
 ## Deployment and rollback consequences
+
+## Final reviewer-remediation pass (2026-09-21)
+
+The current-head preparation closed the remaining review findings without
+introducing a second credential or approval implementation:
+
+- API-key revocation now requires the same fresh, actor-bound MFA contract as
+  issuance and rotation, locks the target credential row before deciding its
+  state, and commits the revocation audit record atomically with the state
+  transition. This prevents a rotation/revocation race from reporting success
+  while leaving a rotated descendant active.
+- Console DELETE requests carry the MFA body through the existing allowlisted
+  BFF route instead of creating a new transport path.
+- Approval reads no longer mutate an active execution to
+  `execution_indeterminate` after an arbitrary wall-clock deadline. Stale
+  classification remains an explicit compare-and-swap reconciliation operation,
+  preventing a legitimate long-running provider call from being finalized by a
+  concurrent list or detail request.
+- Approved execution identity is preserved through graph state and sent to the
+  gateway as both `Idempotency-Key` and `X-Request-ID`. Offline provider fallback
+  is fail-closed for privileged execution, and the provider-visible operation ID
+  is persisted for outcome reconciliation rather than substituting an unrelated
+  local request identifier.
+
+Fresh focused verification after these changes:
+
+```text
+backend MFA/API-key/security selection: 102 passed, 31 deprecation warnings
+agent authorization/provider/graph selection: 43 passed, 21 subtests passed
+console unit contracts: 52 passed
+console TypeScript: passed
+console ESLint: 0 errors, 14 pre-existing warnings
+git diff --check: passed
+```
+
+The production-line delta introduced by this final pass is small and reuses the
+existing MFA verifier, transactional audit helper, approval CAS, graph state,
+and gateway provider. Test growth is intentional negative/race-contract evidence.
+The aggregate branch still requires the repository-generated material-growth
+marker, current-head CI, and independent human approvals before merge.
 
 1. Apply backend migrations through `052` before deploying backend code. The backend startup gate intentionally accepts only revision `052`; T10 owns `050`, durable MFA replay state is `051`, and ENT-022 pending-enrollment state is `052`.
 2. Agent startup migration adds global counter and lockout columns plus the additive
