@@ -896,7 +896,13 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
         ))
         request = SimpleNamespace(headers={"Authorization": "Bearer test"})
 
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield object()
+
         with (
+            patch("database.engine", Engine()),
             patch.object(main, "get_approval", return_value=record),
             patch.object(main, "_approval_authenticated_payload", return_value={
                 "sub": "oidc|checker", "tenant_id": 42,
