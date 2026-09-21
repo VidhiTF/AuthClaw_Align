@@ -450,7 +450,7 @@ def verify_alert_outage_and_retry(client, tokens, engine, tenant_context):
         assert smtp.return_value.__enter__.return_value.send_message.call_count == sent
         with engine.begin() as conn:
             conn.execute(text("UPDATE tenant_users SET email_verified=TRUE WHERE email='verified@tenant-a.test'"))
-            conn.execute(text("""UPDATE document_scans SET outputs_json=(outputs_json::jsonb - 'provider_review')::text
+            conn.execute(text("""UPDATE document_scans SET outputs_json=(outputs_json::jsonb - 'provider_review' - 'scan_health')::text
                 WHERE document_id=(SELECT id FROM documents WHERE filename='retryable.txt')"""))
         assert EventPipeline().retry_dead_letters()["delivered"] == 1
         with engine.connect() as conn:

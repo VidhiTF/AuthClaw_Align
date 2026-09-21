@@ -27,11 +27,13 @@ class EventPipeline:
         self.analytics_topic = topics.analytics
         self.dlq_topic = topics.dlq
         self.clickhouse_enabled = _truthy("AUTHCLAW_CLICKHOUSE_ENABLED", True)
+        self.clickhouse_required = _truthy("AUTHCLAW_REQUIRE_CLICKHOUSE", False)
+        self.audit_required = _truthy("AUTHCLAW_REQUIRE_KAFKA", False)
         self.max_attempts = int(os.getenv("AUTHCLAW_EVENT_DELIVERY_ATTEMPTS", "3"))
         self.timeout = float(os.getenv("AUTHCLAW_EVENT_DELIVERY_TIMEOUT_SECONDS", "1.5"))
         self.audit_publisher = make_audit_publisher(
             timeout=self.timeout,
-            required=_truthy("AUTHCLAW_REQUIRE_KAFKA", False),
+            required=self.audit_required,
         )
 
     def record_and_deliver(self, event: Dict[str, Any], stream: str = "audit") -> Dict[str, Any]:
@@ -94,13 +96,17 @@ class EventPipeline:
             attempts = 0 if retry else int(record["attempts"] or 0)
             errors = []
             delivered = False
-            for attempt in range(attempts + 1, self.max_attempts + 1):
+            applicable = record["stream"] == "security_alert" or self.audit_publisher.configured or self.audit_required or (
+                self.clickhouse_enabled and bool(os.getenv("CLICKHOUSE_HTTP_URL"))) or self.clickhouse_required
+            for attempt in (range(attempts + 1, self.max_attempts + 1) if applicable else ()):
                 try:
                     if record["stream"] == "security_alert":
                         from document_processing.alerts import trigger_security_alert
                         trigger_security_alert(event, connection=conn)
                     else:
                         self.audit_publisher.publish(record["topic"], event, serialized=record["payload"])
+                        if self.clickhouse_required and not self.clickhouse_enabled:
+                            raise RuntimeError("ClickHouse delivery is required but disabled")
                         if self.clickhouse_enabled:
                             self._write_clickhouse(event)
                     delivered = True
@@ -111,8 +117,8 @@ class EventPipeline:
                     errors.append(type(exc).__name__ if record["stream"] == "security_alert" else str(exc))
                     time.sleep(min(0.05 * attempt, 0.25))
 
-            status = "delivered" if delivered else "dead_letter"
-            error_message = None if delivered else "; ".join(errors[-3:]) or record["error_message"]
+            status = "delivered" if delivered else "dead_letter" if applicable else "not_applicable"
+            error_message = None if status != "dead_letter" else "; ".join(errors[-3:]) or record["error_message"]
             conn.execute(
                 text(
                     """
@@ -121,7 +127,7 @@ class EventPipeline:
                         attempts = :attempts,
                         delivered_at = CASE WHEN :status = 'delivered' THEN NOW() ELSE delivered_at END,
                         error_message = :error_message,
-                        next_retry_at = CASE WHEN :status = 'dead_letter' THEN NULL ELSE NOW() END,
+                        next_retry_at = CASE WHEN :status IN ('dead_letter', 'not_applicable') THEN NULL ELSE NOW() END,
                         updated_at = NOW()
                     WHERE event_id = :event_id
                     """
@@ -168,11 +174,11 @@ class EventPipeline:
                         ELSE 'alert_delivery_failed' END,
                         outputs_json = jsonb_set(
                             jsonb_set(outputs_json::jsonb, '{alert_delivery,status}', CAST(:status AS jsonb)),
-                            '{health}', CASE WHEN :delivered THEN CASE outputs_json::jsonb #>> '{provider_review,status}'
-                                WHEN 'unavailable' THEN '"degraded"'::jsonb
-                                WHEN 'healthy' THEN '"healthy"'::jsonb
-                                WHEN 'not_applicable' THEN '"healthy"'::jsonb
-                                ELSE '"unknown"'::jsonb END
+                            '{health}', CASE WHEN :delivered THEN COALESCE(
+                                to_jsonb(outputs_json::jsonb ->> 'scan_health'),
+                                CASE outputs_json::jsonb #>> '{provider_review,status}'
+                                    WHEN 'unavailable' THEN '"degraded"'::jsonb
+                                    ELSE '"unknown"'::jsonb END)
                                 ELSE CAST(:health AS jsonb) END)::text
                     WHERE tenant_id = :tenant AND document_id = :document AND outputs_json::jsonb #>> '{alert_delivery,event_id}' = :id
                     RETURNING id, document_id, status
@@ -269,10 +275,15 @@ class EventPipeline:
             by_stream[stream][status] = int(count or 0)
             by_stream[stream]["max_attempts"] = max(by_stream[stream]["max_attempts"], int(attempts or 0))
         alerts = by_stream.get("security_alert", {})
+        clickhouse_configured = self.clickhouse_enabled and bool(os.getenv("CLICKHOUSE_HTTP_URL"))
+        required_unavailable = (self.audit_required and not self.audit_publisher.configured) or (
+            self.clickhouse_required and not clickhouse_configured)
         return {
             "security_alerts": {"status": "not_applicable" if not alerts else "unavailable" if alerts.get("dead_letter") else "unknown" if alerts.get("queued") or alerts.get("delivering") else "healthy", **alerts},
             "kafka_rest_configured": self.audit_publisher.configured,
             "clickhouse_enabled": self.clickhouse_enabled,
+            "external_delivery_status": "unavailable" if required_unavailable else "unknown" if (
+                self.audit_publisher.configured or clickhouse_configured) else "not_applicable",
             "streams": by_stream,
             "checkpoints": [dict(row._mapping) for row in checkpoints],
         }

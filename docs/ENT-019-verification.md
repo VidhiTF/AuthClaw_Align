@@ -624,3 +624,35 @@ test skipped**, plus **6 PostgreSQL approval integration tests passed**; console
 verified degraded alert failure recovers to healthy after successful retry while
 provider degradation is retained. Provider outage used an HTTP boundary double;
 no live Gemini or deployed environment was exercised.
+
+## Persisted stage-health and delivery-applicability follow-up (2026-09-21)
+
+Three retained false-success paths were reproduced and fixed together. Document
+scans now persist extraction, indexing and provider-review states; failed parsing
+or vector persistence degrades the scan, and indexing becomes complete only after
+successful chunk persistence. Unchanged documents retain their latest nonhealthy
+scan state until a verified recovery, without taking alert retries away from the
+existing outbox. Empty documents reduce to `not_applicable`, not healthy.
+
+External delivery now records `not_applicable` when optional Kafka/ClickHouse
+transports are intentionally absent. Required but missing transports fail through
+the existing retry/dead-letter path and report unavailable even when another sink
+is configured. Acknowledged security-alert delivery can still make its applicable
+queue healthy while optional external delivery remains separately not applicable.
+
+Reuse and minimality: the implementation reuses persisted scan outputs, existing
+synchronization failure aggregation, pipeline retry/dead-letter handling and queue
+reducers. No schema, dependency or new retry mechanism was added. Production delta
+for this follow-up is **93 added / 53 removed physical lines, net +40** across five
+agent modules; tests and CI selection are separate. The final adversarial review
+found and resolved required-sink precedence, quota-cleanup and all-not-applicable
+reduction edge cases.
+
+Fresh verification against disposable PostgreSQL and Redis: focused failure paths
+**32 passed, 78 subtests passed**; complete affected Agent selection **195 passed,
+130 subtests passed** with the existing Starlette deprecation warning; repository
+policy/Compose contracts **27 passed, 27 subtests passed**. Tests use actual parser,
+pipeline and reducer code with provider/vector/network seams. No live Gemini,
+Kafka, ClickHouse or deployed outage was exercised. Rollback reverts this follow-up
+but restores false healthy and delivered states; human current-head owner/risk
+approval and deployment verification remain required.

@@ -134,10 +134,17 @@ class MonitoringQuotaTests(unittest.TestCase):
                         self.assertEqual(self.ns["last_sync_time"], "previous success")
                         self.ns["run_document_scan_pipeline"].assert_called_once()
                         self.conn.execute.return_value.fetchone.side_effect = None
-                        for status in ("alert_delivery_pending", "alert_delivery_failed", "completed"):
-                            self.conn.execute.return_value.fetchone.return_value = (1, 4, status)
+                        for status, health in (("alert_delivery_pending", "degraded"),
+                                               ("alert_delivery_failed", "degraded"),
+                                               ("completed", "healthy"),
+                                               ("completed", "not_applicable")):
+                            self.conn.execute.return_value.fetchone.return_value = (1, 4, status, health)
                             with tenant_context(7):
-                                self.assertEqual(self.ns["trigger_manual_sync"]()["status"], "success")
+                                if health in ("healthy", "not_applicable"):
+                                    self.assertEqual(self.ns["trigger_manual_sync"]()["status"], "success")
+                                else:
+                                    with self.assertRaisesRegex(RuntimeError, "Document synchronization incomplete"):
+                                        self.ns["trigger_manual_sync"]()
                             self.ns["run_document_scan_pipeline"].assert_called_once()
 
     def test_degraded_scan_health_propagates_to_manual_and_background_sync(self):
@@ -162,6 +169,16 @@ class MonitoringQuotaTests(unittest.TestCase):
                             RuntimeError, "Document synchronization incomplete"):
                         self.ns["trigger_manual_sync"]()
                 self.assertEqual(self.ns["last_sync_time"], "previous success")
+
+    def test_unchanged_degraded_scan_does_not_claim_recovery(self):
+        for health in ("degraded", "unavailable", "unknown", None):
+            with self.subTest(health=health):
+                self.setUp()
+                self.conn.execute.return_value.fetchone.return_value = (1, 4, "completed", health)
+                with tenant_context(7), self.assertRaisesRegex(RuntimeError, "Document synchronization incomplete"):
+                    self.ns["trigger_manual_sync"]()
+                self.ns["run_document_scan_pipeline"].assert_not_called()
+                self.assertEqual(self.ns["last_sync_time"], "N/A")
 
     def test_source_failure_preserves_success_time_and_recovery(self):
         self.engine.connect.side_effect = ConnectionError("database unavailable")

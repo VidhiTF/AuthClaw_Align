@@ -108,7 +108,10 @@ def _sync_sources(tenant_id):
             # Check DB
             with engine.connect() as conn:
                 doc = conn.execute(
-                    text("SELECT id, size_bytes, status FROM documents WHERE filename = :name AND source = 'watched' AND tenant_id = :tenant_id"),
+                    text("""SELECT d.id, d.size_bytes, d.status, (SELECT s.outputs_json::jsonb ->> 'health'
+                        FROM document_scans s WHERE s.document_id = d.id AND s.tenant_id = d.tenant_id
+                        ORDER BY s.id DESC LIMIT 1) FROM documents d
+                        WHERE d.filename = :name AND d.source = 'watched' AND d.tenant_id = :tenant_id"""),
                     {"name": filename, "tenant_id": tenant_id}
                 ).fetchone()
                 
@@ -139,6 +142,8 @@ def _sync_sources(tenant_id):
                 with open(filepath, "rb") as f:
                     if _scan_failed(run_document_scan_pipeline(doc[0], f.read(), filename, source="watched", tenant_id=tenant_id)):
                         failures.add("local")
+            elif len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
+                failures.add("local")
     except (QuotaExceeded, QuotaUnavailable):
         raise
     except Exception as e:
@@ -265,7 +270,10 @@ def _sync_sources(tenant_id):
                 
                 with engine.connect() as conn:
                     doc = conn.execute(
-                        text("SELECT id, size_bytes, status FROM documents WHERE filename = :name AND source = :src AND tenant_id = :tenant_id"),
+                        text("""SELECT d.id, d.size_bytes, d.status, (SELECT s.outputs_json::jsonb ->> 'health'
+                            FROM document_scans s WHERE s.document_id = d.id AND s.tenant_id = d.tenant_id
+                            ORDER BY s.id DESC LIMIT 1) FROM documents d
+                            WHERE d.filename = :name AND d.source = :src AND d.tenant_id = :tenant_id"""),
                         {"name": filename, "src": src, "tenant_id": tenant_id}
                     ).fetchone()
                     
@@ -335,6 +343,8 @@ def _sync_sources(tenant_id):
                         
                     if _scan_failed(run_document_scan_pipeline(doc[0], file_bytes, filename, source=src, tenant_id=tenant_id)):
                         failures.add(src)
+                elif len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
+                    failures.add(src)
                         
         except (QuotaExceeded, QuotaUnavailable):
             raise

@@ -487,14 +487,20 @@ class ObservabilityService:
                 unknown["status"] = "degraded"
         except AttributeError:
             return unknown
+        if pipeline.get("external_delivery_status") == "unavailable":
+            return {**unknown, "status": "unavailable", "reason": "Required external delivery is not configured"}
         # SMTP deliveries have no Kafka checkpoint. Completed alerts must not
         # prevent recovery; pending/failed alerts still lack a measured lag.
         pending_alert = False
+        security_observed = "security_alert" in streams
         if "security_alert" in streams:
             pending_alert = bool(streams["security_alert"].get("queued", 0) or streams["security_alert"].get("dead_letter", 0))
             streams = {name: counts for name, counts in streams.items() if name != "security_alert"}
             if not pending_alert and not streams and checkpoints == []:
                 return {**unknown, "status": "healthy", "max_lag_seconds": 0, "alertable": False}
+        if pipeline.get("external_delivery_status") == "not_applicable" and not unknown["pending_events"]:
+            return {**unknown, "status": "healthy" if security_observed else "not_applicable",
+                    "max_lag_seconds": 0, "alertable": False}
         if not isinstance(checkpoints, list) or not checkpoints or any(not isinstance(cp, dict) or not isinstance(cp.get("stream"), str) or not cp["stream"] for cp in checkpoints):
             return unknown
         if set(streams) - {cp["stream"] for cp in checkpoints}:

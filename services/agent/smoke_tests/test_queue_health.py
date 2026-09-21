@@ -12,9 +12,65 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services.observability_service import ObservabilityService
 from services.event_pipeline import EventPipeline
+from services.tenant_context import tenant_context
 
 
 class QueueHealthTests(unittest.TestCase):
+    def test_disabled_external_delivery_is_not_applicable(self):
+        database = MagicMock()
+        conn = database.begin.return_value.__enter__.return_value
+        conn.execute.return_value.fetchone.return_value = SimpleNamespace(_mapping={
+            "status": "queued", "stream": "audit", "tenant_id": 7,
+            "payload": "{}", "attempts": 0, "topic": "audit", "error_message": None,
+        })
+        with patch.dict(os.environ, {"KAFKA_REST_URL": "", "AUTHCLAW_REQUIRE_KAFKA": "false",
+                                    "AUTHCLAW_CLICKHOUSE_ENABLED": "false"}), \
+                patch("services.event_pipeline.engine", database), \
+                patch.object(EventPipeline, "refresh_checkpoint"):
+            result = EventPipeline().deliver_event("event-1")
+        self.assertEqual(result["status"], "not_applicable")
+        update = next(call.args[1] for call in conn.execute.call_args_list
+                      if "UPDATE event_delivery_records" in str(call.args[0]))
+        self.assertEqual(update["status"], "not_applicable")
+        self.assertEqual(update["attempts"], 0)
+
+        health = ObservabilityService()._queue_lag({
+            "external_delivery_status": "not_applicable",
+            "streams": {"audit": {"not_applicable": 1, "queued": 0, "dead_letter": 0}},
+            "checkpoints": [self.checkpoint(dead_letter_count=0, pending_events=0)],
+        })
+        self.assertEqual(health["status"], "not_applicable")
+        self.assertFalse(health["alertable"])
+        health = ObservabilityService()._queue_lag({
+            "external_delivery_status": "not_applicable",
+            "streams": {"security_alert": {"delivered": 1, "queued": 0, "dead_letter": 0},
+                        "audit": {"not_applicable": 1, "queued": 0, "dead_letter": 0}},
+            "checkpoints": [self.checkpoint(dead_letter_count=0, pending_events=0)],
+        })
+        self.assertEqual(health["status"], "healthy")
+
+        with patch.dict(os.environ, {"KAFKA_REST_URL": "", "AUTHCLAW_REQUIRE_KAFKA": "true",
+                                    "AUTHCLAW_CLICKHOUSE_ENABLED": "false",
+                                    "AUTHCLAW_EVENT_DELIVERY_ATTEMPTS": "1"}), \
+                patch("services.event_pipeline.engine", database), patch("services.event_pipeline.time.sleep"), \
+                patch.object(EventPipeline, "refresh_checkpoint"):
+            self.assertEqual(EventPipeline().deliver_event("event-1")["status"], "dead_letter")
+
+        for environment in (
+                {"KAFKA_REST_URL": "", "AUTHCLAW_REQUIRE_KAFKA": "true",
+                 "AUTHCLAW_CLICKHOUSE_ENABLED": "true", "CLICKHOUSE_HTTP_URL": "http://clickhouse.invalid"},
+                {"KAFKA_REST_URL": "http://kafka.invalid", "AUTHCLAW_REQUIRE_KAFKA": "false",
+                 "AUTHCLAW_CLICKHOUSE_ENABLED": "false", "AUTHCLAW_REQUIRE_CLICKHOUSE": "true"}):
+            with self.subTest(environment=environment), tenant_context(7), patch.dict(os.environ, environment, clear=True), \
+                    patch("services.event_pipeline.engine", database):
+                self.assertEqual(EventPipeline().delivery_metrics()["external_delivery_status"], "unavailable")
+        with patch.dict(os.environ, {"KAFKA_REST_URL": "", "AUTHCLAW_REQUIRE_KAFKA": "false",
+                                    "AUTHCLAW_CLICKHOUSE_ENABLED": "false", "AUTHCLAW_REQUIRE_CLICKHOUSE": "true",
+                                    "AUTHCLAW_EVENT_DELIVERY_ATTEMPTS": "1"}), \
+                patch("services.event_pipeline.engine", database), patch("services.event_pipeline.time.sleep"), \
+                patch.object(EventPipeline, "refresh_checkpoint"):
+            self.assertEqual(EventPipeline().deliver_event("event-1")["status"], "dead_letter")
+
     def test_kafka_acknowledgement_controls_delivery_and_health(self):
         acknowledged = {"partition": 0, "offset": 0, "error_code": None, "error": None}
         rejected = {"partition": None, "offset": None, "error_code": 50003, "error": "Broker unavailable"}

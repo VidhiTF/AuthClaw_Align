@@ -30,6 +30,7 @@ def run_document_scan_pipeline(doc_id: int, file_bytes: bytes, filename: str, so
     
     # 1. Extract text and metadata
     text_content = extract_document_text(file_bytes, filename)
+    extraction = {"status": "healthy" if text_content.strip() else "unavailable" if file_bytes else "not_applicable"}
     meta = extract_file_metadata(file_bytes, filename, source_location=source)
     
     # Update document entry with basic details
@@ -49,44 +50,47 @@ def run_document_scan_pipeline(doc_id: int, file_bytes: bytes, filename: str, so
     # 2. Chunk text and save to RAG vector database (knowledge_chunks)
     chunks = split_text_into_chunks(text_content)
     from rag.vector_store import save_document_chunks
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text("""
-                    SELECT id
-                    FROM knowledge_documents
-                    WHERE name = :name AND (:tenant_id IS NULL OR tenant_id = :tenant_id)
-                """),
-                {"name": filename, "tenant_id": tenant_id}
-            ).fetchone()
-            if row:
-                k_doc_id = row[0]
-            else:
-                import os as _os
-                ext = _os.path.splitext(filename)[1].upper().replace(".", "") or "TXT"
-                res = conn.execute(
-                    text("""
-                    INSERT INTO knowledge_documents (tenant_id, name, type, size_bytes, status, last_indexed, chunks_count)
-                    VALUES (:tenant_id, :name, :type, :size_bytes, 'indexed', :last_indexed, :chunks_count)
-                    RETURNING id
-                    """),
-                    {
-                        "tenant_id": tenant_id,
-                        "name": filename,
-                        "type": ext,
-                        "size_bytes": len(file_bytes),
-                        "last_indexed": datetime.now(timezone.utc).date().isoformat(),
-                        "chunks_count": len(chunks)
-                    }
-                )
-                k_doc_id = res.fetchone()[0]
+    k_doc_id = None
+    indexing = {"status": "not_applicable"}
+    if extraction["status"] == "healthy":
+        indexing = {"status": "healthy"}
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(text("""SELECT id FROM knowledge_documents
+                    WHERE name = :name AND (:tenant_id IS NULL OR tenant_id = :tenant_id)"""),
+                    {"name": filename, "tenant_id": tenant_id}).fetchone()
+                if row:
+                    k_doc_id = row[0]
+                    conn.execute(text("UPDATE knowledge_documents SET status = 'indexing' WHERE id = :id AND tenant_id = :tenant_id"),
+                                 {"id": k_doc_id, "tenant_id": tenant_id})
+                else:
+                    res = conn.execute(text("""INSERT INTO knowledge_documents
+                        (tenant_id, name, type, size_bytes, status, last_indexed, chunks_count)
+                        VALUES (:tenant_id, :name, :type, :size_bytes, 'indexing', :last_indexed, :chunks_count)
+                        RETURNING id"""), {"tenant_id": tenant_id, "name": filename,
+                        "type": os.path.splitext(filename)[1].upper().replace(".", "") or "TXT",
+                        "size_bytes": len(file_bytes), "last_indexed": datetime.now(timezone.utc).date().isoformat(),
+                        "chunks_count": len(chunks)})
+                    k_doc_id = res.fetchone()[0]
                 conn.commit()
-                
-        save_document_chunks(k_doc_id, chunks, tenant_id=tenant_id)
-    except (QuotaExceeded, QuotaUnavailable):
-        raise
-    except Exception as ex:
-        logger.error(f"Failed to index chunks into RAG: {ex}")
+            save_document_chunks(k_doc_id, chunks, tenant_id=tenant_id)
+            with engine.connect() as conn:
+                conn.execute(text("UPDATE knowledge_documents SET status = 'indexed' WHERE id = :id AND tenant_id = :tenant_id"),
+                             {"id": k_doc_id, "tenant_id": tenant_id})
+                conn.commit()
+        except Exception as ex:
+            indexing = {"status": "unavailable"}
+            logger.error(f"Failed to index chunks into RAG: {ex}")
+            if k_doc_id is not None:
+                try:
+                    with engine.connect() as conn:
+                        conn.execute(text("UPDATE knowledge_documents SET status = 'unavailable' WHERE id = :id AND tenant_id = :tenant_id"),
+                                     {"id": k_doc_id, "tenant_id": tenant_id})
+                        conn.commit()
+                except Exception:
+                    logger.error("Failed to persist unavailable RAG index status")
+            if isinstance(ex, (QuotaExceeded, QuotaUnavailable)):
+                raise
         
     # 3. Scan for PII, Financial Data, and Secrets (Regex/Entropy scanner)
     findings = scan_text_for_sensitive_data(text_content)
@@ -296,7 +300,10 @@ Do not include markdown packaging like ```json.
     # 9. Save results to database
     duration_ms = int((time.perf_counter() - start_time) * 1000)
     scan_status = status
-    health = "degraded" if provider_review["status"] == "unavailable" else "healthy"
+    stage_health = extraction["status"], indexing["status"], provider_review["status"]
+    health = ("degraded" if "unavailable" in stage_health else
+              "healthy" if "healthy" in stage_health else
+              "not_applicable" if set(stage_health) == {"not_applicable"} else "unknown")
     with engine.connect() as conn:
         # Commit the retryable alert and its scan together, before network I/O.
         if any(f.get("risk_level", "LOW").upper() in ("CRITICAL", "HIGH") for f in all_findings):
@@ -338,7 +345,9 @@ Do not include markdown packaging like ```json.
                 "findings_json": json.dumps(all_findings),
                 "status": status,
                 "outputs": json.dumps({"alert_delivery": alert_delivery, "scan_status": scan_status,
-                                        "health": health, "provider_review": provider_review}),
+                                        "health": health, "scan_health": health,
+                                        "extraction": extraction, "indexing": indexing,
+                                        "provider_review": provider_review}),
             }
         )
         
@@ -388,6 +397,8 @@ Do not include markdown packaging like ```json.
         "severity": severity,
         "status": status,
         "health": health,
+        "extraction": extraction,
+        "indexing": indexing,
         "provider_review": provider_review,
         "alert_delivery": alert_delivery,
         "duration_ms": duration_ms,

@@ -394,7 +394,7 @@ jobs:
             smoke_tests/test_control_plane_auth.py smoke_tests/test_agent_execution_authorization.py \
             smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py \
             smoke_tests/test_quota_service.py smoke_tests/test_quota_http_boundary.py \
-            smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py smoke_tests/test_connector_truthfulness.py \
+            smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py smoke_tests/test_document_provider_health.py smoke_tests/test_connector_truthfulness.py \
             smoke_tests/test_quota_redis.py smoke_tests/test_compliance_diagnostics.py -q
 
   sdk:
