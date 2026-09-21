@@ -4,6 +4,67 @@ Date: 2026-09-17
 Branch: `security/ent-022-privileged-mfa`
 Repository baseline: `align/master` at `45976f0`
 
+## Review finding remediation (2026-09-21)
+
+The final review findings were reproduced from the reported source paths and
+closed in the existing approval, abuse-control, request-authentication, console
+signing, and audit seams. No additional factor store or approval state machine
+was introduced.
+
+- Backend gateway and workflow approve/reject/expiry transitions now use
+  tenant-scoped, status-and-expiry-qualified `UPDATE ... RETURNING` operations.
+  Expiry, workflow synchronization, and immutable approval audit insertion are
+  committed in the same transaction. An approval that expires while MFA is
+  being verified cannot transition to approved.
+- Agent rejection now rejects only an unexpired pending record. If the decision
+  arrives after expiry, the same transaction records `expired` state and its
+  immutable audit event; it cannot overwrite approval or execution consumption.
+- A successful MFA verification rechecks the Redis cooldown atomically before
+  clearing attempt state. A request admitted before a concurrent lockout now
+  returns 429 and leaves that cooldown intact.
+- Validated API keys now produce a non-secret immutable approval requester
+  subject (`api-key:<sha256>`). Existing quota accounting deliberately remains
+  on the shared `service:tenant` bucket; the full Agent CI selection caught and
+  verified this compatibility boundary.
+- The production console exposes authenticated approve and execute BFF routes.
+  The route removes the MFA code, obtains the body/action-bound backend
+  assertion, and uses the existing HMAC-v3 agent signer.
+- Backend assertion audit persistence now places assertion ID, operation, and
+  body SHA-256 in canonical `execution_trace`; the PostgreSQL readback test
+  asserts all three bindings. Gateway rejection now inserts tenant-bound
+  immutable `REJECTED` evidence in the transition transaction.
+
+Fresh current-working-tree evidence:
+
+```text
+T01 live activation verifier: active; PR #52; merged 1e40bdb5c8fd6b4e28c827035ab7d06645530ccb
+backend focused MFA/abuse selection: 20 passed, 4 environment-gated skips
+agent exact CI selection: 120 passed, 15 environment-gated skips, 60 subtests passed
+console unit/contract selection: 52 passed
+console lint: 0 errors, 14 pre-existing warnings
+console TypeScript and production build: passed; privileged BFF route present in route manifest
+repository-policy unit tests: 27 passed
+Gitleaks 8.24.3 full working-tree scan: 944.52 MB scanned, no leaks found
+Tokei 12.1.2 line-budget gate: passed
+Python compile and git diff --check: passed
+```
+
+The new deterministic abuse test proves a success admitted before lockout cannot
+clear that lockout. The new route contract invokes both production BFF stages.
+The new API-key test proves the requester is stable and non-secret while quota
+behavior is unchanged. The PostgreSQL tests cover expiry-during-MFA,
+approve/reject/expire races, gateway rejection audit readback, agent rejection
+after expiry, and durable assertion binding readback.
+
+This Windows host has PostgreSQL running but no authorized disposable-test owner
+credentials, and no Redis service. Consequently the new real PostgreSQL cases
+were collected but skipped locally, and the exact database suite refused to run
+without explicit `_test` URLs as designed. The broad backend selection was
+stopped at the unavailable live-service boundary and is not claimed as a pass.
+PR CI must run the PostgreSQL/Redis cases and the independent current-head
+security scan before approval. No human approval, merge readiness, or zero-risk
+claim is inferred from local evidence.
+
 ## Interactive-credential recovery follow-up (2026-09-18)
 
 The reported API-key recovery takeover was confirmed: the generic tenant

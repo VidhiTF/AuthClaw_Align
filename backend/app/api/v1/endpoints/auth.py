@@ -689,6 +689,12 @@ def create_agent_mfa_assertion(
 
     verified_at = int(datetime.now(timezone.utc).timestamp())
     assertion_id = secrets.token_hex(16)
+    assertion_binding = {
+        "event": "agent_mfa_assertion_issued",
+        "assertion_id": assertion_id,
+        "operation": operation,
+        "body_sha256": payload.body_sha256,
+    }
     event = event_backbone.audit_event(
         event_type="authentication",
         tenant_id=str(request.state.tenant_id),
@@ -699,11 +705,12 @@ def create_agent_mfa_assertion(
         provider="control-plane-mfa",
         request_id=request.headers.get("x-request-id", ""),
         actor_id=str(request.state.user_id),
-        trace=[],
+        trace=[assertion_binding],
     )
     event.update({
         "result": "success",
         "response_status": 200,
+        "assertion_id": assertion_id,
         "body_sha256": payload.body_sha256,
     })
     if event_backbone.publish_audit_event(

@@ -426,6 +426,9 @@ def optional_user_from_request(request: Request) -> dict:
     principal = getattr(request.state, "control_plane_principal", None)
     if principal:
         return principal
+    principal = getattr(request.state, "api_key_principal", None)
+    if principal:
+        return principal
     auth_header = request.headers.get("Authorization")
     if not auth_header:
         return {}
@@ -496,8 +499,19 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
 
     if x_api_key:
         tenant_id = resolve_tenant(x_api_key=x_api_key, authorization=None)
-        request.state.quota_key_id = hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
+        key_hash = hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
+        service_subject = f"api-key:{key_hash}"
+        request.state.quota_key_id = key_hash
         request.state.quota_user_id = "service:tenant"
+        # Tenant API keys are tenant-wide service credentials. Preserve their
+        # existing authorization while giving approval workflows a unique,
+        # immutable maker identity bound to the validated key record hash.
+        request.state.api_key_principal = {
+            "auth_source": "api_key",
+            "tenant_id": tenant_id,
+            "sub": service_subject,
+            "role": "owner",
+        }
         return tenant_id
 
     return None

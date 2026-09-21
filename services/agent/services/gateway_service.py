@@ -1,4 +1,5 @@
 from services.quota_service import QuotaExceeded, QuotaUnavailable
+import hashlib
 import json
 import logging
 import time
@@ -79,7 +80,11 @@ class GatewayService:
         )
         resolved_session_id = execution_context["session_id"]
         resolved_username = username or self._username_from_authorization(authorization)
-        requester_id = username or self._requester_id_from_authorization(authorization)
+        requester_id = (
+            username
+            or self._requester_id_from_authorization(authorization)
+            or self._requester_id_from_api_key(x_api_key)
+        )
 
         start = time.perf_counter()
         token = set_agent_event_context(request_id)
@@ -410,3 +415,9 @@ class GatewayService:
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _requester_id_from_api_key(x_api_key: Optional[str]) -> Optional[str]:
+        if not isinstance(x_api_key, str) or not x_api_key:
+            return None
+        return f"api-key:{hashlib.sha256(x_api_key.encode('utf-8')).hexdigest()}"

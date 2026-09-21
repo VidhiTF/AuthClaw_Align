@@ -813,6 +813,8 @@ def reject_approval_atomic(
     """Commit the single-use pending-to-rejected decision and audit atomically."""
     approval_id = record.get("approval_id")
     tenant_id = record.get("tenant_id")
+    conflict_status = None
+    updated_record = None
     try:
         with engine.begin() as conn:
             row = conn.execute(
@@ -826,6 +828,7 @@ def reject_approval_atomic(
                     WHERE approval_id = :approval_id
                       AND tenant_id = :tenant_id
                       AND status = 'pending'
+                      AND expires_at > :rejected_at
                     RETURNING *
                     """
                 ),
@@ -837,32 +840,66 @@ def reject_approval_atomic(
                 },
             ).fetchone()
             if row is None:
-                current_status = conn.execute(
+                expired_row = conn.execute(
                     text(
                         """
-                        SELECT status FROM gateway_approvals
-                        WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                        UPDATE gateway_approvals
+                        SET status = 'expired',
+                            last_action_at = :rejected_at
+                        WHERE approval_id = :approval_id
+                          AND tenant_id = :tenant_id
+                          AND status = 'pending'
+                          AND expires_at <= :rejected_at
+                        RETURNING *
                         """
                     ),
-                    {"approval_id": approval_id, "tenant_id": tenant_id},
-                ).scalar()
-                raise ApprovalStateConflict(str(current_status or "missing"))
-
-            updated_record = _row_to_record(row)
-            append_approval_audit(
-                updated_record,
-                action="rejected",
-                actor=actor,
-                comment=comment,
-                metadata=audit_metadata,
-                connection=conn,
-            )
-    except (ApprovalPersistenceError, ApprovalStateConflict):
+                    {
+                        "approval_id": approval_id,
+                        "tenant_id": tenant_id,
+                        "rejected_at": _parse_optional_dt(rejected_at),
+                    },
+                ).fetchone()
+                if expired_row is not None:
+                    updated_record = _row_to_record(expired_row)
+                    append_approval_audit(
+                        updated_record,
+                        action="expired",
+                        actor="system",
+                        comment="Approval expired before the rejection decision completed.",
+                        metadata={"expires_at": updated_record.get("expires_at")},
+                        connection=conn,
+                    )
+                    conflict_status = "expired"
+                else:
+                    current_status = conn.execute(
+                        text(
+                            """
+                            SELECT status FROM gateway_approvals
+                            WHERE approval_id = :approval_id AND tenant_id = :tenant_id
+                            """
+                        ),
+                        {"approval_id": approval_id, "tenant_id": tenant_id},
+                    ).scalar()
+                    conflict_status = str(current_status or "missing")
+            else:
+                updated_record = _row_to_record(row)
+                append_approval_audit(
+                    updated_record,
+                    action="rejected",
+                    actor=actor,
+                    comment=comment,
+                    metadata=audit_metadata,
+                    connection=conn,
+                )
+    except ApprovalPersistenceError:
         raise
     except Exception as exc:
         raise ApprovalPersistenceError("Atomic rejection transition failed") from exc
 
-    _approvals[approval_id] = updated_record
+    if updated_record is not None:
+        _approvals[approval_id] = updated_record
+    if conflict_status is not None:
+        raise ApprovalStateConflict(conflict_status)
     return updated_record
 
 

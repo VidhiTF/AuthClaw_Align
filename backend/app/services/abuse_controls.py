@@ -41,7 +41,13 @@ redis.call('SET', KEYS[3], '1', 'PX', cooldown)
 return {failures, cooldown, level}
 """
 
-MFA_RESET_LUA = "return redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])"
+MFA_RESET_LUA = """
+local remaining = redis.call('PTTL', KEYS[3])
+if remaining == -1 then return redis.error_reply('invalid cooldown TTL') end
+if remaining > 0 then return remaining end
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+return 0
+"""
 
 
 @dataclass(frozen=True)
@@ -195,11 +201,20 @@ def verify_mfa_challenge(
     )
     if verification.verified:
         try:
-            client.eval(MFA_RESET_LUA, 3, attempts_key, level_key, cooldown_key)
+            cooldown_ms = int(client.eval(
+                MFA_RESET_LUA, 3, attempts_key, level_key, cooldown_key
+            ))
         except redis.RedisError as exc:
             raise _redis_failure(
                 exc, tenant_id, str(user.id), operation, request_id
             ) from exc
+        if cooldown_ms > 0:
+            _audit(tenant_id, str(user.id), operation, "cooldown", request_id)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many MFA attempts. Try again later.",
+                headers={"Retry-After": str(max(1, (cooldown_ms + 999) // 1000))},
+            )
         _audit(tenant_id, str(user.id), operation, "reset", request_id)
         return True
 

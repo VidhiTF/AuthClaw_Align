@@ -176,6 +176,56 @@ test("privileged agent requests verify MFA in backend and never forward the code
   assert.equal(forwarded.headers.get("x-authclaw-mfa-operation"), `POST ${path}`);
 });
 
+test("production BFF route dispatches both privileged agent stages", async () => {
+  const calls: Array<{ path: string; body: string }> = [];
+  const routeSource = fs.readFileSync(
+    new URL("../src/app/api/agent/approvals/[id]/[action]/route.ts", import.meta.url),
+    "utf8",
+  );
+  const exports: Record<string, unknown> = {};
+  const json = (body: unknown, init?: { status?: number }) => ({ body, status: init?.status ?? 200 });
+  vm.runInNewContext(ts.transpileModule(routeSource, { compilerOptions: {
+    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+  } }).outputText, {
+    exports,
+    require: (name: string) => {
+      if (name === "next/server") return { NextResponse: { json } };
+      if (name === "@/lib/api-client") return {
+        agentFetch: async (path: string, options: RequestInit) => {
+          calls.push({ path, body: String(options.body) });
+          return { status: path.slice(1, path.indexOf("/", 1)) + "d" };
+        },
+        handleApiError: (error: unknown) => json({ error: String(error) }, { status: 500 }),
+        routeParam: async (context: { params: Promise<Record<string, string>> }, key: string) =>
+          (await context.params)[key],
+      };
+      throw new Error(`unexpected module: ${name}`);
+    },
+    Request, Response, JSON, Error,
+  });
+
+  const post = exports.POST as (
+    request: Request,
+    context: { params: Promise<{ id: string; action: string }> },
+  ) => Promise<{ status: number; body: unknown }>;
+  for (const action of ["approve", "execute"]) {
+    const response = await post(
+      new Request("http://console/api/agent/approvals/approval-17/" + action, {
+        method: "POST",
+        body: JSON.stringify({ mfa_code: "654321", comment: "ok" }),
+        headers: { "content-type": "application/json" },
+      }),
+      { params: Promise.resolve({ id: "approval-17", action }) },
+    );
+    assert.equal(response.status, 200);
+  }
+  assert.deepEqual(calls.map(({ path }) => path), [
+    "/approve/approval-17",
+    "/execute/approval-17",
+  ]);
+  assert.ok(calls.every(({ body }) => JSON.parse(body).mfa_code === "654321"));
+});
+
 test("readiness authenticates before probes, sanitizes diagnostics, and distinguishes outages", async () => {
   const errors = fs.readFileSync(new URL("../src/lib/errors.ts", import.meta.url), "utf8");
   for (const [token, identityStatus, expected, healthy] of [["", 200, 401, false], ["malformed", 200, 401, false], ["acl_session_expired", 401, 401, false], ["acl_session_revoked", 401, 401, false], ["acl_session_valid", 503, 503, false], ["acl_session_valid", 200, 200, false], ["acl_session_valid", 200, 200, true]] as const) {

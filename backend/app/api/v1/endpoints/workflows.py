@@ -15,6 +15,7 @@ from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Discriminator, Field, Tag, TypeAdapter, ValidationError, field_validator
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -248,39 +249,141 @@ def resume_workflow(
     return _workflow_response(result)
 
 
-def _auto_expire_stale(db: Session, tenant_id: str, actor_id: uuid.UUID) -> None:
-    """Helper to auto-expire stale PENDING approvals and write immutable logs."""
+def _expire_pending_approval(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    approval_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    expired_at: datetime,
+) -> bool:
+    """Atomically expire one still-pending approval and stage its audit evidence."""
+    expired = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == tenant_id,
+            PendingApproval.id == approval_id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at <= expired_at,
+        )
+        .values(status="EXPIRED", updated_at=expired_at)
+        .returning(
+            PendingApproval.id,
+            PendingApproval.action_hash,
+            PendingApproval.action_id,
+        )
+        .execution_options(synchronize_session=False)
+    ).first()
+    if expired is None:
+        return False
+
+    db.execute(
+        update(ComplianceWorkflow)
+        .where(
+            ComplianceWorkflow.tenant_id == tenant_id,
+            ComplianceWorkflow.approval_id == expired.id,
+            ComplianceWorkflow.approval_status == "PENDING",
+        )
+        .values(
+            approval_status="EXPIRED",
+            execution_status="COMPLETED",
+            updated_at=expired_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    db.add(ApprovalAudit(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        approval_id=expired.id,
+        actor_id=actor_id,
+        action="EXPIRED",
+        action_hash=expired.action_hash,
+        reason="Approval expired before a human decision",
+        details={"action_id": expired.action_id, "status": "EXPIRED"},
+        mfa_verified=False,
+        mfa_timestamp=None,
+    ))
+    return True
+
+
+def _auto_expire_stale(db: Session, tenant_id: str, actor_id: uuid.UUID) -> int:
+    """Atomically expire stale approvals without overwriting concurrent decisions."""
+    tenant_uuid = uuid.UUID(tenant_id)
     now = datetime.now(timezone.utc)
-    stale = db.query(PendingApproval).filter(
-        PendingApproval.tenant_id == uuid.UUID(tenant_id),
-        PendingApproval.status == "PENDING",
-        PendingApproval.expires_at < now
+    stale_ids = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == tenant_uuid,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at <= now,
+        )
+        .values(status="EXPIRED", updated_at=now)
+        .returning(
+            PendingApproval.id,
+            PendingApproval.action_hash,
+            PendingApproval.action_id,
+        )
+        .execution_options(synchronize_session=False)
     ).all()
-    
-    for approval in stale:
-        approval.status = "EXPIRED"
-        wf = db.query(ComplianceWorkflow).filter(
-            ComplianceWorkflow.approval_id == approval.id
-        ).first()
-        if wf:
-            wf.approval_status = "EXPIRED"
-            wf.execution_status = "COMPLETED"
-            
-        audit = ApprovalAudit(
+    if not stale_ids:
+        return 0
+
+    approval_ids = [row.id for row in stale_ids]
+    db.execute(
+        update(ComplianceWorkflow)
+        .where(
+            ComplianceWorkflow.tenant_id == tenant_uuid,
+            ComplianceWorkflow.approval_id.in_(approval_ids),
+            ComplianceWorkflow.approval_status == "PENDING",
+        )
+        .values(approval_status="EXPIRED", execution_status="COMPLETED", updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    for row in stale_ids:
+        db.add(ApprovalAudit(
             id=uuid.uuid4(),
-            tenant_id=uuid.UUID(tenant_id),
-            approval_id=approval.id,
+            tenant_id=tenant_uuid,
+            approval_id=row.id,
             actor_id=actor_id,
             action="EXPIRED",
-            action_hash=approval.action_hash,
+            action_hash=row.action_hash,
             reason="Approval expired before a human decision",
-            details={"action_id": approval.action_id, "status": "EXPIRED"},
+            details={"action_id": row.action_id, "status": "EXPIRED"},
             mfa_verified=False,
             mfa_timestamp=None,
-        )
-        db.add(audit)
-    if stale:
+        ))
+    db.commit()
+    return len(stale_ids)
+
+
+def _commit_expiry_or_raise_conflict(
+    db: Session,
+    *,
+    approval: PendingApproval,
+    tenant_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    decision_at: datetime,
+) -> None:
+    """Resolve a failed decision CAS without rewriting a concurrent terminal state."""
+    if _expire_pending_approval(
+        db,
+        tenant_id=tenant_id,
+        approval_id=approval.id,
+        actor_id=actor_id,
+        expired_at=decision_at,
+    ):
         db.commit()
+        raise HTTPException(status_code=400, detail="Approval already resolved: EXPIRED")
+
+    db.rollback()
+    current = db.query(PendingApproval.status).filter(
+        PendingApproval.tenant_id == tenant_id,
+        PendingApproval.id == approval.id,
+    ).scalar()
+    raise HTTPException(
+        status_code=400,
+        detail=f"Approval already resolved: {current or 'NOT_FOUND'}",
+    )
 
 
 def _record_altered_approval_rejection(
@@ -419,18 +522,7 @@ def expire_stale_approvals(
     tenant_id = str(request.state.tenant_id)
     user_id = request.state.user_id
     
-    now = datetime.now(timezone.utc)
-    stale = db.query(PendingApproval).filter(
-        PendingApproval.tenant_id == uuid.UUID(tenant_id),
-        PendingApproval.status == "PENDING",
-        PendingApproval.expires_at < now
-    ).all()
-    
-    expired_count = len(stale)
-    if expired_count > 0:
-        _auto_expire_stale(db, tenant_id, user_id)
-        
-    return {"expired_count": expired_count}
+    return {"expired_count": _auto_expire_stale(db, tenant_id, user_id)}
 
 
 @router.get("/approvals", response_model=list[GatewayApprovalResponse])
@@ -483,12 +575,34 @@ def approve_gateway_approval(
         user, request, body, required=True, operation="gateway_approval"
     )
 
-    approval.status = "APPROVED"
-    approval.approver_id = user_id
-    approval.approved_at = datetime.now(timezone.utc)
-    approval.updated_at = datetime.now(timezone.utc)
-    approval.mfa_verified = mfa_verified
-    approval.mfa_timestamp = mfa_timestamp
+    decision_at = datetime.now(timezone.utc)
+    transitioned = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == uuid.UUID(tenant_id),
+            PendingApproval.id == approval.id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at > decision_at,
+        )
+        .values(
+            status="APPROVED",
+            approver_id=user_id,
+            approved_at=decision_at,
+            updated_at=decision_at,
+            mfa_verified=mfa_verified,
+            mfa_timestamp=mfa_timestamp,
+        )
+        .returning(PendingApproval.id)
+        .execution_options(synchronize_session=False)
+    ).scalar_one_or_none()
+    if transitioned is None:
+        _commit_expiry_or_raise_conflict(
+            db,
+            approval=approval,
+            tenant_id=uuid.UUID(tenant_id),
+            actor_id=user_id,
+            decision_at=decision_at,
+        )
 
     # Write immutable audit entry (was previously missing for gateway approvals)
     audit = ApprovalAudit(
@@ -522,16 +636,50 @@ def reject_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).first()
+    ).with_for_update().first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
         raise HTTPException(status_code=400, detail=f"Approval already resolved: {approval.status}")
 
-    approval.status = "REJECTED"
-    approval.approver_id = user_id
-    approval.approved_at = datetime.now(timezone.utc)
-    approval.updated_at = datetime.now(timezone.utc)
+    decision_at = datetime.now(timezone.utc)
+    transitioned = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == uuid.UUID(tenant_id),
+            PendingApproval.id == approval.id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at > decision_at,
+        )
+        .values(
+            status="REJECTED",
+            approver_id=user_id,
+            approved_at=decision_at,
+            updated_at=decision_at,
+        )
+        .returning(PendingApproval.id)
+        .execution_options(synchronize_session=False)
+    ).scalar_one_or_none()
+    if transitioned is None:
+        _commit_expiry_or_raise_conflict(
+            db,
+            approval=approval,
+            tenant_id=uuid.UUID(tenant_id),
+            actor_id=user_id,
+            decision_at=decision_at,
+        )
+    db.add(ApprovalAudit(
+        id=uuid.uuid4(),
+        tenant_id=uuid.UUID(tenant_id),
+        approval_id=approval.id,
+        actor_id=user_id,
+        action="REJECTED",
+        action_hash=approval.action_hash,
+        reason="Human approver rejected gateway egress",
+        details={"action_id": approval.action_id, "status": "REJECTED"},
+        mfa_verified=False,
+        mfa_timestamp=None,
+    ))
     db.commit()
     db.refresh(approval)
     return _approval_response(approval)
@@ -667,18 +815,41 @@ def approve_workflow(
     if requires_fresh_mfa and not _has_fresh_mfa(mfa_verified, mfa_timestamp):
         raise HTTPException(status_code=403, detail="Fresh MFA is required for destructive remediation")
 
-    # Update PendingApproval (non-transferable, bound to current user)
-    approval.status = "APPROVED"
-    approval.approver_id = user_id
-    approval.approved_at = datetime.now(timezone.utc)
-    approval.mfa_verified = mfa_verified
-    approval.mfa_timestamp = mfa_timestamp
+    # Update PendingApproval (non-transferable, bound to current user).
+    decision_at = datetime.now(timezone.utc)
+    transitioned = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == uuid.UUID(tenant_id),
+            PendingApproval.id == approval.id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at > decision_at,
+        )
+        .values(
+            status="APPROVED",
+            approver_id=user_id,
+            approved_at=decision_at,
+            updated_at=decision_at,
+            mfa_verified=mfa_verified,
+            mfa_timestamp=mfa_timestamp,
+        )
+        .returning(PendingApproval.id)
+        .execution_options(synchronize_session=False)
+    ).scalar_one_or_none()
+    if transitioned is None:
+        _commit_expiry_or_raise_conflict(
+            db,
+            approval=approval,
+            tenant_id=uuid.UUID(tenant_id),
+            actor_id=user_id,
+            decision_at=decision_at,
+        )
 
     # Sync workflow status
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
         ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
     if wf:
         wf.approval_status = "APPROVED"
         
@@ -762,10 +933,33 @@ def reject_workflow(
             detail=f"Approval request is already resolved (status={approval.status})",
         )
 
-    # Reject
-    approval.status = "REJECTED"
-    approval.approver_id = user_id
-    approval.approved_at = datetime.now(timezone.utc)
+    # Reject only if the approval is still pending and unexpired.
+    decision_at = datetime.now(timezone.utc)
+    transitioned = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == uuid.UUID(tenant_id),
+            PendingApproval.id == approval.id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at > decision_at,
+        )
+        .values(
+            status="REJECTED",
+            approver_id=user_id,
+            approved_at=decision_at,
+            updated_at=decision_at,
+        )
+        .returning(PendingApproval.id)
+        .execution_options(synchronize_session=False)
+    ).scalar_one_or_none()
+    if transitioned is None:
+        _commit_expiry_or_raise_conflict(
+            db,
+            approval=approval,
+            tenant_id=uuid.UUID(tenant_id),
+            actor_id=user_id,
+            decision_at=decision_at,
+        )
 
     # Sync workflow status
     wf = db.query(ComplianceWorkflow).filter(

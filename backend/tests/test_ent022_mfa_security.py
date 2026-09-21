@@ -74,7 +74,14 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     assert verified.call_args.kwargs["operation"] == "agent_approval"
     event = published.call_args.args[2]
     assert event["actor_id"] == str(user_id)
+    assert event["assertion_id"] == response.assertion_id
     assert event["body_sha256"] == "a" * 64
+    assert event["execution_trace"] == [{
+        "event": "agent_mfa_assertion_issued",
+        "assertion_id": response.assertion_id,
+        "operation": "POST /approve/approval-17",
+        "body_sha256": "a" * 64,
+    }]
     assert "654321" not in str(event)
     db.commit.assert_called_once()
 

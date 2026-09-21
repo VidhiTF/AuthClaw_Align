@@ -291,3 +291,32 @@ def test_concurrent_approval_is_single_use_and_audit_failure_rolls_back(approval
             )
     with tenant_one.connect() as conn:
         assert conn.execute(text("SELECT status FROM gateway_approvals")).scalar_one() == "approved"
+
+
+def test_rejection_after_expiry_records_expiry_instead(approval_database):
+    import approval_store
+    from services.tenant_context import tenant_context
+
+    _, tenant_one, _, _, _ = approval_database
+    record = _pending_record()
+    record["approval_id"] = "approval-expired-before-reject"
+    record["expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    rejected_at = datetime.now(timezone.utc)
+    with tenant_context(1, request_id=record["request_id"], required=True):
+        approval_store._persist_record(record)
+        with pytest.raises(approval_store.ApprovalStateConflict) as raised:
+            approval_store.reject_approval_atomic(
+                record,
+                actor=str(uuid4()),
+                rejected_at=rejected_at,
+            )
+
+    assert raised.value.current_status == "expired"
+    with tenant_one.connect() as conn:
+        assert conn.execute(text(
+            "SELECT status FROM gateway_approvals WHERE approval_id=:approval_id"
+        ), {"approval_id": record["approval_id"]}).scalar_one() == "expired"
+        assert conn.execute(text(
+            "SELECT action FROM approval_audit_events WHERE approval_id=:approval_id"
+            " ORDER BY id DESC LIMIT 1"
+        ), {"approval_id": record["approval_id"]}).scalar_one() == "expired"

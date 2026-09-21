@@ -17,7 +17,7 @@ from fastapi import HTTPException
 
 from app.api.v1.endpoints import auth
 from app.core.auth import set_mfa_credentials
-from app.db.models import AuditOutbox, User
+from app.db.models import AuditLogMetadata, AuditOutbox, User
 from app.db import session as database_session
 from tests.test_t10_postgres import postgres  # Reuse migrated, authenticated RLS harness.
 
@@ -64,6 +64,20 @@ def test_backend_totp_assertions_complete_signed_agent_actions(postgres, monkeyp
         assert all(event["actor_id"] == str(identity.user_id) for event in events)
         assert secret not in json.dumps(events)
         assert code not in json.dumps(events)
+        durable_bindings = [
+            json.loads(row.execution_trace)[0]
+            for row in db.query(AuditLogMetadata).all()
+            if row.action == "mfa:agent_assertion_issued"
+        ]
+        assert len(durable_bindings) == 2
+        assert {binding["assertion_id"] for binding in durable_bindings} == {
+            bundle["approve"]["assertion_id"], bundle["execute"]["assertion_id"]
+        }
+        assert {binding["operation"] for binding in durable_bindings} == {
+            "POST /approve/approval-postgres-17",
+            "POST /execute/approval-postgres-17",
+        }
+        assert all(len(binding["body_sha256"]) == 64 for binding in durable_bindings)
     with harness.session_for(other_tenant) as db:
         assert db.get(User, identity.user_id) is None
         assert db.query(AuditOutbox).filter(AuditOutbox.tenant_id == identity.tenant_id).count() == 0

@@ -1,10 +1,12 @@
 import asyncio
 import copy
+import hashlib
 import os
 import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from services.execution_auth import authorize_agent_operation
@@ -81,6 +83,36 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             main.approval_actor_from_payload({"email": "alice@example.com"})
 
         self.assertEqual(raised.exception.status_code, 401)
+
+    def test_validated_api_key_has_unique_non_secret_service_identity(self):
+        from services.gateway_service import GatewayService
+
+        raw_key = "test-only-api-key"
+        expected = f"api-key:{hashlib.sha256(raw_key.encode('utf-8')).hexdigest()}"
+        service = GatewayService(graph=Mock(), resolve_tenant=Mock(), decode_jwt=Mock())
+
+        self.assertEqual(service._requester_id_from_api_key(raw_key), expected)
+        self.assertNotIn(raw_key, expected)
+
+    def test_validated_api_key_principal_can_create_high_risk_approval(self):
+        import main
+
+        raw_key = "test-only-api-key"
+        expected = f"api-key:{hashlib.sha256(raw_key.encode('utf-8')).hexdigest()}"
+        request = SimpleNamespace(
+            headers={"X-API-Key": raw_key},
+            state=SimpleNamespace(verified_service_principal=None),
+        )
+        with patch.object(main, "resolve_tenant", return_value=42):
+            self.assertEqual(main._tenant_id_from_request_headers(request), 42)
+
+        principal = main.optional_user_from_request(request)
+        self.assertEqual(principal["tenant_id"], 42)
+        self.assertEqual(principal["role"], "owner")
+        self.assertEqual(main.approval_actor_from_payload(principal), expected)
+        self.assertEqual(request.state.quota_user_id, "service:tenant")
+        self.assertTrue(principal["sub"].startswith("api-key:"))
+        self.assertNotIn(raw_key, principal["sub"])
 
     def test_self_approval_rejects_subject_even_when_email_differs(self):
         import main

@@ -32,12 +32,15 @@ class FakeRedis:
         if script == abuse_controls.MFA_CHECK_LUA:
             return self.ttls.get(keys[0], -2)
         if script == abuse_controls.MFA_RESET_LUA:
+            remaining = self.ttls.get(keys[2], -2)
+            if remaining > 0:
+                return remaining
             removed = 0
             for key in keys:
                 removed += int(key in self.values or key in self.ttls)
                 self.values.pop(key, None)
                 self.ttls.pop(key, None)
-            return removed
+            return 0
         if script == abuse_controls.MFA_FAILURE_LUA:
             attempts, level, cooldown = keys
             threshold = int(argv[1])
@@ -123,6 +126,35 @@ def test_mfa_isolated_by_user_and_operation_and_success_resets(monkeypatch):
     approval_keys = abuse_controls._mfa_keys("tenant-1", "user-1", "gateway_approval")
     assert client.values.get(disable_keys[0]) == 2
     assert all(key not in client.values for key in approval_keys)
+
+
+def test_success_admitted_before_cooldown_cannot_clear_new_cooldown(monkeypatch):
+    user = SimpleNamespace(id="user-1")
+
+    class CooldownDuringVerification(FakeRedis):
+        def eval(self, script, number_of_keys, *args):
+            if script == abuse_controls.MFA_RESET_LUA:
+                cooldown_key = args[2]
+                self.values[cooldown_key] = 1
+                self.ttls[cooldown_key] = 2_000
+            return super().eval(script, number_of_keys, *args)
+
+    client = CooldownDuringVerification()
+    monkeypatch.setattr(
+        "app.core.auth.verify_mfa_code_result",
+        lambda *_args: MFAVerification(True, method="totp"),
+    )
+
+    with pytest.raises(HTTPException) as blocked:
+        abuse_controls.verify_mfa_challenge(
+            client, user, "valid", tenant_id="tenant-1", operation="gateway_approval"
+        )
+
+    assert blocked.value.status_code == 429
+    cooldown_key = abuse_controls._mfa_keys(
+        "tenant-1", "user-1", "gateway_approval"
+    )[2]
+    assert client.ttls[cooldown_key] == 2_000
 
 
 def test_mfa_cooldown_escalates_but_is_bounded(monkeypatch):
