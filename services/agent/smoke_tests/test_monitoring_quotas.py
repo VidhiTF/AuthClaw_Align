@@ -136,15 +136,21 @@ class MonitoringQuotaTests(unittest.TestCase):
                         self.conn.execute.return_value.fetchone.side_effect = None
                         for status, health in (("alert_delivery_pending", "degraded"),
                                                ("alert_delivery_failed", "degraded"),
+                                               ("alert_delivery_pending", "healthy"),
+                                               ("alert_delivery_failed", "healthy"),
                                                ("completed", "healthy"),
                                                ("completed", "not_applicable")):
                             self.conn.execute.return_value.fetchone.return_value = (1, 4, status, health)
                             with tenant_context(7):
-                                if health in ("healthy", "not_applicable"):
+                                if status == "completed" and health in ("healthy", "not_applicable"):
                                     self.assertEqual(self.ns["trigger_manual_sync"]()["status"], "success")
                                 else:
                                     with self.assertRaisesRegex(RuntimeError, "Document synchronization incomplete"):
                                         self.ns["trigger_manual_sync"]()
+                                    if background:
+                                        self.ns["_monitor_loop"]("7")
+                                        self.assertEqual(observed[-1]["status"], "degraded")
+                                        self.assertEqual(observed[-1]["last_success_timestamp"], 123)
                             self.ns["run_document_scan_pipeline"].assert_called_once()
 
     def test_degraded_scan_health_propagates_to_manual_and_background_sync(self):

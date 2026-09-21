@@ -345,7 +345,7 @@ Do not include markdown packaging like ```json.
                 "findings_json": json.dumps(all_findings),
                 "status": status,
                 "outputs": json.dumps({"alert_delivery": alert_delivery, "scan_status": scan_status,
-                                        "health": health, "scan_health": health,
+                                        "health": "degraded" if alert_delivery["status"] == "queued" else health, "scan_health": health,
                                         "extraction": extraction, "indexing": indexing,
                                         "provider_review": provider_review}),
             }

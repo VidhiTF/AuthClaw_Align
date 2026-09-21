@@ -680,3 +680,21 @@ Redis **198 passed, 130 subtests passed**, including restricted-role migrations,
 RLS, concurrency and direct upload rollback; repository/Compose contracts **27
 passed, 27 subtests passed**. The existing Starlette deprecation warning remains.
 HTTP used controlled test responses; no live Gemini or deployed outage was tested.
+
+## Interrupted alert delivery follow-up (2026-09-21)
+
+Regression assertions failed before the fix for both unchanged pending/healthy
+documents and the real PostgreSQL upload/dispatcher-crash boundary. Queued alerts
+now persist aggregate health degraded while retaining scan_health. Existing
+outbox acknowledgement restores scan_health; local and cloud polls also reject
+legacy pending/failed documents with healthy scan outputs without rescanning.
+This reuses the existing transaction, statuses and retry owner: three production
+lines replaced, zero net production line growth. Rollback is a code revert,
+but would restore the misleading queued-health behavior; no migration is needed.
+
+Fresh affected agent verification: 198 passed, 130 subtests passed, including
+isolated PostgreSQL migrations, restricted-role RLS, concurrency, crash/retry
+and Redis checks. After strengthening the unchanged-background assertions,
+monitoring plus repository/Compose checks passed 45 tests and 45 subtests.
+Independent bounded review found no confirmed defect in the fix. Live providers
+and deployed outages remain unverified; the existing deprecation warning remains.

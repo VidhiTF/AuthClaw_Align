@@ -454,6 +454,8 @@ def verify_alert_outage_and_retry(client, tokens, engine, tenant_context):
         assert response.status_code == 503 and "private-dispatch" not in response.text
         with engine.begin() as conn:
             assert conn.execute(text("SELECT status FROM documents WHERE filename='retryable.txt'")).scalar() == "alert_delivery_pending"
+            assert tuple(conn.execute(text("""SELECT outputs_json::jsonb ->> 'health', outputs_json::jsonb ->> 'scan_health'
+                FROM document_scans WHERE document_id=(SELECT id FROM documents WHERE filename='retryable.txt')""")).one()) == ("degraded", "healthy")
             conn.execute(text("UPDATE tenant_users SET email_verified=FALSE WHERE email='verified@tenant-a.test'"))
         sent = smtp.return_value.__enter__.return_value.send_message.call_count
         assert EventPipeline().retry_dead_letters()["failed"] == 1

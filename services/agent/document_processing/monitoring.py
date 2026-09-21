@@ -142,7 +142,7 @@ def _sync_sources(tenant_id):
                 with open(filepath, "rb") as f:
                     if _scan_failed(run_document_scan_pipeline(doc[0], f.read(), filename, source="watched", tenant_id=tenant_id)):
                         failures.add("local")
-            elif len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
+            elif doc[2] in {"alert_delivery_pending", "alert_delivery_failed"} or len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
                 failures.add("local")
     except (QuotaExceeded, QuotaUnavailable):
         raise
@@ -343,7 +343,7 @@ def _sync_sources(tenant_id):
                         
                     if _scan_failed(run_document_scan_pipeline(doc[0], file_bytes, filename, source=src, tenant_id=tenant_id)):
                         failures.add(src)
-                elif len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
+                elif doc[2] in {"alert_delivery_pending", "alert_delivery_failed"} or len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
                     failures.add(src)
                         
         except (QuotaExceeded, QuotaUnavailable):
