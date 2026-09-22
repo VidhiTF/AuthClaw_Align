@@ -1,5 +1,6 @@
 import pytest
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -51,6 +52,23 @@ def test_sensitive_database_read_permissions_are_explicit():
     assert role_allows(Role.TENANT_ADMINISTRATOR, "tenant.connectors.read")
     assert role_allows(Role.APPROVER, "tenant.approvals.read")
     assert not role_allows(Role.VIEWER, "tenant.policies.read")
+
+
+def test_ent026_replaces_table_specific_legacy_rls_policies():
+    migration = Path(__file__).parents[1] / "alembic" / "versions" / "052_ent026_authorization_contract.py"
+    source = migration.read_text(encoding="utf-8")
+    legacy_policies = {
+        "api_keys": "api_keys_tenant_isolation",
+        "users": "users_tenant_isolation",
+        "policies": "policies_tenant_isolation",
+        "gateway_configs": "gateway_configs_tenant_isolation",
+        "provider_credentials": "provider_credentials_tenant_isolation",
+        "pending_approvals": "pending_approvals_tenant_isolation",
+        "audit_log_metadata": "audit_log_metadata_tenant_isolation",
+    }
+    for table, policy in legacy_policies.items():
+        assert f"DROP POLICY IF EXISTS {policy} ON public.{table}" in source
+    assert "authn.authorize_action('tenant.approvals.read')" in source
 
 
 def test_access_review_export_is_secret_free_and_integrity_protected():

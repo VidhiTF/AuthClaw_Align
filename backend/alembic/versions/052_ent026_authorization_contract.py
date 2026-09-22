@@ -195,6 +195,7 @@ def upgrade() -> None:
 
         -- Replace the broad tenant-only policies on security-sensitive tables
         -- with independent role checks. Tenant isolation remains mandatory.
+        DROP POLICY IF EXISTS api_keys_tenant_isolation ON public.api_keys;
         DROP POLICY IF EXISTS tenant_isolation ON public.api_keys;
         CREATE POLICY tenant_isolation ON public.api_keys FOR SELECT
             USING (tenant_id = authn.current_tenant_id()
@@ -208,6 +209,7 @@ def upgrade() -> None:
             USING (tenant_id = authn.current_tenant_id()
                    AND authn.authorize_action('tenant.access_review.export'));
 
+        DROP POLICY IF EXISTS users_tenant_isolation ON public.users;
         DROP POLICY IF EXISTS tenant_isolation ON public.users;
         CREATE POLICY tenant_user_read ON public.users FOR SELECT
             USING (tenant_id = authn.current_tenant_id()
@@ -224,6 +226,7 @@ def upgrade() -> None:
             USING (tenant_id = authn.current_tenant_id()
                    AND authn.authorize_action('tenant.users.manage'));
 
+        DROP POLICY IF EXISTS policies_tenant_isolation ON public.policies;
         DROP POLICY IF EXISTS tenant_isolation ON public.policies;
         CREATE POLICY tenant_policy_read ON public.policies FOR SELECT
             USING (tenant_id = authn.current_tenant_id()
@@ -240,6 +243,7 @@ def upgrade() -> None:
             USING (tenant_id = authn.current_tenant_id()
                    AND authn.authorize_action('tenant.policies.manage'));
 
+        DROP POLICY IF EXISTS gateway_configs_tenant_isolation ON public.gateway_configs;
         DROP POLICY IF EXISTS tenant_isolation ON public.gateway_configs;
         CREATE POLICY tenant_gateway_read ON public.gateway_configs FOR SELECT
             USING (tenant_id = authn.current_tenant_id()
@@ -256,6 +260,7 @@ def upgrade() -> None:
             USING (tenant_id = authn.current_tenant_id()
                    AND authn.authorize_action('tenant.connectors.manage'));
 
+        DROP POLICY IF EXISTS provider_credentials_tenant_isolation ON public.provider_credentials;
         DROP POLICY IF EXISTS tenant_isolation ON public.provider_credentials;
         CREATE POLICY tenant_provider_read ON public.provider_credentials FOR SELECT
             USING (tenant_id = authn.current_tenant_id()
@@ -272,6 +277,7 @@ def upgrade() -> None:
             USING (tenant_id = authn.current_tenant_id()
                    AND authn.authorize_action('tenant.credentials.manage'));
 
+        DROP POLICY IF EXISTS pending_approvals_tenant_isolation ON public.pending_approvals;
         DROP POLICY IF EXISTS tenant_isolation ON public.pending_approvals;
         CREATE POLICY tenant_approval_read ON public.pending_approvals FOR SELECT
             USING (tenant_id = authn.current_tenant_id()
@@ -311,6 +317,7 @@ def upgrade() -> None:
                         OR authn.authorize_action('tenant.privacy.execute')))
             WITH CHECK (tenant_id = authn.current_tenant_id());
 
+        DROP POLICY IF EXISTS audit_log_metadata_tenant_isolation ON public.audit_log_metadata;
         DROP POLICY IF EXISTS tenant_isolation ON public.audit_log_metadata;
         CREATE POLICY tenant_audit_read ON public.audit_log_metadata FOR SELECT
             USING (tenant_id = authn.current_tenant_id()
