@@ -27,6 +27,7 @@ from app.services.audit_export import (
 from app.services.audit_store import append_audit_event, standardize_timestamp
 from app.services import event_backbone
 from app.services.event_backbone import increment_metric
+from app.core.authorization import normalize_role
 
 EXPORT_FORMAT = "authclaw.data-subject.export.v1"
 logger = logging.getLogger("services.data_subject_requests")
@@ -106,6 +107,7 @@ class DataSubjectRequestService:
             id=uuid.uuid4(),
             tenant_id=tenant_id,
             subject_id=payload.subject_id,
+            requester_id=actor_id,
             request_type=payload.request_type,
             scope=payload.scope,
             status="PENDING",
@@ -131,6 +133,8 @@ class DataSubjectRequestService:
             record = cls._locked(db, tenant_id, request_id)
             if record.status != "PENDING":
                 raise ValueError("Request is not pending")
+            if record.requester_id is None or record.requester_id == actor_id:
+                raise ValueError("The requester cannot verify their own data-subject request")
             now = datetime.now(timezone.utc)
             record.identity_verified = True
             record.identity_verified_by = actor_id
@@ -156,6 +160,13 @@ class DataSubjectRequestService:
             record = cls._locked(db, tenant_id, request_id)
             if record.status != "VERIFIED":
                 raise ValueError("Request identity is not verified")
+            approver = db.query(User).filter(
+                User.id == actor_id, User.tenant_id == tenant_id, User.is_active == True
+            ).with_for_update().first()
+            if not approver or normalize_role(approver.role) != "approver":
+                raise ValueError("A distinct active approver is required")
+            if record.requester_id in {actor_id, record.identity_verified_by}:
+                raise ValueError("The approver must be distinct from requester and verifier")
             now = datetime.now(timezone.utc)
             record.decision = decision
             record.decision_reason = reason
@@ -364,6 +375,8 @@ class DataSubjectRequestService:
                 or record.decision != "APPROVED"
             ):
                 raise ValueError("Request is not approved for export")
+            if record.decision_by is None or record.decision_by == actor_id:
+                raise ValueError("Export execution must be performed by a distinct operator")
             cls._audit(db, record, actor_id, "export_started", include_subject=True)
             data = cls._collect_subject_data(db, record)
             completed_at = datetime.now(timezone.utc)
@@ -496,6 +509,8 @@ class DataSubjectRequestService:
                 or record.decision != "APPROVED"
             ):
                 raise ValueError("Request is not approved for deletion")
+            if record.decision_by is None or record.decision_by == actor_id:
+                raise ValueError("Deletion execution must be performed by a distinct operator")
             cls._audit(db, record, actor_id, "deletion_started", include_subject=True)
             deleted, retained, reasons = cls._delete_subject_data(db, record)
             if retained:

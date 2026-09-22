@@ -69,6 +69,13 @@ PERMISSION_ROLES = {
         Role.OPERATOR.value,
         Role.TENANT_ADMINISTRATOR.value,
     }),
+    "tenant.privacy.request": frozenset({Role.TENANT_ADMINISTRATOR.value}),
+    "tenant.privacy.verify": frozenset({Role.TENANT_ADMINISTRATOR.value}),
+    "tenant.privacy.decide": frozenset({Role.APPROVER.value}),
+    "tenant.privacy.execute": frozenset({
+        Role.OPERATOR.value,
+        Role.TENANT_ADMINISTRATOR.value,
+    }),
     "platform.tenant.manage": PLATFORM_ROLES,
 }
 

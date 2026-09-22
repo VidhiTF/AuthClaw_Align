@@ -147,12 +147,28 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     ).decode("ascii"))
     metrics_before = event_backbone.metrics_snapshot()
     tenant_a_id, tenant_b_id = uuid4(), uuid4()
-    owner_a_id, viewer_a_id, owner_b_id = uuid4(), uuid4(), uuid4()
-    owner_a_key, viewer_a_key, owner_b_key = "dsr-owner-a", "dsr-viewer-a", "dsr-owner-b"
+    owner_a_id, viewer_a_id, approver_a_id, operator_a_id, verifier_a_id, owner_b_id = (
+        uuid4(), uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    )
+    owner_a_key, viewer_a_key = "dsr-owner-a", "dsr-viewer-a"
+    approver_a_key, operator_a_key, verifier_a_key = (
+        "dsr-approver-a", "dsr-operator-a", "dsr-verifier-a"
+    )
+    owner_b_key = "dsr-owner-b"
 
     for tenant_id, name, users in (
-        (tenant_a_id, "DSR Tenant A", [(owner_a_id, "owner-a@dsr.test", "owner"), (viewer_a_id, "viewer-a@dsr.test", "viewer")]),
-        (tenant_b_id, "DSR Tenant B", [(owner_b_id, "owner-b@dsr.test", "owner")]),
+        (
+            tenant_a_id,
+            "DSR Tenant A",
+            [
+                (owner_a_id, "owner-a@dsr.test", "tenant_admin"),
+                (viewer_a_id, "viewer-a@dsr.test", "viewer"),
+                (approver_a_id, "approver-a@dsr.test", "approver"),
+                (operator_a_id, "operator-a@dsr.test", "operator"),
+                (verifier_a_id, "verifier-a@dsr.test", "tenant_admin"),
+            ],
+        ),
+        (tenant_b_id, "DSR Tenant B", [(owner_b_id, "owner-b@dsr.test", "tenant_admin")]),
     ):
         db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
         db_session.add(Tenant(id=tenant_id, name=name, tier="enterprise", status="active"))
@@ -164,6 +180,9 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     for tenant_id, user_id, key, scopes in (
         (tenant_a_id, owner_a_id, owner_a_key, ["admin", "read", "write"]),
         (tenant_a_id, viewer_a_id, viewer_a_key, ["read"]),
+        (tenant_a_id, approver_a_id, approver_a_key, ["read", "write"]),
+        (tenant_a_id, operator_a_id, operator_a_key, ["read", "write"]),
+        (tenant_a_id, verifier_a_id, verifier_a_key, ["read", "write"]),
         (tenant_b_id, owner_b_id, owner_b_key, ["admin", "read", "write"]),
     ):
         db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
@@ -196,6 +215,9 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         "scope": {"systems": ["console"]},
     }
     owner_a_headers = {"Authorization": f"Bearer {owner_a_key}"}
+    approver_a_headers = {"Authorization": f"Bearer {approver_a_key}"}
+    operator_a_headers = {"Authorization": f"Bearer {operator_a_key}"}
+    verifier_a_headers = {"Authorization": f"Bearer {verifier_a_key}"}
 
     denied = client.post(
         "/v1/data-subject-requests",
@@ -225,7 +247,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     verified = client.post(
         f"/v1/data-subject-requests/{request_id}/verify",
         json={"identity_verified": True},
-        headers=owner_a_headers,
+        headers=verifier_a_headers,
     )
     assert verified.status_code == status.HTTP_200_OK
     assert verified.json()["status"] == "VERIFIED"
@@ -234,7 +256,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     approved = client.post(
         f"/v1/data-subject-requests/{request_id}/approve",
         json={"decision_reason": "Identity and scope confirmed"},
-        headers=owner_a_headers,
+        headers=approver_a_headers,
     )
     assert approved.status_code == status.HTTP_200_OK
     assert approved.json()["status"] == "COMPLETED"
@@ -243,7 +265,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
 
     invalid_state = client.post(
         f"/v1/data-subject-requests/{request_id}/export",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert invalid_state.status_code == status.HTTP_409_CONFLICT
 
@@ -256,12 +278,12 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     client.post(
         f"/v1/data-subject-requests/{second_id}/verify",
         json={"identity_verified": True},
-        headers=owner_a_headers,
+        headers=verifier_a_headers,
     )
     rejected = client.post(
         f"/v1/data-subject-requests/{second_id}/reject",
         json={"decision_reason": "Identity confirmed; request rejected"},
-        headers=owner_a_headers,
+        headers=approver_a_headers,
     )
     assert rejected.status_code == status.HTTP_200_OK
     assert rejected.json()["status"] == "REJECTED"
@@ -276,12 +298,12 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         assert client.post(
             f"/v1/data-subject-requests/{export_request_id}/verify",
             json={"identity_verified": True},
-            headers=owner_a_headers,
+            headers=verifier_a_headers,
         ).status_code == status.HTTP_200_OK
         assert client.post(
             f"/v1/data-subject-requests/{export_request_id}/approve",
             json={"decision_reason": "Approved subject access export"},
-            headers=owner_a_headers,
+            headers=approver_a_headers,
         ).status_code == status.HTTP_200_OK
         return export_request_id
 
@@ -299,7 +321,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
 
     exported = client.post(
         f"/v1/data-subject-requests/{export_request_id}/export",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert exported.status_code == status.HTTP_200_OK
     artifact = exported.json()
@@ -321,14 +343,14 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
 
     completed = client.post(
         f"/v1/data-subject-requests/{export_request_id}/export",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert completed.status_code == status.HTTP_409_CONFLICT
 
     empty_request_id = approved_request("external-subject-with-no-records", "EXPORT")
     empty_export = client.post(
         f"/v1/data-subject-requests/{empty_request_id}/export",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert empty_export.status_code == status.HTTP_200_OK
     assert empty_export.json()["manifest"]["record_counts"] == {
@@ -364,7 +386,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     publication_count = len(published_tenants)
     deleted = client.post(
         f"/v1/data-subject-requests/{deletion_request_id}/delete",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert deleted.status_code == status.HTTP_200_OK
     deletion_result = deleted.json()
@@ -383,7 +405,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
 
     repeated = client.post(
         f"/v1/data-subject-requests/{deletion_request_id}/delete",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert repeated.status_code == status.HTTP_200_OK
     assert repeated.json()["deleted_items"] == {}
@@ -444,7 +466,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     with pytest.raises(RuntimeError, match="failure"):
         client.post(
             f"/v1/data-subject-requests/{rollback_request_id}/delete",
-            headers=owner_a_headers,
+            headers=operator_a_headers,
         )
     assert len(published_tenants) == publication_count
     db_session.expire_all()

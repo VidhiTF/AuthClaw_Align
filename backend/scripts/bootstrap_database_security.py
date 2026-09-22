@@ -633,6 +633,7 @@ def secure_agent_authentication_boundary(
         "bind_agent_context",
         "agent_current_tenant_id",
         "resolve_tenant_api_key",
+        "resolve_api_key_principal",
         "resolve_tenant_domain",
         "upsert_control_plane_tenant",
         "load_oidc_login_state",

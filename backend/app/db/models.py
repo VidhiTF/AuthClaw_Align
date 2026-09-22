@@ -90,6 +90,7 @@ class DataSubjectRequest(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     subject_id = Column(String(255), nullable=False)
+    requester_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     request_type = Column(String(20), nullable=False)
     status = Column(
         Enum(

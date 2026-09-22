@@ -56,26 +56,37 @@ def upgrade() -> None:
         SET search_path = pg_catalog, authn, public
         AS $$
         BEGIN
-            IF OLD.status <> 'PENDING' THEN
+            IF OLD.status NOT IN ('PENDING','APPROVED') THEN
                 RAISE EXCEPTION 'approval is not pending';
             END IF;
-            IF NEW.tenant_id <> OLD.tenant_id
-               OR NEW.requester_id <> OLD.requester_id
-               OR NEW.action_hash <> OLD.action_hash
-               OR NEW.action_payload <> OLD.action_payload
-               OR NEW.created_at <> OLD.created_at THEN
+            IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+               OR NEW.requester_id IS DISTINCT FROM OLD.requester_id
+               OR NEW.action_hash IS DISTINCT FROM OLD.action_hash
+               OR NEW.action_payload IS DISTINCT FROM OLD.action_payload
+               OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
                 RAISE EXCEPTION 'approval identity and action are immutable';
             END IF;
             IF NEW.status = 'EXPIRED' THEN
-                IF OLD.expires_at >= now()
+                IF OLD.expires_at IS NULL OR OLD.expires_at >= now()
                    OR NOT authn.authorize_action('tenant.approvals.expire') THEN
                     RAISE EXCEPTION 'approval expiration is not authorized';
                 END IF;
-            ELSIF NEW.status IN ('CONSUMED','REJECTED') THEN
+            ELSIF NEW.status = 'ALTERED' THEN
+                NULL;
+            ELSIF OLD.status = 'PENDING' AND NEW.status IN ('APPROVED','CONSUMED','REJECTED') THEN
                 IF NOT authn.authorize_action('tenant.high_risk.approve')
+                   OR OLD.requester_id IS NULL
                    OR OLD.requester_id = authn.current_user_id()
-                   OR NEW.approver_id <> authn.current_user_id() THEN
+                   OR NEW.approver_id IS NULL
+                   OR NEW.approver_id IS DISTINCT FROM authn.current_user_id() THEN
                     RAISE EXCEPTION 'approval decision is not authorized';
+                END IF;
+            ELSIF OLD.status = 'APPROVED' AND NEW.status = 'CONSUMED' THEN
+                IF NOT authn.authorize_action('tenant.workflow.resume')
+                   OR OLD.requester_id IS NULL
+                   OR OLD.requester_id = authn.current_user_id()
+                   OR OLD.approver_id IS NULL THEN
+                    RAISE EXCEPTION 'approval consumption is not authorized';
                 END IF;
             ELSE
                 RAISE EXCEPTION 'invalid approval transition';
@@ -87,6 +98,60 @@ def upgrade() -> None:
         CREATE TRIGGER pending_approval_transition_guard
             BEFORE UPDATE ON public.pending_approvals
             FOR EACH ROW EXECUTE FUNCTION authn.enforce_pending_approval_transition();
+
+        CREATE OR REPLACE FUNCTION authn.enforce_dsr_transition()
+        RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog, authn, public
+        AS $$
+        BEGIN
+            IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+               OR NEW.requester_id IS DISTINCT FROM OLD.requester_id
+               OR NEW.subject_id IS DISTINCT FROM OLD.subject_id
+               OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+                RAISE EXCEPTION 'data-subject request identity is immutable';
+            END IF;
+            IF OLD.status = 'PENDING' AND NEW.status = 'VERIFIED' THEN
+                IF NOT authn.authorize_action('tenant.privacy.verify')
+                   OR NEW.requester_id IS NULL
+                   OR NEW.requester_id = authn.current_user_id()
+                   OR NEW.identity_verified_by IS DISTINCT FROM authn.current_user_id() THEN
+                    RAISE EXCEPTION 'data-subject verification is not authorized';
+                END IF;
+            ELSIF OLD.status = 'VERIFIED' AND NEW.status IN ('APPROVED','REJECTED') THEN
+                IF NOT authn.authorize_action('tenant.privacy.decide')
+                   OR NEW.decision_by IS NULL
+                   OR NEW.decision_by IS DISTINCT FROM authn.current_user_id()
+                   OR NEW.identity_verified_by IS NULL
+                   OR NEW.identity_verified_by = authn.current_user_id() THEN
+                    RAISE EXCEPTION 'data-subject decision is not authorized';
+                END IF;
+            ELSIF OLD.status = 'VERIFIED'
+                  AND NEW.status = 'COMPLETED'
+                  AND NEW.request_type = 'ACCESS' THEN
+                IF NOT authn.authorize_action('tenant.privacy.decide')
+                   OR NEW.decision IS DISTINCT FROM 'APPROVED'
+                   OR NEW.decision_by IS NULL
+                   OR NEW.decision_by IS DISTINCT FROM authn.current_user_id()
+                   OR NEW.identity_verified_by IS NULL
+                   OR NEW.identity_verified_by = authn.current_user_id() THEN
+                    RAISE EXCEPTION 'data-subject access completion is not authorized';
+                END IF;
+            ELSIF OLD.status = 'APPROVED' AND NEW.status = 'COMPLETED' THEN
+                IF NOT authn.authorize_action('tenant.privacy.execute')
+                   OR OLD.decision_by IS NULL
+                   OR OLD.decision_by = authn.current_user_id() THEN
+                    RAISE EXCEPTION 'data-subject execution is not authorized';
+                END IF;
+            ELSE
+                RAISE EXCEPTION 'invalid data-subject request transition';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS data_subject_request_transition_guard ON public.data_subject_requests;
+        CREATE TRIGGER data_subject_request_transition_guard
+            BEFORE UPDATE ON public.data_subject_requests
+            FOR EACH ROW EXECUTE FUNCTION authn.enforce_dsr_transition();
 
         CREATE OR REPLACE FUNCTION authn.has_role(p_roles text[]) RETURNS boolean
         LANGUAGE sql STABLE SECURITY DEFINER
@@ -114,6 +179,10 @@ def upgrade() -> None:
                 WHEN 'tenant.workflow.create' THEN v_role IN ('developer','operator','tenant_administrator')
                 WHEN 'tenant.workflow.resume' THEN v_role IN ('operator','tenant_administrator')
                 WHEN 'tenant.workflow.remediate' THEN v_role IN ('operator','tenant_administrator')
+                WHEN 'tenant.privacy.request' THEN v_role = 'tenant_administrator'
+                WHEN 'tenant.privacy.verify' THEN v_role = 'tenant_administrator'
+                WHEN 'tenant.privacy.decide' THEN v_role = 'approver'
+                WHEN 'tenant.privacy.execute' THEN v_role IN ('operator','tenant_administrator')
                 WHEN 'platform.tenant.manage' THEN v_role = 'platform_administrator'
                 ELSE false
             END;
@@ -217,6 +286,22 @@ def upgrade() -> None:
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND status = 'EXPIRED'
                         AND authn.authorize_action('tenant.approvals.expire'));
+
+        ALTER TABLE public.data_subject_requests
+            ADD COLUMN IF NOT EXISTS requester_id uuid REFERENCES public.users(id);
+        DROP POLICY IF EXISTS data_subject_requests_tenant_isolation ON public.data_subject_requests;
+        CREATE POLICY data_subject_requests_read ON public.data_subject_requests FOR SELECT
+            USING (tenant_id = authn.current_tenant_id()
+                   AND authn.authorize_action('tenant.audit.read'));
+        CREATE POLICY data_subject_requests_create ON public.data_subject_requests FOR INSERT
+            WITH CHECK (tenant_id = authn.current_tenant_id()
+                        AND authn.authorize_action('tenant.privacy.request'));
+        CREATE POLICY data_subject_requests_update ON public.data_subject_requests FOR UPDATE
+            USING (tenant_id = authn.current_tenant_id()
+                   AND (authn.authorize_action('tenant.privacy.verify')
+                        OR authn.authorize_action('tenant.privacy.decide')
+                        OR authn.authorize_action('tenant.privacy.execute')))
+            WITH CHECK (tenant_id = authn.current_tenant_id());
 
         DROP POLICY IF EXISTS tenant_isolation ON public.audit_log_metadata;
         CREATE POLICY tenant_audit_read ON public.audit_log_metadata FOR SELECT
