@@ -170,12 +170,16 @@ def upgrade() -> None:
                 WHEN 'tenant.users.read' THEN v_role IN ('viewer','developer','operator','auditor','approver','tenant_administrator')
                 WHEN 'tenant.users.manage' THEN v_role = 'tenant_administrator'
                 WHEN 'tenant.credentials.manage' THEN v_role = 'tenant_administrator'
+                WHEN 'tenant.credentials.read' THEN v_role = 'tenant_administrator'
                 WHEN 'tenant.policies.manage' THEN v_role = 'tenant_administrator'
+                WHEN 'tenant.policies.read' THEN v_role = 'tenant_administrator'
                 WHEN 'tenant.connectors.manage' THEN v_role = 'tenant_administrator'
+                WHEN 'tenant.connectors.read' THEN v_role = 'tenant_administrator'
                 WHEN 'tenant.audit.read' THEN v_role IN ('auditor','approver','tenant_administrator')
                 WHEN 'tenant.access_review.export' THEN v_role IN ('auditor','tenant_administrator')
                 WHEN 'tenant.high_risk.approve' THEN v_role = 'approver'
                 WHEN 'tenant.approvals.expire' THEN v_role IN ('operator','approver','tenant_administrator')
+                WHEN 'tenant.approvals.read' THEN v_role IN ('viewer','developer','operator','auditor','approver','tenant_administrator')
                 WHEN 'tenant.workflow.create' THEN v_role IN ('developer','operator','tenant_administrator')
                 WHEN 'tenant.workflow.resume' THEN v_role IN ('operator','tenant_administrator')
                 WHEN 'tenant.workflow.remediate' THEN v_role IN ('operator','tenant_administrator')
@@ -222,7 +226,8 @@ def upgrade() -> None:
 
         DROP POLICY IF EXISTS tenant_isolation ON public.policies;
         CREATE POLICY tenant_policy_read ON public.policies FOR SELECT
-            USING (tenant_id = authn.current_tenant_id());
+            USING (tenant_id = authn.current_tenant_id()
+                   AND authn.authorize_action('tenant.policies.read'));
         CREATE POLICY tenant_policy_write ON public.policies FOR INSERT
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND authn.authorize_action('tenant.policies.manage'));
@@ -237,7 +242,8 @@ def upgrade() -> None:
 
         DROP POLICY IF EXISTS tenant_isolation ON public.gateway_configs;
         CREATE POLICY tenant_gateway_read ON public.gateway_configs FOR SELECT
-            USING (tenant_id = authn.current_tenant_id());
+            USING (tenant_id = authn.current_tenant_id()
+                   AND authn.authorize_action('tenant.connectors.read'));
         CREATE POLICY tenant_gateway_write ON public.gateway_configs FOR INSERT
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND authn.authorize_action('tenant.connectors.manage'));
@@ -252,7 +258,8 @@ def upgrade() -> None:
 
         DROP POLICY IF EXISTS tenant_isolation ON public.provider_credentials;
         CREATE POLICY tenant_provider_read ON public.provider_credentials FOR SELECT
-            USING (tenant_id = authn.current_tenant_id());
+            USING (tenant_id = authn.current_tenant_id()
+                   AND authn.authorize_action('tenant.credentials.read'));
         CREATE POLICY tenant_provider_write ON public.provider_credentials FOR INSERT
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND authn.authorize_action('tenant.credentials.manage'));
@@ -267,7 +274,8 @@ def upgrade() -> None:
 
         DROP POLICY IF EXISTS tenant_isolation ON public.pending_approvals;
         CREATE POLICY tenant_approval_read ON public.pending_approvals FOR SELECT
-            USING (tenant_id = authn.current_tenant_id());
+            USING (tenant_id = authn.current_tenant_id()
+                   AND authn.authorize_action('tenant.approvals.read'));
         CREATE POLICY tenant_approval_create ON public.pending_approvals FOR INSERT
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND authn.current_role() IN ('developer','operator','tenant_administrator'));

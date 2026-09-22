@@ -45,6 +45,14 @@ def test_approver_permission_is_distinct_from_tenant_administrator():
     assert not role_allows(Role.OPERATOR, "tenant.high_risk.approve")
 
 
+def test_sensitive_database_read_permissions_are_explicit():
+    assert role_allows(Role.TENANT_ADMINISTRATOR, "tenant.policies.read")
+    assert role_allows(Role.TENANT_ADMINISTRATOR, "tenant.credentials.read")
+    assert role_allows(Role.TENANT_ADMINISTRATOR, "tenant.connectors.read")
+    assert role_allows(Role.APPROVER, "tenant.approvals.read")
+    assert not role_allows(Role.VIEWER, "tenant.policies.read")
+
+
 def test_access_review_export_is_secret_free_and_integrity_protected():
     user = SimpleNamespace(
         id=uuid4(), email="viewer@example.com", is_active=True, role="viewer",

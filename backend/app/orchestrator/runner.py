@@ -140,6 +140,8 @@ def _create_approval_in_db(
     workflow_id: str,
     plan: list,
     requester_id: Optional[str] = None,
+    *,
+    commit: bool = True,
 ) -> str:
     """Create a pending_approvals record for HITL review."""
     approval_id = str(uuid.uuid4())
@@ -172,7 +174,8 @@ def _create_approval_in_db(
     )
 
     db.add(approval)
-    db.commit()
+    if commit:
+        db.commit()
 
     logger.info("Created approval %s for workflow %s", approval_id, workflow_id)
     return approval_id

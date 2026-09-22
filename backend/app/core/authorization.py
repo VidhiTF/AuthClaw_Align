@@ -39,8 +39,11 @@ PERMISSION_ROLES = {
     "tenant.users.read": TENANT_ROLES,
     "tenant.users.manage": frozenset({Role.TENANT_ADMINISTRATOR.value}),
     "tenant.credentials.manage": frozenset({Role.TENANT_ADMINISTRATOR.value}),
+    "tenant.credentials.read": frozenset({Role.TENANT_ADMINISTRATOR.value}),
     "tenant.policies.manage": frozenset({Role.TENANT_ADMINISTRATOR.value}),
+    "tenant.policies.read": frozenset({Role.TENANT_ADMINISTRATOR.value}),
     "tenant.connectors.manage": frozenset({Role.TENANT_ADMINISTRATOR.value}),
+    "tenant.connectors.read": frozenset({Role.TENANT_ADMINISTRATOR.value}),
     "tenant.audit.read": frozenset({
         Role.AUDITOR.value,
         Role.APPROVER.value,
@@ -56,6 +59,7 @@ PERMISSION_ROLES = {
         Role.APPROVER.value,
         Role.TENANT_ADMINISTRATOR.value,
     }),
+    "tenant.approvals.read": TENANT_ROLES,
     "tenant.workflow.create": frozenset({
         Role.DEVELOPER.value,
         Role.OPERATOR.value,

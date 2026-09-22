@@ -13,6 +13,8 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
         self.assertEqual(rule.permission, "agent:execute")
         self.assertTrue(role_allowed("owner", "POST", self.path))
         self.assertTrue(role_allowed("Super Admin", "POST", self.path))
+        self.assertTrue(role_allowed("tenant_administrator", "GET", "/access-control/users"))
+        self.assertFalse(role_allowed("viewer", "GET", "/access-control/users"))
 
     def test_operations_use_least_privilege(self):
         expectations = {

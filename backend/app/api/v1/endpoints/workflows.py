@@ -430,7 +430,8 @@ def expire_stale_approvals(
 def list_gateway_approvals(
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["read"]),
+    _auth=require_permission("tenant.approvals.read"),
+    _scope=require_scopes(["read"]),
 ):
     """List gateway HITL approvals for AuthClaw Lite."""
     tenant_id = str(request.state.tenant_id)
@@ -813,7 +814,7 @@ def remediate_workflow(
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
         ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
 
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -841,6 +842,7 @@ def remediate_workflow(
         workflow_id,
         wf.remediation_plan,
         requester_id=str(request.state.user_id),
+        commit=False,
     )
 
     # Transition workflow to PAUSED/AWAITING_APPROVAL
