@@ -4,7 +4,7 @@ import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import text
 
@@ -581,7 +581,11 @@ class RemediationRuntime:
         return row
 
     def execute_approved_plan(
-        self, approval_record: Dict[str, Any], *, idempotency_key: str
+        self,
+        approval_record: Dict[str, Any],
+        *,
+        idempotency_key: str,
+        pre_effect_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         tenant_id = int(approval_record["tenant_id"])
         WorkerThrottle("remediation").enforce(tenant_id)
@@ -623,6 +627,8 @@ class RemediationRuntime:
                 "evidence": evidence,
                 "audit_events": [{"event": "remediation_reconciled", "details": evidence["summary"]}],
             }
+        if pre_effect_check is not None:
+            pre_effect_check()
         lease = self._lease_credentials(tenant_id, connector, "execution")
         self._create_worker(
             tenant_id,
@@ -634,6 +640,8 @@ class RemediationRuntime:
             plan_id=plan_id,
             approval_id=approval_record["approval_id"],
         )
+        if pre_effect_check is not None:
+            pre_effect_check()
         evidence = self._adapter(connector).execute_plan(
             plan, idempotency_key=idempotency_key
         )
@@ -674,6 +682,8 @@ class RemediationRuntime:
                 {"finding_id": plan["finding_id"], "tenant_id": tenant_id},
             )
             conn.commit()
+        if pre_effect_check is not None:
+            pre_effect_check()
         self._audit(tenant_id, "remediation_executed", evidence["summary"], worker_id=worker_id, connector_id=connector["id"], finding_id=plan["finding_id"], plan_id=plan_id, approval_id=approval_record["approval_id"], metadata=evidence)
         return {
             "worker_run_id": worker_id,

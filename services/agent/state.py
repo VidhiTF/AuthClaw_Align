@@ -30,6 +30,7 @@ class AuthState(TypedDict, total=False):
     requester_id: str
     original_request_id: Optional[str]
     idempotency_key: Optional[str]
+    pre_effect_check: Any
 
     # Policy Check
     allowed: bool
@@ -80,6 +81,7 @@ GRAPH_STATE_CONTRACT = {
         "message", "session_id", "request_id", "correlation_id", "tenant_id",
         "username", "requester_id", "original_request_id", "gateway_api_key", "route_id",
         "provider", "model", "approval_id", "approval_status", "idempotency_key",
+        "pre_effect_check",
     },
     "node_outputs": {
         "task_type", "original_query", "security_approved", "security_findings",

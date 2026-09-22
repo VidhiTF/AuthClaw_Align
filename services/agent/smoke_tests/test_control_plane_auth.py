@@ -1,6 +1,7 @@
 """Protocol, tamper, rotation, ASGI body and real Redis replay regressions."""
 
 import ast
+from datetime import datetime, timezone
 import json
 import math
 import os
@@ -18,9 +19,11 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from services import control_plane_auth as auth
 from services.tenant_context import tenant_context
+from approval_store import ApprovalPersistenceError
 from services.quota_service import QuotaExceeded, QuotaUnavailable
 
 SECRET = "test-only-32-byte-signing-secret!!"
@@ -374,6 +377,11 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
             "QuotaExceeded": QuotaExceeded,
             "QuotaUnavailable": QuotaUnavailable,
             "decode_jwt": lambda _: None,
+            "reconcile_due_approval_executions": Mock(return_value=0),
+            "ApprovalPersistenceError": ApprovalPersistenceError,
+            "run_in_threadpool": run_in_threadpool,
+            "datetime": datetime,
+            "timezone": timezone,
         }
         # Preserve source declaration/decorator order, not a hand-built substitute stack.
         exec(

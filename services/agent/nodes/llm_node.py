@@ -144,6 +144,10 @@ def llm_node(state):
             "response": "Policy Violation"
         }
 
+    pre_effect_check = state.get("pre_effect_check")
+    if pre_effect_check is not None:
+        pre_effect_check()
+
     session_id = state.get(
         "session_id",
         "default"

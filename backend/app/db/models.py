@@ -554,6 +554,10 @@ class PendingApproval(Base):
         Index("idx_approval_status", "status"),
         Index("idx_approval_expires", "expires_at"),
         Index("idx_approval_tenant_action_hash", "tenant_id", "action_hash"),
+        UniqueConstraint(
+            "tenant_id", "action_type", "action_id",
+            name="uq_pending_approval_tenant_action",
+        ),
     )
 
 

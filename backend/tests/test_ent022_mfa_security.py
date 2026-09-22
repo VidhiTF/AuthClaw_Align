@@ -10,8 +10,10 @@ from fastapi import HTTPException
 from app.api.v1.endpoints import apikeys, auth, users, workflows
 from app.core.auth import hash_key
 from app.core.crypto import decrypt_secret, encrypt_secret
-from app.db.models import PendingApproval
+from app.db.models import ComplianceWorkflow, PendingApproval
+from app.orchestrator import runner as workflow_runner
 from app.orchestrator.runner import ComplianceWorkflowRunner, _create_approval_in_db
+from app.services.remediation_approval import build_action_payload, compute_action_hash
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -92,6 +94,8 @@ def test_api_key_administration_requires_interactive_replay_protected_mfa(monkey
     user = SimpleNamespace(
         id=user_id,
         tenant_id=tenant_id,
+        role="owner",
+        is_active=True,
         mfa_enabled=True,
         mfa_secret="encrypted-factor",
     )
@@ -104,7 +108,11 @@ def test_api_key_administration_requires_interactive_replay_protected_mfa(monkey
     db = MagicMock()
     db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
     verify = MagicMock(return_value=True)
-    monkeypatch.setattr(apikeys, "revalidate_tenant_credential", lambda *_: None)
+    monkeypatch.setattr(
+        apikeys,
+        "revalidate_tenant_credential",
+        lambda *_: SimpleNamespace(role="owner", scopes=["admin", "read", "write"]),
+    )
     monkeypatch.setattr(apikeys, "_get_redis", MagicMock(return_value=object()))
     monkeypatch.setattr(apikeys, "verify_mfa_challenge", verify)
 
@@ -145,6 +153,52 @@ def test_api_key_audit_is_atomic_and_contains_no_factor_or_secret(monkeypatch):
     assert "ak_" not in str(event)
 
 
+def test_api_key_issue_revalidates_locked_actor_before_commit(monkeypatch):
+    tenant_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    actor = SimpleNamespace(
+        id=user_id,
+        tenant_id=tenant_id,
+        role="owner",
+        is_active=True,
+        mfa_enabled=True,
+        mfa_secret="encrypted-factor",
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            credential_kind="session",
+            credential_hash="session-hash",
+            tenant_id=tenant_id,
+            user_id=user_id,
+        ),
+        headers={"x-request-id": "concurrent-demotion"},
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = actor
+    db.flush.side_effect = lambda: setattr(db.add.call_args.args[0], "id", uuid.uuid4())
+    authority = iter((
+        SimpleNamespace(role="owner", scopes=["admin", "read"]),
+        SimpleNamespace(role="viewer", scopes=["read"]),
+    ))
+    monkeypatch.setattr(apikeys, "revalidate_tenant_credential", lambda *_: next(authority))
+    monkeypatch.setattr(apikeys, "verify_mfa_challenge", MagicMock(return_value=True))
+    monkeypatch.setattr(apikeys, "_get_redis", MagicMock(return_value=object()))
+    audit = MagicMock()
+    monkeypatch.setattr(apikeys, "_commit_api_key_audit", audit)
+
+    with pytest.raises(HTTPException, match="Active tenant owner") as exc:
+        apikeys.generate_api_key(
+            request,
+            apikeys.APIKeyCreate(name="raced", scopes=["read"], mfa_code="654321"),
+            db,
+        )
+
+    assert exc.value.status_code == 403
+    assert db.refresh.call_count == 2
+    db.rollback.assert_called()
+    audit.assert_not_called()
+
+
 def test_api_key_rotation_locks_the_target_credential(monkeypatch):
     tenant_id = uuid.uuid4()
     user_id = uuid.uuid4()
@@ -172,7 +226,9 @@ def test_api_key_rotation_locks_the_target_credential(monkeypatch):
         new_key.created_at = datetime.now(timezone.utc)
 
     db.flush.side_effect = assign_generated_fields
-    monkeypatch.setattr(apikeys, "_verify_api_key_mfa", MagicMock())
+    actor = SimpleNamespace(role="owner", is_active=True)
+    monkeypatch.setattr(apikeys, "_verify_api_key_mfa", MagicMock(return_value=actor))
+    monkeypatch.setattr(apikeys, "_revalidate_locked_api_key_actor", MagicMock())
     monkeypatch.setattr(apikeys, "_commit_api_key_audit", MagicMock())
     monkeypatch.setattr(apikeys, "create_notification", MagicMock())
 
@@ -200,9 +256,11 @@ def test_api_key_revocation_requires_mfa_locks_and_audits(monkeypatch):
     db = MagicMock()
     query = db.query.return_value
     query.filter.return_value.with_for_update.return_value.first.return_value = key
-    verify = MagicMock()
+    actor = SimpleNamespace(role="owner", is_active=True)
+    verify = MagicMock(return_value=actor)
     audit = MagicMock()
     monkeypatch.setattr(apikeys, "_verify_api_key_mfa", verify)
+    monkeypatch.setattr(apikeys, "_revalidate_locked_api_key_actor", MagicMock())
     monkeypatch.setattr(apikeys, "_commit_api_key_audit", audit)
     monkeypatch.setattr(apikeys, "create_notification", MagicMock())
 
@@ -296,6 +354,19 @@ def test_graph_workflow_records_authenticated_requester_and_rejects_self_approva
     tenant_id = uuid.uuid4()
     requester_id = uuid.uuid4()
     db = MagicMock()
+    workflow_query = MagicMock()
+    approval_query = MagicMock()
+    workflow_query.filter.return_value.with_for_update.return_value.first.side_effect = (
+        lambda: next(
+            call.args[0]
+            for call in db.add.call_args_list
+            if isinstance(call.args[0], ComplianceWorkflow)
+        )
+    )
+    approval_query.filter.return_value.order_by.return_value.first.return_value = None
+    db.query.side_effect = (
+        lambda model: workflow_query if model is ComplianceWorkflow else approval_query
+    )
     runner = ComplianceWorkflowRunner.__new__(ComplianceWorkflowRunner)
     runner.db = db
 
@@ -345,6 +416,167 @@ def test_graph_approval_creation_fails_closed_without_requester():
 
     db.add.assert_not_called()
     db.execute.assert_not_called()
+
+
+def test_remediation_approval_creation_links_workflow_in_same_commit():
+    tenant_id = uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
+    requester_id = uuid.uuid4()
+    workflow = SimpleNamespace(
+        approval_id=None,
+        state_data={"requester_id": str(requester_id)},
+        current_state="COMPLETE",
+        execution_status="COMPLETED",
+        approval_status=None,
+        updated_at=None,
+    )
+    db = MagicMock()
+    workflow_query = MagicMock()
+    approval_query = MagicMock()
+    workflow_query.filter.return_value.with_for_update.return_value.first.return_value = workflow
+    approval_query.filter.return_value.order_by.return_value.first.return_value = None
+    db.query.side_effect = (
+        lambda model: workflow_query if model is ComplianceWorkflow else approval_query
+    )
+
+    approval_id = _create_approval_in_db(
+        db,
+        str(tenant_id),
+        workflow_id,
+        [{"action": "redact"}],
+        str(requester_id),
+    )
+
+    approval = next(
+        call.args[0] for call in db.add.call_args_list
+        if isinstance(call.args[0], PendingApproval)
+    )
+    assert str(approval.id) == approval_id
+    assert workflow.approval_id == approval.id
+    assert workflow.current_state == "AWAITING_APPROVAL"
+    assert workflow.execution_status == "PAUSED"
+    assert workflow.state_data["approval_id"] == approval_id
+    db.commit.assert_called_once()
+
+
+def test_remediation_approval_creation_relinks_existing_valid_orphan():
+    tenant_id = uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
+    requester_id = uuid.uuid4()
+    plan = [{"action": "redact"}]
+    action_payload = build_action_payload(workflow_id, plan)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=20)
+    existing = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        action_type="remediation",
+        action_id=workflow_id,
+        action_payload=action_payload,
+        expires_at=expires_at,
+        action_hash=compute_action_hash(
+            tenant_id=str(tenant_id),
+            action_payload=action_payload,
+            expires_at=expires_at,
+        ),
+        status="PENDING",
+    )
+    workflow = SimpleNamespace(
+        approval_id=None,
+        state_data={},
+        approval_status=None,
+        updated_at=None,
+    )
+    db = MagicMock()
+    workflow_query = MagicMock()
+    approval_query = MagicMock()
+    workflow_query.filter.return_value.with_for_update.return_value.first.return_value = workflow
+    approval_query.filter.return_value.order_by.return_value.first.return_value = existing
+    db.query.side_effect = (
+        lambda model: workflow_query if model is ComplianceWorkflow else approval_query
+    )
+
+    approval_id = _create_approval_in_db(
+        db, str(tenant_id), workflow_id, plan, str(requester_id)
+    )
+
+    assert approval_id == str(existing.id)
+    assert workflow.approval_id == existing.id
+    assert workflow.state_data["approval_id"] == str(existing.id)
+    db.add.assert_not_called()
+    db.commit.assert_called_once()
+
+
+def test_approval_consumption_waits_for_workflow_transition_commit(monkeypatch):
+    tenant_id = uuid.uuid4()
+    actor_id = uuid.uuid4()
+    approval = SimpleNamespace(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        action_type="remediation",
+        action_id="workflow-atomic",
+        action_payload={"plan": [{"action": "redact", "destructive": False}]},
+        action_hash="a" * 64,
+        status="APPROVED",
+        requester_id=uuid.uuid4(),
+        approver_id=actor_id,
+        mfa_verified=True,
+        mfa_timestamp=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        consumed_at=None,
+        consumed_by_id=None,
+        resolution_reason=None,
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = approval
+    monkeypatch.setattr(
+        workflow_runner,
+        "evaluate_approval",
+        lambda **_kwargs: SimpleNamespace(allowed=True, status="APPROVED", reason="allowed"),
+    )
+
+    status = workflow_runner._check_approval_in_db(
+        db,
+        str(approval.id),
+        str(tenant_id),
+        str(actor_id),
+        approval.action_id,
+        approval.action_payload["plan"],
+    )
+
+    assert status == "APPROVED"
+    assert approval.status == "CONSUMED"
+    db.flush.assert_called_once()
+    db.commit.assert_not_called()
+
+
+def test_resume_failure_before_workflow_advance_rolls_back_consumption(monkeypatch):
+    tenant_id = uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
+    workflow = SimpleNamespace(
+        workflow_id=workflow_id,
+        tenant_id=tenant_id,
+        execution_status="PAUSED",
+        current_state="AWAITING_APPROVAL",
+        state_data={"requester_id": str(uuid.uuid4()), "request_id": "atomic-retry"},
+        remediation_plan=[{"action": "redact"}],
+        error_message=None,
+        updated_at=None,
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = workflow
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = workflow
+    runner = ComplianceWorkflowRunner.__new__(ComplianceWorkflowRunner)
+    runner.db = db
+    monkeypatch.setattr(workflow_runner, "workflow_advisory_lock", lambda *_args: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(workflow_runner, "awaiting_approval", MagicMock(side_effect=RuntimeError("injected after approval consumption")))
+    monkeypatch.setattr(workflow_runner, "emit_audit_event", MagicMock())
+
+    with pytest.raises(RuntimeError, match="injected"):
+        runner.resume(workflow_id, str(tenant_id), str(uuid.uuid4()))
+
+    db.rollback.assert_called_once()
+    db.commit.assert_called_once()
+    assert workflow.execution_status == "PAUSED"
 
 
 def test_historical_workflow_without_requester_cannot_resume():

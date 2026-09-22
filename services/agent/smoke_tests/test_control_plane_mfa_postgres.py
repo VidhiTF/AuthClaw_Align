@@ -67,7 +67,8 @@ def approval_database(monkeypatch, request):
                 execution_mfa_counter BIGINT, execution_token_hash VARCHAR(64),
                 execution_token_used_at TIMESTAMP, execution_expires_at TIMESTAMP,
                 execution_operation_id VARCHAR(100), execution_provider_operation_id VARCHAR(255),
-                execution_outcome TEXT, execution_reconcile_after TIMESTAMP
+                execution_outcome TEXT, execution_reconcile_after TIMESTAMP,
+                execution_worker_id VARCHAR(255), execution_fence_token VARCHAR(100)
             );
             CREATE TABLE approval_audit_events (
                 id SERIAL PRIMARY KEY, tenant_id INTEGER NOT NULL, approval_id VARCHAR(100),
@@ -302,6 +303,7 @@ def test_concurrent_approval_is_single_use_and_audit_failure_rolls_back(approval
             approval_store.begin_approval_execution_atomic(
                 approved, actor=winners[0], transition_at=datetime.now(timezone.utc),
                 execution_token_hash="b" * 64, execution_operation_id="operation-17",
+                execution_worker_id="worker-17", execution_fence_token="fence-17",
                 reconcile_after=datetime.now(timezone.utc) + timedelta(minutes=1),
                 mfa_binding_hash="c" * 64, mfa_counter=2,
             )

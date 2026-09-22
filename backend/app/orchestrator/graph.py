@@ -422,11 +422,6 @@ def awaiting_approval(state: ComplianceState) -> ComplianceState:
             persist(new_state)
         return new_state
     
-    emit = state.get("_emit_audit")
-    if emit:
-        emit(state["workflow_id"], state["tenant_id"], state.get("request_id", ""),
-             f"AWAITING_APPROVAL→{next_state}", "approval_resolved", status.lower())
-    
     persist = state.get("_persist_state")
     new_state = {
         **state,
@@ -437,6 +432,10 @@ def awaiting_approval(state: ComplianceState) -> ComplianceState:
     }
     if persist:
         persist(new_state)
+    emit = state.get("_emit_audit")
+    if emit:
+        emit(state["workflow_id"], state["tenant_id"], state.get("request_id", ""),
+             f"AWAITING_APPROVAL→{next_state}", "approval_resolved", status.lower())
     return new_state
 
 

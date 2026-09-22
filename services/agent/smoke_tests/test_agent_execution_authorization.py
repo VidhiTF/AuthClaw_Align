@@ -67,6 +67,82 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
                 42,
             )
 
+    def test_persisted_role_replaces_stale_jwt_and_privileged_demotion_is_audited(self):
+        import main
+
+        class Row:
+            _mapping = {
+                "id": 17,
+                "role": "Viewer",
+                "permissions": "read_only",
+                "status": "active",
+            }
+
+        class Result:
+            @staticmethod
+            def fetchone():
+                return Row()
+
+        class Connection:
+            @staticmethod
+            def execute(*_args, **_kwargs):
+                return Result()
+
+        class Engine:
+            @contextmanager
+            def connect(self):
+                yield Connection()
+
+        stale = {
+            "tenant_id": 42,
+            "user_id": 17,
+            "sub": "oidc|demoted-user",
+            "role": "Super Admin",
+        }
+        audit = Mock()
+        with (
+            patch("database.engine", Engine()),
+            patch.object(main, "_audit_stale_session_denial", audit),
+            self.assertRaises(main.HTTPException) as denied,
+        ):
+            main.require_tenant_access_admin(stale)
+
+        self.assertEqual(denied.exception.status_code, 403)
+        audit.assert_called_once_with(stale, "Viewer")
+
+    def test_operator_demotion_refreshes_original_session_authority(self):
+        import main
+
+        row = SimpleNamespace(_mapping={
+            "id": 18,
+            "role": "Viewer",
+            "permissions": "read_only",
+            "status": "active",
+        })
+        connection = Mock()
+        connection.execute.return_value.fetchone.return_value = row
+
+        class Engine:
+            @contextmanager
+            def connect(self):
+                yield connection
+
+        stale = {
+            "tenant_id": 42,
+            "user_id": 18,
+            "sub": "oidc|operator-user",
+            "role": "Operator",
+        }
+        with (
+            patch("database.engine", Engine()),
+            patch.object(main, "_audit_stale_session_denial") as audit,
+        ):
+            refreshed = main.revalidate_tenant_session_payload(stale)
+
+        self.assertEqual(refreshed["role"], "Viewer")
+        self.assertEqual(refreshed["permissions"], "read_only")
+        audit.assert_called_once_with(stale, "Viewer")
+
     def test_approval_actor_uses_immutable_subject_not_email_alias(self):
         import main
 
@@ -668,6 +744,8 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
                 transition_at=approval_store.datetime.now(approval_store.timezone.utc),
                 execution_token_hash="token-hash",
                 execution_operation_id="operation-17",
+                execution_worker_id="worker-17",
+                execution_fence_token="fence-17",
                 reconcile_after=approval_store.datetime.now(approval_store.timezone.utc),
                 mfa_binding_hash="binding",
                 mfa_counter=505,
@@ -760,6 +838,8 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             "status": "executing",
             "executed_by": "oidc|checker",
             "execution_operation_id": "operation-stale-17",
+            "execution_worker_id": "worker-stale-17",
+            "execution_fence_token": "fence-stale-17",
             "execution_reconcile_after": "2026-01-01T00:01:00+00:00",
             "created_at": "2026-01-01T00:00:00+00:00",
             "expires_at": "2099-01-01T00:00:00+00:00",
@@ -785,11 +865,13 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
         class Connection:
             def execute(self, statement, parameters):
                 sql = " ".join(str(statement).split()).upper()
+                if sql.startswith("SELECT ALLOWED, STATUS, DECISION, PROVIDER FROM GATEWAY_REQUESTS"):
+                    return SimpleNamespace(fetchone=lambda: None)
                 if sql.startswith(
-                    "UPDATE GATEWAY_APPROVALS SET STATUS = 'EXECUTION_INDETERMINATE'"
+                    "UPDATE GATEWAY_APPROVALS SET STATUS = CAST(:FINAL_STATUS AS VARCHAR)"
                 ):
                     self.assert_operation(parameters)
-                    shared["status"] = "execution_indeterminate"
+                    shared["status"] = parameters["final_status"]
                     return Result()
                 if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
                     audit_rows.append(dict(parameters))
@@ -821,6 +903,532 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
         self.assertEqual(result["status"], "execution_indeterminate")
         self.assertEqual([row["action"] for row in audit_rows], ["execution_indeterminate"])
         self.assertIn("operation-stale-17", audit_rows[0]["metadata"])
+
+    def test_due_execution_reconciliation_is_repeatable_under_competing_workers(self):
+        import approval_store
+
+        rows = [
+            SimpleNamespace(_mapping={
+                "approval_id": value,
+                "tenant_id": 42,
+                "status": "executing",
+                "execution_operation_id": f"operation-{value}",
+                "execution_reconcile_after": approval_store.datetime(2026, 1, 1),
+                "comments": "[]",
+                "metadata": "{}",
+            })
+            for value in ("approval-a", "approval-b")
+        ]
+        connection = Mock()
+        connection.execute.return_value.fetchall.return_value = rows
+
+        class Engine:
+            @contextmanager
+            def connect(self):
+                yield connection
+
+        reconcile = Mock(side_effect=[
+            {"status": "execution_indeterminate"},
+            approval_store.ApprovalStateConflict("execution_indeterminate"),
+        ])
+        with (
+            patch.object(approval_store, "engine", Engine()),
+            patch.object(
+                approval_store,
+                "reconcile_stale_approval_execution_atomic",
+                reconcile,
+            ),
+        ):
+            count = approval_store.reconcile_due_approval_executions(
+                42,
+                transition_at=approval_store.datetime(2026, 1, 1, 0, 2),
+            )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(reconcile.call_count, 2)
+        self.assertEqual(connection.execute.call_args.args[1]["tenant_id"], 42)
+
+    def test_renewed_live_lease_survives_initial_deadline_then_expires(self):
+        import approval_store
+
+        shared = {
+            "approval_id": "approval-long-running",
+            "tenant_id": 42,
+            "status": "executing",
+            "execution_operation_id": "operation-long-running",
+            "execution_worker_id": "worker-long-running",
+            "execution_fence_token": "fence-long-running",
+            "execution_reconcile_after": approval_store.datetime(2026, 1, 1, 0, 1),
+            "comments": "[]",
+            "metadata": "{}",
+        }
+
+        class Row:
+            @property
+            def _mapping(self):
+                return copy.deepcopy(shared)
+
+        class Result:
+            def __init__(self, row=None, rows=None):
+                self.row = row
+                self.rows = rows or []
+
+            def fetchone(self):
+                return self.row
+
+            def fetchall(self):
+                return self.rows
+
+            def scalar(self):
+                return shared["status"]
+
+        class Connection:
+            def execute(self, statement, parameters):
+                sql = " ".join(str(statement).split()).upper()
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET EXECUTION_RECONCILE_AFTER"):
+                    owned = (
+                        parameters["worker_id"] == shared["execution_worker_id"]
+                        and parameters["fence_token"] == shared["execution_fence_token"]
+                        and shared["execution_reconcile_after"] > parameters["renewed_at"]
+                    )
+                    if not owned:
+                        return Result()
+                    shared["execution_reconcile_after"] = parameters["lease_expires_at"]
+                    return Result(Row())
+                if sql.startswith("SELECT STATUS FROM GATEWAY_APPROVALS"):
+                    return Result()
+                if sql.startswith("SELECT * FROM GATEWAY_APPROVALS"):
+                    rows = (
+                        [Row()]
+                        if shared["execution_reconcile_after"] <= parameters["transition_at"]
+                        else []
+                    )
+                    return Result(rows=rows)
+                raise AssertionError(sql)
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield Connection()
+
+            @contextmanager
+            def connect(self):
+                yield Connection()
+
+        with patch.object(approval_store, "engine", Engine()):
+            renewed = approval_store.renew_approval_execution_lease_atomic(
+                dict(shared),
+                renewed_at=approval_store.datetime(2026, 1, 1, 0, 0, 50),
+                lease_expires_at=approval_store.datetime(2026, 1, 1, 0, 1, 50),
+            )
+            reconcile = Mock(return_value={"status": "execution_indeterminate"})
+            with patch.object(
+                approval_store, "reconcile_stale_approval_execution_atomic", reconcile
+            ):
+                early = approval_store.reconcile_due_approval_executions(
+                    42, transition_at=approval_store.datetime(2026, 1, 1, 0, 1, 1)
+                )
+                late = approval_store.reconcile_due_approval_executions(
+                    42, transition_at=approval_store.datetime(2026, 1, 1, 0, 2)
+                )
+
+        self.assertEqual(renewed["status"], "executing")
+        self.assertEqual(early, 0)
+        self.assertEqual(late, 1)
+        reconcile.assert_called_once()
+
+    def test_competing_worker_cannot_renew_live_fenced_lease(self):
+        import approval_store
+
+        shared = {
+            "approval_id": "approval-owned",
+            "tenant_id": 42,
+            "status": "executing",
+            "execution_operation_id": "operation-owned",
+            "execution_worker_id": "worker-owner",
+            "execution_fence_token": "fence-owner",
+            "execution_reconcile_after": approval_store.datetime(2026, 1, 1, 0, 2),
+        }
+
+        class Result:
+            def fetchone(self):
+                return None
+
+            def scalar(self):
+                return shared["status"]
+
+        connection = Mock()
+        connection.execute.return_value = Result()
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield connection
+
+        competitor = {**shared, "execution_worker_id": "worker-competitor"}
+        with (
+            patch.object(approval_store, "engine", Engine()),
+            self.assertRaises(approval_store.ApprovalStateConflict),
+        ):
+            approval_store.renew_approval_execution_lease_atomic(
+                competitor,
+                renewed_at=approval_store.datetime(2026, 1, 1, 0, 1),
+                lease_expires_at=approval_store.datetime(2026, 1, 1, 0, 2),
+            )
+
+        update_parameters = connection.execute.call_args_list[0].args[1]
+        self.assertEqual(update_parameters["worker_id"], "worker-competitor")
+        self.assertEqual(shared["execution_worker_id"], "worker-owner")
+
+    def test_lease_loss_cancels_pre_effect_and_defers_late_outcome_reconciliation(self):
+        import main
+
+        base = {
+            "approval_id": "approval-lease-loss",
+            "request_id": "request-lease-loss",
+            "correlation_id": "correlation-lease-loss",
+            "tenant_id": 42,
+            "status": "approved",
+            "requested_by": "oidc|requester",
+            "approved_by": "oidc|checker",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "execution_expires_at": "2099-01-01T00:10:00+00:00",
+            "metadata": {},
+            "query": "Apply the approved change",
+            "risk_level": "HIGH",
+        }
+        dispatched = {
+            **base,
+            "status": "executing",
+            "execution_operation_id": "operation-lease-loss",
+            "execution_worker_id": "worker-lease-loss",
+            "execution_fence_token": "fence-lease-loss",
+        }
+        request = SimpleNamespace(headers={"Authorization": "Bearer test"})
+        external_effect = Mock()
+
+        def execute_approval(**kwargs):
+            kwargs["pre_effect_check"]()
+            external_effect()
+            kwargs["pre_effect_check"]()
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield object()
+
+        for loss_after_effect in (False, True):
+            external_effect.reset_mock()
+            renewals = (
+                [main.ApprovalStateConflict("execution_indeterminate")]
+                if not loss_after_effect
+                else [dispatched, main.ApprovalStateConflict("execution_indeterminate")]
+            )
+            with (
+                self.subTest(loss_after_effect=loss_after_effect),
+                patch("database.engine", Engine()),
+                patch.object(main, "get_approval", return_value=dict(base)),
+                patch.object(main, "_approval_authenticated_payload", return_value={
+                    "sub": "oidc|checker", "tenant_id": 42,
+                }),
+                patch.object(main, "parse_approval_action_payload", AsyncMock(return_value={
+                    "_body_present": True, "mfa_code": "redacted",
+                })),
+                patch.object(main, "_verify_approval_stage_mfa", return_value=(True, "binding", 7)),
+                patch.object(main, "begin_approval_execution_atomic", return_value=dict(dispatched)),
+                patch.object(
+                    main,
+                    "renew_approval_execution_lease_atomic",
+                    side_effect=renewals,
+                ),
+                patch.object(main, "get_gateway_service", return_value=SimpleNamespace(
+                    execute_approval=execute_approval,
+                )),
+                patch.object(main, "finish_approval_execution_atomic") as finish,
+                patch.object(
+                    main,
+                    "reconcile_late_approval_execution_outcome_atomic",
+                    return_value=None,
+                ) as reconcile_late,
+            ):
+                response = asyncio.run(main.execute_request(base["approval_id"], request))
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(
+                json.loads(response.body)["status"], "reconciliation_pending"
+            )
+            self.assertEqual(external_effect.call_count, int(loss_after_effect))
+            finish.assert_not_called()
+            reconcile_late.assert_called_once()
+
+    def test_remediation_lease_fence_runs_before_credentials_or_provider_effect(self):
+        import main
+        from services import remediation_runtime
+
+        runtime = remediation_runtime.RemediationRuntime()
+        runtime.get_connector = Mock(return_value={"id": 9, "provider": "aws"})
+        runtime._lease_credentials = Mock()
+        runtime._create_worker = Mock()
+        adapter = Mock()
+        runtime._adapter = Mock(return_value=adapter)
+        plan = {
+            "id": 17,
+            "connector_id": 9,
+            "finding_id": 23,
+            "proposed_action": "enable_s3_block_public_access",
+            "resource_id": "bucket-17",
+        }
+
+        class Result:
+            def __init__(self, row=None):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class Connection:
+            def execute(self, statement, _parameters):
+                sql = " ".join(str(statement).split()).upper()
+                if "FROM REMEDIATION_PLANS" in sql:
+                    return Result(SimpleNamespace(_mapping=plan))
+                if "FROM REMEDIATION_WORKER_RUNS" in sql:
+                    return Result()
+                raise AssertionError(sql)
+
+        class Engine:
+            @contextmanager
+            def connect(self):
+                yield Connection()
+
+        guard = Mock(side_effect=main.ExecutionLeaseLostError("lease lost"))
+        with (
+            patch.object(remediation_runtime, "engine", Engine()),
+            patch.object(remediation_runtime.WorkerThrottle, "enforce"),
+            self.assertRaises(main.ExecutionLeaseLostError),
+        ):
+            runtime.execute_approved_plan(
+                {
+                    "approval_id": "approval-remediation-fence",
+                    "tenant_id": 42,
+                    "metadata": {"remediation_plan_id": 17},
+                },
+                idempotency_key="operation-remediation-fence",
+                pre_effect_check=guard,
+            )
+
+        guard.assert_called_once()
+        runtime._lease_credentials.assert_not_called()
+        runtime._create_worker.assert_not_called()
+        adapter.execute_plan.assert_not_called()
+
+    def test_expired_lease_recovers_recorded_provider_success(self):
+        import approval_store
+
+        shared = {
+            "approval_id": "approval-provider-recovery",
+            "tenant_id": 42,
+            "status": "executing",
+            "execution_operation_id": "operation-provider-recovery",
+            "execution_worker_id": "worker-provider-recovery",
+            "execution_fence_token": "fence-provider-recovery",
+            "execution_reconcile_after": approval_store.datetime(2026, 1, 1, 0, 1),
+            "comments": "[]",
+            "metadata": "{}",
+        }
+        audit_rows = []
+
+        class Row:
+            def __init__(self, mapping):
+                self._mapping = mapping
+
+        class Result:
+            rowcount = 1
+
+            def __init__(self, row=None):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class Connection:
+            def execute(self, statement, parameters):
+                sql = " ".join(str(statement).split()).upper()
+                if sql.startswith("SELECT ALLOWED, STATUS, DECISION, PROVIDER FROM GATEWAY_REQUESTS"):
+                    return Result(Row({
+                        "allowed": True,
+                        "status": "allowed",
+                        "decision": "ALLOW",
+                        "provider": "test-provider",
+                    }))
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = CAST"):
+                    shared["status"] = parameters["final_status"]
+                    shared["execution_outcome"] = parameters["execution_outcome"]
+                    shared["execution_provider_operation_id"] = parameters["provider_operation_id"]
+                    return Result(Row(copy.deepcopy(shared)))
+                if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
+                    audit_rows.append(dict(parameters))
+                    return Result()
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET COMMENTS"):
+                    shared["comments"] = parameters["comments"]
+                    return Result()
+                raise AssertionError(sql)
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield Connection()
+
+        with patch.object(approval_store, "engine", Engine()):
+            recovered = approval_store.reconcile_stale_approval_execution_atomic(
+                dict(shared),
+                actor="system:execution-reconciler",
+                transition_at=approval_store.datetime(2026, 1, 1, 0, 2),
+            )
+
+        self.assertEqual(recovered["status"], "executed")
+        self.assertEqual(audit_rows[0]["action"], "executed")
+        self.assertEqual(
+            recovered["execution_provider_operation_id"],
+            "approval-exec-operation-provider-recovery",
+        )
+
+    def test_late_provider_success_upgrades_indeterminate_same_fence(self):
+        import approval_store
+
+        shared = {
+            "approval_id": "approval-late-provider",
+            "tenant_id": 42,
+            "status": "execution_indeterminate",
+            "execution_operation_id": "operation-late-provider",
+            "execution_worker_id": "worker-late-provider",
+            "execution_fence_token": "fence-late-provider",
+            "comments": "[]",
+            "metadata": "{}",
+        }
+        audit_rows = []
+
+        class Row:
+            @property
+            def _mapping(self):
+                return copy.deepcopy(shared)
+
+        class Result:
+            rowcount = 1
+
+            def __init__(self, row=None):
+                self.row = row
+
+            def fetchone(self):
+                return self.row
+
+        class Connection:
+            def execute(self, statement, parameters):
+                sql = " ".join(str(statement).split()).upper()
+                if sql.startswith("SELECT ALLOWED, STATUS, DECISION, PROVIDER FROM GATEWAY_REQUESTS"):
+                    return Result(SimpleNamespace(_mapping={
+                        "allowed": True,
+                        "status": "allowed",
+                        "decision": "ALLOW",
+                        "provider": "test-provider",
+                    }))
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = CAST"):
+                    self.assert_same_fence(parameters)
+                    shared["status"] = parameters["final_status"]
+                    shared["execution_outcome"] = parameters["execution_outcome"]
+                    shared["execution_provider_operation_id"] = parameters["provider_operation_id"]
+                    return Result(Row())
+                if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
+                    audit_rows.append(dict(parameters))
+                    return Result()
+                if sql.startswith("UPDATE GATEWAY_APPROVALS SET COMMENTS"):
+                    shared["comments"] = parameters["comments"]
+                    return Result()
+                raise AssertionError(sql)
+
+            @staticmethod
+            def assert_same_fence(parameters):
+                assert parameters["operation_id"] == "operation-late-provider"
+                assert parameters["worker_id"] == "worker-late-provider"
+                assert parameters["fence_token"] == "fence-late-provider"
+
+        class Engine:
+            @contextmanager
+            def begin(self):
+                yield Connection()
+
+        with patch.object(approval_store, "engine", Engine()):
+            recovered = approval_store.reconcile_late_approval_execution_outcome_atomic(
+                dict(shared),
+                actor="system:late-outcome-reconciler",
+                transition_at=approval_store.datetime(2026, 1, 1, 0, 2),
+            )
+
+        self.assertEqual(recovered["status"], "executed")
+        self.assertEqual(audit_rows[0]["action"], "executed")
+        self.assertEqual(
+            recovered["execution_provider_operation_id"],
+            "approval-exec-operation-late-provider",
+        )
+
+    def test_renewed_long_execution_can_finish_success_or_failure(self):
+        import approval_store
+
+        for final_status in ("executed", "execution_failed"):
+            with self.subTest(final_status=final_status):
+                shared = {
+                    "approval_id": f"approval-long-{final_status}",
+                    "tenant_id": 42,
+                    "status": "executing",
+                    "executed_by": "oidc|checker",
+                    "execution_token_hash": "token-hash",
+                    "execution_operation_id": f"operation-long-{final_status}",
+                    "execution_worker_id": "worker-long",
+                    "execution_fence_token": "fence-long",
+                    "execution_reconcile_after": approval_store.datetime(2026, 1, 1, 0, 5),
+                    "comments": "[]",
+                    "metadata": "{}",
+                }
+
+                class Row:
+                    @property
+                    def _mapping(self):
+                        return copy.deepcopy(shared)
+
+                class Result:
+                    def fetchone(self):
+                        return Row()
+
+                class Connection:
+                    def execute(self, statement, parameters):
+                        sql = " ".join(str(statement).split()).upper()
+                        if sql.startswith("UPDATE GATEWAY_APPROVALS SET STATUS = CAST"):
+                            assert parameters["worker_id"] == "worker-long"
+                            assert parameters["fence_token"] == "fence-long"
+                            shared["status"] = parameters["final_status"]
+                            shared["execution_outcome"] = parameters["execution_outcome"]
+                            return Result()
+                        if sql.startswith("INSERT INTO APPROVAL_AUDIT_EVENTS"):
+                            return Result()
+                        if sql.startswith("UPDATE GATEWAY_APPROVALS SET COMMENTS"):
+                            shared["comments"] = parameters["comments"]
+                            return Result()
+                        raise AssertionError(sql)
+
+                class Engine:
+                    @contextmanager
+                    def begin(self):
+                        yield Connection()
+
+                with patch.object(approval_store, "engine", Engine()):
+                    result = approval_store.finish_approval_execution_atomic(
+                        dict(shared),
+                        actor="oidc|checker",
+                        final_status=final_status,
+                        transition_at=approval_store.datetime(2026, 1, 1, 0, 3),
+                    )
+
+                self.assertEqual(result["status"], final_status)
 
     def test_read_does_not_reconcile_a_live_execution(self):
         import approval_store

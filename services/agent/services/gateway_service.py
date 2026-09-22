@@ -23,6 +23,10 @@ from verify_audit import (
 logger = logging.getLogger("authclaw.gateway_service")
 
 
+class ExecutionLeaseLostError(RuntimeError):
+    """The executing worker no longer owns its fenced approval lease."""
+
+
 class GatewayProviderConfigurationError(Exception):
     pass
 
@@ -202,6 +206,7 @@ class GatewayService:
         authorization: Optional[str],
         x_api_key: Optional[str],
         idempotency_key: str,
+        pre_effect_check: Optional[Callable[[], None]] = None,
         username: Optional[str] = None,
         provider: str = "AuthClaw Gateway",
         model: str = "authclaw-gateway",
@@ -240,6 +245,7 @@ class GatewayService:
                     "approval_status": "APPROVED",
                     "original_request_id": approval_record.get("request_id"),
                     "idempotency_key": idempotency_key,
+                    "pre_effect_check": pre_effect_check,
                     "provider": provider,
                     "model": model,
                 }
@@ -248,7 +254,7 @@ class GatewayService:
                 raise RuntimeError(
                     "Approved execution did not receive an upstream provider response"
                 )
-        except (QuotaExceeded, QuotaUnavailable):
+        except (QuotaExceeded, QuotaUnavailable, ExecutionLeaseLostError):
             raise
         except ValueError as e:
             raise GatewayProviderConfigurationError(str(e)) from e
@@ -307,6 +313,9 @@ class GatewayService:
             duration_ms=latency_ms,
             decision=decision,
         )
+
+        if pre_effect_check is not None:
+            pre_effect_check()
 
         trace = self.get_trace(request_id=request_id, session_id=resolved_session_id, tenant_id=tenant_id)
         self.persist_latest_message_trace(resolved_session_id, trace)

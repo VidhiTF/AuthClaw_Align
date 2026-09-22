@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.api.v1.endpoints import auth, users
+from app.api.v1.endpoints import auth, users, workflows
 from app.core.auth import revalidate_tenant_credential
 
 
@@ -54,3 +54,34 @@ def test_revalidation_binds_same_canonical_actor_and_tenant(kind, mismatch):
             revalidate_tenant_credential(request, db)
         assert denied.value.status_code == 401
         db.rollback.assert_called_once()
+
+
+@pytest.mark.parametrize("headers", [
+    {"authorization": "Bearer api-key-value"},
+    {"x-api-key": "api-key-value"},
+    {"authorization": "Bearer api-key-value", "x-api-key": "alternate"},
+])
+@pytest.mark.parametrize("operation", ["gateway", "remediation"])
+def test_human_approval_endpoints_reject_api_keys_before_database_access(headers, operation):
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            credential_kind="api_key", tenant_id=uuid4(), user_id=uuid4()
+        ),
+        headers=headers,
+    )
+    db = MagicMock()
+    if operation == "gateway":
+        call = lambda: workflows.approve_gateway_approval(
+            str(uuid4()), request, None, db
+        )
+    else:
+        call = lambda: workflows.approve_workflow(str(uuid4()), request, None, db)
+
+    with pytest.raises(HTTPException) as denied:
+        call()
+
+    assert denied.value.status_code == 403
+    assert denied.value.detail == "Interactive tenant session required"
+    db.query.assert_not_called()
+    db.execute.assert_not_called()
+    db.commit.assert_not_called()

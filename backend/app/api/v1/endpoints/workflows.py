@@ -22,6 +22,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.auth import (
     get_tenant_db,
     revalidate_tenant_credential,
+    require_interactive_session,
     require_scopes,
 )
 from app.api.v1.endpoints.onboarding import _get_redis
@@ -541,7 +542,11 @@ def list_gateway_approvals(
     return [_approval_response(approval) for approval in approvals]
 
 
-@router.post("/approvals/{approval_id}/approve", response_model=GatewayApprovalResponse)
+@router.post(
+    "/approvals/{approval_id}/approve",
+    response_model=GatewayApprovalResponse,
+    dependencies=[Depends(require_interactive_session)],
+)
 def approve_gateway_approval(
     approval_id: str,
     request: Request,
@@ -550,6 +555,7 @@ def approve_gateway_approval(
     _auth=require_scopes(["admin"]),
 ):
     """Approve a gateway HITL approval so the waiting request may continue (MFA challenged)."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
     user_id = request.state.user_id
     _auto_expire_stale(db, tenant_id, user_id)
@@ -732,7 +738,11 @@ def get_workflow(
     return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/approve", response_model=WorkflowResponseVariant)
+@router.post(
+    "/{workflow_id}/approve",
+    response_model=WorkflowResponseVariant,
+    dependencies=[Depends(require_interactive_session)],
+)
 def approve_workflow(
     workflow_id: str,
     request: Request,
@@ -741,6 +751,7 @@ def approve_workflow(
     _auth=require_scopes(["admin"]),
 ):
     """Approve a workflow's remediation plan and resume execution (MFA challenged)."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
     user_id = request.state.user_id
     

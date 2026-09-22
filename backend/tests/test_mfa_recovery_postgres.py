@@ -244,6 +244,81 @@ def test_recovery_rejects_pre_authenticated_requests_after_lock(recovery_case, o
 
 
 @pytest.mark.parametrize("operation", ["issue", "rotate", "revoke"])
+def test_concurrent_demotion_blocks_api_key_mutation(recovery_case, operation):
+    case = recovery_case
+    target = case.target
+    request = request_for(target)
+    ready = Event()
+    worker = {}
+
+    def pending_request():
+        with case.harness.session_for(target) as db:
+            key = db.query(APIKey).filter(APIKey.created_by == target.user_id).one()
+            worker["pid"] = db.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            ready.set()
+            try:
+                if operation == "issue":
+                    apikeys.generate_api_key(
+                        request,
+                        APIKeyCreate(
+                            name="demotion-race",
+                            scopes=["read"],
+                            mfa_code=pyotp.TOTP(case.secrets[target.user_id]).now(),
+                        ),
+                        db,
+                    )
+                elif operation == "rotate":
+                    apikeys.rotate_api_key(
+                        key.id,
+                        request,
+                        APIKeyRotate(
+                            mfa_code=pyotp.TOTP(case.secrets[target.user_id]).now()
+                        ),
+                        db,
+                    )
+                else:
+                    apikeys.revoke_api_key(
+                        key.id,
+                        request,
+                        APIKeyRevoke(
+                            mfa_code=pyotp.TOTP(case.secrets[target.user_id]).now()
+                        ),
+                        db,
+                    )
+            except HTTPException as exc:
+                return exc.status_code
+            return 200
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with case.harness.owner_engine.begin() as demotion:
+            demotion.execute(
+                text("UPDATE users SET role='viewer' WHERE id=:id"),
+                {"id": target.user_id},
+            )
+            future = pool.submit(pending_request)
+            assert ready.wait(10)
+            deadline = monotonic() + 5
+            with case.harness.owner_engine.connect() as connection:
+                while monotonic() < deadline:
+                    blocked = connection.execute(
+                        text("SELECT cardinality(pg_blocking_pids(:pid)) > 0"), worker
+                    ).scalar_one()
+                    if blocked:
+                        break
+                    sleep(0.01)
+                assert blocked, "API-key mutation never waited on the actor row lock"
+            assert not future.done()
+
+        assert future.result(timeout=15) == 403
+    with case.harness.session_for(case.owner) as db:
+        keys = db.query(APIKey).filter(APIKey.created_by == target.user_id).all()
+        assert len(keys) == 1
+        assert keys[0].is_active
+        assert keys[0].revoked_at is None
+        assert keys[0].rotated_at is None
+
+
+@pytest.mark.parametrize("operation", ["issue", "rotate", "revoke"])
 def test_api_key_credentials_cannot_administer_api_keys(recovery_case, operation):
     case = recovery_case
     target = case.target

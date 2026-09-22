@@ -9,6 +9,7 @@ Backward-compatible: `pending_approvals` and `approved_results` aliases are
 kept so existing imports in main.py continue to work during the transition.
 """
 
+import hashlib
 import json
 import uuid
 from contextlib import nullcontext
@@ -312,6 +313,8 @@ def _row_to_record(row) -> PersistentApprovalRecord:
             "execution_provider_operation_id": mapping.get("execution_provider_operation_id"),
             "execution_outcome": execution_outcome,
             "execution_reconcile_after": as_iso(mapping.get("execution_reconcile_after")),
+            "execution_worker_id": mapping.get("execution_worker_id"),
+            "execution_fence_token": mapping.get("execution_fence_token"),
             "last_action_at": as_iso(mapping.get("last_action_at")),
             "metadata": json.loads(mapping.get("metadata") or "{}"),
         }
@@ -922,6 +925,8 @@ def begin_approval_execution_atomic(
     transition_at: datetime,
     execution_token_hash: str,
     execution_operation_id: str,
+    execution_worker_id: str,
+    execution_fence_token: str,
     reconcile_after: datetime,
     mfa_binding_hash: str,
     mfa_counter: int,
@@ -945,6 +950,8 @@ def begin_approval_execution_atomic(
                         execution_token_hash = :token_hash,
                         execution_token_used_at = :transition_at,
                         execution_operation_id = :operation_id,
+                        execution_worker_id = :worker_id,
+                        execution_fence_token = :fence_token,
                         execution_reconcile_after = :reconcile_after,
                         execution_mfa_verified = TRUE,
                         execution_mfa_binding_hash = :binding_hash,
@@ -968,6 +975,8 @@ def begin_approval_execution_atomic(
                     "transition_at": _parse_optional_dt(transition_at),
                     "token_hash": execution_token_hash,
                     "operation_id": execution_operation_id,
+                    "worker_id": execution_worker_id,
+                    "fence_token": execution_fence_token,
                     "reconcile_after": _parse_optional_dt(reconcile_after),
                     "binding_hash": mfa_binding_hash,
                     "counter": mfa_counter,
@@ -1081,6 +1090,8 @@ def finish_approval_execution_atomic(
                       AND status = 'executing'
                       AND executed_by = :actor
                       AND execution_token_hash = :execution_token_hash
+                      AND execution_worker_id = :worker_id
+                      AND execution_fence_token = :fence_token
                     RETURNING *
                     """
                 ),
@@ -1091,6 +1102,8 @@ def finish_approval_execution_atomic(
                     "final_status": final_status,
                     "transition_at": _parse_optional_dt(transition_at),
                     "execution_token_hash": record.get("execution_token_hash"),
+                    "worker_id": record.get("execution_worker_id"),
+                    "fence_token": record.get("execution_fence_token"),
                     "provider_operation_id": provider_operation_id,
                     "execution_outcome": json.dumps(execution_outcome or {}, sort_keys=True),
                 },
@@ -1126,13 +1139,13 @@ def finish_approval_execution_atomic(
     return updated_record
 
 
-def reconcile_stale_approval_execution_atomic(
+def renew_approval_execution_lease_atomic(
     record: dict,
     *,
-    actor: str,
-    transition_at: datetime,
+    renewed_at: datetime,
+    lease_expires_at: datetime,
 ) -> PersistentApprovalRecord:
-    """Convert an abandoned dispatch into an explicit, audited unknown outcome."""
+    """Renew only the live lease owned by this exact worker generation."""
     approval_id = record.get("approval_id")
     tenant_id = record.get("tenant_id")
     try:
@@ -1141,14 +1154,166 @@ def reconcile_stale_approval_execution_atomic(
                 text(
                     """
                     UPDATE gateway_approvals
-                    SET status = 'execution_indeterminate',
-                        last_action_at = :transition_at,
-                        execution_outcome = :execution_outcome
+                    SET execution_reconcile_after = :lease_expires_at,
+                        last_action_at = :renewed_at
                     WHERE approval_id = :approval_id
                       AND tenant_id = :tenant_id
                       AND status = 'executing'
-                      AND execution_reconcile_after <= :transition_at
                       AND execution_operation_id = :operation_id
+                      AND execution_worker_id = :worker_id
+                      AND execution_fence_token = :fence_token
+                      AND execution_reconcile_after > :renewed_at
+                    RETURNING *
+                    """
+                ),
+                {
+                    "approval_id": approval_id,
+                    "tenant_id": tenant_id,
+                    "operation_id": record.get("execution_operation_id"),
+                    "worker_id": record.get("execution_worker_id"),
+                    "fence_token": record.get("execution_fence_token"),
+                    "renewed_at": _parse_optional_dt(renewed_at),
+                    "lease_expires_at": _parse_optional_dt(lease_expires_at),
+                },
+            ).fetchone()
+            if row is None:
+                current_status = conn.execute(
+                    text(
+                        "SELECT status FROM gateway_approvals "
+                        "WHERE approval_id = :approval_id AND tenant_id = :tenant_id"
+                    ),
+                    {"approval_id": approval_id, "tenant_id": tenant_id},
+                ).scalar()
+                raise ApprovalStateConflict(str(current_status or "missing"))
+            updated_record = _row_to_record(row)
+    except (ApprovalPersistenceError, ApprovalStateConflict):
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Execution lease renewal failed") from exc
+    _approvals[approval_id] = updated_record
+    return updated_record
+
+
+def _known_execution_outcome(conn, record: dict) -> Optional[dict]:
+    """Read durable idempotency state before declaring an expired lease unknown."""
+    operation_id = record.get("execution_operation_id")
+    tenant_id = record.get("tenant_id")
+    if not operation_id:
+        return None
+    metadata = record.get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError):
+            metadata = {}
+    if metadata.get("execution_target") == "remediation":
+        worker_id = f"worker-exec-{hashlib.sha256(operation_id.encode('utf-8')).hexdigest()[:32]}"
+        row = conn.execute(
+            text(
+                "SELECT status, evidence FROM remediation_worker_runs "
+                "WHERE worker_id = :worker_id AND tenant_id = :tenant_id"
+            ),
+            {"worker_id": worker_id, "tenant_id": tenant_id},
+        ).fetchone()
+        if row is not None:
+            mapping = row._mapping
+            if mapping.get("status") == "completed" and mapping.get("evidence"):
+                return {
+                    "final_status": "executed",
+                    "provider_operation_id": worker_id,
+                    "outcome": {
+                        "status": "succeeded",
+                        "outcome": "remediation_reconciled",
+                        "allowed": True,
+                        "executed": True,
+                    },
+                }
+            if mapping.get("status") == "failed":
+                return {
+                    "final_status": "execution_failed",
+                    "provider_operation_id": worker_id,
+                    "outcome": {
+                        "status": "failed",
+                        "outcome": "remediation_failed",
+                        "allowed": False,
+                        "executed": False,
+                    },
+                }
+        return None
+
+    request_id = f"approval-exec-{operation_id}"
+    row = conn.execute(
+        text(
+            "SELECT allowed, status, decision, provider FROM gateway_requests "
+            "WHERE tenant_id = CAST(:tenant_id AS VARCHAR) AND request_id = :request_id "
+            "ORDER BY created_at DESC, id DESC LIMIT 1"
+        ),
+        {"tenant_id": tenant_id, "request_id": request_id},
+    ).fetchone()
+    if row is None:
+        return None
+    mapping = row._mapping
+    if mapping.get("allowed") is True and mapping.get("status") == "allowed":
+        return {
+            "final_status": "executed",
+            "provider_operation_id": request_id,
+            "outcome": {
+                "status": "succeeded",
+                "outcome": "provider_state_reconciled",
+                "decision": mapping.get("decision"),
+                "provider": mapping.get("provider"),
+                "allowed": True,
+                "executed": True,
+            },
+        }
+    if mapping.get("status") == "blocked":
+        return {
+            "final_status": "execution_failed",
+            "provider_operation_id": request_id,
+            "outcome": {
+                "status": "denied",
+                "outcome": "provider_state_reconciled",
+                "decision": mapping.get("decision"),
+                "provider": mapping.get("provider"),
+                "allowed": False,
+                "executed": False,
+            },
+        }
+    return None
+
+
+def reconcile_late_approval_execution_outcome_atomic(
+    record: dict,
+    *,
+    actor: str,
+    transition_at: datetime,
+) -> Optional[PersistentApprovalRecord]:
+    """Apply a durable idempotent outcome after this worker loses its lease."""
+    approval_id = record.get("approval_id")
+    tenant_id = record.get("tenant_id")
+    try:
+        with engine.begin() as conn:
+            known_outcome = _known_execution_outcome(conn, record)
+            if known_outcome is None:
+                return None
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE gateway_approvals
+                    SET status = CAST(:final_status AS VARCHAR),
+                        executed_at = CASE
+                            WHEN CAST(:final_status AS VARCHAR) = 'executed' THEN :transition_at
+                            ELSE executed_at
+                        END,
+                        last_action_at = :transition_at,
+                        execution_provider_operation_id = :provider_operation_id,
+                        execution_outcome = :execution_outcome
+                    WHERE approval_id = :approval_id
+                      AND tenant_id = :tenant_id
+                      AND status IN ('executing', 'execution_indeterminate')
+                      AND execution_operation_id = :operation_id
+                      AND execution_worker_id IS NOT DISTINCT FROM :worker_id
+                      AND execution_fence_token IS NOT DISTINCT FROM :fence_token
                     RETURNING *
                     """
                 ),
@@ -1157,14 +1322,101 @@ def reconcile_stale_approval_execution_atomic(
                     "tenant_id": tenant_id,
                     "transition_at": _parse_optional_dt(transition_at),
                     "operation_id": record.get("execution_operation_id"),
+                    "worker_id": record.get("execution_worker_id"),
+                    "fence_token": record.get("execution_fence_token"),
+                    "final_status": known_outcome["final_status"],
+                    "provider_operation_id": known_outcome["provider_operation_id"],
                     "execution_outcome": json.dumps(
-                        {
-                            "status": "indeterminate",
-                            "error": "terminal_result_not_recorded_before_deadline",
-                            "execution_operation_id": record.get("execution_operation_id"),
-                        },
-                        sort_keys=True,
+                        known_outcome["outcome"], sort_keys=True
                     ),
+                },
+            ).fetchone()
+            if row is None:
+                return None
+            updated_record = _row_to_record(row)
+            append_approval_audit(
+                updated_record,
+                action=known_outcome["final_status"],
+                actor=actor,
+                comment="Reconciled a durable operation result received after lease loss.",
+                metadata={
+                    "execution_operation_id": record.get("execution_operation_id"),
+                    "execution_worker_id": record.get("execution_worker_id"),
+                    "control": "late_idempotent_operation_reconciliation",
+                },
+                connection=conn,
+            )
+    except ApprovalPersistenceError:
+        raise
+    except Exception as exc:
+        raise ApprovalPersistenceError("Late execution outcome reconciliation failed") from exc
+    _approvals[approval_id] = updated_record
+    return updated_record
+
+
+def reconcile_stale_approval_execution_atomic(
+    record: dict,
+    *,
+    actor: str,
+    transition_at: datetime,
+) -> PersistentApprovalRecord:
+    """Recover an expired worker lease, consulting durable operation state first."""
+    approval_id = record.get("approval_id")
+    tenant_id = record.get("tenant_id")
+    try:
+        with engine.begin() as conn:
+            known_outcome = _known_execution_outcome(conn, record)
+            final_status = (
+                known_outcome["final_status"]
+                if known_outcome is not None
+                else "execution_indeterminate"
+            )
+            execution_outcome = (
+                known_outcome["outcome"]
+                if known_outcome is not None
+                else {
+                    "status": "indeterminate",
+                    "error": "worker_lease_expired_without_terminal_result",
+                    "execution_operation_id": record.get("execution_operation_id"),
+                }
+            )
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE gateway_approvals
+                    SET status = CAST(:final_status AS VARCHAR),
+                        executed_at = CASE
+                            WHEN CAST(:final_status AS VARCHAR) = 'executed' THEN :transition_at
+                            ELSE executed_at
+                        END,
+                        last_action_at = :transition_at,
+                        execution_provider_operation_id = COALESCE(
+                            :provider_operation_id, execution_provider_operation_id
+                        ),
+                        execution_outcome = :execution_outcome
+                    WHERE approval_id = :approval_id
+                      AND tenant_id = :tenant_id
+                      AND status = 'executing'
+                      AND execution_reconcile_after <= :transition_at
+                      AND execution_operation_id = :operation_id
+                      AND execution_worker_id IS NOT DISTINCT FROM :worker_id
+                      AND execution_fence_token IS NOT DISTINCT FROM :fence_token
+                    RETURNING *
+                    """
+                ),
+                {
+                    "approval_id": approval_id,
+                    "tenant_id": tenant_id,
+                    "transition_at": _parse_optional_dt(transition_at),
+                    "operation_id": record.get("execution_operation_id"),
+                    "worker_id": record.get("execution_worker_id"),
+                    "fence_token": record.get("execution_fence_token"),
+                    "final_status": final_status,
+                    "provider_operation_id": (
+                        known_outcome.get("provider_operation_id")
+                        if known_outcome is not None else None
+                    ),
+                    "execution_outcome": json.dumps(execution_outcome, sort_keys=True),
                 },
             ).fetchone()
             if row is None:
@@ -1179,12 +1431,21 @@ def reconcile_stale_approval_execution_atomic(
             updated_record = _row_to_record(row)
             append_approval_audit(
                 updated_record,
-                action="execution_indeterminate",
+                action=final_status,
                 actor=actor,
-                comment="Execution worker stopped before a terminal result was durably recorded.",
+                comment=(
+                    "Recovered terminal state from the idempotent operation record."
+                    if known_outcome is not None
+                    else "Execution worker lease expired before a terminal result was durably recorded."
+                ),
                 metadata={
                     "execution_operation_id": record.get("execution_operation_id"),
-                    "control": "manual_reconciliation_required",
+                    "execution_worker_id": record.get("execution_worker_id"),
+                    "control": (
+                        "idempotent_operation_reconciliation"
+                        if known_outcome is not None
+                        else "manual_reconciliation_required"
+                    ),
                 },
                 connection=conn,
             )
@@ -1194,6 +1455,53 @@ def reconcile_stale_approval_execution_atomic(
         raise ApprovalPersistenceError("Stale execution reconciliation failed") from exc
     _approvals[approval_id] = updated_record
     return updated_record
+
+
+def reconcile_due_approval_executions(
+    tenant_id: int,
+    *,
+    transition_at: datetime,
+) -> int:
+    """Finalize every overdue EXECUTING record visible to one tenant.
+
+    The operation is safe to repeat: the atomic transition accepts only the
+    original EXECUTING row and competing reconcilers observe a terminal state.
+    """
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT * FROM gateway_approvals
+                    WHERE tenant_id = :tenant_id
+                      AND status = 'executing'
+                      AND execution_reconcile_after IS NOT NULL
+                      AND execution_reconcile_after <= :transition_at
+                    ORDER BY execution_reconcile_after, approval_id
+                    """
+                ),
+                {
+                    "tenant_id": tenant_id,
+                    "transition_at": _parse_optional_dt(transition_at),
+                },
+            ).fetchall()
+    except Exception as exc:
+        raise ApprovalPersistenceError("Stale execution discovery failed") from exc
+
+    reconciled = 0
+    for row in rows:
+        record = _row_to_record(row)
+        try:
+            reconcile_stale_approval_execution_atomic(
+                record,
+                actor="system:execution-reconciler",
+                transition_at=transition_at,
+            )
+            reconciled += 1
+        except ApprovalStateConflict:
+            # Another worker already finalized the same operation.
+            continue
+    return reconciled
 
 
 def get_approval_history(approval_id: str, tenant_id: int = None) -> List[dict]:

@@ -31,6 +31,7 @@ from app.services import abuse_controls, audit_store, compliance_scoring, contro
 from app.api.v1.endpoints.trust_center import get_public_trust_center
 from app.api.v1.endpoints import compliance_scores
 from app.api.v1.endpoints import workflows as workflow_endpoints
+from app.orchestrator.runner import _create_approval_in_db
 from starlette.requests import Request
 from tests.db_safety import destructive_test_urls
 from tests.test_tenant_isolation import Identity, IsolationHarness
@@ -59,7 +60,10 @@ def postgres():
         assert (result.returncode == 0) is succeeds, result.stderr
         return result
 
-    legacy_tenant, legacy_snapshot = uuid4(), uuid4()
+    legacy_tenant, legacy_snapshot, legacy_user = uuid4(), uuid4(), uuid4()
+    linkage_workflow = f"workflow-linkage-{uuid4()}"
+    duplicate_pending, duplicate_approved, orphan_approval = uuid4(), uuid4(), uuid4()
+    duplicate_audit = uuid4()
     with admin.connect() as conn:
         conn.execute(text(f'CREATE DATABASE "{name}"'))
     try:
@@ -77,11 +81,58 @@ def postgres():
         with owner.begin() as conn:
             conn.execute(text("""INSERT INTO users (id,tenant_id,email,role,platform_role,is_active,mfa_enabled,mfa_secret)
                 VALUES (:id,:tenant,'legacy-mfa@example.invalid','admin','NONE',true,true,'legacy-test-enrollment')"""),
-                {"id": uuid4(), "tenant": legacy_tenant})
+                {"id": legacy_user, "tenant": legacy_tenant})
         command("-m", "alembic", "upgrade", "051")
         command("-m", "alembic", "upgrade", "052")
+        with owner.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO compliance_workflows
+                    (id,tenant_id,workflow_id,framework,current_state,execution_status,
+                     state_data,started_at,updated_at)
+                VALUES (:id,:tenant,:workflow,'SOC2','AWAITING_APPROVAL','PAUSED',
+                        '{}'::json,now(),now())
+            """), {"id": uuid4(), "tenant": legacy_tenant, "workflow": linkage_workflow})
+            for approval_id, status, created_at in (
+                (duplicate_pending, "PENDING", datetime(2026, 1, 1, tzinfo=timezone.utc)),
+                (duplicate_approved, "APPROVED", datetime(2026, 1, 2, tzinfo=timezone.utc)),
+            ):
+                conn.execute(text("""
+                    INSERT INTO pending_approvals
+                        (id,tenant_id,action_id,action_type,action_description,action_payload,
+                         status,requester_id,mfa_verified,expires_at,created_at,updated_at)
+                    VALUES (:id,:tenant,:action,'remediation','legacy duplicate','{}'::json,
+                            :status,:user,false,now()+interval '1 hour',:created,:created)
+                """), {"id": approval_id, "tenant": legacy_tenant,
+                         "action": linkage_workflow, "status": status,
+                         "user": legacy_user, "created": created_at})
+            conn.execute(text("""
+                INSERT INTO pending_approvals
+                    (id,tenant_id,action_id,action_type,action_description,action_payload,
+                     status,requester_id,mfa_verified,expires_at,created_at,updated_at)
+                VALUES (:id,:tenant,'orphan-action','remediation','legacy orphan','{}'::json,
+                        'PENDING',:user,false,now()+interval '1 hour',now(),now())
+            """), {"id": orphan_approval, "tenant": legacy_tenant, "user": legacy_user})
+            conn.execute(text("""
+                INSERT INTO approval_audit
+                    (id,tenant_id,approval_id,actor_id,action,mfa_verified,created_at)
+                VALUES (:id,:tenant,:approval,:user,'CREATED',false,now())
+            """), {"id": duplicate_audit, "tenant": legacy_tenant,
+                     "approval": duplicate_pending, "user": legacy_user})
+            conn.execute(
+                text("UPDATE compliance_workflows SET approval_id=:approval WHERE workflow_id=:workflow"),
+                {"approval": duplicate_pending, "workflow": linkage_workflow},
+            )
+        command("-m", "alembic", "upgrade", "053")
         command("scripts/bootstrap_database_security.py", "finalize-backend")
         harness = IsolationHarness(owner, app, sessionmaker(bind=app, expire_on_commit=False))
+        harness.approval_linkage_053 = {
+            "tenant_id": legacy_tenant,
+            "workflow_id": linkage_workflow,
+            "keeper_id": duplicate_approved,
+            "duplicate_id": duplicate_pending,
+            "orphan_id": orphan_approval,
+            "audit_id": duplicate_audit,
+        }
         yield harness, command, legacy_snapshot
     finally:
         owner.dispose()
@@ -95,6 +146,81 @@ def postgres():
 def evidence_scope(monkeypatch):
     monkeypatch.setattr(control_assessments.settings, "COMPLIANCE_ENVIRONMENT", "ci")
     monkeypatch.setattr(evidence_service, "_emit_evidence_audit", lambda *_: None)
+
+
+def test_approval_linkage_upgrade_repairs_duplicates_orphans_and_reruns(postgres):
+    harness, command, _ = postgres
+    evidence = harness.approval_linkage_053
+
+    def assert_reconciled():
+        with harness.owner_engine.connect() as conn:
+            workflow_approval = conn.execute(
+                text("SELECT approval_id FROM compliance_workflows WHERE workflow_id=:workflow"),
+                {"workflow": evidence["workflow_id"]},
+            ).scalar_one()
+            duplicate = conn.execute(
+                text("SELECT action_id FROM pending_approvals WHERE id=:id"),
+                {"id": evidence["duplicate_id"]},
+            ).scalar_one()
+            orphan_count = conn.execute(
+                text("SELECT count(*) FROM pending_approvals WHERE id=:id"),
+                {"id": evidence["orphan_id"]},
+            ).scalar_one()
+            audit_approval = conn.execute(
+                text("SELECT approval_id FROM approval_audit WHERE id=:id"),
+                {"id": evidence["audit_id"]},
+            ).scalar_one()
+            canonical_count = conn.execute(text("""
+                SELECT count(*) FROM pending_approvals
+                WHERE tenant_id=:tenant AND action_type='remediation' AND action_id=:workflow
+            """), {"tenant": evidence["tenant_id"], "workflow": evidence["workflow_id"]}).scalar_one()
+        assert workflow_approval == evidence["keeper_id"]
+        assert duplicate.endswith(f"#superseded:{evidence['duplicate_id']}")
+        assert orphan_count == 1
+        assert audit_approval == evidence["keeper_id"]
+        assert canonical_count == 1
+
+    assert_reconciled()
+    command("-m", "alembic", "downgrade", "052")
+    command("-m", "alembic", "upgrade", "053")
+    assert_reconciled()
+
+
+def test_concurrent_approval_retry_reuses_single_upgraded_link(postgres):
+    harness, _, _ = postgres
+    identity = harness.create_identity("approval-retry")
+    workflow_id = f"workflow-retry-{uuid4()}"
+    with harness.owner_engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO compliance_workflows
+                (id,tenant_id,workflow_id,framework,current_state,execution_status,
+                 state_data,started_at,updated_at)
+            VALUES (:id,:tenant,:workflow,'SOC2','AWAITING_APPROVAL','PAUSED',
+                    '{}'::json,now(),now())
+        """), {"id": uuid4(), "tenant": identity.tenant_id, "workflow": workflow_id})
+
+    barrier = Barrier(2)
+
+    def create_or_reuse():
+        barrier.wait()
+        with harness.session_for(identity) as db:
+            return _create_approval_in_db(
+                db,
+                str(identity.tenant_id),
+                workflow_id,
+                [{"action": "redact", "destructive": False}],
+                str(identity.user_id),
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        approval_ids = list(pool.map(lambda _: create_or_reuse(), range(2)))
+
+    assert approval_ids[0] == approval_ids[1]
+    with harness.owner_engine.connect() as conn:
+        assert conn.execute(text("""
+            SELECT count(*) FROM pending_approvals
+            WHERE tenant_id=:tenant AND action_type='remediation' AND action_id=:workflow
+        """), {"tenant": identity.tenant_id, "workflow": workflow_id}).scalar_one() == 1
 
 
 def score(score_value, *, generated_at=None):
@@ -481,7 +607,7 @@ def test_downgrade_refuses_retained_versioned_history_and_keeps_rls(postgres):
     result = command("-m", "alembic", "downgrade", "049", succeeds=False)
     assert "downgrade refused" in result.stderr
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "052"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "053"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='compliance_score_snapshots'")).scalar_one()
 
 
@@ -728,5 +854,5 @@ def test_durable_mfa_state_prevents_schema_downgrade(real_mfa, postgres):
     result = command("-m", "alembic", "downgrade", "050", succeeds=False)
     assert "mfa" in result.stderr.lower() and "downgrade" in result.stderr.lower()
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "052"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "053"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='users'")).scalar_one()

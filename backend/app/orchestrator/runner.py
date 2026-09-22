@@ -141,14 +141,44 @@ def _create_approval_in_db(
     plan: list,
     requester_id: str,
 ) -> str:
-    """Create a pending_approvals record for HITL review."""
-    approval_id = str(uuid.uuid4())
+    """Create and link one remediation approval in the workflow transaction."""
     if not str(requester_id or "").strip():
         raise ValueError("Authenticated workflow requester identity is required")
     resolved_requester_id = uuid.UUID(str(requester_id))
 
+    workflow = db.query(ComplianceWorkflow).filter(
+        ComplianceWorkflow.workflow_id == workflow_id,
+        ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
+    ).with_for_update().first()
+    if not workflow:
+        raise ValueError(f"Workflow {workflow_id} not found for tenant {tenant_id}")
     expires_at = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
     action_payload = build_action_payload(workflow_id, plan)
+    existing = db.query(PendingApproval).filter(
+        PendingApproval.tenant_id == uuid.UUID(tenant_id),
+        PendingApproval.action_type == "remediation",
+        PendingApproval.action_id == workflow_id,
+    ).order_by(PendingApproval.created_at, PendingApproval.id).first()
+    if existing:
+        if existing.action_payload != action_payload:
+            raise ValueError("Existing remediation approval does not match the current plan")
+        expected_hash = compute_action_hash(
+            tenant_id=tenant_id,
+            action_payload=existing.action_payload,
+            expires_at=existing.expires_at,
+        )
+        if existing.action_hash and existing.action_hash != expected_hash:
+            raise ValueError("Existing remediation approval failed its integrity binding")
+        state_data = dict(workflow.state_data or {})
+        state_data["approval_id"] = str(existing.id)
+        workflow.approval_id = existing.id
+        workflow.approval_status = existing.status
+        workflow.state_data = state_data
+        workflow.updated_at = datetime.now(tz=timezone.utc)
+        db.commit()
+        return str(existing.id)
+
+    approval_id = str(uuid.uuid4())
 
     approval = PendingApproval(
         id=uuid.UUID(approval_id),
@@ -168,6 +198,19 @@ def _create_approval_in_db(
     )
 
     db.add(approval)
+    state_data = dict(workflow.state_data or {})
+    state_data.update({
+        "current_state": WorkflowState.AWAITING_APPROVAL.value,
+        "execution_status": ExecutionStatus.PAUSED.value,
+        "approval_status": "PENDING",
+        "approval_id": approval_id,
+    })
+    workflow.current_state = WorkflowState.AWAITING_APPROVAL.value
+    workflow.execution_status = ExecutionStatus.PAUSED.value
+    workflow.approval_status = "PENDING"
+    workflow.approval_id = approval.id
+    workflow.state_data = state_data
+    workflow.updated_at = datetime.now(tz=timezone.utc)
     db.commit()
 
     logger.info("Created approval %s for workflow %s", approval_id, workflow_id)
@@ -307,7 +350,7 @@ def _check_approval_in_db(
                 db, approval, uuid.UUID(actor_id), "EXPIRED", approval.resolution_reason
             )
             event_backbone.increment_metric("remediation_approval_expired_total")
-            db.commit()
+            db.flush()
             return "EXPIRED"
 
     decision = evaluate_approval(
@@ -328,7 +371,7 @@ def _check_approval_in_db(
         event_backbone.increment_metric(
             f"remediation_approval_{decision.status.lower()}_rejected_total"
         )
-        db.commit()
+        db.flush()
         if decision.status in {"EXPIRED", "REPLAYED", "ALTERED", "USER_MISMATCH", "ACTION_MISMATCH"}:
             return "EXPIRED"
         return approval.status
@@ -339,7 +382,7 @@ def _check_approval_in_db(
     approval.resolution_reason = "Approval consumed for one remediation execution"
     _record_approval_audit(db, approval, uuid.UUID(actor_id), "CONSUMED", approval.resolution_reason)
     event_backbone.increment_metric("remediation_approval_consumed_total")
-    db.commit()
+    db.flush()
     return "APPROVED"
 
 
@@ -513,7 +556,7 @@ class ComplianceWorkflowRunner:
             # Update DB status
             wf.execution_status = ExecutionStatus.RUNNING.value
             wf.updated_at = datetime.now(tz=timezone.utc)
-            self.db.commit()
+            self.db.flush()
 
             # Execute remaining nodes from current state
             try:
@@ -533,9 +576,23 @@ class ComplianceWorkflowRunner:
 
             except Exception as exc:
                 logger.error("Workflow %s resume failed: %s", workflow_id, exc)
+                self.db.rollback()
                 emit_audit_event(workflow_id, tenant_id, state.get("request_id", ""),
                                  "FAILED", "workflow_resume_error", str(exc))
-                wf.execution_status = ExecutionStatus.FAILED.value
+                wf = self.db.query(ComplianceWorkflow).filter(
+                    ComplianceWorkflow.workflow_id == workflow_id,
+                    ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
+                ).with_for_update().first()
+                if wf is None:
+                    raise
+                # A failure while consuming an approval must leave both the
+                # workflow and approval retryable; the rollback above restores
+                # the APPROVED approval and this durable pause advertises recovery.
+                awaiting = wf.current_state == WorkflowState.AWAITING_APPROVAL.value
+                wf.execution_status = (
+                    ExecutionStatus.PAUSED.value if awaiting
+                    else ExecutionStatus.FAILED.value
+                )
                 wf.error_message = str(exc)
                 wf.updated_at = datetime.now(tz=timezone.utc)
                 self.db.commit()

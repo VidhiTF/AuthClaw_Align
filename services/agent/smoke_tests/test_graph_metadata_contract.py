@@ -153,20 +153,27 @@ class GraphMetadataContractTests(unittest.TestCase):
             "verify_audit": types.SimpleNamespace(log_agent_event=lambda **_: None),
         })
         calls = []
+        order = []
 
         class Provider:
             def generate(self, prompt, **kwargs):
+                order.append("provider")
                 calls.append((prompt, kwargs))
                 return "ok"
+
+        def pre_effect_check():
+            order.append("fence")
 
         result = one_node_graph(llm).invoke({
             "message": "execute", "allowed": True,
             "provider_client": Provider(),
             "request_id": "approval-exec-operation-17",
             "idempotency_key": "operation-17",
+            "pre_effect_check": pre_effect_check,
         })
 
         self.assertEqual(result["provider_status"], "ok")
+        self.assertEqual(order, ["fence", "provider"])
         self.assertEqual(calls[0][1], {
             "idempotency_key": "operation-17",
             "request_id": "approval-exec-operation-17",

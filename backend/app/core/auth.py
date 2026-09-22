@@ -339,7 +339,7 @@ def require_interactive_session(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Interactive tenant session required")
 
 
-def revalidate_tenant_credential(request: Request, db: Session) -> None:
+def revalidate_tenant_credential(request: Request, db: Session):
     """Check revocation again after waiting on a credential-owner row lock."""
     kind = getattr(request.state, "credential_kind", None)
     credential_hash = getattr(request.state, "credential_hash", None)
@@ -354,7 +354,7 @@ def revalidate_tenant_credential(request: Request, db: Session) -> None:
         else "authn.bind_api_key_context"
     )
     bound = db.execute(
-        text(f"SELECT tenant_id, user_id FROM {resolver}(:credential_hash)"),
+        text(f"SELECT tenant_id, user_id, role, scopes FROM {resolver}(:credential_hash)"),
         {"credential_hash": credential_hash},
     ).first()
     if (not bound or str(bound.tenant_id) != str(expected_tenant)
@@ -365,6 +365,7 @@ def revalidate_tenant_credential(request: Request, db: Session) -> None:
     # transactions that must be re-bound after a commit (for example, audit
     # appends).  This is cleared with the request-scoped SQLAlchemy session.
     db.info["authclaw_database_auth_context"] = (kind, credential_hash)
+    return bound
 
 
 def get_tenant_score_db(request: Request, db: Session = Depends(get_score_db)) -> Generator[Session, None, None]:

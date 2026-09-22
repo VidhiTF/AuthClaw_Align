@@ -503,7 +503,9 @@ def run_startup_migrations():
         execution_operation_id VARCHAR(100),
         execution_provider_operation_id VARCHAR(255),
         execution_outcome TEXT,
-        execution_reconcile_after TIMESTAMP
+        execution_reconcile_after TIMESTAMP,
+        execution_worker_id VARCHAR(255),
+        execution_fence_token VARCHAR(100)
     );
 
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS approval_id VARCHAR(100);
@@ -542,6 +544,8 @@ def run_startup_migrations():
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_provider_operation_id VARCHAR(255);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_outcome TEXT;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_reconcile_after TIMESTAMP;
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_worker_id VARCHAR(255);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_fence_token VARCHAR(100);
 
     CREATE TABLE IF NOT EXISTS approval_audit_events (
         id SERIAL PRIMARY KEY,

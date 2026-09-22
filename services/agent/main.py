@@ -8,6 +8,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+import threading
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager, nullcontext
@@ -28,6 +29,7 @@ from approval_store import (
     begin_approval_execution_atomic,
     expire_approved_execution_atomic,
     finish_approval_execution_atomic,
+    renew_approval_execution_lease_atomic,
     reject_approval_atomic,
     pending_approvals,
     approved_results,
@@ -35,6 +37,8 @@ from approval_store import (
     get_all_approvals,
     get_approval_history,
     append_approval_audit,
+    reconcile_due_approval_executions,
+    reconcile_late_approval_execution_outcome_atomic,
     remaining_seconds,
 )
 from memory import add_message, delete_session_history, get_history, list_sessions, purge_session_history
@@ -44,6 +48,7 @@ from startup.initialization import initialize_provider
 from database import validate_database_security
 from policy import compile_policy_to_rego, evaluate_opa_policy, get_policy, load_policy
 from services.gateway_service import (
+    ExecutionLeaseLostError,
     GatewayExecutionOutcome,
     GatewayProviderConfigurationError,
     GatewayProviderUnavailableError,
@@ -70,6 +75,84 @@ from services.document_monitor_status import monitor_metrics_snapshot, monitor_s
 # Set up basic logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("authclaw.gateway")
+
+EXECUTION_LEASE_SECONDS = 60
+EXECUTION_HEARTBEAT_SECONDS = 20
+
+
+class _ExecutionLeaseHeartbeat:
+    """Renew one fenced execution lease until its terminal write completes."""
+
+    def __init__(self, record: dict):
+        self.record = dict(record)
+        self._stop = threading.Event()
+        self._lost = threading.Event()
+        self._record_lock = threading.Lock()
+        self._loss_reason = "execution lease is no longer owned"
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"approval-lease-{record.get('approval_id')}",
+            daemon=True,
+        )
+
+    def start(self) -> "_ExecutionLeaseHeartbeat":
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not threading.current_thread():
+            self._thread.join(timeout=1)
+
+    def assert_owned(self) -> None:
+        """Renew synchronously at a side-effect boundary or cancel execution."""
+        if self._lost.is_set():
+            raise ExecutionLeaseLostError(self._loss_reason)
+        renewed_at = datetime.now(timezone.utc)
+        try:
+            with self._record_lock:
+                current = dict(self.record)
+            with tenant_context(
+                current.get("tenant_id"),
+                request_id=str(current.get("request_id") or ""),
+                required=True,
+            ):
+                renewed = renew_approval_execution_lease_atomic(
+                    current,
+                    renewed_at=renewed_at,
+                    lease_expires_at=(
+                        renewed_at + timedelta(seconds=EXECUTION_LEASE_SECONDS)
+                    ),
+                )
+            with self._record_lock:
+                self.record = renewed
+        except (ApprovalStateConflict, ApprovalPersistenceError) as exc:
+            self._loss_reason = str(exc)
+            self._lost.set()
+            raise ExecutionLeaseLostError(self._loss_reason) from exc
+
+    def _run(self) -> None:
+        while not self._stop.wait(EXECUTION_HEARTBEAT_SECONDS):
+            try:
+                self.assert_owned()
+            except ExecutionLeaseLostError as exc:
+                logger.error(
+                    "Execution lease lost for approval %s: %s",
+                    self.record.get("approval_id"),
+                    exc,
+                )
+                return
+
+
+def _finish_execution_with_lease(
+    heartbeat: _ExecutionLeaseHeartbeat,
+    record: dict,
+    **kwargs,
+) -> dict:
+    try:
+        return finish_approval_execution_atomic(record, **kwargs)
+    finally:
+        heartbeat.stop()
 
 API_KEY = os.getenv("AUTHCLAW_TEST_API_KEY", "")
 
@@ -423,11 +506,71 @@ def get_current_user_from_authorization(authorization: str = Header(None)) -> di
         raise HTTPException(status_code=401, detail="Invalid session token.")
     return payload
 
+
+def _audit_stale_session_denial(payload: dict, current_role: Optional[str]) -> None:
+    from verify_audit import create_audit_block
+
+    create_audit_block(
+        query="Privileged session authorization",
+        response="Denied because persisted tenant authority changed after token issue.",
+        allowed=False,
+        risk_level="HIGH",
+        approval_status="authorization_denied",
+        execution_status="denied",
+        username=str(payload.get("email") or payload.get("sub") or payload.get("user_id")),
+        tenant_id=payload.get("tenant_id"),
+        policy_name="authoritative_tenant_role",
+        policy_type="authorization",
+        matched_pattern=f"claimed={payload.get('role')};current={current_role or 'inactive'}",
+    )
+
+
+def revalidate_tenant_session_payload(payload: dict) -> dict:
+    """Replace JWT role claims with current persisted tenant-user authority."""
+    tenant_id = payload.get("tenant_id")
+    user_id = payload.get("user_id")
+    if not tenant_id or not user_id:
+        raise HTTPException(status_code=401, detail="Session token is missing canonical user scope.")
+
+    from database import engine
+    with tenant_context(tenant_id, required=True), engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT id, role, permissions, status
+                FROM tenant_users
+                WHERE id = :user_id AND tenant_id = :tenant_id
+                """
+            ),
+            {"user_id": user_id, "tenant_id": tenant_id},
+        ).fetchone()
+
+    current_role = (
+        str(row._mapping["role"])
+        if row and row._mapping.get("status") == "active"
+        else None
+    )
+    claimed_role = str(payload.get("role") or "")
+    if current_role is None or current_role != claimed_role:
+        with tenant_context(tenant_id, required=True):
+            _audit_stale_session_denial(payload, current_role)
+    if current_role is None:
+        raise HTTPException(status_code=403, detail="Tenant user is inactive or unavailable.")
+
+    refreshed = dict(payload)
+    refreshed["role"] = current_role
+    refreshed["permissions"] = row._mapping.get("permissions")
+    return refreshed
+
+
 def optional_user_from_request(request: Request) -> dict:
     principal = getattr(request.state, "control_plane_principal", None)
     if principal:
         return principal
     principal = getattr(request.state, "api_key_principal", None)
+    if principal:
+        return principal
+    principal = getattr(request.state, "session_principal", None)
     if principal:
         return principal
     auth_header = request.headers.get("Authorization")
@@ -491,6 +634,8 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
         token = authorization[7:] if authorization.startswith("Bearer ") else authorization
         payload = decode_jwt(token)
         if payload and payload.get("tenant_id"):
+            payload = revalidate_tenant_session_payload(payload)
+            request.state.session_principal = payload
             request.state.quota_user_id = payload.get("user_id") or payload.get("sub")
             if not request.state.quota_user_id:
                 raise HTTPException(status_code=401, detail="Authenticated user identity required.")
@@ -556,6 +701,18 @@ async def tenant_database_context_middleware(request: Request, call_next):
     request.state.tenant_id = tenant_id
     with tenant_context(tenant_id, request_id=request_id, required=tenant_id is not None):
         if protected:
+            try:
+                await run_in_threadpool(
+                    reconcile_due_approval_executions,
+                    tenant_id,
+                    transition_at=datetime.now(timezone.utc),
+                )
+            except ApprovalPersistenceError:
+                return JSONResponse(
+                    status_code=503,
+                    content={"error": "approval_reconciliation_unavailable"},
+                    headers={"Retry-After": "1"},
+                )
             try:
                 limit = await run_in_threadpool(_tenant_tier_limit, tenant_id)
                 await run_in_threadpool(
@@ -934,6 +1091,7 @@ def require_platform_admin(payload: dict = Depends(get_current_user_from_authori
     return payload
 
 def require_tenant_access_admin(payload: dict = Depends(get_current_user_from_authorization)) -> dict:
+    payload = revalidate_tenant_session_payload(payload)
     if payload.get("role") not in {"Super Admin", "Security Admin"}:
         raise HTTPException(status_code=403, detail="Tenant access administrator role required.")
     if not payload.get("tenant_id"):
@@ -1823,6 +1981,10 @@ async def execute_request(approval_id: str, request: Request):
     from startup.audit import log_approval_event
     execution_operation_id = secrets.token_hex(16)
     execution_token_hash = hashlib.sha256(execution_operation_id.encode("utf-8")).hexdigest()
+    execution_worker_id = (
+        f"{os.getenv('HOSTNAME') or 'agent'}:{os.getpid()}:{secrets.token_hex(8)}"
+    )
+    execution_fence_token = secrets.token_hex(16)
     transition_at = datetime.now(timezone.utc)
     deferred_failure = []
     try:
@@ -1846,7 +2008,11 @@ async def execute_request(approval_id: str, request: Request):
                     transition_at=transition_at,
                     execution_token_hash=execution_token_hash,
                     execution_operation_id=execution_operation_id,
-                    reconcile_after=transition_at + timedelta(seconds=60),
+                    execution_worker_id=execution_worker_id,
+                    execution_fence_token=execution_fence_token,
+                    reconcile_after=(
+                        transition_at + timedelta(seconds=EXECUTION_LEASE_SECONDS)
+                    ),
                     mfa_binding_hash=execution_mfa_binding_hash,
                     mfa_counter=execution_mfa_counter,
                     comment=comment,
@@ -1911,13 +2077,16 @@ async def execute_request(approval_id: str, request: Request):
         return JSONResponse(status_code=400, content={"error": "Approval execution token already used."})
 
     query = record["query"]
+    heartbeat = _ExecutionLeaseHeartbeat(record).start()
 
     # Execute the approved query through the canonical gateway lifecycle.
     try:
         if (record.get("metadata") or {}).get("execution_target") == "remediation":
             from services.remediation_runtime import RemediationRuntime
             remediation_result = RemediationRuntime().execute_approved_plan(
-                record, idempotency_key=record["execution_operation_id"]
+                record,
+                idempotency_key=record["execution_operation_id"],
+                pre_effect_check=heartbeat.assert_owned,
             )
             result = {"response": remediation_result.get("summary", "Remediation executed."), "remediation": remediation_result}
             execution = type("RemediationExecution", (), {
@@ -1940,11 +2109,39 @@ async def execute_request(approval_id: str, request: Request):
                 x_api_key=request.headers.get("X-API-Key"),
                 authorization=request.headers.get("Authorization"),
                 idempotency_key=record["execution_operation_id"],
+                pre_effect_check=heartbeat.assert_owned,
             )
             result = execution.result
+    except ExecutionLeaseLostError as e:
+        logger.warning(
+            "Execution ownership lost for approval %s: %s",
+            record.get("approval_id"),
+            e,
+        )
+        heartbeat.stop()
+        try:
+            reconcile_late_approval_execution_outcome_atomic(
+                record,
+                actor="system:late-outcome-reconciler",
+                transition_at=datetime.now(timezone.utc),
+            )
+        except ApprovalPersistenceError as reconcile_error:
+            logger.error(
+                "Late execution reconciliation failed for approval %s: %s",
+                record.get("approval_id"),
+                reconcile_error,
+            )
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "status": "reconciliation_pending",
+                "error": "execution_lease_lost",
+            },
+        )
     except GatewayProviderConfigurationError as e:
         logger.error(f"Provider configuration error in execute: {e}", exc_info=True)
-        record = finish_approval_execution_atomic(
+        record = _finish_execution_with_lease(
+            heartbeat,
             record,
             actor=approver,
             final_status="execution_failed",
@@ -1969,7 +2166,8 @@ async def execute_request(approval_id: str, request: Request):
         )
     except GatewayProviderUnavailableError as e:
         logger.error(f"Provider invocation error in execute: {e}", exc_info=True)
-        record = finish_approval_execution_atomic(
+        record = _finish_execution_with_lease(
+            heartbeat,
             record,
             actor=approver,
             final_status="execution_indeterminate",
@@ -2003,7 +2201,8 @@ async def execute_request(approval_id: str, request: Request):
         )
     except Exception as e:
         logger.error(f"Execution failed: {e}", exc_info=True)
-        record = finish_approval_execution_atomic(
+        record = _finish_execution_with_lease(
+            heartbeat,
             record,
             actor=approver,
             final_status="execution_indeterminate",
@@ -2028,7 +2227,8 @@ async def execute_request(approval_id: str, request: Request):
     if execution.outcome != GatewayExecutionOutcome.SUCCEEDED:
         denied = execution.outcome == GatewayExecutionOutcome.POLICY_DENIED
         outcome_name = execution.outcome.value
-        record = finish_approval_execution_atomic(
+        record = _finish_execution_with_lease(
+            heartbeat,
             record,
             actor=approver,
             final_status="execution_failed",
@@ -2066,7 +2266,8 @@ async def execute_request(approval_id: str, request: Request):
             },
         )
 
-    record = finish_approval_execution_atomic(
+    record = _finish_execution_with_lease(
+        heartbeat,
         record,
         actor=approver,
         final_status="executed",
@@ -4558,7 +4759,9 @@ def update_tenant_plan(
     x_api_key: Optional[str] = Header(None),
     authorization: Optional[str] = Header(None)
 ):
-    payload = get_current_user_from_authorization(authorization)
+    payload = revalidate_tenant_session_payload(
+        get_current_user_from_authorization(authorization)
+    )
     if payload.get("role") not in {"Super Admin", "Security Admin"}:
         raise HTTPException(status_code=403, detail="Tenant access administrator role required.")
     tenant_id = resolve_tenant(x_api_key, authorization)

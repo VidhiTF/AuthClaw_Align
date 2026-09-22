@@ -85,8 +85,8 @@ def _verify_api_key_mfa(
         .with_for_update()
         .first()
     )
-    revalidate_tenant_credential(request, db)
-    if not user or not user.mfa_enabled or not user.mfa_secret:
+    _revalidate_locked_api_key_actor(request, db, user)
+    if not user.mfa_enabled or not user.mfa_secret:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="MFA enrollment is required for API key administration",
@@ -102,6 +102,32 @@ def _verify_api_key_mfa(
         db.rollback()
         raise HTTPException(status_code=400, detail="Invalid MFA token or backup code")
     return user
+
+
+def _revalidate_locked_api_key_actor(
+    request: Request,
+    db: Session,
+    user: User | None,
+) -> None:
+    """Refresh the locked actor and fail closed if current authority changed."""
+    if user is not None:
+        db.refresh(user, attribute_names=["is_active", "role"])
+    bound = revalidate_tenant_credential(request, db)
+    current_role = str(user.role).lower() if user is not None else ""
+    bound_role = str(bound.role).lower() if bound is not None else ""
+    current_scopes = set(bound.scopes or []) if bound is not None else set()
+    if (
+        user is None
+        or not user.is_active
+        or current_role != "owner"
+        or bound_role != "owner"
+        or "admin" not in current_scopes
+    ):
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Active tenant owner with admin scope required",
+        )
 
 
 def _commit_api_key_audit(
@@ -177,7 +203,7 @@ def generate_api_key(
 
     # Serialize issuance with owner recovery and consume MFA while holding the
     # user row lock so recovery cannot race a privileged credential change.
-    _verify_api_key_mfa(
+    actor = _verify_api_key_mfa(
         request, db, code=key_in.mfa_code.get_secret_value(), operation="api_key_issue"
     )
 
@@ -198,6 +224,7 @@ def generate_api_key(
         )
         db.add(new_key)
         db.flush()
+        _revalidate_locked_api_key_actor(request, db, actor)
         _commit_api_key_audit(db, request, key=new_key, action="issued")
         db.refresh(new_key)
         create_notification(
@@ -240,7 +267,7 @@ def rotate_api_key(
     """Rotate an API key by revoking the old key and returning a new secret once."""
     tenant_id = request.state.tenant_id
     user_id = request.state.user_id
-    _verify_api_key_mfa(
+    actor = _verify_api_key_mfa(
         request, db, code=rotate_in.mfa_code.get_secret_value(), operation="api_key_rotate"
     )
     # Different tenant owners lock different User rows above, so serialize on
@@ -274,6 +301,7 @@ def rotate_api_key(
     old_key.rotated_at = datetime.now(timezone.utc)
     db.add(new_key)
     db.flush()
+    _revalidate_locked_api_key_actor(request, db, actor)
     _commit_api_key_audit(
         db, request, key=new_key, action="rotated", rotated_from_id=old_key.id
     )
@@ -308,7 +336,7 @@ def revoke_api_key(
 ):
     """Revoke (delete) an API key for the tenant"""
     tenant_id = request.state.tenant_id
-    _verify_api_key_mfa(
+    actor = _verify_api_key_mfa(
         request, db, code=revoke_in.mfa_code.get_secret_value(), operation="api_key_revoke"
     )
     key = (
@@ -328,6 +356,7 @@ def revoke_api_key(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="API key is not active")
     key.is_active = False
     key.revoked_at = datetime.now(timezone.utc)
+    _revalidate_locked_api_key_actor(request, db, actor)
     _commit_api_key_audit(db, request, key=key, action="revoked")
     create_notification(
         db,
