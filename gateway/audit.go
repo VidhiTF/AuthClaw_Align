@@ -84,17 +84,22 @@ func auditOutboxPath() string {
 }
 
 func writeAuditOutbox(event *AuditEvent, reason error) error {
-	if event == nil {
-		return fmt.Errorf("audit event is nil")
-	}
-	envelope := auditOutboxEnvelope{
-		FailedAt:    time.Now().UTC(),
-		ErrorReason: reason.Error(),
-		Event:       event,
-	}
-	payload, err := json.Marshal(envelope)
-	if err != nil {
-		return err
+	return writeAuditOutboxBatch([]*AuditEvent{event}, reason)
+}
+
+func writeAuditOutboxBatch(events []*AuditEvent, reason error) error {
+	payload := make([]byte, 0, len(events)*512)
+	failedAt := time.Now().UTC()
+	for _, event := range events {
+		if event == nil {
+			return fmt.Errorf("audit event is nil")
+		}
+		line, err := json.Marshal(auditOutboxEnvelope{FailedAt: failedAt, ErrorReason: reason.Error(), Event: event})
+		if err != nil {
+			return err
+		}
+		payload = append(payload, line...)
+		payload = append(payload, '\n')
 	}
 	path := auditOutboxPath()
 	auditOutboxMu.Lock()
@@ -106,7 +111,7 @@ func writeAuditOutbox(event *AuditEvent, reason error) error {
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(append(payload, '\n')); err != nil {
+	if _, err := file.Write(payload); err != nil {
 		_ = file.Close()
 		return err
 	}
@@ -117,7 +122,7 @@ func writeAuditOutbox(event *AuditEvent, reason error) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	auditOutboxWrites.Add(1)
+	auditOutboxWrites.Add(uint64(len(events)))
 	return nil
 }
 
@@ -221,21 +226,122 @@ func emitPostResponseOutcome(ctx context.Context, route string, event *AuditEven
 	}
 }
 
+const auditAsyncBacklogLimit = 64
+
 var auditAsyncSlots = make(chan struct{}, 4)
 
+type pendingAuditEvent struct {
+	recovery *AuditEvent
+	spilled  bool
+}
+
+var auditAsync struct {
+	sync.Mutex
+	pending int
+	drained chan struct{}
+	closing bool
+	active  map[*pendingAuditEvent]struct{}
+}
+
+func startPendingAudit() {
+	if auditAsync.pending == 0 {
+		auditAsync.drained = make(chan struct{})
+	}
+	auditAsync.pending++
+}
+
+func finishPendingAudit(task *pendingAuditEvent) {
+	auditAsync.Lock()
+	delete(auditAsync.active, task)
+	auditAsync.pending--
+	if auditAsync.pending == 0 {
+		close(auditAsync.drained)
+	}
+	auditAsync.Unlock()
+}
+
+func drainAuditEvents(ctx context.Context) error {
+	auditAsync.Lock()
+	auditAsync.closing = true
+	pending, done := auditAsync.pending, auditAsync.drained
+	auditAsync.Unlock()
+	if pending == 0 {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		err := fmt.Errorf("audit drain: %w", ctx.Err())
+		auditAsync.Lock()
+		spill := make([]*AuditEvent, 0, len(auditAsync.active))
+		for task := range auditAsync.active {
+			if task.spilled {
+				continue
+			}
+			task.spilled = true
+			spill = append(spill, task.recovery)
+		}
+		auditAsync.Unlock()
+		if len(spill) > 0 {
+			if spillErr := writeAuditOutboxBatch(spill, err); spillErr != nil {
+				auditOutboxFailures.Add(1)
+				err = errors.Join(err, spillErr)
+			}
+		}
+		return err
+	}
+}
+
 func EmitAuditEventAsync(ctx context.Context, event *AuditEvent) {
+	if event == nil {
+		log.Print("[AUDIT] async emit rejected nil event")
+		return
+	}
+	auditAsync.Lock()
+	if auditAsync.closing {
+		auditAsync.Unlock()
+		if err := writeAuditOutbox(event, errors.New("gateway shutting down")); err != nil {
+			auditOutboxFailures.Add(1)
+			log.Printf("[AUDIT] shutdown recovery failed: %v", err)
+		}
+		return
+	}
 	ctx = context.WithoutCancel(ctx)
 	if auditFailClosedEnabled() {
+		startPendingAudit()
+		auditAsync.Unlock()
+		defer finishPendingAudit(nil)
 		if err := EmitAuditEvent(ctx, event); err != nil {
 			log.Printf("[AUDIT] fail-closed emit failed: %v", err)
 		}
 		return
 	}
+	if len(auditAsync.active) >= auditAsyncBacklogLimit {
+		auditAsync.Unlock()
+		if err := writeAuditOutbox(event, errors.New("asynchronous audit backlog capacity exhausted")); err != nil {
+			auditOutboxFailures.Add(1)
+			log.Printf("[AUDIT] overload recovery failed: %v", err)
+		}
+		return
+	}
+	recovery := *event
+	recovery.FrameworksAffected = append([]string(nil), event.FrameworksAffected...)
+	recovery.ExecutionTrace = append([]string(nil), event.ExecutionTrace...)
+	task := &pendingAuditEvent{recovery: &recovery}
+	if auditAsync.active == nil {
+		auditAsync.active = make(map[*pendingAuditEvent]struct{})
+	}
+	auditAsync.active[task] = struct{}{}
+	startPendingAudit()
+	auditAsync.Unlock()
 	go func() {
-		// ponytail: bound background DB/Kafka work; a burst must not exhaust the request pool.
 		auditAsyncSlots <- struct{}{}
-		defer func() { <-auditAsyncSlots }()
-		if err := EmitAuditEvent(ctx, event); err != nil {
+		defer func() {
+			<-auditAsyncSlots
+			finishPendingAudit(task)
+		}()
+		if err := auditEventEmitter(ctx, event); err != nil {
 			log.Printf("[AUDIT] async emit failed: %v", err)
 		}
 	}()

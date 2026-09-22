@@ -1,17 +1,240 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
 )
+
+type closingAuditStream struct {
+	auditStream
+	closed chan struct{}
+}
+
+func (s *closingAuditStream) Close() { close(s.closed) }
+
+func lifecycleClients(t *testing.T) (*sql.DB, *redis.Client, <-chan struct{}) {
+	t.Helper()
+	oldDB, oldRedis, oldAudit := DB, RedisClient, activeAuditStream
+	db, err := sql.Open("postgres", "postgres://unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	redisClient := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	DB, RedisClient = db, redisClient
+	stream := &closingAuditStream{closed: make(chan struct{})}
+	activeAuditStream = stream
+	t.Cleanup(func() {
+		DB, RedisClient, activeAuditStream = oldDB, oldRedis, oldAudit
+		_ = db.Close()
+		_ = redisClient.Close()
+		auditAsync.Lock()
+		auditAsync.closing = false
+		auditAsync.Unlock()
+	})
+	return db, redisClient, stream.closed
+}
+
+func TestShutdownGatewayDrainsRequestsAndClosesClients(t *testing.T) {
+	db, redisClient, closed := lifecycleClients(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	releaseRequest := sync.OnceFunc(func() { close(release) })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	defer releaseRequest()
+	requestDone := make(chan error, 1)
+	go func() {
+		resp, err := http.Get(server.URL)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				err = fmt.Errorf("status=%d", resp.StatusCode)
+			}
+		}
+		requestDone <- err
+	}()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- shutdownGateway(ctx, server.Config) }()
+	select {
+	case <-closed:
+		t.Fatal("audit closed before active request drained")
+	case <-time.After(30 * time.Millisecond):
+	}
+	releaseRequest()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-requestDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := http.Get(server.URL); err == nil {
+		t.Fatal("server still accepts requests")
+	}
+	if err := db.Ping(); err == nil || err.Error() != "sql: database is closed" {
+		t.Fatalf("database close not demonstrated: %v", err)
+	}
+	if err := redisClient.Ping(context.Background()).Err(); !errors.Is(err, redis.ErrClosed) {
+		t.Fatalf("redis close not demonstrated: %v", err)
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("audit transport remains open")
+	}
+}
+
+func TestShutdownGatewayForcesConnectionsClosedAtDeadline(t *testing.T) {
+	lifecycleClients(t)
+	entered, canceled := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-r.Context().Done()
+		close(canceled)
+	}))
+	defer server.Close()
+	requestDone := make(chan struct{})
+	go func() {
+		if resp, err := http.Get(server.URL); err == nil {
+			resp.Body.Close()
+		}
+		close(requestDone)
+	}()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := shutdownGateway(ctx, server.Config); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error=%v", err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("request context not canceled")
+	}
+	<-requestDone
+}
+
+func TestShutdownGatewayDrainsBackgroundAudit(t *testing.T) {
+	_, _, closed := lifecycleClients(t)
+	t.Setenv("AUDIT_FAIL_CLOSED", "false")
+	oldEmitter := auditEventEmitter
+	t.Cleanup(func() { auditEventEmitter = oldEmitter })
+	entered, release := make(chan struct{}), make(chan struct{})
+	releaseAudit := sync.OnceFunc(func() { close(release) })
+	defer releaseAudit()
+	auditEventEmitter = func(context.Context, *AuditEvent) error { close(entered); <-release; return nil }
+	EmitAuditEventAsync(context.Background(), &AuditEvent{})
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- shutdownGateway(ctx, &http.Server{}) }()
+	select {
+	case <-closed:
+		t.Fatal("audit closed before pending event drained")
+	case <-time.After(30 * time.Millisecond):
+	}
+	releaseAudit()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAuditDrainDeadlineDurablySpillsActiveQueuedAndOverflowEvents(t *testing.T) {
+	lifecycleClients(t)
+	t.Setenv("AUDIT_FAIL_CLOSED", "false")
+	outbox := filepath.Join(t.TempDir(), "audit.ndjson")
+	t.Setenv("AUDIT_OUTBOX_PATH", outbox)
+	oldEmitter := auditEventEmitter
+	t.Cleanup(func() { auditEventEmitter = oldEmitter })
+	entered, release := make(chan struct{}, cap(auditAsyncSlots)), make(chan struct{})
+	releaseAudit := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(func() {
+		releaseAudit()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = drainAuditEvents(ctx)
+	})
+	auditEventEmitter = func(context.Context, *AuditEvent) error {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	}
+
+	ids := make([]string, 0, auditAsyncBacklogLimit+1)
+	for i := 0; i <= auditAsyncBacklogLimit; i++ {
+		id := fmt.Sprintf("00000000-0000-4000-8000-%012d", i)
+		ids = append(ids, id)
+		EmitAuditEventAsync(context.Background(), &AuditEvent{ID: id, TenantID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})
+	}
+	for range cap(auditAsyncSlots) {
+		<-entered
+	}
+	overflow, err := os.ReadFile(outbox)
+	if err != nil || !strings.Contains(string(overflow), ids[len(ids)-1]) {
+		t.Fatalf("overflow event was not durably recovered: err=%v data=%s", err, overflow)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := drainAuditEvents(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("drain error=%v, want context cancellation", err)
+	}
+	data, err := os.ReadFile(outbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if count := strings.Count(string(data), id); count != 1 {
+			t.Fatalf("event %s recovery count=%d, want 1", id, count)
+		}
+	}
+	if lines := strings.Count(string(data), "\n"); lines != len(ids) {
+		t.Fatalf("outbox lines=%d, want %d", lines, len(ids))
+	}
+	releaseAudit()
+	drained, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := drainAuditEvents(drained); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestShutdownGatewayAfterListenFailure(t *testing.T) {
+	lifecycleClients(t)
+	server := &http.Server{Addr: "invalid:port"}
+	if err := server.ListenAndServe(); err == nil {
+		t.Fatal("invalid listener succeeded")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := shutdownGateway(ctx, server); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func markerMiddleware(header, value string) gatewayMiddleware {
 	return func(next http.Handler) http.Handler {

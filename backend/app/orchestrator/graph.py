@@ -12,12 +12,16 @@ Workflow state is persisted to PostgreSQL for crash recovery.
 import json
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, closing
+from itertools import islice
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any, Optional, TypedDict
 
 from langgraph.graph import StateGraph, END
 import os
+import requests
 
 logger = logging.getLogger("orchestrator")
 
@@ -114,12 +118,45 @@ class ComplianceState(TypedDict, total=False):
 # Node Implementations
 
 
+def _scan_documents(scanner, docs, url, workers):
+    """Bound both outstanding work and sessions; yield in source order."""
+    def scan(session, doc):
+        try:
+            text = scanner.fetch_and_extract_text(doc["object_key"], doc["file_name"])
+            if not text.strip():
+                return None
+            session.cookies.clear()
+            with session.post(url, json={
+                "text": text, "language": "en",
+                "entities": ["EMAIL_ADDRESS", "PERSON", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD"],
+            }, timeout=10) as response:
+                if response.status_code == 200:
+                    return response.json()
+                logger.warning("Presidio returned %d for %s", response.status_code, doc["object_key"])
+        except Exception as exc:
+            logger.error("Failed to scan document %s: %s", doc["object_key"], type(exc).__name__)
+        return None
+
+    with ExitStack() as resources:
+        sessions = [resources.enter_context(requests.Session()) for _ in range(workers)]
+        pool = resources.enter_context(ThreadPoolExecutor(max_workers=workers))
+        documents = iter(docs)
+        while batch := list(islice(documents, workers)):
+            pending = [pool.submit(scan, session, doc) for session, doc in zip(sessions, batch)]
+            for doc, future in zip(batch, pending):
+                yield doc, future.result()
+
+
 def gather_evidence(state: ComplianceState) -> ComplianceState:
     """GATHER_EVIDENCE: Collect documents from S3 and scan for PII/PHI."""
     logger.info("[%s] Gathering evidence for %s", state["workflow_id"], state["framework"])
     
     tenant_id = state["tenant_id"]
     findings = []
+    workers = int(os.getenv("EVIDENCE_SCAN_WORKERS", "4"))
+    if not 1 <= workers <= 16:
+        raise ValueError("EVIDENCE_SCAN_WORKERS must be between 1 and 16")
+    scanner = None
     
     try:
         from app.orchestrator.connectors import DocumentScanner
@@ -129,96 +166,85 @@ def gather_evidence(state: ComplianceState) -> ComplianceState:
         presidio_url = os.getenv("PRESIDIO_URL", "http://localhost:3000")
         if not presidio_url.endswith("/analyze"):
             presidio_url = f"{presidio_url.rstrip('/')}/analyze"
-        import requests
+        scans = _scan_documents(scanner, docs, presidio_url, workers)
         
-        for doc in docs:
-            try:
-                # Fetch text
-                text_content = scanner.fetch_and_extract_text(doc["object_key"], doc["file_name"])
-                if not text_content.strip():
-                    continue
-                
-                # Analyze with Presidio
-                payload = {
-                    "text": text_content,
-                    "language": "en",
-                    "entities": ["EMAIL_ADDRESS", "PERSON", "PHONE_NUMBER", "US_SSN", "CREDIT_CARD"]
-                }
-                resp = requests.post(presidio_url, json=payload, timeout=10)
-                if resp.status_code == 200:
-                    results = resp.json()
-                    if results:
-                        entity_types = list(set([r["entity_type"] for r in results]))
-                        findings.append({
-                            "control": doc["object_key"],
-                            "description": f"Found {len(results)} sensitive entities in document",
-                            "status": "non_compliant",
-                            "evidence": f"Entities: {', '.join(entity_types)}",
-                            "entity_count": len(results)
-                        })
-                        store_fn = state.get("_store_evidence")
-                        if store_fn:
-                            try:
-                                severity = calculate_severity(len(results))
-                                store_fn(
-                                    state["tenant_id"],
-                                    state["workflow_id"],
-                                    state["framework"],
-                                    "s3_document",
-                                    doc["object_key"],
-                                    "pii_detected",
-                                    {
-                                        "object_key": doc["object_key"],
-                                        "file_name": doc.get("file_name", ""),
-                                        "entity_count": len(results),
-                                        "entity_types": entity_types,
-                                        "presidio_results": results,
-                                    },
-                                    severity,
-                                )
-                            except Exception as _ev_exc:
-                                logger.warning(
-                                    "Evidence storage failed for %s (non-fatal): %s",
-                                    doc["object_key"], _ev_exc,
-                                )
-                    else:
-                        findings.append({
-                            "control": doc["object_key"],
-                            "description": "Document contains no detected sensitive data",
-                            "status": "compliant",
-                            "evidence": "Clean scan",
-                            "entity_count": 0
-                        })
-                        store_fn = state.get("_store_evidence")
-                        if store_fn:
-                            try:
-                                store_fn(
-                                    state["tenant_id"],
-                                    state["workflow_id"],
-                                    state["framework"],
-                                    "s3_document",
-                                    doc["object_key"],
-                                    "scan_result",
-                                    {
-                                        "object_key": doc["object_key"],
-                                        "file_name": doc.get("file_name", ""),
-                                        "entity_count": 0,
-                                        "result": "clean",
-                                    },
-                                    "info",
-                                )
-                            except Exception as _ev_exc:
-                                logger.warning(
-                                    "Evidence storage failed for clean scan %s (non-fatal): %s",
-                                    doc["object_key"], _ev_exc,
-                                )
-                else:
-                    logger.warning("Presidio returned %d for %s", resp.status_code, doc["object_key"])
-            except Exception as e:
-                logger.error("Failed to process document %s: %s", doc["object_key"], e)
+        with closing(scans):
+            for doc, results in scans:
+                try:
+                    if results is not None:
+                        if results:
+                            entity_types = list(set([r["entity_type"] for r in results]))
+                            findings.append({
+                                "control": doc["object_key"],
+                                "description": f"Found {len(results)} sensitive entities in document",
+                                "status": "non_compliant",
+                                "evidence": f"Entities: {', '.join(entity_types)}",
+                                "entity_count": len(results)
+                            })
+                            store_fn = state.get("_store_evidence")
+                            if store_fn:
+                                try:
+                                    severity = calculate_severity(len(results))
+                                    store_fn(
+                                        state["tenant_id"],
+                                        state["workflow_id"],
+                                        state["framework"],
+                                        "s3_document",
+                                        doc["object_key"],
+                                        "pii_detected",
+                                        {
+                                            "object_key": doc["object_key"],
+                                            "file_name": doc.get("file_name", ""),
+                                            "entity_count": len(results),
+                                            "entity_types": entity_types,
+                                            "presidio_results": results,
+                                        },
+                                        severity,
+                                    )
+                                except Exception as _ev_exc:
+                                    logger.warning(
+                                        "Evidence storage failed for %s (non-fatal): %s",
+                                        doc["object_key"], _ev_exc,
+                                    )
+                        else:
+                            findings.append({
+                                "control": doc["object_key"],
+                                "description": "Document contains no detected sensitive data",
+                                "status": "compliant",
+                                "evidence": "Clean scan",
+                                "entity_count": 0
+                            })
+                            store_fn = state.get("_store_evidence")
+                            if store_fn:
+                                try:
+                                    store_fn(
+                                        state["tenant_id"],
+                                        state["workflow_id"],
+                                        state["framework"],
+                                        "s3_document",
+                                        doc["object_key"],
+                                        "scan_result",
+                                        {
+                                            "object_key": doc["object_key"],
+                                            "file_name": doc.get("file_name", ""),
+                                            "entity_count": 0,
+                                            "result": "clean",
+                                        },
+                                        "info",
+                                    )
+                                except Exception as _ev_exc:
+                                    logger.warning(
+                                        "Evidence storage failed for clean scan %s (non-fatal): %s",
+                                        doc["object_key"], _ev_exc,
+                                    )
+                except Exception as e:
+                    logger.error("Failed to process document %s: %s", doc["object_key"], e)
                 
     except Exception as e:
         logger.error("Evidence gathering failed: %s", e)
+    finally:
+        if scanner is not None and scanner.s3_client is not None:
+            scanner.s3_client.close()
     
     emit = state.get("_emit_audit")
     if emit:

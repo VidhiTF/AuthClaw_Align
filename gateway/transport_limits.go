@@ -70,6 +70,12 @@ func providerReadTimeout(next http.RoundTripper, timeout time.Duration) http.Rou
 	return readTimeoutTransport{next, timeout}
 }
 
+func (t readTimeoutTransport) CloseIdleConnections() {
+	if closer, ok := t.next.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 func (t readTimeoutTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	ctx, cancel := context.WithCancel(r.Context())
 	response, err := t.next.RoundTrip(r.WithContext(ctx))

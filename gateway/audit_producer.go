@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -105,7 +106,7 @@ func (c *auditProducerClient) PublishDLQ(_ []byte, reason, tenantID, _ string) {
 	log.Printf("[DLQ] producer request retained for normal SQS redrive (tenant=%s reason=%s)", tenantID, reason)
 }
 
-func (c *auditProducerClient) Close() {}
+func (c *auditProducerClient) Close() { c.client.CloseIdleConnections() }
 
 func newAuditProducerHandler(stream *sqsFIFOAuditStream, secret []byte, now func() time.Time) http.Handler {
 	mux := http.NewServeMux()
@@ -145,6 +146,16 @@ func absDuration(value time.Duration) time.Duration {
 	return value
 }
 
+func runAuditProducerServer(server *http.Server, stream interface{ Close() }, signals <-chan os.Signal, serve func() error) (err error) {
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err = errors.Join(err, shutdownHTTPServer(ctx, server))
+		stream.Close()
+	}()
+	return serveUntilSignal(serve, signals, "AuthClaw audit producer")
+}
+
 func runAuditProducer() error {
 	secret, err := auditProducerSecret()
 	if err != nil {
@@ -162,5 +173,7 @@ func runAuditProducer() error {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
-	return server.ListenAndServe()
+	signals, stopSignals := terminationSignals()
+	defer stopSignals()
+	return runAuditProducerServer(server, stream, signals, server.ListenAndServe)
 }

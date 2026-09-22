@@ -27,6 +27,12 @@ def _mock_document_scan(monkeypatch):
     class PresidioResponse:
         status_code = 200
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
         def json(self):
             return [{"entity_type": "EMAIL_ADDRESS"} for _ in range(20)]
 
@@ -63,7 +69,7 @@ def _mock_document_scan(monkeypatch):
             "details": "Restored S3 object",
         },
     )
-    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: PresidioResponse())
+    monkeypatch.setattr(requests.Session, "post", lambda *_args, **_kwargs: PresidioResponse())
 
 
 def _make_initial_state(
@@ -327,20 +333,33 @@ class TestRemediationRollback:
         assert statuses["tenant/doc-success.txt"] == RemediationActionStatus.ROLLED_BACK.value
         assert statuses["tenant/doc-fail.txt"] == RemediationActionStatus.FAILED.value
 
-    def test_action_audit_extra_trace_reaches_publisher_payload(self, monkeypatch):
+    def test_action_audit_extra_trace_reaches_kafka_payload(self, monkeypatch):
         sent_events = []
 
-        def capture_event(producer, tenant_id, event):
-            sent_events.append({"key": tenant_id, "value": event})
+        class DummyFuture:
+            def get(self, timeout):
+                return None
 
-        # The publisher now persists an outbox before transport delivery. This
-        # runner test checks its event boundary; transport has separate tests.
+        class DummyProducer:
+            def send(self, topic, key=None, value=None):
+                sent_events.append({"topic": topic, "key": key, "value": value})
+                return DummyFuture()
+
+        monkeypatch.setattr(workflow_runner, "_kafka_producer", DummyProducer())
         monkeypatch.setattr(workflow_runner, "_init_kafka_producer", lambda: None)
-        monkeypatch.setattr(workflow_runner.event_backbone, "publish_audit_event", capture_event)
+
+        def publish(producer, tenant_id, event):
+            producer.send("audit.events", key=tenant_id, value=event)
+
+        monkeypatch.setattr(
+            workflow_runner.event_backbone,
+            "publish_audit_event",
+            publish,
+        )
 
         workflow_runner.emit_audit_event(
             workflow_id="workflow-123",
-            tenant_id="tenant-123",
+            tenant_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             request_id="request-123",
             transition="REMEDIATION_ACTION_FAILED",
             action="remediation_action_failed",
@@ -355,7 +374,8 @@ class TestRemediationRollback:
 
         assert len(sent_events) == 1
         event = sent_events[0]["value"]
-        assert sent_events[0]["key"] == "tenant-123"
+        assert sent_events[0]["topic"] == "audit.events"
+        assert sent_events[0]["key"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         assert event["action"] == "workflow:remediation_action_failed"
         assert "workflow_id=workflow-123" in event["execution_trace"]
         assert "transition=REMEDIATION_ACTION_FAILED" in event["execution_trace"]
@@ -364,7 +384,7 @@ class TestRemediationRollback:
 
         workflow_runner.emit_audit_event(
             workflow_id="workflow-123",
-            tenant_id="tenant-123",
+            tenant_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             request_id="request-123",
             transition="REMEDIATION_ACTION_FAILED",
             action="remediation_action_failed",
