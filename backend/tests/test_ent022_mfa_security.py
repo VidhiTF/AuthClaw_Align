@@ -54,7 +54,11 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     )
     request = MagicMock(headers={"x-request-id": "request-agent-mfa"})
     request.state.credential_kind = "session"
-    monkeypatch.setattr(auth, "revalidate_tenant_credential", lambda *_: None)
+    monkeypatch.setattr(
+        auth,
+        "revalidate_tenant_credential",
+        lambda *_: SimpleNamespace(role="admin", scopes=["admin", "read", "write"]),
+    )
     request.state.tenant_id = tenant_id
     request.state.user_id = user_id
     db = MagicMock()
@@ -78,6 +82,7 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     assert response.operation == "POST /approve/approval-17"
     assert response.body_sha256 == "a" * 64
     assert len(response.assertion_id) == 32
+    assert response.role == "admin"
     assert "654321" not in str(response)
     assert verified.call_args.kwargs["tenant_id"] == str(tenant_id)
     assert verified.call_args.kwargs["operation"] == "agent_approval"
@@ -93,6 +98,48 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     }]
     assert "654321" not in str(event)
     db.commit.assert_called_once()
+
+
+def test_control_plane_mfa_assertion_rejects_current_non_privileged_role(monkeypatch):
+    tenant_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    user = SimpleNamespace(
+        id=user_id,
+        tenant_id=tenant_id,
+        mfa_enabled=True,
+        mfa_secret=encrypt_secret("JBSWY3DPEHPK3PXP"),
+    )
+    request = SimpleNamespace(
+        headers={"x-request-id": "request-demoted-agent-mfa"},
+        state=SimpleNamespace(
+            credential_kind="session", tenant_id=tenant_id, user_id=user_id
+        ),
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
+    monkeypatch.setattr(
+        auth,
+        "revalidate_tenant_credential",
+        lambda *_: SimpleNamespace(role="viewer", scopes=["read", "write", "admin"]),
+    )
+    verify = MagicMock(return_value=True)
+    monkeypatch.setattr(auth, "verify_mfa_challenge", verify)
+
+    with pytest.raises(HTTPException, match="owner or admin") as exc:
+        auth.create_agent_mfa_assertion(
+            auth.AgentMFAAssertionRequest(
+                code="654321",
+                method="POST",
+                path="/approve/approval-17",
+                body_sha256="a" * 64,
+            ),
+            request,
+            db,
+        )
+
+    assert exc.value.status_code == 403
+    verify.assert_not_called()
+    db.rollback.assert_called_once()
 
 
 def test_api_key_administration_requires_interactive_replay_protected_mfa(monkeypatch):

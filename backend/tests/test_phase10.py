@@ -93,10 +93,17 @@ def _create_admin_tenant(db_session: Session, name: str, email: str, api_key_raw
     return tenant_id, user_id, {"Authorization": f"Bearer {api_key_raw}"}
 
 
-def _create_tenant_approver(db_session: Session, tenant_id, email: str, api_key_raw: str):
+def _create_tenant_approver(
+    db_session: Session,
+    tenant_id,
+    email: str,
+    api_key_raw: str,
+    *,
+    role: str = "admin",
+):
     user_id = uuid.uuid4()
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
-    db_session.add(User(id=user_id, tenant_id=tenant_id, email=email, role="admin", is_active=True))
+    db_session.add(User(id=user_id, tenant_id=tenant_id, email=email, role=role, is_active=True))
     db_session.flush()
     db_session.add(APIKey(
         id=uuid.uuid4(), tenant_id=tenant_id, key_hash=hash_key(api_key_raw),
@@ -110,6 +117,49 @@ def _create_tenant_approver(db_session: Session, tenant_id, email: str, api_key_
     db_session.commit()
     db_session.execute(text("SET app.current_tenant_id = ''"))
     return user_id, {"Authorization": f"Bearer {session_token}"}
+
+
+def test_gateway_decisions_require_interactive_privileged_role(
+    client: TestClient,
+    db_session: Session,
+):
+    tenant_id, requester_id, machine_headers = _create_admin_tenant(
+        db_session,
+        "Gateway Decision Auth Tenant",
+        "requester@gateway-decision-auth.example",
+        "gateway_decision_requester_key",
+    )
+    _, viewer_headers = _create_tenant_approver(
+        db_session,
+        tenant_id,
+        "viewer@gateway-decision-auth.example",
+        "gateway_decision_viewer_key",
+        role="viewer",
+    )
+    approval_id = _create_gateway_approval(
+        db_session,
+        tenant_id,
+        requester_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    approve = client.post(
+        f"/v1/workflows/approvals/{approval_id}/approve",
+        headers=viewer_headers,
+        json={"totp_code": "654321"},
+    )
+    reject = client.post(
+        f"/v1/workflows/approvals/{approval_id}/reject",
+        headers=viewer_headers,
+    )
+    machine_reject = client.post(
+        f"/v1/workflows/approvals/{approval_id}/reject",
+        headers=machine_headers,
+    )
+
+    assert approve.status_code == status.HTTP_403_FORBIDDEN
+    assert reject.status_code == status.HTTP_403_FORBIDDEN
+    assert machine_reject.status_code == status.HTTP_403_FORBIDDEN
 
 
 def _enroll_mfa(client: TestClient, headers: dict[str, str]):

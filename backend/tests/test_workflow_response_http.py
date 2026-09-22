@@ -72,7 +72,14 @@ def api(monkeypatch):
             )
         )
         db.commit()
-    identity = dict(tenant_id=tenant, user_id=user, scopes=["admin"])
+    identity = dict(
+        tenant_id=tenant,
+        user_id=user,
+        user_role="admin",
+        scopes=["admin"],
+        credential_kind="session",
+        credential_hash="workflow-response-session",
+    )
     app = FastAPI()
 
     @app.middleware("http")
@@ -92,7 +99,11 @@ def api(monkeypatch):
     monkeypatch.setattr(workflows, "create_notification", lambda *_args, **_kw: None)
     # Exact credential revocation is exercised against PostgreSQL in
     # test_t10_postgres; this SQLite contract fixture has no authn schema.
-    monkeypatch.setattr(workflows, "revalidate_tenant_credential", lambda *_args: None)
+    monkeypatch.setattr(
+        workflows,
+        "revalidate_tenant_credential",
+        lambda *_args: SimpleNamespace(role="admin", scopes=["admin"]),
+    )
     monkeypatch.setattr(
         workflows, "_verify_mfa_if_enabled", lambda *_args, **_kw: (True, datetime.now(timezone.utc))
     )

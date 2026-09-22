@@ -139,7 +139,13 @@ export async function agentFetch(path: string, options: AgentRequestOptions = {}
   }
   const headers = new Headers(options.headers);
   let requestBody = (options.body ?? "") as string;
-  let mfaAssertion: { verified_at: number; operation: string; body_sha256: string; assertion_id: string } | undefined;
+  let mfaAssertion: {
+    verified_at: number;
+    operation: string;
+    body_sha256: string;
+    assertion_id: string;
+    role: string;
+  } | undefined;
   if (method === "POST" && /^\/(?:approve|execute)\/[A-Za-z0-9._:-]+$/.test(url.pathname)) {
     let privilegedBody: Record<string, unknown>;
     try {
@@ -169,6 +175,10 @@ export async function agentFetch(path: string, options: AgentRequestOptions = {}
       throw new BackendRequestError(apiErrorMessage(body, "MFA verification failed"), assertionResponse.status);
     }
     mfaAssertion = await assertionResponse.json();
+    if (!mfaAssertion || !["owner", "admin"].includes(mfaAssertion.role)) {
+      throw new BackendRequestError("Invalid MFA assertion role", 403);
+    }
+    principal.role = mfaAssertion.role;
   }
   if (options.forwardGatewayKey) headers.set("X-API-Key", principal.apiKey);
   if (requestBody !== "") headers.set("Content-Type", "application/json");

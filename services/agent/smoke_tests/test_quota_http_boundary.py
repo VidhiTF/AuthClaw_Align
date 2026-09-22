@@ -53,7 +53,7 @@ def boundary_namespace():
         "record_unavailable": quota.record_unavailable,
         "QuotaUnavailable": quota.QuotaUnavailable,
         "authenticate_control_plane": AsyncMock(return_value=None),
-        "revalidate_tenant_session_payload": lambda payload: payload,
+        "revalidate_tenant_session_payload": lambda payload, request_id=None: payload,
         "reconcile_due_approval_executions": Mock(return_value=0),
         "ApprovalPersistenceError": ApprovalPersistenceError,
         "run_in_threadpool": run_in_threadpool,

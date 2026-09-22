@@ -1,0 +1,292 @@
+{
+  "agent-terminal-outcomes.json": [
+    {
+      "execution_outcome": {
+        "allowed": false,
+        "decision": "DENY",
+        "executed": false,
+        "outcome": "policy_denied",
+        "provider": "test",
+        "status": "denied"
+      },
+      "final_status": "execution_failed",
+      "http_status": 403,
+      "immutable_audit_metadata": {
+        "allowed": false,
+        "executed": false,
+        "execution_mfa_binding_hash": "binding",
+        "execution_operation_id": "operation-policy_denied",
+        "execution_request_id": "request-policy_denied",
+        "model": "test",
+        "outcome": "policy_denied",
+        "provider": "test"
+      },
+      "scenario": "policy_denied"
+    },
+    {
+      "execution_outcome": {
+        "allowed": false,
+        "decision": "DENY",
+        "executed": false,
+        "outcome": "execution_error",
+        "provider": "test",
+        "status": "failed"
+      },
+      "final_status": "execution_failed",
+      "http_status": 502,
+      "immutable_audit_metadata": {
+        "allowed": false,
+        "executed": false,
+        "execution_mfa_binding_hash": "binding",
+        "execution_operation_id": "operation-execution_error",
+        "execution_request_id": "request-execution_error",
+        "model": "test",
+        "outcome": "execution_error",
+        "provider": "test"
+      },
+      "scenario": "execution_error"
+    },
+    {
+      "execution_outcome": {
+        "allowed": false,
+        "error": "provider_unavailable",
+        "executed": false,
+        "outcome": "provider_unavailable",
+        "status": "indeterminate"
+      },
+      "final_status": "execution_indeterminate",
+      "http_status": 503,
+      "immutable_audit_metadata": {
+        "allowed": false,
+        "error": "provider_unavailable",
+        "executed": false,
+        "execution_operation_id": "operation-provider_unavailable",
+        "outcome": "provider_unavailable",
+        "request_id": "request-offline"
+      },
+      "scenario": "provider_unavailable"
+    },
+    {
+      "execution_outcome": {
+        "allowed": true,
+        "decision": "ALLOW",
+        "executed": true,
+        "outcome": "succeeded",
+        "provider": "test",
+        "status": "succeeded"
+      },
+      "final_status": "executed",
+      "http_status": 200,
+      "immutable_audit_metadata": {
+        "allowed": true,
+        "executed": true,
+        "execution_mfa_binding_hash": "binding",
+        "execution_operation_id": "operation-succeeded",
+        "execution_request_id": "request-succeeded",
+        "model": "test",
+        "outcome": "succeeded",
+        "provider": "test"
+      },
+      "scenario": "succeeded"
+    }
+  ],
+  "backend-assertion-audit.json": [
+    {
+      "id": "c352bf79-88d3-5b3b-ae42-729a23570453",
+      "model": "",
+      "action": "mfa:agent_assertion_issued",
+      "reason": "POST /approve/approval-postgres-17",
+      "actor_id": "2fcf5c05-a623-4408-949b-e6468a631960",
+      "provider": "control-plane-mfa",
+      "policy_id": "",
+      "record_id": "c352bf79-88d3-5b3b-ae42-729a23570453",
+      "tenant_id": "dfbbd7c1-66e5-4599-82a6-3aaf2b46c96b",
+      "timestamp": "2026-09-22T13:09:54.754Z",
+      "actor_type": "backend",
+      "prior_hash": "fce90fbbc5215a13bfa4fcb3f5dba6750a4118416a98843b6cac58b592049e54",
+      "request_id": "ent022-cross-service",
+      "duration_ms": 0,
+      "prompt_count": 0,
+      "request_size": 0,
+      "chain_version": 2,
+      "integrity_hash": "b6aa63362d02efdcb26e5bf29fd163fa77197f81f1d5450475b09199fffcda59",
+      "execution_trace": "[{\"event\": \"agent_mfa_assertion_issued\", \"operation\": \"POST /approve/approval-postgres-17\", \"body_sha256\": \"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\", \"assertion_id\": \"e592e21074c775fee9d229e571e97b79\"}]",
+      "idempotency_key": "c352bf79-88d3-5b3b-ae42-729a23570453",
+      "response_status": 200,
+      "tenant_sequence": 2,
+      "canonical_payload": "{\"model\": \"\", \"action\": \"mfa:agent_assertion_issued\", \"reason\": \"POST /approve/approval-postgres-17\", \"actor_id\": \"2fcf5c05-a623-4408-949b-e6468a631960\", \"provider\": \"control-plane-mfa\", \"policy_id\": \"\", \"record_id\": \"c352bf79-88d3-5b3b-ae42-729a23570453\", \"tenant_id\": \"dfbbd7c1-66e5-4599-82a6-3aaf2b46c96b\", \"timestamp\": \"2026-09-22T13:09:54.754Z\", \"actor_type\": \"backend\", \"request_id\": \"ent022-cross-service\", \"duration_ms\": 0, \"prompt_count\": 0, \"request_size\": 0, \"chain_version\": 2, \"execution_trace\": \"[{\\\"event\\\": \\\"agent_mfa_assertion_issued\\\", \\\"operation\\\": \\\"POST /approve/approval-postgres-17\\\", \\\"body_sha256\\\": \\\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\\\", \\\"assertion_id\\\": \\\"e592e21074c775fee9d229e571e97b79\\\"}]\", \"response_status\": 200, \"tenant_sequence\": 2, \"frameworks_affected\": []}",
+      "frameworks_affected": []
+    },
+    {
+      "id": "7500628e-d45e-5ce9-a6e6-fc3da7eef6f5",
+      "model": "",
+      "action": "mfa:agent_assertion_issued",
+      "reason": "POST /execute/approval-postgres-17",
+      "actor_id": "2fcf5c05-a623-4408-949b-e6468a631960",
+      "provider": "control-plane-mfa",
+      "policy_id": "",
+      "record_id": "7500628e-d45e-5ce9-a6e6-fc3da7eef6f5",
+      "tenant_id": "dfbbd7c1-66e5-4599-82a6-3aaf2b46c96b",
+      "timestamp": "2026-09-22T13:09:54.824Z",
+      "actor_type": "backend",
+      "prior_hash": "54abbd1b8d8b86aba923c25c9cbce2bdb8d51068bb8d26f2902e92baf18fa80e",
+      "request_id": "ent022-cross-service",
+      "duration_ms": 0,
+      "prompt_count": 0,
+      "request_size": 0,
+      "chain_version": 2,
+      "integrity_hash": "af335a95519b48598d40688004ef15af4d3d49ff986699f166b458965616ef21",
+      "execution_trace": "[{\"event\": \"agent_mfa_assertion_issued\", \"operation\": \"POST /execute/approval-postgres-17\", \"body_sha256\": \"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\", \"assertion_id\": \"0186c5c7663547f2093045930177bcfb\"}]",
+      "idempotency_key": "7500628e-d45e-5ce9-a6e6-fc3da7eef6f5",
+      "response_status": 200,
+      "tenant_sequence": 6,
+      "canonical_payload": "{\"model\": \"\", \"action\": \"mfa:agent_assertion_issued\", \"reason\": \"POST /execute/approval-postgres-17\", \"actor_id\": \"2fcf5c05-a623-4408-949b-e6468a631960\", \"provider\": \"control-plane-mfa\", \"policy_id\": \"\", \"record_id\": \"7500628e-d45e-5ce9-a6e6-fc3da7eef6f5\", \"tenant_id\": \"dfbbd7c1-66e5-4599-82a6-3aaf2b46c96b\", \"timestamp\": \"2026-09-22T13:09:54.824Z\", \"actor_type\": \"backend\", \"request_id\": \"ent022-cross-service\", \"duration_ms\": 0, \"prompt_count\": 0, \"request_size\": 0, \"chain_version\": 2, \"execution_trace\": \"[{\\\"event\\\": \\\"agent_mfa_assertion_issued\\\", \\\"operation\\\": \\\"POST /execute/approval-postgres-17\\\", \\\"body_sha256\\\": \\\"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\\\", \\\"assertion_id\\\": \\\"0186c5c7663547f2093045930177bcfb\\\"}]\", \"response_status\": 200, \"tenant_sequence\": 6, \"frameworks_affected\": []}",
+      "frameworks_affected": []
+    }
+  ],
+  "agent-UTC-audit.json": {
+    "gateway_approval": {
+      "status": "executed",
+      "execution_outcome": {
+        "allowed": true,
+        "decision": "ALLOW",
+        "executed": true,
+        "outcome": "succeeded",
+        "provider": "test",
+        "status": "succeeded"
+      }
+    },
+    "audit_events": [
+      {
+        "action": "approved",
+        "actor": "2fcf5c05-a623-4408-949b-e6468a631960",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-22 13:10:04.172123"
+      },
+      {
+        "action": "executing",
+        "actor": "2fcf5c05-a623-4408-949b-e6468a631960",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-22 13:10:05.789608"
+      },
+      {
+        "action": "executed",
+        "actor": "2fcf5c05-a623-4408-949b-e6468a631960",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-22 13:10:05.800417"
+      }
+    ]
+  },
+  "agent-America-Los_Angeles-audit.json": {
+    "gateway_approval": {
+      "status": "executed",
+      "execution_outcome": {
+        "allowed": true,
+        "decision": "ALLOW",
+        "executed": true,
+        "outcome": "succeeded",
+        "provider": "test",
+        "status": "succeeded"
+      }
+    },
+    "audit_events": [
+      {
+        "action": "approved",
+        "actor": "2fcf5c05-a623-4408-949b-e6468a631960",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-22 13:10:09.071271"
+      },
+      {
+        "action": "executing",
+        "actor": "2fcf5c05-a623-4408-949b-e6468a631960",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-22 13:10:10.450758"
+      },
+      {
+        "action": "executed",
+        "actor": "2fcf5c05-a623-4408-949b-e6468a631960",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-22 13:10:10.471738"
+      }
+    ]
+  },
+  "agent-Asia-Kolkata-audit.json": {
+    "gateway_approval": {
+      "status": "executed",
+      "execution_outcome": {
+        "allowed": true,
+        "decision": "ALLOW",
+        "executed": true,
+        "outcome": "succeeded",
+        "provider": "test",
+        "status": "succeeded"
+      }
+    },
+    "audit_events": [
+      {
+        "action": "approved",
+        "actor": "2fcf5c05-a623-4408-949b-e6468a631960",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-22 13:10:13.251341"
+      },
+      {
+        "action": "executing",
+        "actor": "2fcf5c05-a623-4408-949b-e6468a631960",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-22 13:10:14.780310"
+      },
+      {
+        "action": "executed",
+        "actor": "2fcf5c05-a623-4408-949b-e6468a631960",
+        "tenant_id": 1,
+        "approval_id": "approval-postgres-17",
+        "mfa_verified": true,
+        "created_at": "2026-09-22 13:10:14.789100"
+      }
+    ]
+  },
+  "backend-recovery-audit.json": [
+    {
+      "id": "e2c22f00-7099-5764-8bdf-222760f9771a",
+      "model": "",
+      "action": "mfa:recovery_reset",
+      "reason": "separate_owner_verified",
+      "actor_id": "cad78a2a-55cf-4e7e-a29f-11a800ec86e9",
+      "provider": "totp",
+      "policy_id": "",
+      "record_id": "e2c22f00-7099-5764-8bdf-222760f9771a",
+      "tenant_id": "07a5ff6d-714b-46d5-97bb-c57ae9271177",
+      "timestamp": "2026-09-22T13:11:37.620Z",
+      "actor_type": "backend",
+      "prior_hash": "5ab044e696c47edf3be906f6d6fe397a3911d86090dca61bbb7958f04ad89481",
+      "request_id": "",
+      "duration_ms": 0,
+      "prompt_count": 0,
+      "request_size": 0,
+      "chain_version": 2,
+      "integrity_hash": "9b8d0ab49b288f15adc0e890bbfca7c4da0a13977e7b631f63db8cd402b459e2",
+      "execution_trace": "[\"subject_id:a5de0bf7-d037-4130-afd8-5090a5b9ba66\"]",
+      "idempotency_key": "e2c22f00-7099-5764-8bdf-222760f9771a",
+      "response_status": 200,
+      "tenant_sequence": 2,
+      "canonical_payload": "{\"model\": \"\", \"action\": \"mfa:recovery_reset\", \"reason\": \"separate_owner_verified\", \"actor_id\": \"cad78a2a-55cf-4e7e-a29f-11a800ec86e9\", \"provider\": \"totp\", \"policy_id\": \"\", \"record_id\": \"e2c22f00-7099-5764-8bdf-222760f9771a\", \"tenant_id\": \"07a5ff6d-714b-46d5-97bb-c57ae9271177\", \"timestamp\": \"2026-09-22T13:11:37.620Z\", \"actor_type\": \"backend\", \"request_id\": \"\", \"duration_ms\": 0, \"prompt_count\": 0, \"request_size\": 0, \"chain_version\": 2, \"execution_trace\": \"[\\\"subject_id:a5de0bf7-d037-4130-afd8-5090a5b9ba66\\\"]\", \"response_status\": 200, \"tenant_sequence\": 2, \"frameworks_affected\": []}",
+      "frameworks_affected": []
+    }
+  ]
+}

@@ -211,6 +211,8 @@ def _revalidate_privileged_workflow_actor(
     request: Request,
     db: Session,
     user: User | None = None,
+    *,
+    http_error: bool = False,
 ) -> None:
     """Fail closed if the locked actor lost current workflow authority."""
     if user is None:
@@ -224,6 +226,8 @@ def _revalidate_privileged_workflow_actor(
         bound = revalidate_tenant_credential(request, db)
     except HTTPException as exc:
         db.rollback()
+        if http_error:
+            raise
         raise WorkflowAuthorizationError(
             str(exc.detail), status_code=exc.status_code
         ) from exc
@@ -238,6 +242,11 @@ def _revalidate_privileged_workflow_actor(
         or "admin" not in current_scopes
     ):
         db.rollback()
+        if http_error:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Active tenant owner or admin with admin scope required",
+            )
         raise WorkflowAuthorizationError(
             "Active tenant owner or admin with admin scope required"
         )
@@ -626,7 +635,10 @@ def count_pending_gateway_approvals(
 @router.post(
     "/approvals/{approval_id}/approve",
     response_model=GatewayApprovalResponse,
-    dependencies=[Depends(require_interactive_session)],
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
 )
 def approve_gateway_approval(
     approval_id: str,
@@ -662,7 +674,7 @@ def approve_gateway_approval(
     # Authentication happens before handler-level lock waits. Re-bind the exact
     # session/API key after all authorization rows are locked so revocation wins
     # the race before MFA consumption or the privileged state transition.
-    revalidate_tenant_credential(request, db)
+    _revalidate_privileged_workflow_actor(request, db, user, http_error=True)
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
         user, request, body, required=True, operation="gateway_approval"
     )
@@ -712,7 +724,14 @@ def approve_gateway_approval(
     return _approval_response(approval)
 
 
-@router.post("/approvals/{approval_id}/reject", response_model=GatewayApprovalResponse)
+@router.post(
+    "/approvals/{approval_id}/reject",
+    response_model=GatewayApprovalResponse,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def reject_gateway_approval(
     approval_id: str,
     request: Request,
@@ -728,11 +747,13 @@ def reject_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).first()
+    ).with_for_update().first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
         raise HTTPException(status_code=400, detail=f"Approval already resolved: {approval.status}")
+
+    _revalidate_privileged_workflow_actor(request, db, http_error=True)
 
     decision_at = datetime.now(timezone.utc)
     transitioned = db.execute(

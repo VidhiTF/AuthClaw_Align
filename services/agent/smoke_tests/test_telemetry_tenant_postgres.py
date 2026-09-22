@@ -245,7 +245,35 @@ def run_integration():
 
                 client = TestClient(main.app)  # No lifespan: do not start provider/cloud workers.
                 assert client.get("/reports/executive/json").status_code == 401
-                tokens = {tenant: {"Authorization": "Bearer " + main.create_jwt({"tenant_id": tenant, "sub": f"auditor-{tenant}", "role": "owner", "exp": int(time.time()) + 300})} for tenant in (7, 8)}
+                with owner.begin() as conn:
+                    user_ids = {
+                        tenant: conn.execute(
+                            text("""INSERT INTO agent.tenant_users
+                                (tenant_id,email,password_hash,role,email_verified,status)
+                                VALUES (:tenant,:email,'test-only','owner',FALSE,'active')
+                                RETURNING id"""),
+                            {"tenant": tenant, "email": f"auditor-{tenant}@example.invalid"},
+                        ).scalar_one()
+                        for tenant in (7, 8)
+                    }
+                tokens = {
+                    tenant: {"Authorization": "Bearer " + main.create_jwt({
+                        "tenant_id": tenant,
+                        "user_id": user_ids[tenant],
+                        "sub": f"auditor-{tenant}",
+                        "role": "owner",
+                        "exp": int(time.time()) + 300,
+                    })}
+                    for tenant in (7, 8)
+                }
+                for tenant in (7, 8):
+                    refreshed = main.revalidate_tenant_session_payload({
+                        "tenant_id": tenant,
+                        "user_id": user_ids[tenant],
+                        "sub": f"auditor-{tenant}",
+                        "role": "owner",
+                    }, request_id=f"session-revalidation-{tenant}")
+                    assert refreshed["role"] == "owner"
                 for tenant in (7, 8, 7):
                     response = client.get("/trust/public", headers=tokens[tenant])
                     assert response.status_code == 200, response.text
@@ -258,8 +286,8 @@ def run_integration():
                 with owner.begin() as conn:
                     conn.execute(text("UPDATE agent.tenants SET status='inactive' WHERE id=7"))
                 revoked = client.get("/trust/public", headers=tokens[7])
-                # Restricted DB tenant binding rejects inactive tenants in quota middleware first.
-                assert revoked.status_code == 503 and revoked.json() == {"error": "rate_limit_unavailable"}, revoked.text
+                # Authenticated RLS binding rejects inactive tenants before quota admission.
+                assert revoked.status_code == 503 and revoked.json() == {"error": "authentication_unavailable"}, revoked.text
                 with owner.begin() as conn:
                     conn.execute(text("UPDATE agent.tenants SET status='active' WHERE id=7"))
                 assert client.get("/trust/public", headers=tokens[7]).status_code == 200
@@ -349,7 +377,7 @@ def run_integration():
                         work.assert_not_called()
                 with patch.object(monitoring, "_sync_sources") as work:
                     assert client.post("/cloud/connectors/sync", headers=tokens[8]).status_code == 200
-                    work.assert_called_once_with("8")
+                    work.assert_called_once_with("8", requested_by="auditor-8")
                 with tenant_context(8, request_id="monitor-worker", required=True), patch.object(monitoring, "WATCH_DIR", str(Path(temporary) / "watch")), patch.object(monitoring, "list_cloud_source_files", return_value=[]), patch.object(monitoring, "is_real_connectors_enabled", return_value=False):
                     with patch.object(monitoring, "list_cloud_source_files", side_effect=ConnectionError("source unavailable")):
                         response = client.post("/cloud/connectors/sync", headers=tokens[8])
@@ -402,7 +430,10 @@ def verify_alert_outage_and_retry(client, tokens, engine, tenant_context):
     with tenant_context(7, request_id="alert-worker", required=True), patch.dict(os.environ, GOOGLE_API_KEY="", SMTP_HOST="smtp.test.invalid", SKIP_EMAIL_DELIVERY_FOR_TESTING="false"), patch.object(alerts.smtplib, "SMTP", smtp):
         smtp.side_effect = OSError("private-transport-error")
         with patch.object(orchestrator, "extract_document_text", return_value="test"), patch.object(orchestrator, "extract_file_metadata", return_value={}), patch.object(orchestrator, "split_text_into_chunks", return_value=[]), patch.object(orchestrator, "scan_text_for_sensitive_data", return_value=[finding]), patch("rag.vector_store.save_document_chunks"), patch.object(orchestrator, "create_approval"):
-            result = orchestrator.run_document_scan_pipeline(7, b"test", "never-email-this-filename", tenant_id=7)
+            result = orchestrator.run_document_scan_pipeline(
+                7, b"test", "never-email-this-filename", tenant_id=7,
+                requested_by="telemetry-test-worker",
+            )
         assert result["status"] == "alert_delivery_failed" and result["alert_delivery"]["status"] == "dead_letter"
         event_id = result["alert_delivery"]["event_id"]
         with engine.connect() as conn:
@@ -444,7 +475,10 @@ def verify_alert_outage_and_retry(client, tokens, engine, tenant_context):
             original_delivery(pipeline, identifier, retry=True)
             return original_delivery(pipeline, identifier, **kwargs)
         with patch.object(orchestrator, "extract_document_text", return_value="test"), patch.object(orchestrator, "extract_file_metadata", return_value={}), patch.object(orchestrator, "split_text_into_chunks", return_value=[]), patch.object(orchestrator, "scan_text_for_sensitive_data", return_value=[finding]), patch("rag.vector_store.save_document_chunks"), patch.object(orchestrator, "create_approval"), patch.object(EventPipeline, "deliver_event", retry_first):
-            result = orchestrator.run_document_scan_pipeline(7, b"test", "concurrent-scan", tenant_id=7)
+            result = orchestrator.run_document_scan_pipeline(
+                7, b"test", "concurrent-scan", tenant_id=7,
+                requested_by="telemetry-test-worker",
+            )
         assert result["status"] == "pending_approval" and result["alert_delivery"]["status"] == "delivered"
         assert smtp.return_value.__enter__.return_value.send_message.call_count == sent + 1
 

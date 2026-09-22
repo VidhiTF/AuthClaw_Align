@@ -583,16 +583,21 @@ def reviewed_assessment(harness, requester, approver=None):
 
 def test_migration_preserves_legacy_rows_and_restricted_forced_rls(postgres):
     harness, _, legacy_id = postgres
+    linkage = harness.approval_linkage_054
     with harness.owner_engine.connect() as conn:
         row = conn.execute(text("SELECT * FROM compliance_score_snapshots WHERE id=:id"), {"id": legacy_id}).mappings().one()
         assert row["overall_score"] == 97.5
         assert row["control_scores"] == {"CC7.2": {"status": "compliant"}}
         assert row["calculation_version"] == "legacy_unversioned"
         assert row["assessment_metadata"] == {}
-        prior_user = conn.execute(text("SELECT mfa_enabled,mfa_last_totp_step FROM users WHERE tenant_id=:tenant"),
-                                 {"tenant": row["tenant_id"]}).one()
+        prior_user = conn.execute(text("""SELECT mfa_enabled,mfa_last_totp_step FROM users
+            WHERE tenant_id=:tenant AND id=:user"""),
+            {"tenant": row["tenant_id"],
+             "user": linkage["requesters"][linkage["duplicate_id"]]}).one()
         assert prior_user.mfa_enabled is True and prior_user.mfa_last_totp_step is None
-        assert conn.execute(text("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='compliance_score_snapshots'")).scalar_one() == make_url(os.environ["BACKEND_MIGRATION_DATABASE_URL"]).username
+        assert conn.execute(text("""SELECT pg_get_userbyid(c.relowner)
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relname='compliance_score_snapshots'""")).scalar_one() == make_url(os.environ["BACKEND_MIGRATION_DATABASE_URL"]).username
         flags = conn.execute(text("""SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class
             WHERE relname IN ('compliance_score_snapshots','approval_audit','pending_approvals','evidence_records')""")).all()
         assert len(flags) == 4 and all(row.relrowsecurity and row.relforcerowsecurity for row in flags)

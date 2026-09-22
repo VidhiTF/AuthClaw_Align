@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from services.execution_auth import authorize_agent_operation
 from services.rbac_matrix import agent_operation_allowed, resolve_rule, role_allowed
-from services.tenant_context import get_current_request_id
+from services.tenant_context import get_current_request_id, tenant_context
 
 
 class AgentExecutionAuthorizationTests(unittest.TestCase):
@@ -1712,6 +1712,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             "risk_level": "CRITICAL",
         }
         with (
+            tenant_context(42, request_id="request-17", required=True),
             patch.object(orchestrator, "engine", Engine()),
             patch.object(orchestrator, "extract_document_text", return_value="sensitive document"),
             patch.object(orchestrator, "extract_file_metadata", return_value={}),
@@ -1722,6 +1723,14 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             patch("rag.vector_store.save_document_chunks"),
             patch("document_processing.alerts.trigger_security_alert"),
             patch("document_processing.drift.record_compliance_snapshot"),
+            patch(
+                "services.event_pipeline.EventPipeline.record_event",
+                return_value="event-document-17",
+            ),
+            patch(
+                "services.event_pipeline.EventPipeline.deliver_event",
+                return_value={"status": "delivered", "event_id": "event-document-17"},
+            ),
             patch.dict(os.environ, {"GOOGLE_API_KEY": "dummy"}),
         ):
             result = orchestrator.run_document_scan_pipeline(

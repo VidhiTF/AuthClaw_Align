@@ -525,7 +525,10 @@ def _audit_stale_session_denial(payload: dict, current_role: Optional[str]) -> N
     )
 
 
-def revalidate_tenant_session_payload(payload: dict) -> dict:
+def revalidate_tenant_session_payload(
+    payload: dict,
+    request_id: Optional[str] = None,
+) -> dict:
     """Replace JWT role claims with current persisted tenant-user authority."""
     tenant_id = payload.get("tenant_id")
     user_id = payload.get("user_id")
@@ -533,7 +536,11 @@ def revalidate_tenant_session_payload(payload: dict) -> dict:
         raise HTTPException(status_code=401, detail="Session token is missing canonical user scope.")
 
     from database import engine
-    with tenant_context(tenant_id, required=True), engine.connect() as conn:
+    with tenant_context(
+        tenant_id,
+        request_id=request_id or get_current_request_id(),
+        required=True,
+    ), engine.connect() as conn:
         row = conn.execute(
             text(
                 """
@@ -634,7 +641,10 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
         token = authorization[7:] if authorization.startswith("Bearer ") else authorization
         payload = decode_jwt(token)
         if payload and payload.get("tenant_id"):
-            payload = revalidate_tenant_session_payload(payload)
+            payload = revalidate_tenant_session_payload(
+                payload,
+                request_id=getattr(request.state, "correlation_id", None),
+            )
             request.state.session_principal = payload
             request.state.quota_user_id = payload.get("user_id") or payload.get("sub")
             if not request.state.quota_user_id:
@@ -667,6 +677,7 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
 async def tenant_database_context_middleware(request: Request, call_next):
     from starlette.concurrency import run_in_threadpool
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.correlation_id = request_id
     tenant_id = None
     protected = not _is_public_or_auth_path(request.url.path)
     try:
@@ -697,7 +708,6 @@ async def tenant_database_context_middleware(request: Request, call_next):
                             headers={"X-Request-ID": request_id})
     except Exception:
         return JSONResponse(status_code=503, content={"error": "authentication_unavailable"}, headers={"Retry-After": "1"})
-    request.state.correlation_id = request_id
     request.state.tenant_id = tenant_id
     with tenant_context(tenant_id, request_id=request_id, required=tenant_id is not None):
         if protected:

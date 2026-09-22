@@ -1,0 +1,39 @@
+{
+  "subject": "PR #58 proposed final tree",
+  "generated_at_utc": "2026-09-22T13:14:11Z",
+  "tool": {
+    "name": "gitleaks",
+    "version": "8.24.3",
+    "container_digest": "sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055",
+    "configuration": ".gitleaks.toml",
+    "redaction": true
+  },
+  "binding": {
+    "method": "sha256 of sorted Git index mode/blob/path records excluding docs/evidence/ENT-022-*",
+    "scope_sha256": "252b321d1fcb15964bf024dff7757fc1c33cdf94acb39913118390e1fd8ccd50",
+    "exclusion_reason": "Evidence files are excluded to avoid a self-referential digest; they are scanned independently."
+  },
+  "scans": [
+    {
+      "name": "full proposed tree",
+      "command": "gitleaks dir --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/full-tree.json /scan",
+      "report": "ENT-022-gitleaks-full-tree-2026-09-22.json",
+      "exit_code": 0,
+      "findings": 0
+    },
+    {
+      "name": "PR range patch",
+      "command": "git diff --binary align/master -- | gitleaks stdin --no-banner --redact --config=.gitleaks.toml --report-format=json --report-path=pr-range.json",
+      "report": "ENT-022-gitleaks-pr-range-2026-09-22.json",
+      "exit_code": 0,
+      "findings": 0
+    },
+    {
+      "name": "committed ENT-022 evidence",
+      "command": "gitleaks dir --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/evidence-files.json /scan/docs/evidence",
+      "report": "ENT-022-gitleaks-evidence-files-2026-09-22.json",
+      "exit_code": 0,
+      "findings": 0
+    }
+  ]
+}

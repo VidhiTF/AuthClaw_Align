@@ -151,7 +151,7 @@ test("privileged agent requests verify MFA in backend and never forward the code
           assert.equal(request.code, "654321");
           return Response.json({
             verified_at: Math.floor(Date.now() / 1000), operation: `POST ${path}`,
-            body_sha256: request.body_sha256, assertion_id: "f".repeat(32),
+            body_sha256: request.body_sha256, assertion_id: "f".repeat(32), role: "admin",
           });
         }
         return Response.json({ status: "approved" });
@@ -173,6 +173,7 @@ test("privileged agent requests verify MFA in backend and never forward the code
   assert.doesNotMatch(forwarded.body, /654321|mfa_code/);
   assert.equal(forwarded.headers.get("x-authclaw-version"), "3");
   assert.equal(forwarded.headers.get("x-authclaw-user-id"), "backend-user-uuid");
+  assert.equal(forwarded.headers.get("x-authclaw-role"), "admin");
   assert.equal(forwarded.headers.get("x-authclaw-mfa-operation"), `POST ${path}`);
 });
 

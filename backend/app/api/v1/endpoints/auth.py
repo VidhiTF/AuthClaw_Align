@@ -153,6 +153,7 @@ class AgentMFAAssertionResponse(BaseModel):
     operation: str
     body_sha256: str
     assertion_id: str
+    role: str
 
 
 class PasswordResetRequest(BaseModel):
@@ -669,11 +670,18 @@ def create_agent_mfa_assertion(
         User.id == request.state.user_id,
         User.tenant_id == request.state.tenant_id,
     ).with_for_update().first()
-    revalidate_tenant_credential(request, db)
+    bound = revalidate_tenant_credential(request, db)
     if not user or not user.mfa_enabled or not user.mfa_secret:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="MFA enrollment is required for privileged agent actions",
+        )
+    current_role = str(bound.role).strip().lower() if bound is not None else ""
+    if current_role not in {"owner", "admin"}:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Active tenant owner or admin required for privileged agent actions",
         )
     operation = f"{payload.method} {payload.path}"
     if not verify_mfa_challenge(
@@ -727,6 +735,7 @@ def create_agent_mfa_assertion(
         operation=operation,
         body_sha256=payload.body_sha256,
         assertion_id=assertion_id,
+        role=current_role,
     )
 
 

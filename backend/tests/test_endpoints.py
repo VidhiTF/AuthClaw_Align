@@ -1094,7 +1094,7 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         }
         response_approve = client.post(
             f"/v1/workflows/{workflow_id}/approve",
-            headers=approver_headers,
+            headers=mfa_headers,
             json={"totp_code": backup_code},
         )
     assert response_approve.status_code == status.HTTP_200_OK
