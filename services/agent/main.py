@@ -387,6 +387,24 @@ def resolve_tenant(x_api_key: str, authorization: str = None) -> int:
         return tenant_id
 
 
+def resolve_api_key_principal(key: str) -> dict:
+    """Resolve tenant and role atomically; raw keys never become unscoped principals."""
+    if not key:
+        raise HTTPException(status_code=401, detail="Authentication credentials missing.")
+    key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT tenant_id, role FROM resolve_api_key_principal(:key_hash)"),
+            {"key_hash": key_hash},
+        ).first()
+    if not row or row.tenant_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired API key.")
+    role = normalize_role(row.role)
+    if not role or role == ROLE_PLATFORM_ADMIN:
+        raise HTTPException(status_code=403, detail="API key has no valid tenant role.")
+    return {"tenant_id": row.tenant_id, "role": role, "sub": f"api-key:{key_hash[:16]}"}
+
+
 def require_tenant_context() -> int:
     tenant_id = get_current_tenant_id()
     if tenant_id is None:
@@ -417,6 +435,9 @@ def get_current_user_from_authorization(authorization: str = Header(None)) -> di
 
 def optional_user_from_request(request: Request) -> dict:
     principal = getattr(request.state, "control_plane_principal", None)
+    if principal:
+        return principal
+    principal = getattr(request.state, "api_key_principal", None)
     if principal:
         return principal
     auth_header = request.headers.get("Authorization")
@@ -483,9 +504,11 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
             x_api_key = token
 
     if x_api_key:
-        tenant_id = resolve_tenant(x_api_key=x_api_key, authorization=None)
+        principal = resolve_api_key_principal(x_api_key)
+        request.state.api_key_principal = principal
+        tenant_id = principal["tenant_id"]
         request.state.quota_key_id = hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
-        request.state.quota_user_id = "service:tenant"
+        request.state.quota_user_id = principal["sub"]
         return tenant_id
 
     return None

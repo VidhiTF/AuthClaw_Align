@@ -51,6 +51,43 @@ def upgrade() -> None:
         END;
         $$;
 
+        CREATE OR REPLACE FUNCTION authn.enforce_pending_approval_transition()
+        RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog, authn, public
+        AS $$
+        BEGIN
+            IF OLD.status <> 'PENDING' THEN
+                RAISE EXCEPTION 'approval is not pending';
+            END IF;
+            IF NEW.tenant_id <> OLD.tenant_id
+               OR NEW.requester_id <> OLD.requester_id
+               OR NEW.action_hash <> OLD.action_hash
+               OR NEW.action_payload <> OLD.action_payload
+               OR NEW.created_at <> OLD.created_at THEN
+                RAISE EXCEPTION 'approval identity and action are immutable';
+            END IF;
+            IF NEW.status = 'EXPIRED' THEN
+                IF OLD.expires_at >= now()
+                   OR NOT authn.authorize_action('tenant.approvals.expire') THEN
+                    RAISE EXCEPTION 'approval expiration is not authorized';
+                END IF;
+            ELSIF NEW.status IN ('CONSUMED','REJECTED') THEN
+                IF NOT authn.authorize_action('tenant.high_risk.approve')
+                   OR OLD.requester_id = authn.current_user_id()
+                   OR NEW.approver_id <> authn.current_user_id() THEN
+                    RAISE EXCEPTION 'approval decision is not authorized';
+                END IF;
+            ELSE
+                RAISE EXCEPTION 'invalid approval transition';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS pending_approval_transition_guard ON public.pending_approvals;
+        CREATE TRIGGER pending_approval_transition_guard
+            BEFORE UPDATE ON public.pending_approvals
+            FOR EACH ROW EXECUTE FUNCTION authn.enforce_pending_approval_transition();
+
         CREATE OR REPLACE FUNCTION authn.has_role(p_roles text[]) RETURNS boolean
         LANGUAGE sql STABLE SECURITY DEFINER
         SET search_path = pg_catalog, authn, public
@@ -74,6 +111,9 @@ def upgrade() -> None:
                 WHEN 'tenant.access_review.export' THEN v_role IN ('auditor','tenant_administrator')
                 WHEN 'tenant.high_risk.approve' THEN v_role = 'approver'
                 WHEN 'tenant.approvals.expire' THEN v_role IN ('operator','approver','tenant_administrator')
+                WHEN 'tenant.workflow.create' THEN v_role IN ('developer','operator','tenant_administrator')
+                WHEN 'tenant.workflow.resume' THEN v_role IN ('operator','tenant_administrator')
+                WHEN 'tenant.workflow.remediate' THEN v_role IN ('operator','tenant_administrator')
                 WHEN 'platform.tenant.manage' THEN v_role = 'platform_administrator'
                 ELSE false
             END;
@@ -196,6 +236,8 @@ def upgrade() -> None:
         GRANT EXECUTE ON FUNCTION authn.current_role() TO {app_role};
         GRANT EXECUTE ON FUNCTION authn.has_role(text[]) TO {app_role};
         GRANT EXECUTE ON FUNCTION authn.authorize_action(text) TO {app_role};
+        REVOKE ALL ON FUNCTION authn.enforce_pending_approval_transition() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION authn.enforce_pending_approval_transition() TO {app_role};
         """
     )
 

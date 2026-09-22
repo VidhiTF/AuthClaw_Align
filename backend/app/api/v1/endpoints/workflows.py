@@ -167,12 +167,12 @@ def _tenant_tier(db: Session, tenant_id: str) -> str:
     return tenant.tier if tenant else "starter"
 
 
-@router.post("", response_model=WorkflowResponse, status_code=201)
+@router.post("", response_model=WorkflowResponse, status_code=201,
+             dependencies=[require_permission("tenant.workflow.create"), require_scopes(["write"])])
 def create_workflow(
     body: WorkflowCreateRequest,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["write"]),
 ):
     """Start a new compliance workflow."""
     tenant_id = str(request.state.tenant_id)
@@ -201,12 +201,12 @@ def create_workflow(
     return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/resume", response_model=WorkflowResponseVariant)
+@router.post("/{workflow_id}/resume", response_model=WorkflowResponseVariant,
+             dependencies=[require_permission("tenant.workflow.resume"), require_scopes(["write"])])
 def resume_workflow(
     workflow_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["write"]),
 ):
     """Resume a paused workflow (typically after approval)."""
     tenant_id = str(request.state.tenant_id)
@@ -799,12 +799,12 @@ def reject_workflow(
     return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/remediate", response_model=WorkflowResponseVariant)
+@router.post("/{workflow_id}/remediate", response_model=WorkflowResponseVariant,
+             dependencies=[require_permission("tenant.workflow.remediate"), require_scopes(["write"])])
 def remediate_workflow(
     workflow_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["write"]),
 ):
     """Transition a completed scan into remediation mode and generate approval request."""
     tenant_id = str(request.state.tenant_id)

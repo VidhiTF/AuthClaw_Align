@@ -56,6 +56,19 @@ PERMISSION_ROLES = {
         Role.APPROVER.value,
         Role.TENANT_ADMINISTRATOR.value,
     }),
+    "tenant.workflow.create": frozenset({
+        Role.DEVELOPER.value,
+        Role.OPERATOR.value,
+        Role.TENANT_ADMINISTRATOR.value,
+    }),
+    "tenant.workflow.resume": frozenset({
+        Role.OPERATOR.value,
+        Role.TENANT_ADMINISTRATOR.value,
+    }),
+    "tenant.workflow.remediate": frozenset({
+        Role.OPERATOR.value,
+        Role.TENANT_ADMINISTRATOR.value,
+    }),
     "platform.tenant.manage": PLATFORM_ROLES,
 }
 
