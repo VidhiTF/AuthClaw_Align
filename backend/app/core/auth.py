@@ -16,6 +16,7 @@ from app.db.dependencies import get_db, get_score_db
 from app.core.authorization import (
     effective_scopes,
     normalize_role as _canonical_role,
+    role_allows,
 )
 from app.core.crypto import (
     SECRET_ENVELOPE_PREFIX,
@@ -324,7 +325,9 @@ def require_scopes(required_scopes: List[str]):
     """Enforce that the requesting client has the required scopes"""
 
     def dependency(request: Request):
-        scopes = getattr(request.state, "scopes", [])
+        scopes = set(getattr(request.state, "scopes", []))
+        if "admin" in scopes:
+            scopes.update({"read", "write"})
         for scope in required_scopes:
             if scope not in scopes:
                 raise HTTPException(
@@ -345,6 +348,19 @@ def require_roles(required_roles: List[str]):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Forbidden: Insufficient role",
+            )
+
+    return Depends(dependency)
+
+
+def require_permission(permission: str):
+    """Enforce the canonical role/action matrix at the API boundary."""
+
+    def dependency(request: Request):
+        if not role_allows(getattr(request.state, "user_role", None), permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Insufficient permission",
             )
 
     return Depends(dependency)

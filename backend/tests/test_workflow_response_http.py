@@ -39,7 +39,7 @@ def api(monkeypatch):
     engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
     for model in (Tenant, User, PendingApproval, ComplianceWorkflow, ApprovalAudit, Policy, EvidenceRecord, Finding):
         model.__table__.create(engine)
-    tenant, user = uuid4(), uuid4()
+    tenant, user, approver = uuid4(), uuid4(), uuid4()
     payload = workflow(
         findings=[{"control": "doc", "evidence": "Entities: EMAIL_ADDRESS", "entity_count": 1}],
         remediation_plan=_plan(),
@@ -50,9 +50,10 @@ def api(monkeypatch):
     payload["tenant_id"] = str(tenant)
     with Session(engine) as db:
         db.add(Tenant(id=tenant, name="contract-test"))
-        db.add(
-            User(id=user, tenant_id=tenant, email="reviewer@example.invalid", role="admin", is_active=True)
-        )
+        db.add_all([
+            User(id=user, tenant_id=tenant, email="requester@example.invalid", role="operator", is_active=True),
+            User(id=approver, tenant_id=tenant, email="approver@example.invalid", role="approver", is_active=True),
+        ])
         db.add(
             ComplianceWorkflow(
                 id=uuid4(),
@@ -68,7 +69,7 @@ def api(monkeypatch):
             )
         )
         db.commit()
-    identity = dict(tenant_id=tenant, user_id=user, scopes=["admin"])
+    identity = dict(tenant_id=tenant, user_id=user, user_role="operator", scopes=["read", "write"])
     app = FastAPI()
 
     @app.middleware("http")
@@ -92,7 +93,7 @@ def api(monkeypatch):
     monkeypatch.setattr(runner, "emit_audit_event", lambda *_args, **_kw: None)
     monkeypatch.setattr(runner, "workflow_advisory_lock", lambda *_args: nullcontext())
     with TestClient(app, raise_server_exceptions=False) as client:
-        yield SimpleNamespace(client=client, engine=engine, identity=identity, payload=payload)
+        yield SimpleNamespace(client=client, engine=engine, identity=identity, approver=approver, payload=payload)
     engine.dispose()
 
 
@@ -117,6 +118,7 @@ def test_route_contract_and_sanitized_post_commit_errors(
 ):
     if operation in {"approve", "reject"}:
         assert request_operation(api, prefix, "remediate").status_code == 200
+        api.identity.update(user_id=api.approver, user_role="approver", scopes=["read", "write"])
     payload = deepcopy(api.payload)
     if invalid:
         payload["findings"] = [{"entity_count": "private-marker"}]
@@ -221,6 +223,8 @@ def test_missing_scope_is_denied_before_execution(api, operation):
 @pytest.mark.parametrize("operation", ["list", "get", "resume", "approve", "reject", "remediate"])
 def test_other_tenant_cannot_read_or_change_workflow(api, operation):
     api.identity["tenant_id"] = uuid4()
+    if operation in {"approve", "reject"}:
+        api.identity.update(user_id=api.approver, user_role="approver", scopes=["read", "write"])
     response = request_operation(api, "/v1", operation)
     assert response.status_code == (200 if operation == "list" else 404), response.text
     if operation == "list":

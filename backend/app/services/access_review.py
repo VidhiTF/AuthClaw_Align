@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import base64
 from datetime import datetime, timezone
 from typing import Any
 
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.authorization import normalize_role
 from app.db.models import APIKey, User
+from app.services.audit_export import _private_key_from_env, signing_key_metadata
 
 
 def build_access_review_export(db: Session, tenant_id: str) -> dict[str, Any]:
@@ -56,4 +58,11 @@ def build_access_review_export(db: Session, tenant_id: str) -> dict[str, Any]:
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     payload["integrity_sha256"] = hashlib.sha256(canonical).hexdigest()
+    signing = signing_key_metadata()
+    payload["signing"] = {
+        "algorithm": signing["algorithm"],
+        "key_id": signing["key_id"],
+        "public_key": signing["public_key"],
+    }
+    payload["signature"] = base64.b64encode(_private_key_from_env().sign(canonical)).decode("ascii")
     return payload

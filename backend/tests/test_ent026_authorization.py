@@ -12,6 +12,8 @@ from app.core.authorization import (
 )
 from app.services.access_review import build_access_review_export
 from app.api.v1.endpoints.users import router as users_router
+from app.api.v1.endpoints.audit import router as audit_router
+from scripts import bootstrap_database_security
 
 
 def test_role_matrix_is_least_privilege_and_platform_is_separate():
@@ -19,6 +21,7 @@ def test_role_matrix_is_least_privilege_and_platform_is_separate():
     assert effective_scopes(Role.DEVELOPER, ["read", "write", "admin"]) == ["read", "write"]
     assert effective_scopes(Role.TENANT_ADMINISTRATOR, ["read", "write", "admin"]) == ["admin", "read", "write"]
     assert effective_scopes(Role.PLATFORM_ADMINISTRATOR, ["read", "platform.admin"]) == ["platform.admin"]
+    assert effective_scopes(Role.TENANT_ADMINISTRATOR, ["admin"]) == ["admin", "read", "write"]
     assert not role_allows(Role.TENANT_ADMINISTRATOR, "platform.tenant.manage")
     assert not role_allows(Role.PLATFORM_ADMINISTRATOR, "tenant.users.manage")
 
@@ -61,6 +64,8 @@ def test_access_review_export_is_secret_free_and_integrity_protected():
     assert export["records"][0]["role"] == "viewer"
     assert "key_hash" not in export["records"][0]
     assert len(export["integrity_sha256"]) == 64
+    assert export["signing"]["algorithm"] == "Ed25519"
+    assert export["signature"]
 
 
 def test_access_review_route_requires_auditor_or_tenant_administrator():
@@ -75,3 +80,22 @@ def test_access_review_route_requires_auditor_or_tenant_administrator():
     check("tenant_administrator")
     with pytest.raises(Exception):
         check("viewer")
+
+
+def test_audit_reads_require_audit_permission_not_only_read_scope():
+    route = next(route for route in audit_router.routes if route.path == "" and "GET" in route.methods)
+    viewer = SimpleNamespace(state=SimpleNamespace(user_role="viewer", scopes=["read"]))
+    auditor = SimpleNamespace(state=SimpleNamespace(user_role="auditor", scopes=["read"]))
+    with pytest.raises(Exception):
+        for dependency in route.dependencies:
+            dependency.dependency(viewer)
+    for dependency in route.dependencies:
+        dependency.dependency(auditor)
+
+
+def test_database_finalizer_preserves_ent026_function_runtime_grants():
+    assert {
+        "current_role",
+        "has_role",
+        "authorize_action",
+    }.issubset(bootstrap_database_security.AUTHN_RUNTIME_FUNCTIONS)

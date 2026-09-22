@@ -51,6 +51,11 @@ PERMISSION_ROLES = {
         Role.TENANT_ADMINISTRATOR.value,
     }),
     "tenant.high_risk.approve": frozenset({Role.APPROVER.value}),
+    "tenant.approvals.expire": frozenset({
+        Role.OPERATOR.value,
+        Role.APPROVER.value,
+        Role.TENANT_ADMINISTRATOR.value,
+    }),
     "platform.tenant.manage": PLATFORM_ROLES,
 }
 
@@ -98,7 +103,12 @@ def scopes_for_role(role: object) -> frozenset[str]:
 
 def effective_scopes(role: object, requested: Iterable[object]) -> list[str]:
     allowed = scopes_for_role(role)
-    return sorted({str(scope).strip().lower() for scope in requested if str(scope).strip().lower() in allowed})
+    normalized = {str(scope).strip().lower() for scope in requested if str(scope).strip()}
+    effective = {scope for scope in normalized if scope in allowed}
+    # Preserve the documented coarse-scope implication for existing admin keys.
+    if "admin" in effective:
+        effective.update({"read", "write"})
+    return sorted(effective)
 
 
 def group_role_mapping(groups: Iterable[object], mapping: dict[object, object]) -> str:

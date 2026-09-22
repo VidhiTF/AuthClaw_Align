@@ -75,6 +75,8 @@ class AccessReviewExport(BaseModel):
     generated_at: datetime
     records: list[dict[str, Any]]
     integrity_sha256: str
+    signing: dict[str, str]
+    signature: str
 
 
 @router.get("", response_model=list[UserResponse], dependencies=[require_roles(["owner", "admin"])])

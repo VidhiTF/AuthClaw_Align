@@ -17,7 +17,16 @@ from sqlalchemy import text
 from database import engine
 from services.secret_manager import SecretManager
 from services.tenant_context import tenant_context
-from services.role_contract import TENANT_ROLES, ROLE_PLATFORM_ADMIN, normalize_role
+from services.role_contract import (
+    TENANT_ROLES,
+    ROLE_PLATFORM_ADMIN,
+    ROLE_APPROVER,
+    ROLE_AUDITOR,
+    ROLE_DEVELOPER,
+    ROLE_OPERATOR,
+    ROLE_OWNER,
+    normalize_role,
+)
 
 
 SUPPORTED_PROVIDER_TYPES = {
@@ -605,12 +614,15 @@ def map_role(provider: OIDCProviderConfig, claims: Dict[str, Any], userinfo: Dic
 
 
 def permissions_for_role(role: str) -> str:
-    if role in {"Super Admin", "Platform Admin"}:
+    role = normalize_role(role) or ""
+    if role == ROLE_PLATFORM_ADMIN:
         return "all_access"
-    if role == "Security Admin":
+    if role == ROLE_OWNER:
         return "read_write_gateway,manage_policies,manage_approvals"
-    if role == "Auditor":
+    if role in {ROLE_AUDITOR, ROLE_APPROVER}:
         return "audit_read"
+    if role in {ROLE_DEVELOPER, ROLE_OPERATOR}:
+        return "read_write_gateway"
     return DEFAULT_PERMISSIONS
 
 

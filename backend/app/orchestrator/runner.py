@@ -144,15 +144,12 @@ def _create_approval_in_db(
     """Create a pending_approvals record for HITL review."""
     approval_id = str(uuid.uuid4())
 
-    if requester_id:
+    if not requester_id:
+        raise RuntimeError("Authenticated workflow requester is required for approval creation")
+    try:
         resolved_requester_id = uuid.UUID(str(requester_id))
-    else:
-        # Legacy graph-created approvals do not carry an HTTP user context.
-        result = db.execute(
-            text("SELECT id FROM users WHERE tenant_id = :tid AND is_active = true LIMIT 1"),
-            {"tid": tenant_id},
-        ).first()
-        resolved_requester_id = result[0] if result else uuid.UUID(tenant_id)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Authenticated workflow requester is invalid") from exc
 
     expires_at = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
     action_payload = build_action_payload(workflow_id, plan)
@@ -362,6 +359,7 @@ class ComplianceWorkflowRunner:
         tenant_id: str,
         framework: str,
         request_id: Optional[str] = None,
+        requester_id: Optional[str] = None,
     ) -> dict:
         """Start a new compliance workflow."""
         workflow_id = str(uuid.uuid4())
@@ -390,6 +388,7 @@ class ComplianceWorkflowRunner:
         initial_state: ComplianceState = {
             "workflow_id": workflow_id,
             "tenant_id": tenant_id,
+            "requester_id": requester_id,
             "request_id": request_id or "",
             "framework": framework,
             "current_state": WorkflowState.GATHER_EVIDENCE.value,
@@ -410,7 +409,9 @@ class ComplianceWorkflowRunner:
             "completed_at": "",
             "_emit_audit": emit_audit_event,
             "_persist_state": lambda s: _persist_state_to_db(self.db, s),
-            "_create_approval": lambda tid, wid, plan: _create_approval_in_db(self.db, tid, wid, plan),
+            "_create_approval": lambda tid, wid, plan: _create_approval_in_db(
+                self.db, tid, wid, plan, requester_id=requester_id
+            ),
             "_check_approval": lambda aid: _check_approval_in_db(self.db, aid),
             "_store_evidence": _make_store_evidence_fn(self.db),
             "_store_finding": _make_store_finding_fn(self.db),
@@ -483,7 +484,13 @@ class ComplianceWorkflowRunner:
                 "execution_status": ExecutionStatus.RUNNING.value,
                 "_emit_audit": emit_audit_event,
                 "_persist_state": lambda s: _persist_state_to_db(self.db, s),
-                "_create_approval": lambda tid, wid, plan: _create_approval_in_db(self.db, tid, wid, plan),
+                "_create_approval": lambda tid, wid, plan: _create_approval_in_db(
+                    self.db,
+                    tid,
+                    wid,
+                    plan,
+                    requester_id=state.get("requester_id"),
+                ),
                 "_check_approval": lambda aid: _check_approval_in_db(
                     self.db,
                     aid,

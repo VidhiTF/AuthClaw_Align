@@ -21,6 +21,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.auth import (
     get_tenant_db,
+    require_permission,
     require_roles,
     require_scopes,
     set_mfa_credentials,
@@ -192,6 +193,7 @@ def create_workflow(
             tenant_id=tenant_id,
             framework=framework,
             request_id=body.request_id,
+            requester_id=str(request.state.user_id),
         )
     except Exception as exc:
         logger.error("Failed to create workflow: %s", exc)
@@ -404,7 +406,7 @@ def mfa_setup(
 def expire_stale_approvals(
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_permission("tenant.approvals.expire"),
 ):
     """Explicitly trigger expiration of all stale pending approvals."""
     tenant_id = str(request.state.tenant_id)
@@ -456,7 +458,7 @@ def approve_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).first()
+    ).with_for_update().first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
@@ -514,7 +516,7 @@ def reject_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).first()
+    ).with_for_update().first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
@@ -609,7 +611,7 @@ def approve_workflow(
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_id == workflow_id,
         PendingApproval.action_type == "remediation",
-    ).first()
+    ).with_for_update().first()
     
     if not approval:
         raise HTTPException(status_code=404, detail="Approval record not found")
@@ -625,7 +627,7 @@ def approve_workflow(
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
         ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
     expected_payload = build_action_payload(workflow_id, (wf.remediation_plan if wf else []) or [])
     expected_hash = compute_action_hash(
         tenant_id=tenant_id,
@@ -673,7 +675,7 @@ def approve_workflow(
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
         ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
     if wf:
         wf.approval_status = "APPROVED"
         
@@ -746,7 +748,7 @@ def reject_workflow(
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_id == workflow_id,
         PendingApproval.action_type == "remediation",
-    ).first()
+    ).with_for_update().first()
 
     if not approval:
         raise HTTPException(status_code=404, detail="Approval record not found")
@@ -768,7 +770,7 @@ def reject_workflow(
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
         ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
     if wf:
         wf.approval_status = "REJECTED"
 

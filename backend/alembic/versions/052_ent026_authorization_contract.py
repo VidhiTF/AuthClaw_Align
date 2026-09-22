@@ -73,6 +73,7 @@ def upgrade() -> None:
                 WHEN 'tenant.audit.read' THEN v_role IN ('auditor','approver','tenant_administrator')
                 WHEN 'tenant.access_review.export' THEN v_role IN ('auditor','tenant_administrator')
                 WHEN 'tenant.high_risk.approve' THEN v_role = 'approver'
+                WHEN 'tenant.approvals.expire' THEN v_role IN ('operator','approver','tenant_administrator')
                 WHEN 'platform.tenant.manage' THEN v_role = 'platform_administrator'
                 ELSE false
             END;
@@ -90,6 +91,9 @@ def upgrade() -> None:
                    AND authn.authorize_action('tenant.credentials.manage'))
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND authn.authorize_action('tenant.credentials.manage'));
+        CREATE POLICY tenant_access_review_api_keys_read ON public.api_keys FOR SELECT
+            USING (tenant_id = authn.current_tenant_id()
+                   AND authn.authorize_action('tenant.access_review.export'));
 
         DROP POLICY IF EXISTS tenant_isolation ON public.users;
         CREATE POLICY tenant_user_read ON public.users FOR SELECT
@@ -165,6 +169,21 @@ def upgrade() -> None:
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND authn.authorize_action('tenant.high_risk.approve')
                         AND requester_id <> authn.current_user_id());
+        CREATE POLICY tenant_approval_expire ON public.pending_approvals FOR UPDATE
+            USING (tenant_id = authn.current_tenant_id()
+                   AND status = 'PENDING'
+                   AND expires_at < now()
+                   AND authn.authorize_action('tenant.approvals.expire'))
+            WITH CHECK (tenant_id = authn.current_tenant_id()
+                        AND status = 'EXPIRED'
+                        AND authn.authorize_action('tenant.approvals.expire'));
+
+        DROP POLICY IF EXISTS tenant_isolation ON public.audit_log_metadata;
+        CREATE POLICY tenant_audit_read ON public.audit_log_metadata FOR SELECT
+            USING (tenant_id = authn.current_tenant_id()
+                   AND authn.authorize_action('tenant.audit.read'));
+        CREATE POLICY tenant_audit_append ON public.audit_log_metadata FOR INSERT
+            WITH CHECK (tenant_id = authn.current_tenant_id());
         """
     )
     app_role = _app_role()

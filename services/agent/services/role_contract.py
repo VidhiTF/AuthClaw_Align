@@ -30,6 +30,7 @@ _ROLE_ALIASES = {
     ROLE_PLATFORM_ADMIN: ROLE_PLATFORM_ADMIN,
     "platform_admin": ROLE_PLATFORM_ADMIN,
     "platform admin": ROLE_PLATFORM_ADMIN,
+    ROLE_OWNER: ROLE_OWNER,
     "owner": ROLE_OWNER,
     "super_admin": ROLE_OWNER,
     "super admin": ROLE_OWNER,

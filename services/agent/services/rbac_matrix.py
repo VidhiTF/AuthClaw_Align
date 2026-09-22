@@ -33,8 +33,8 @@ ALL_ROLES = [
 TENANT_ADMIN_ROLES = [ROLE_OWNER, ROLE_ADMIN]
 TENANT_READ_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR, ROLE_APPROVER, ROLE_OPERATOR, ROLE_VIEWER]
 GATEWAY_USER_ROLES = TENANT_READ_ROLES + [ROLE_DEVELOPER]
-RAG_EXECUTION_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER]
-REMEDIATION_PLAN_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER]
+RAG_EXECUTION_ROLES = TENANT_ADMIN_ROLES + [ROLE_DEVELOPER, ROLE_OPERATOR]
+REMEDIATION_PLAN_ROLES = TENANT_ADMIN_ROLES + [ROLE_DEVELOPER, ROLE_OPERATOR]
 
 AGENT_OPERATION_ROLES = {
     "chat": frozenset(GATEWAY_USER_ROLES),
@@ -105,7 +105,7 @@ ENDPOINT_RULES: List[EndpointRule] = [
     EndpointRule("POST", "/reject/*", [ROLE_APPROVER], "approvals:reject", True, True, "HITL rejection."),
     EndpointRule("POST", "/execute/*", [ROLE_APPROVER], "approvals:execute", True, True, "HITL execution."),
     EndpointRule("POST", "/test/*", [ROLE_OWNER], "testing:local", True, True, "Local test utilities."),
-    EndpointRule("GET", "/audit*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "audit:read", True, True, "Audit and signed export read."),
+    EndpointRule("GET", "/audit*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR, ROLE_APPROVER], "audit:read", True, True, "Audit and signed export read."),
     EndpointRule("POST", "/audit/export/verify", ALL_ROLES, "audit:verify", False, False, "Public export verification."),
     EndpointRule("*", "/policies*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER], "policies:manage", True, True, "Policy lifecycle."),
     EndpointRule("*", "/policy/bundles*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER], "policy-bundles:manage", True, True, "OPA policy bundle lifecycle."),
@@ -158,15 +158,11 @@ def role_allowed(role: Optional[str], method: str, path: str) -> bool:
     if not rule:
         return False
     canonical_role = normalize_role(role)
-    if canonical_role == ROLE_PLATFORM_ADMIN:
-        return True
     return (canonical_role or "") in set(rule.roles)
 
 
 def agent_operation_allowed(role: Optional[str], operation: str) -> bool:
     canonical_role = normalize_role(role)
-    if canonical_role == ROLE_PLATFORM_ADMIN:
-        return True
     return (canonical_role or "") in AGENT_OPERATION_ROLES.get((operation or "").strip().lower(), frozenset())
 
 
