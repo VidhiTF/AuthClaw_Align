@@ -81,3 +81,4 @@ def verify_runtime_database_identity(dbapi_connection, _connection_record, _conn
             )
     finally:
         cursor.close()
+        dbapi_connection.rollback()

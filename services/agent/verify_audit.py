@@ -366,7 +366,8 @@ def verify_audit_chain(tenant_id: int = None) -> dict:
 
     if not rows:
         return {
-            "valid": True,
+            "valid": None,
+            "status": "unknown",
             "records_checked": 0,
             "chain_started_at": None
         }
@@ -381,7 +382,8 @@ def verify_audit_chain(tenant_id: int = None) -> dict:
     if start_index == -1:
         # No chained records exist yet (all are legacy)
         return {
-            "valid": True,
+            "valid": None,
+            "status": "unknown",
             "records_checked": 0,
             "chain_started_at": None
         }
@@ -475,9 +477,9 @@ def record_gateway_request(
     route_id: str = None,
     provider: str = "OpenAI",
     model: str = "gpt-4o",
-    latency: int = 150,
-    tokens_in: int = 0,
-    tokens_out: int = 0,
+    latency: int = None,
+    tokens_in: int = None,
+    tokens_out: int = None,
     decision: str = None,
     duration_ms: int = None
 ):
@@ -487,6 +489,10 @@ def record_gateway_request(
     from database import engine
     from datetime import datetime
     import uuid
+    tokens_in = tokens_in if type(tokens_in) is int and tokens_in >= 0 else None
+    tokens_out = tokens_out if type(tokens_out) is int and tokens_out >= 0 else None
+    latency = latency if type(latency) is int and latency >= 0 else None
+    duration_ms = duration_ms if type(duration_ms) is int and duration_ms >= 0 else latency
     try:
         if not request_id:
             request_id = f"req-{uuid.uuid4()}"
@@ -496,12 +502,12 @@ def record_gateway_request(
                 INSERT INTO gateway_requests (
                     timestamp, created_at, risk_level, allowed, status, request_id, 
                     tenant_id, route_id, provider, model, latency, 
-                    tokens_in, tokens_out, decision, duration_ms
+                    tokens_in, tokens_out, decision, duration_ms, token_usage_recorded, latency_recorded
                 )
                 VALUES (
                     :timestamp, :created_at, :risk_level, :allowed, :status, :request_id, 
                     :tenant_id, :route_id, :provider, :model, :latency, 
-                    :tokens_in, :tokens_out, :decision, :duration_ms
+                    :tokens_in, :tokens_out, :decision, :duration_ms, TRUE, :latency_recorded
                 )
                 """),
                 {
@@ -516,10 +522,11 @@ def record_gateway_request(
                     "provider": provider,
                     "model": model,
                     "latency": latency,
-                    "tokens_in": tokens_in or int(len(risk_level) * 15),
-                    "tokens_out": tokens_out or int(len(status) * 25),
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
                     "decision": decision,
-                    "duration_ms": duration_ms if duration_ms is not None else latency
+                    "duration_ms": duration_ms,
+                    "latency_recorded": duration_ms is not None,
                 }
             )
             conn.commit()

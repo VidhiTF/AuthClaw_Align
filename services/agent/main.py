@@ -1834,18 +1834,9 @@ def verify_audit(authorization: Optional[str] = Header(None)):
     from verify_audit import verify_audit_chain
     res = verify_audit_chain(tenant_id=tenant_id)
 
-    if res["valid"]:
-        log_audit_event(
-            event="audit_verification_passed",
-            correlation_id=correlation_id,
-            extra={"records_checked": res["records_checked"]}
-        )
-    else:
-        log_audit_event(
-            event="audit_verification_failed",
-            correlation_id=correlation_id,
-            extra={"records_checked": res["records_checked"]}
-        )
+    outcome = "passed" if res["valid"] is True else "failed" if res["valid"] is False else "unknown"
+    log_audit_event(event=f"audit_verification_{outcome}", correlation_id=correlation_id,
+                    extra={"records_checked": res["records_checked"]})
     return res
 
 
@@ -1857,7 +1848,8 @@ def verify_audit_summary(authorization: Optional[str] = Header(None)):
 
     if not res["valid"]:
         return {
-            "valid": False,
+            "valid": res["valid"],
+            "status": "unknown" if res["valid"] is None else "degraded",
             "records_checked": res["records_checked"],
             "last_verified_record": res.get("failed_record_id"),
             "chain_started_at": None,
@@ -2152,9 +2144,7 @@ def reload_policies_endpoint():
 @app.get("/api/v1/agent/health")
 @app.get("/health")
 def get_health():
-    return {
-        "status": "healthy"
-    }
+    return {"status": "alive", "scope": "process_liveness"}
 
 
 @app.get("/internal/metrics/quota", include_in_schema=False)
@@ -2188,30 +2178,20 @@ def get_quota_metrics(authorization: str = Header(None)):
 
 @app.get("/health/details")
 def get_health_details():
-    database_status = "healthy"
-    try:
-        from database import engine
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-    except Exception:
-        database_status = "unhealthy"
-
-    provider_status = "healthy"
-    try:
-        from providers import get_provider
-        get_provider()
-    except Exception:
-        provider_status = "unhealthy"
-
-    return {
-        "audit_chain_active": True,
-        "hitl_enabled": True,
-        "policy_enforcement_enabled": True,
-        "redaction_enabled": True,
-        "provider_status": provider_status,
-        "database_status": database_status
-    }
+    readiness = get_readiness()
+    payload = json.loads(readiness.body)
+    return JSONResponse(status_code=readiness.status_code, content={
+        "status": payload["health_status"],
+        "scope": "agent_readiness",
+        "checks": payload["checks"],
+        "unmeasured": ["provider", "audit_chain", "hitl", "policy_enforcement", "redaction"],
+        "audit_chain_active": None,
+        "hitl_enabled": None,
+        "policy_enforcement_enabled": None,
+        "redaction_enabled": None,
+        "provider_status": "unknown",
+        "database_status": "unavailable" if payload["checks"]["database"] == "unhealthy" else payload["checks"]["database"],
+    })
 
 
 @app.get("/api/v1/agent/health/ready")
@@ -2231,8 +2211,6 @@ def get_readiness():
         checks["rate_limiter"] = "unhealthy"
         http_status = 503
     try:
-        from database import engine
-        from sqlalchemy import text
         validate_database_security()
         checks["database"] = "healthy"
     except Exception:
@@ -2241,7 +2219,10 @@ def get_readiness():
 
     if os.getenv("AUTHCLAW_ENV", "development").lower() in {"production", "prod"}:
         from startup.validation import validate_production_environment
-        validation_errors = validate_production_environment()
+        try:
+            validation_errors = validate_production_environment()
+        except Exception:
+            validation_errors = ["Production validation unavailable"]
         if validation_errors:
             checks["production_validation"] = "failed"
             checks["production_errors"] = validation_errors
@@ -2249,7 +2230,7 @@ def get_readiness():
         else:
             checks["production_validation"] = "passed"
 
-    return JSONResponse(status_code=http_status, content={"status": "ready" if http_status == 200 else "not_ready", "checks": checks})
+    return JSONResponse(status_code=http_status, content={"status": "ready" if http_status == 200 else "not_ready", "health_status": "healthy" if http_status == 200 else "unavailable", "checks": checks})
 
 
 @app.get("/trust/public/health")
@@ -2257,7 +2238,7 @@ def get_public_trust_health():
     from services.trust_center_runtime import trust_runtime_health
 
     result = trust_runtime_health()
-    status_code = 200 if result.get("status") != "unhealthy" else 503
+    status_code = 503 if result.get("status") == "unavailable" else 200
     return JSONResponse(status_code=status_code, content=jsonable_encoder(result))
 
 
@@ -2269,14 +2250,12 @@ def get_metrics():
         with engine.connect() as conn:
             total_requests = conn.execute(text("SELECT COUNT(*) FROM gateway_requests")).scalar() or 0
             blocked_requests = conn.execute(text("SELECT COUNT(*) FROM gateway_requests WHERE allowed = FALSE")).scalar() or 0
-            avg_latency = conn.execute(text("SELECT AVG(latency) FROM gateway_requests")).scalar() or 142
-            avg_latency = int(avg_latency)
+            avg_latency = conn.execute(text("SELECT CASE WHEN COUNT(*) = COUNT(CASE WHEN latency_recorded THEN COALESCE(duration_ms, latency) END) THEN AVG(COALESCE(duration_ms, latency)) END FROM gateway_requests")).scalar()
+            avg_latency = float(avg_latency) if avg_latency is not None else None
             
-            tokens_in = conn.execute(text("SELECT SUM(tokens_in) FROM gateway_requests")).scalar() or 0
-            tokens_out = conn.execute(text("SELECT SUM(tokens_out) FROM gateway_requests")).scalar() or 0
-            token_consumption = (tokens_in or 0) + (tokens_out or 0)
+            token_consumption = conn.execute(text("SELECT CASE WHEN COUNT(*) = COUNT(CASE WHEN token_usage_recorded THEN tokens_in + tokens_out END) THEN COALESCE(SUM(tokens_in + tokens_out), 0) END FROM gateway_requests")).scalar()
             
-            active_tenants = conn.execute(text("SELECT COUNT(*) FROM tenants WHERE status = 'active'")).scalar() or 0
+            active_tenants = conn.execute(text("SELECT COUNT(*) FROM tenants WHERE status = 'active' AND id = :tenant_id"), {"tenant_id": get_current_tenant_id()}).scalar() or 0
             active_routes = conn.execute(text("SELECT COUNT(*) FROM gateway_routes WHERE enabled = TRUE")).scalar() or 0
             active_policies = conn.execute(text("SELECT COUNT(*) FROM policies WHERE enabled = TRUE")).scalar() or 0
             open_findings = conn.execute(text("SELECT COUNT(*) FROM remediation_findings WHERE approval_status = 'pending'")).scalar() or 0
@@ -2290,7 +2269,7 @@ def get_metrics():
             evidence_count = conn.execute(text("SELECT COUNT(*) FROM compliance_evidence")).scalar() or 0
 
             scanned_today = conn.execute(text("SELECT COUNT(*) FROM documents WHERE created_at >= CURRENT_DATE")).scalar() or 0
-            drift_alerts = conn.execute(text("SELECT COUNT(*) FROM compliance_drift_alerts")).scalar() or 0
+            drift_alerts = conn.execute(text("SELECT COUNT(*) FROM compliance_drift_alerts WHERE tenant_id = :tenant_id"), {"tenant_id": get_current_tenant_id()}).scalar() or 0
             secret_leaks = conn.execute(text("SELECT COUNT(*) FROM document_findings WHERE finding_type IN ('Secret', 'Credentials')")).scalar() or 0
             pii_violations = conn.execute(text("SELECT COUNT(*) FROM document_findings WHERE finding_type = 'PII'")).scalar() or 0
             provider_errors = conn.execute(text("""
@@ -2306,72 +2285,48 @@ def get_metrics():
                 FROM gateway_approvals
                 WHERE created_at IS NOT NULL
             """)).fetchone()
-            avg_approval_latency_seconds = int(approval_latency_row[0] or 0) if approval_latency_row else 0
+            avg_approval_latency_seconds = float(approval_latency_row[0]) if approval_latency_row and approval_latency_row[0] is not None else None
             rate_limit_blocked = conn.execute(text("SELECT COUNT(*) FROM rate_limit_events WHERE allowed = FALSE AND created_at >= NOW() - INTERVAL '1 hour'")).scalar() or 0
             worker_throttle_blocked = conn.execute(text("SELECT COUNT(*) FROM worker_throttle_events WHERE allowed = FALSE AND created_at >= NOW() - INTERVAL '1 hour'")).scalar() or 0
 
             risk_res = conn.execute(text("SELECT risk_level, COUNT(*) FROM gateway_requests GROUP BY risk_level")).fetchall()
-            risk_dist = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+            risk_dist = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "UNKNOWN": 0}
             for row in risk_res:
-                lvl = row[0].upper() if row[0] else "LOW"
-                if lvl in risk_dist:
-                    risk_dist[lvl] = row[1]
+                lvl = row[0].upper() if row[0] else "UNKNOWN"
+                risk_dist[lvl if lvl in risk_dist else "UNKNOWN"] += row[1]
                     
-            failed_tests = conn.execute(text("SELECT COUNT(*) FROM pentest_simulations WHERE status = 'FAIL'")).scalar() or 0
-            
-            # Incorporate document findings into compliance score
-            compliance_score = max(0, min(84, 100 - (open_findings * 5) - (failed_tests * 10) - (total_violations * 8)))
+            # Framework scores are calculated by the canonical compliance API, not this counter endpoint.
             from services.event_pipeline import EventPipeline
             from verify_audit import verify_audit_chain
             event_pipeline_metrics = EventPipeline().delivery_metrics()
-            audit_chain_status = verify_audit_chain()
+            audit_chain_status = verify_audit_chain(tenant_id=get_current_tenant_id())
+            approval_counts = dict(conn.execute(text("SELECT lower(status), COUNT(*) FROM gateway_approvals GROUP BY lower(status)")).fetchall())
             
     except Exception as e:
-        logger.error(f"Error querying metrics from database: {e}")
-        total_requests = 0
-        blocked_requests = 0
-        avg_latency = 142
-        token_consumption = 0
-        active_tenants = 0
-        active_routes = 0
-        active_policies = 0
-        open_findings = 0
-        active_workers = 0
-        audit_chain_records = 0
-        total_documents = 0
-        total_findings = 0
-        total_violations = 0
-        evidence_count = 0
-        scanned_today = 0
-        drift_alerts = 0
-        secret_leaks = 0
-        pii_violations = 0
-        provider_errors = 0
-        avg_approval_latency_seconds = 0
-        rate_limit_blocked = 0
-        worker_throttle_blocked = 0
-        event_pipeline_metrics = {"streams": {}, "checkpoints": []}
-        audit_chain_status = {"valid": True, "records_checked": 0}
-        risk_dist = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
-        compliance_score = None
+        logger.error("Telemetry source failed (%s)", type(e).__name__)
+        return JSONResponse(status_code=503, content={
+            "status": "unavailable", "error": "telemetry_source_unavailable",
+            "avg_latency": None, "gateway_latency_ms": None, "compliance_score": None,
+            "compliance_status": "unavailable", "compliance_authoritative": False,
+            "audit_chain_status": {"status": "unavailable", "valid": None, "records_checked": None},
+        })
 
-    approvals = get_all_approvals()
-    pending = sum(1 for a in approvals.values() if a["status"] == "pending")
-    executed = sum(1 for a in approvals.values() if a["status"] == "executed")
-    approved = sum(1 for a in approvals.values() if a["status"] == "approved")
-    rejected = sum(1 for a in approvals.values() if a["status"] == "rejected")
-    pending_pipeline = sum(int(cp.get("pending_events") or 0) for cp in event_pipeline_metrics.get("checkpoints", []))
-    dead_letters = sum(int(cp.get("dead_letter_count") or 0) for cp in event_pipeline_metrics.get("checkpoints", []))
-    max_queue_lag = max([int(cp.get("lag_seconds") or 0) for cp in event_pipeline_metrics.get("checkpoints", [])] or [0])
-    redaction_rate = round((pii_violations + secret_leaks) / total_requests, 4) if total_requests else 0
+    from services.observability_service import ObservabilityService, aggregate_health
+    queue = ObservabilityService()._queue_lag(event_pipeline_metrics)
+    redaction_rate = round((pii_violations + secret_leaks) / total_requests, 4) if total_requests else None
 
     return {
         "total_requests": total_requests,
+        "status": aggregate_health(
+            "unknown" if audit_chain_status.get("valid") is None else "healthy" if audit_chain_status["valid"] else "degraded",
+            queue["status"],
+        ),
+        "compliance_status": "unknown",
         "blocked_requests": blocked_requests,
-        "pending_approvals": pending,
-        "executed_approvals": executed,
-        "approved_approvals": approved,
-        "rejected_approvals": rejected,
+        "pending_approvals": approval_counts.get("pending", 0),
+        "executed_approvals": approval_counts.get("executed", 0),
+        "approved_approvals": approval_counts.get("approved", 0),
+        "rejected_approvals": approval_counts.get("rejected", 0),
         "audit_chain_records": audit_chain_records,
         "risk_distribution": risk_dist,
         "avg_latency": avg_latency,
@@ -2379,9 +2334,10 @@ def get_metrics():
         "redaction_rate": redaction_rate,
         "provider_errors": provider_errors,
         "avg_approval_latency_seconds": avg_approval_latency_seconds,
-        "queue_lag_seconds": max_queue_lag,
-        "queue_pending_events": pending_pipeline,
-        "dead_letter_events": dead_letters,
+        "queue_status": queue["status"],
+        "queue_lag_seconds": queue["max_lag_seconds"],
+        "queue_pending_events": queue["pending_events"],
+        "dead_letter_events": queue["dead_letter_count"],
         "audit_chain_status": audit_chain_status,
         "event_pipeline": event_pipeline_metrics,
         "rate_limit_blocked": rate_limit_blocked,
@@ -2391,8 +2347,7 @@ def get_metrics():
         "active_tenants": active_tenants,
         "active_routes": active_routes,
         "active_policies": active_policies,
-        "compliance_score": compliance_score,
-        "compliance_status": "unavailable" if compliance_score is None else "unassessed",
+        "compliance_score": None,
         "compliance_authoritative": False,
         "compliance_score_kind": "diagnostic",
         "compliance_calculation_version": "agent-diagnostic-v2",
@@ -2867,7 +2822,7 @@ def create_document(
     tenant_id = resolve_tenant(x_api_key, authorization)
     today = datetime.now(timezone.utc).date().isoformat()
     chunks_count = max(1, int(doc.size_bytes // 50000))
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         res = conn.execute(
             text("""
             INSERT INTO knowledge_documents (tenant_id, name, type, size_bytes, status, last_indexed, chunks_count)
@@ -2884,7 +2839,6 @@ def create_document(
             }
         )
         inserted_id = res.fetchone()[0]
-        conn.commit()
 
         # Insert chunks and generate actual embeddings
         for i in range(chunks_count):
@@ -2903,7 +2857,6 @@ def create_document(
                     "vec": json.dumps(vector)
                 }
             )
-        conn.commit()
     create_audit_block(
         query=f"Upload Knowledge Document: {doc.name}",
         response=f"Document uploaded and indexed successfully into {chunks_count} vector chunks.",
@@ -2984,18 +2937,11 @@ async def upload_document(
     except (QuotaExceeded, QuotaUnavailable):
         raise
     except Exception as ex:
-        # Fallback if pipeline fails (e.g. LLM issues) so document is still indexed
-        logger.error(f"Scan pipeline failed, fallback indexing document: {ex}")
-        pipeline_res = {
-            "document_id": doc_id,
-            "filename": filename,
-            "risk_score": 100,
-            "severity": "LOW",
-            "status": "completed",
-            "duration_ms": 0,
-            "findings": [],
-            "summary": "Scan pipeline fallback"
-        }
+        logger.error("Document scan failed: %s", type(ex).__name__)
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE documents SET status='scan_failed' WHERE id=:id AND tenant_id=:tenant AND status NOT IN ('alert_delivery_pending', 'alert_delivery_failed')"),
+                         {"id": doc_id, "tenant": tenant_id})
+        raise HTTPException(503, "Document scan unavailable; no successful assessment was produced") from ex
     
     # 3. Find matching knowledge_document ID for frontend backward compatibility
     with engine.connect() as conn:
@@ -3007,7 +2953,7 @@ async def upload_document(
         
     return {
         "document_id": f"doc_{k_doc_id}",
-        "status": "indexed",
+        "status": pipeline_res["status"],
         "pipeline_results": pipeline_res
     }
 
@@ -3147,12 +3093,12 @@ async def redact_gateway_document(
             text("""
                 INSERT INTO gateway_requests (
                     timestamp, risk_level, allowed, status, request_id, tenant_id,
-                    route_id, provider, model, latency, tokens_in, tokens_out,
+                    route_id, provider, model, latency, latency_recorded, tokens_in, tokens_out,
                     created_at, decision, duration_ms
                 )
                 VALUES (
                     NOW(), :risk_level, :allowed, :status, :request_id, :tenant_id,
-                    :route_id, :provider, :model, :latency, :tokens_in, 0,
+                    :route_id, :provider, :model, :latency, TRUE, NULL, NULL,
                     NOW(), :decision, :duration_ms
                 )
             """),
@@ -3166,7 +3112,6 @@ async def redact_gateway_document(
                 "provider": "authclaw",
                 "model": "document-redaction",
                 "latency": duration_ms,
-                "tokens_in": len(extracted_text.split()),
                 "decision": decision,
                 "duration_ms": duration_ms,
             },
@@ -3996,6 +3941,7 @@ def _compact_framework_scores(scores: Dict[str, Any]) -> Dict[str, Any]:
                 "passed": value.get("passed", 0),
                 "failed": value.get("failed", 0),
                 "watch": value.get("watch", 0),
+                "unknown": value.get("unknown", 0),
                 "unassessed": value.get("unassessed", 0),
                 "status": value.get("status", "unassessed"),
                 "authoritative": False,
@@ -4036,28 +3982,17 @@ def get_compliance_framework_explorer(
     authorization: Optional[str] = Header(None)
 ):
     tenant_id = resolve_tenant(x_api_key, authorization)
-    from services.compliance_evidence_engine import CONTROL_CATALOG, ComplianceEvidenceEngine
+    from services.compliance_evidence_engine import ComplianceEvidenceEngine
 
     engine = ComplianceEvidenceEngine()
     try:
         controls = engine.catalog(framework)
-    except Exception:
-        controls = [dict(item) for item in CONTROL_CATALOG]
-        if framework:
-            framework_key = framework.upper()
-            controls = [item for item in controls if item.get("framework") == framework_key]
-    try:
         scores = engine.calculate_scores(tenant_id)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail="Compliance diagnostics are unavailable") from exc
-    try:
+
         evidence_rows = engine.evidence_export_rows(tenant_id, framework=framework, refresh_scores=False, limit=300)
-    except Exception:
-        evidence_rows = []
-    try:
         changes = engine.score_changes(tenant_id, framework=framework, limit=50)
-    except Exception:
-        changes = []
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Compliance telemetry unavailable") from exc
     evidence_by_control: Dict[str, List[Dict[str, Any]]] = {}
     for row in evidence_rows:
         evidence_by_control.setdefault(row["control_id"], []).append(_compact_framework_evidence(row))
@@ -5027,7 +4962,7 @@ def activate_verified_registration(conn, registration) -> int:
 
 
 @app.get("/reports/{type}/{format}")
-def get_report_endpoint(type: str, format: str):
+def get_report_endpoint(type: str, format: str, tenant_id: int = Depends(require_tenant_context)):
     from document_processing.reports import (
         generate_executive_summary_report,
         generate_technical_findings_report,
@@ -5039,11 +4974,11 @@ def get_report_endpoint(type: str, format: str):
         raise HTTPException(status_code=400, detail="Invalid report format")
     
     if type == "executive":
-        content = generate_executive_summary_report(format)
+        content = generate_executive_summary_report(format, tenant_id)
     elif type == "technical":
-        content = generate_technical_findings_report(format)
+        content = generate_technical_findings_report(format, tenant_id)
     elif type == "auditor":
-        content = generate_auditor_evidence_report(format)
+        content = generate_auditor_evidence_report(format, tenant_id)
     else:
         raise HTTPException(status_code=400, detail="Invalid report type")
 
@@ -5070,10 +5005,12 @@ def get_cloud_connectors_status():
     connectors = []
     
     for src in sources:
+        status = "healthy" if is_real else "not_applicable"
         try:
             files = list_cloud_source_files(src)
         except Exception:
-            files = []
+            files = None
+            status = "unavailable"
         
         name_map = {
             "s3": "AWS S3 Bucket",
@@ -5087,8 +5024,9 @@ def get_cloud_connectors_status():
             "name": name_map.get(src, src),
             "key": src,
             "enabled": is_real,
-            "status": "Active (Real)" if is_real else "Simulated (Mock)",
-            "files_count": len(files),
+            "status": status,
+            "mode": "real" if is_real else "mock",
+            "files_count": len(files) if files is not None else None,
             "files": files
         })
         
@@ -5101,8 +5039,12 @@ def get_cloud_connectors_status():
 @app.post("/cloud/connectors/sync")
 def sync_cloud_connectors():
     from document_processing.monitoring import trigger_manual_sync
-    res = trigger_manual_sync()
-    return res
+    try:
+        return trigger_manual_sync()
+    except (QuotaExceeded, QuotaUnavailable, HTTPException):
+        raise
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "unavailable", "error": "Document synchronization incomplete"})
 
 # 10. ONBOARDING & TENANT MANAGEMENT ENDPOINTS
 

@@ -1,0 +1,12 @@
+{
+  "status": "unavailable",
+  "error": "telemetry_source_unavailable",
+  "avg_latency": null,
+  "gateway_latency_ms": null,
+  "compliance_score": null,
+  "audit_chain_status": {
+    "status": "unavailable",
+    "valid": null,
+    "records_checked": null
+  }
+}

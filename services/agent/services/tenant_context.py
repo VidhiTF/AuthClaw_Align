@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Iterator, Optional
+from fastapi import HTTPException
 
 
 _tenant_id: ContextVar[Optional[str]] = ContextVar("authclaw_tenant_id", default=None)
@@ -10,6 +11,11 @@ _tenant_required: ContextVar[bool] = ContextVar("authclaw_tenant_required", defa
 
 def get_current_tenant_id() -> Optional[str]:
     return _tenant_id.get()
+
+
+def validate_tenant_id(tenant_id: int) -> None:
+    if tenant_id is None or str(tenant_id) != get_current_tenant_id():
+        raise HTTPException(status_code=403, detail="Authenticated tenant context mismatch.")
 
 
 def get_current_request_id() -> Optional[str]:

@@ -2,8 +2,8 @@ export type TrustSummaryControl = {
   framework: string;
   id: string;
   name: string;
-  score: number;
-  status: "compliant" | "partial" | "non_compliant";
+  score: number | null;
+  status: "compliant" | "partial" | "non_compliant" | "insufficient_evidence";
   evidence_assessment?: EvidenceAssessment;
   gaps?: string[];
 };

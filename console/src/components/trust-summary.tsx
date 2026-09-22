@@ -80,7 +80,7 @@ export function TrustSummary({ summary, dark = false }: { summary?: TrustSummary
                     <div key={`${control.framework}-${control.id}`} className={`rounded-lg border px-3 py-2 ${panel}`}>
                       <div className="flex items-center justify-between gap-2">
                         <span className={`truncate text-xs font-semibold ${foreground}`}>{control.name}</span>
-                        <span className={`shrink-0 text-[10px] font-bold ${muted}`}>{control.score}%</span>
+                        <span className={`shrink-0 text-[10px] font-bold ${muted}`}>{control.score == null ? "Unknown" : `${control.score}%`}</span>
                       </div>
                       <div className={`mt-1 font-mono text-[10px] ${muted}`}>{control.framework} · {control.id}</div>
                       <div className={`mt-1 text-[10px] ${muted}`}>{evidenceAssessmentLabel(control.evidence_assessment)}</div>

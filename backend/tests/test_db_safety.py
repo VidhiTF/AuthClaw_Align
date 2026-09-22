@@ -1,5 +1,8 @@
 import pytest
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+from app.db import session as db_session
 from tests.db_safety import destructive_test_urls
 
 
@@ -22,3 +25,14 @@ def test_destructive_database_guard_accepts_test_database(monkeypatch):
         monkeypatch.setenv(name, app)
 
     assert destructive_test_urls() == (owner, app)
+
+
+def test_runtime_identity_check_leaves_connection_idle(monkeypatch):
+    connection = MagicMock()
+    connection.cursor.return_value.fetchone.return_value = ("authclaw_app", "authclaw_app")
+    monkeypatch.setenv("AUTHCLAW_RUNTIME_DB_ROLE", "authclaw_app")
+    monkeypatch.setattr(db_session, "engine", SimpleNamespace(dialect=SimpleNamespace(name="postgresql")))
+
+    db_session.verify_runtime_database_identity(connection, None, None)
+
+    connection.rollback.assert_called_once_with()

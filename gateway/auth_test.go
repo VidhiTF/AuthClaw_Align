@@ -3,10 +3,43 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/lib/pq"
 )
+
+func TestAuditProducerOwnsCorrelationIdentity(t *testing.T) {
+	t.Setenv("GATEWAY_AUTH_CACHE_TTL_MS", "60000")
+	t.Setenv("GATEWAY_AUTH_LAST_USED_ENABLED", "false")
+	hash := HashKey("identity-regression-key")
+	setCachedAPIKeyResolution(hash, cachedAPIKeyResolution{tenantID: "test-tenant", scopes: []string{"read"}})
+	t.Cleanup(func() { apiKeyResolutionCache.Delete(hash) })
+	seen := map[string]bool{}
+	handler := AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Context().Value(RequestIDContextKey).(string)
+		if !strings.HasPrefix(id, "gw2-") || seen[id] || id == r.Header.Get("X-Request-ID") {
+			t.Fatalf("audit identity is not unique and server-owned: %s", id)
+		}
+		seen[id] = true
+		if r.Context().Value(CorrelationIDContextKey) != r.Header.Get("X-Request-ID") || w.Header().Get("X-Request-ID") != id {
+			t.Fatal("correlation and response identity were not preserved separately")
+		}
+	}))
+	for _, correlation := range []string{"repeated", "repeated", "connect-test-1", ""} {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.Header.Set("Authorization", "Bearer identity-regression-key")
+		r.Header.Set("X-Request-ID", correlation)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("legitimate request rejected: %d", w.Code)
+		}
+	}
+	if len(seen) != 4 {
+		t.Fatal("not every request received an independent identity")
+	}
+}
 
 func TestAuthMiddleware(t *testing.T) {
 	// 1. Initialize DB

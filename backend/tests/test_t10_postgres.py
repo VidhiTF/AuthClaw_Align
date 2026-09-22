@@ -15,6 +15,7 @@ from time import perf_counter
 import tracemalloc
 from types import SimpleNamespace
 from uuid import uuid4
+from unittest.mock import patch
 
 import pytest
 import pyotp
@@ -27,6 +28,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.models import ApprovalAudit, ComplianceScoreSnapshot, Notification, PendingApproval, TrustCenterAccessLog, TrustCenterShare, User
 from app.db import dependencies, session as database_session
 from app.core.auth import get_tenant_score_db, set_mfa_credentials
+from app.core.startup_checks import validate_database_security
 from app.services import abuse_controls, audit_store, compliance_scoring, control_assessments, event_backbone, evidence_service, trust_center
 from app.api.v1.endpoints.trust_center import get_public_trust_center
 from app.api.v1.endpoints import compliance_scores
@@ -79,6 +81,16 @@ def postgres():
                 {"id": uuid4(), "tenant": legacy_tenant})
         command("-m", "alembic", "upgrade", "051")
         command("scripts/bootstrap_database_security.py", "finalize-backend")
+        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="051,052"), app.connect() as connection:
+            validate_database_security(connection)
+            with pytest.raises(HTTPException) as failure:
+                compliance_scores.require_snapshot_schema(connection)
+            assert failure.value.status_code == 503
+        command("-m", "alembic", "upgrade", "head")
+        command("scripts/bootstrap_database_security.py", "finalize-backend")
+        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="051,052"), app.connect() as connection:
+            validate_database_security(connection)
+            compliance_scores.require_snapshot_schema(connection)
         harness = IsolationHarness(owner, app, sessionmaker(bind=app, expire_on_commit=False))
         yield harness, command, legacy_snapshot
     finally:
@@ -100,6 +112,17 @@ def score(score_value, *, generated_at=None):
         "score": score_value, "readiness_level": "monitor", "controls": [],
         "generated_at": (generated_at or datetime.now(timezone.utc)).isoformat(),
         "metrics": {"evidence_count": 0, "audit_event_count": 0, "open_findings": 0, "critical_findings": 0}}
+
+
+def test_real_get_does_not_write_snapshot_or_notification(postgres):
+    harness, _, _ = postgres
+    tenant = harness.create_identity("ent019-read-only")
+    request = SimpleNamespace(method="GET", state=SimpleNamespace(tenant_id=tenant.tenant_id))
+    with harness.session_for(tenant) as db:
+        db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        assert compliance_scores.get_compliance_scores(request, db=db)["overall_score"] is None
+        assert compliance_scores.get_framework_score("SOC2", request, db=db)["score"] is None
+        assert db.query(ComplianceScoreSnapshot).count() == db.query(Notification).count() == 0
 
 
 def reviewer(harness, requester):
@@ -188,19 +211,17 @@ def test_real_evidence_writer_and_review_qualify_with_repeatable_read(postgres, 
     with harness.session_for(tenant) as db:
         db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         db.info["compliance_read_transaction"] = True
-        unreviewed = compliance_scores.get_framework_score("SOC2", SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id)),
-            persist_snapshot=True, db=db)
-        assert unreviewed["score"] == 0 and unreviewed["readiness_level"] == "insufficient_evidence"
-        assert all(row["score"] == 0 and row["status"] == "non_compliant" for row in unreviewed["controls"])
+        unreviewed = compliance_scores.get_framework_score("SOC2", SimpleNamespace(method="POST", state=SimpleNamespace(tenant_id=tenant.tenant_id)), db=db)
+        assert unreviewed["score"] is None and unreviewed["readiness_level"] == "insufficient_evidence"
+        assert all(row["score"] is None and row["status"] == "insufficient_evidence" for row in unreviewed["controls"])
         if with_activity:
             assert next(row for row in unreviewed["controls"] if row["id"] == "CC7.2")["activity_diagnostics"]["score"] == 100
-        assert db.query(ComplianceScoreSnapshot).one().overall_score == 0
+        assert db.query(ComplianceScoreSnapshot).one().overall_score is None
     _, _, assessment_id = reviewed_assessment(harness, tenant)
     with harness.session_for(tenant) as db:
         db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         db.info["compliance_read_transaction"] = True
-        result = compliance_scores.get_framework_score("SOC2", SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id)),
-            persist_snapshot=True, db=db)
+        result = compliance_scores.get_framework_score("SOC2", SimpleNamespace(method="POST", state=SimpleNamespace(tenant_id=tenant.tenant_id)), db=db)
         result = compliance_scores.FrameworkScoreResponse.model_validate(result).model_dump()
         control = next(row for row in result["controls"] if row["id"] == "CC7.2")
         assert control["evidence_assessment"]["state"] == "qualified", control["evidence_assessment"]
@@ -211,7 +232,7 @@ def test_real_evidence_writer_and_review_qualify_with_repeatable_read(postgres, 
         assert str(assessment_id) in control["evidence_assessment"]["evidence_ids"]
         persisted = db.query(ComplianceScoreSnapshot).one()
         assert persisted.calculation_version == result["calculation_version"]
-        assert persisted.overall_score == 12.5
+        assert persisted.overall_score is None
         assert persisted.control_scores["CC7.2"]["score"] == 100
 
 
@@ -219,6 +240,8 @@ def test_request_dependency_uses_single_connection_and_resets_write_isolation(po
     harness, _, _ = postgres
     tenant = harness.create_identity("t10-one-connection")
     pool = create_engine(harness.app_engine.url, pool_size=1, max_overflow=0, pool_timeout=2)
+    monkeypatch.setenv("AUTHCLAW_RUNTIME_DB_ROLE", pool.url.username)
+    event.listen(pool, "checkout", database_session.verify_runtime_database_identity)
     monkeypatch.setattr(dependencies, "SessionLocal", sessionmaker(bind=pool, expire_on_commit=False))
     request = SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id,
         credential_kind="session", credential_hash=tenant.session_hash))
@@ -331,6 +354,89 @@ def test_rollback_preserves_snapshot_and_notification_atomicity(postgres):
         assert db.query(Notification).count() == 0
 
 
+def test_unknown_transition_persists_null_and_one_atomic_alert(postgres):
+    harness, _, _ = postgres
+    tenant = harness.create_identity("ent019-unknown-snapshot")
+    when = datetime.now(timezone.utc)
+    with harness.session_for(tenant) as db:
+        compliance_scoring.upsert_score_snapshot(db, str(tenant.tenant_id), score(90, generated_at=when))
+        unknown = {**score(None, generated_at=when + timedelta(seconds=1)),
+                   "readiness_level": "insufficient_evidence", "evidence_timestamp": None,
+                   "inputs_as_of": when.isoformat(), "missing_control_treatment": compliance_scoring.MISSING_CONTROL_TREATMENT}
+        compliance_scoring.upsert_score_snapshot(db, str(tenant.tenant_id), unknown)
+        compliance_scoring.upsert_score_snapshot(db, str(tenant.tenant_id), unknown)
+        assert db.query(ComplianceScoreSnapshot).one().overall_score is None
+        assert db.query(Notification).filter(Notification.type == "compliance_score_unavailable").count() == 1
+        history = compliance_scoring.score_history(db, str(tenant.tenant_id))[0]
+        assert history["overall_score"] is None and history["evidence_timestamp"] is None
+        assert history["inputs_as_of"] == when.isoformat()
+
+
+def test_all_framework_snapshots_roll_back_on_real_postgres_failure(postgres, monkeypatch):
+    harness, _, _ = postgres
+    tenant = harness.create_identity("ent019-batch-rollback")
+    with harness.session_for(tenant) as db:
+        for framework in compliance_scoring.FRAMEWORKS:
+            compliance_scoring.upsert_score_snapshot(db, str(tenant.tenant_id), {**score(90), "framework": framework})
+    monkeypatch.setattr(compliance_scoring, "_calculate_framework", lambda db, tid, framework, **kwargs:
+                        {**score(50, generated_at=kwargs["as_of"]), "framework": framework, "evidence_timestamp": None})
+
+    def fail_second_framework(conn, cursor, statement, parameters, context, many):
+        if statement.startswith("INSERT INTO compliance_score_snapshots") and parameters.get("framework") == "GDPR":
+            conn.exec_driver_sql("SELECT 1 / 0")
+
+    event.listen(harness.app_engine, "before_cursor_execute", fail_second_framework)
+    try:
+        with harness.session_for(tenant) as db:
+            db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+            db.info["compliance_read_transaction"] = True
+            with pytest.raises(DBAPIError, match="division by zero"):
+                compliance_scoring.score_all_frameworks(db, str(tenant.tenant_id), include_traceability=False)
+            assert {row.overall_score for row in db.query(ComplianceScoreSnapshot).all()} == {90}
+            assert db.query(Notification).count() == 0
+    finally:
+        event.remove(harness.app_engine, "before_cursor_execute", fail_second_framework)
+
+
+def test_concurrent_first_framework_batches_are_one_revision(postgres, monkeypatch):
+    harness, _, _ = postgres
+    tenant = harness.create_identity("ent019-first-batch")
+    barrier = Barrier(2)
+    monkeypatch.setattr(compliance_scoring, "_calculate_framework", lambda db, tid, framework, **kwargs:
+                        {**score(50, generated_at=kwargs["as_of"]), "framework": framework, "evidence_timestamp": None})
+
+    def persist():
+        with harness.session_for(tenant) as db:
+            db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+            db.info["compliance_read_transaction"] = True
+            barrier.wait(timeout=15)
+            return compliance_scoring.score_all_frameworks(db, str(tenant.tenant_id), include_traceability=False)["generated_at"]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(persist) for _ in range(2)]
+        latest = max(future.result(timeout=30) for future in futures)
+    with harness.session_for(tenant) as db:
+        rows = db.query(ComplianceScoreSnapshot).all()
+        assert {row.framework for row in rows} == set(compliance_scoring.FRAMEWORKS)
+        assert len(rows) == 3
+        assert {row.generated_at.isoformat() for row in rows} == {latest}
+
+
+def test_nullable_expansion_preserves_unknowns_and_old_numeric_writes_on_rollback(postgres):
+    harness, command, _ = postgres
+    tenant = harness.create_identity("ent019-null-rollback")
+    with harness.session_for(tenant) as db:
+        identifier = compliance_scoring.upsert_score_snapshot(db, str(tenant.tenant_id), score(None)).id
+    command("-m", "alembic", "downgrade", "051")
+    try:
+        with harness.owner_engine.begin() as conn:
+            assert conn.execute(text("SELECT overall_score FROM compliance_score_snapshots WHERE id=:id"), {"id": identifier}).scalar_one() is None
+            assert conn.execute(text("SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='compliance_score_snapshots' AND column_name='overall_score'")).scalar_one() == "YES"
+            conn.execute(text("UPDATE compliance_score_snapshots SET overall_score=50 WHERE id=:id"), {"id": identifier})
+    finally:
+        command("-m", "alembic", "upgrade", "head")
+
+
 def test_downgrade_refuses_retained_versioned_history_and_keeps_rls(postgres):
     harness, command, _ = postgres
     tenant = harness.create_identity("t10-downgrade")
@@ -339,7 +445,7 @@ def test_downgrade_refuses_retained_versioned_history_and_keeps_rls(postgres):
     result = command("-m", "alembic", "downgrade", "049", succeeds=False)
     assert "downgrade refused" in result.stderr
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "051"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "052"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='compliance_score_snapshots'")).scalar_one()
 
 
@@ -383,7 +489,7 @@ def test_concurrent_public_score_views_rebind_and_log_each_access(postgres, monk
         packages = [future.result(timeout=30) for future in futures]
     assert all(package["scores"]["calculation_version"] == control_assessments.CALCULATION_VERSION for package in packages)
     assert all([row["framework"] for row in package["scores"]["frameworks"]] == ["SOC2"] for package in packages)
-    assert all(package["scores"]["overall_score"] == 0
+    assert all(package["scores"]["overall_score"] is None
                and package["scores"]["readiness_level"] == "insufficient_evidence" for package in packages)
     with harness.session_for(tenant) as db:
         assert db.get(TrustCenterShare, share_id).access_count == 2
@@ -586,5 +692,5 @@ def test_durable_mfa_state_prevents_schema_downgrade(real_mfa, postgres):
     result = command("-m", "alembic", "downgrade", "050", succeeds=False)
     assert "mfa" in result.stderr.lower() and "downgrade" in result.stderr.lower()
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "051"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "052"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='users'")).scalar_one()

@@ -52,6 +52,7 @@ def main() -> None:
         agent_environment["AUTHCLAW_PROVIDER_GEMINI_API_KEY"] == DUMMY_GEMINI_KEY
     )
     assert agent_environment["MODEL_PROVIDER"] == "gemini"
+    assert agent_environment["AUTHCLAW_CLICKHOUSE_ENABLED"] == os.getenv("AUTHCLAW_CLICKHOUSE_ENABLED", "false")
 
 
 if __name__ == "__main__":
