@@ -8,7 +8,7 @@ import re
 import unittest
 from unittest.mock import patch
 
-from scripts.repository_policy import (REQUIRED_SECTIONS, approval_users, growth_evidence,
+from scripts.repository_policy import (REQUIRED_SECTIONS, api, approval_users, growth_evidence,
     validate_live_rules, validate_manifest, verify_github, verify_live_protection,
     verify_owner_reviews, verify_pr_evidence, verify_t01)
 from scripts import check_line_budget
@@ -102,6 +102,11 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(evidence["status"], "active")
         self.assertEqual(evidence["merged_commit"], "b" * 40)
         self.assertEqual(evidence["effective_at"], self.pr["merged_at"])
+
+    @patch("scripts.repository_policy.subprocess.check_output", return_value="{}")
+    def test_gh_api_output_is_decoded_as_utf8(self, output):
+        self.assertEqual(api("repos/example/repo"), {})
+        output.assert_called_once_with(["gh", "api", "repos/example/repo"], text=True, encoding="utf-8")
 
     def test_schema_rejects_missing_extra_duplicate_and_mutable_sources(self):
         bad = deepcopy(self.record)
