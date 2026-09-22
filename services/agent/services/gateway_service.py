@@ -87,6 +87,7 @@ class GatewayService:
                 {
                     "message": message,
                     "username": resolved_username,
+                    "requester_id": resolved_username,
                     **execution_context,
                     "gateway_api_key": x_api_key,
                     "route_id": route_id,

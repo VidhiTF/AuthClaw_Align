@@ -43,13 +43,14 @@ def api(monkeypatch):
     tenant, other, requester, reviewer, outsider = [uuid4() for _ in range(5)]
     with Session(engine) as db:
         for uid, tid in ((requester, tenant), (reviewer, tenant), (outsider, other)):
-            db.add(User(id=uid, tenant_id=tid, email=f"{uid}@example.test", role="admin", is_active=True, mfa_enabled=True))
+            role = "tenant_administrator" if uid == requester else "approver"
+            db.add(User(id=uid, tenant_id=tid, email=f"{uid}@example.test", role=role, is_active=True, mfa_enabled=True))
         db.commit()
         source = evidence_service.create_evidence(db, tenant_id=str(tenant), workflow_id=None,
             framework="SOC2", source_type="audit_event", source_reference="monitoring-operation",
             evidence_type="audit_log", evidence_data={"monitoring_window": "operating record"})
         source_id, created_at = source.id, source.created_at.replace(tzinfo=timezone.utc)
-    identity = dict(tenant_id=tenant, user_id=requester, credential_kind="session", user_role="admin", scopes=["read", "write"])
+    identity = dict(tenant_id=tenant, user_id=requester, credential_kind="session", user_role="tenant_administrator", scopes=["read", "write"])
     app = FastAPI()
 
     @app.middleware("http")
@@ -111,20 +112,21 @@ def test_actor_database_state_overrides_asserted_request_role(api, mutation):
         else:
             api.identity["user_id"] = api.outsider
         db.commit()
-    assert api.client.post("/v1/compliance-scores/assessments", json=api.proposal).status_code == 403
+    expected = 400 if mutation == "demoted" else 403
+    assert api.client.post("/v1/compliance-scores/assessments", json=api.proposal).status_code == expected
 
 
 @pytest.mark.parametrize("revocation", [{"is_active": False}, {"role": "viewer"}])
 def test_locked_principal_refreshes_cached_actor_after_database_revocation(api, revocation):
     with Session(api.engine) as db:
         cached_actor = db.get(User, api.requester)
-        assert cached_actor.is_active and cached_actor.role == "admin"
+        assert cached_actor.is_active and cached_actor.role == "tenant_administrator"
         # Raw SQL models a changed database row while the ORM identity retains
         # the actor previously loaded by the endpoint authorization check.
         db.execute(update(User).where(User.id == api.requester).values(**revocation),
                    execution_options={"synchronize_session": False})
-        assert cached_actor.is_active and cached_actor.role == "admin"
-        with pytest.raises(ValueError, match="active tenant owner or administrator"):
+        assert cached_actor.is_active and cached_actor.role == "tenant_administrator"
+        with pytest.raises(ValueError, match="active tenant administrator"):
             control_assessments._principal(db, api.tenant, api.requester)
 
 
@@ -140,6 +142,7 @@ def test_real_http_proposal_review_and_response_contract(api):
     assert datetime.fromisoformat(retrieved.pop("expires_at")).replace(tzinfo=timezone.utc) == datetime.fromisoformat(pending["expires_at"])
     assert retrieved == {key: value for key, value in pending.items() if key != "expires_at"}
     api.identity["user_id"] = api.reviewer
+    api.identity["user_role"] = "approver"
     response = api.client.post(f"/v1/compliance-scores/assessments/{pending['approval_id']}/review", json=review_payload(pending))
     assert response.status_code == 200, response.text
     result = response.json()
@@ -161,7 +164,7 @@ def test_real_http_proposal_review_and_response_contract(api):
 
 def test_cross_tenant_read_and_review_are_not_found(api):
     pending = propose(api)
-    api.identity.update(tenant_id=api.other, user_id=api.outsider)
+    api.identity.update(tenant_id=api.other, user_id=api.outsider, user_role="approver")
     path = f"/v1/compliance-scores/assessments/{pending['approval_id']}"
     assert api.client.get(path).status_code == 404
     assert api.client.post(path + "/review", json=review_payload(pending)).status_code == 404
@@ -189,6 +192,7 @@ def test_cross_tenant_source_is_rejected_before_proposal_commit(api):
 def test_action_hash_mismatch_never_consumes_mfa_or_approval(api):
     pending = propose(api)
     api.identity["user_id"] = api.reviewer
+    api.identity["user_role"] = "approver"
     payload = review_payload(pending)
     payload["action_hash"] = "0" * 64
     response = api.client.post(f"/v1/compliance-scores/assessments/{pending['approval_id']}/review", json=payload)
@@ -201,8 +205,9 @@ def test_action_hash_mismatch_never_consumes_mfa_or_approval(api):
 def test_mfa_failure_and_self_review_cannot_consume_assessment(api):
     pending = propose(api)
     path = f"/v1/compliance-scores/assessments/{pending['approval_id']}/review"
-    assert api.client.post(path, json=review_payload(pending)).status_code == 400
+    assert api.client.post(path, json=review_payload(pending)).status_code == 403
     api.identity["user_id"] = api.reviewer
+    api.identity["user_role"] = "approver"
     api.mfa.side_effect = HTTPException(status_code=401, detail="MFA challenge failed")
     assert api.client.post(path, json=review_payload(pending)).status_code == 401
     with Session(api.engine) as db:
@@ -213,6 +218,7 @@ def test_mfa_failure_and_self_review_cannot_consume_assessment(api):
 def test_rejection_does_not_create_assessment_evidence(api):
     pending = propose(api)
     api.identity["user_id"] = api.reviewer
+    api.identity["user_role"] = "approver"
     payload = review_payload(pending)
     payload["approve"] = False
     response = api.client.post(f"/v1/compliance-scores/assessments/{pending['approval_id']}/review", json=payload)
@@ -224,6 +230,7 @@ def test_rejection_does_not_create_assessment_evidence(api):
 def test_review_service_failure_rolls_back_mutations(api, monkeypatch):
     pending = propose(api)
     api.identity["user_id"] = api.reviewer
+    api.identity["user_role"] = "approver"
 
     def fail_after_mutation(db, *_args):
         approval = db.query(PendingApproval).one()

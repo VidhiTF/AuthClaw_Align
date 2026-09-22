@@ -57,6 +57,7 @@ from services.tenant_context import get_current_tenant_id, tenant_context
 from services.control_plane_auth import authenticate_control_plane
 from services.quota_service import admit, check_available, metrics_snapshot, record_unavailable, QuotaExceeded, QuotaUnavailable
 from services.document_monitor_status import monitor_metrics_snapshot, monitor_status
+from services.role_contract import ROLE_OWNER, ROLE_PLATFORM_ADMIN, normalize_role
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO)
@@ -512,7 +513,15 @@ async def tenant_database_context_middleware(request: Request, call_next):
                     raise HTTPException(status_code=422, detail="operation must be one of: chat, rag, remediation_plan")
                 if not agent_operation_allowed(principal.role, operation):
                     raise HTTPException(status_code=403, detail="Role is not authorized for this agent operation.")
-        if protected:
+        platform_route = request.url.path.startswith("/platform/")
+        platform_payload = optional_user_from_request(request) if platform_route else {}
+        if platform_route and (
+            normalize_role(platform_payload.get("role")) != ROLE_PLATFORM_ADMIN
+            or platform_payload.get("tenant_id") is not None
+            or platform_payload.get("external_tenant_id") is not None
+        ):
+            raise HTTPException(status_code=403, detail="Tenantless platform administrator session required.")
+        if protected and not platform_route:
             tenant_id = await run_in_threadpool(_tenant_id_from_request_headers, request)
             if tenant_id is None:
                 raise HTTPException(status_code=401, detail="Authentication credentials missing.")
@@ -527,7 +536,7 @@ async def tenant_database_context_middleware(request: Request, call_next):
     request.state.correlation_id = request_id
     request.state.tenant_id = tenant_id
     with tenant_context(tenant_id, request_id=request_id, required=tenant_id is not None):
-        if protected:
+        if protected and not platform_route:
             try:
                 limit = await run_in_threadpool(_tenant_tier_limit, tenant_id)
                 await run_in_threadpool(
@@ -570,6 +579,14 @@ def _rbac_enforcement_enabled() -> bool:
 
 def approval_actor_from_payload(payload: dict) -> str:
     return payload.get("email") or payload.get("sub") or "System Admin"
+
+
+def ensure_distinct_approval_actor(record: dict, actor: str) -> None:
+    requester = record.get("requester_id")
+    if not requester:
+        raise HTTPException(status_code=409, detail="Approval requester identity is missing")
+    if str(requester) == str(actor):
+        raise HTTPException(status_code=403, detail="The requester cannot approve or reject their own high-risk action")
 
 def ensure_approval_tenant_access(record: dict, payload: dict) -> None:
     tenant_id = payload.get("tenant_id")
@@ -742,12 +759,12 @@ def _approval_is_expired(record: dict) -> bool:
     return datetime.now(timezone.utc) >= _utc_from_iso(expires_at)
 
 def require_platform_admin(payload: dict = Depends(get_current_user_from_authorization)) -> dict:
-    if payload.get("role") != "Platform Admin":
+    if normalize_role(payload.get("role")) != ROLE_PLATFORM_ADMIN or payload.get("tenant_id") is not None:
         raise HTTPException(status_code=403, detail="Platform admin access required.")
     return payload
 
 def require_tenant_access_admin(payload: dict = Depends(get_current_user_from_authorization)) -> dict:
-    if payload.get("role") not in {"Super Admin", "Security Admin"}:
+    if normalize_role(payload.get("role")) != ROLE_OWNER:
         raise HTTPException(status_code=403, detail="Tenant access administrator role required.")
     if not payload.get("tenant_id"):
         raise HTTPException(status_code=401, detail="Session token is missing tenant scope.")
@@ -1307,6 +1324,7 @@ async def approve_request(approval_id: str, request: Request):
     user_payload = _approval_authenticated_payload(request)
     ensure_approval_tenant_access(record, user_payload)
     approver = approval_actor_from_payload(user_payload)
+    ensure_distinct_approval_actor(record, approver)
 
     # Expiry check is handled by get_approval() lazily updating to 'expired'
     if record["status"] == "expired":
@@ -1466,6 +1484,7 @@ async def reject_request(approval_id: str, request: Request):
     user_payload = optional_user_from_request(request)
     ensure_approval_tenant_access(record, user_payload)
     approver = approval_actor_from_payload(user_payload)
+    ensure_distinct_approval_actor(record, approver)
     payload = await parse_approval_action_payload(request)
     payload.pop("_body_present", None)
     comment = (payload.get("comment") or "").strip() or None
@@ -1548,6 +1567,7 @@ async def execute_request(approval_id: str, request: Request):
     user_payload = _approval_authenticated_payload(request)
     ensure_approval_tenant_access(record, user_payload)
     approver = approval_actor_from_payload(user_payload)
+    ensure_distinct_approval_actor(record, approver)
     payload = await parse_approval_action_payload(request)
     body_present = bool(payload.pop("_body_present", False))
     comment = (payload.get("comment") or "").strip() or None
@@ -3700,15 +3720,8 @@ def create_user_role(role_req: UserRoleRequest, payload: dict = Depends(require_
     from sqlalchemy import text
     from verify_audit import create_audit_block
     tenant_id = payload["tenant_id"]
-    allowed_roles = {
-        "Super Admin",
-        "Security Admin",
-        "Compliance Officer",
-        "Developer",
-        "Auditor",
-        "Viewer",
-    }
-    if role_req.role not in allowed_roles:
+    allowed_roles = {ROLE_OWNER, ROLE_DEVELOPER, ROLE_OPERATOR, ROLE_AUDITOR, ROLE_APPROVER, ROLE_VIEWER}
+    if normalize_role(role_req.role) not in allowed_roles:
         raise HTTPException(status_code=400, detail="Unsupported tenant role.")
     normalized_email = role_req.username.strip().lower()
     if not is_valid_work_email(normalized_email):
@@ -3724,7 +3737,7 @@ def create_user_role(role_req: UserRoleRequest, payload: dict = Depends(require_
             {
                 "tenant_id": tenant_id,
                 "email": normalized_email,
-                "role": role_req.role,
+                "role": normalize_role(role_req.role),
                 "permissions": role_req.permissions,
             },
         ).fetchone()

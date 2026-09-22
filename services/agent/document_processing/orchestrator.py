@@ -281,7 +281,8 @@ Do not include markdown packaging like ```json.
         create_approval(
             query=f"Document Compliance Override: {filename}",
             risk_level=severity,
-            session_id=f"doc_{doc_id}"
+            session_id=f"doc_{doc_id}",
+            requester_id=f"system:document:{doc_id}"
         )
         create_document_audit(
             doc_id, 

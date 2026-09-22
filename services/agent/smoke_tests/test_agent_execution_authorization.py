@@ -18,9 +18,9 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
         expectations = {
             "owner": (True, True, True),
             "admin": (True, True, True),
-            "compliance_officer": (True, True, True),
-            "developer": (True, False, False),
-            "operator": (True, False, False),
+            "compliance_officer": (True, False, False),
+            "developer": (True, True, True),
+            "operator": (True, True, True),
             "viewer": (True, False, False),
             "auditor": (True, False, False),
         }
@@ -44,7 +44,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
         )
         self.assertEqual(identity.tenant_id, 42)
         self.assertEqual(identity.user_id, "user-17")
-        self.assertEqual(identity.role, "admin")
+        self.assertEqual(identity.role, "tenant_administrator")
 
     def test_missing_identity_and_denied_operation_fail_closed(self):
         with self.assertRaises(ValueError):

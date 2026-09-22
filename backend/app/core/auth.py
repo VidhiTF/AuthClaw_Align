@@ -149,6 +149,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/v1/auth/login",
             "/v1/auth/password-reset/request",
             "/v1/auth/password-reset/confirm",
+            "/v1/audit-logs/export/verify",
+            "/v1/audit/export/verify",
             "/api/public/v1/access-requests",
         }
         public_access_request = (

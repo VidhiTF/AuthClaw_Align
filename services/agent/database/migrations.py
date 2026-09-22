@@ -464,6 +464,7 @@ def run_startup_migrations():
         id SERIAL PRIMARY KEY,
         approval_id VARCHAR(100) NOT NULL UNIQUE,
         request_id VARCHAR(100),
+        requester_id VARCHAR(255),
         correlation_id VARCHAR(100),
         tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
         status VARCHAR(50) NOT NULL,
@@ -497,6 +498,7 @@ def run_startup_migrations():
 
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS approval_id VARCHAR(100);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS request_id VARCHAR(100);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS requester_id VARCHAR(255);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(100);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS status VARCHAR(50);

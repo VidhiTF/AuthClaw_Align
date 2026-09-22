@@ -112,7 +112,7 @@ def _persist_record(record: dict) -> None:
                 text(
                     """
                     INSERT INTO gateway_approvals (
-                        approval_id, request_id, correlation_id, tenant_id, status,
+                        approval_id, request_id, requester_id, correlation_id, tenant_id, status,
                         created_at, expires_at, approved_at, rejected_at, executed_at,
                         requested_action, query, risk_level, audit_id, reason, comments,
                         approved_by, rejected_by, executed_by, mfa_verified, last_action_at,
@@ -122,7 +122,7 @@ def _persist_record(record: dict) -> None:
                         execution_token_hash, execution_token_used_at, execution_expires_at
                     )
                     VALUES (
-                        :approval_id, :request_id, :correlation_id, :tenant_id, :status,
+                        :approval_id, :request_id, :requester_id, :correlation_id, :tenant_id, :status,
                         :created_at, :expires_at, :approved_at, :rejected_at, :executed_at,
                         :requested_action, :query, :risk_level, :audit_id, :reason, :comments,
                         :approved_by, :rejected_by, :executed_by, :mfa_verified, :last_action_at,
@@ -133,6 +133,7 @@ def _persist_record(record: dict) -> None:
                     )
                     ON CONFLICT (approval_id) DO UPDATE SET
                         request_id = EXCLUDED.request_id,
+                        requester_id = EXCLUDED.requester_id,
                         correlation_id = EXCLUDED.correlation_id,
                         tenant_id = EXCLUDED.tenant_id,
                         status = EXCLUDED.status,
@@ -166,6 +167,7 @@ def _persist_record(record: dict) -> None:
                 {
                     "approval_id": record.get("approval_id"),
                     "request_id": record.get("request_id"),
+                    "requester_id": record.get("requester_id"),
                     "correlation_id": record.get("correlation_id"),
                     "tenant_id": record.get("tenant_id"),
                     "status": record.get("status"),
@@ -219,6 +221,7 @@ def _row_to_record(row) -> PersistentApprovalRecord:
         {
             "approval_id": mapping.get("approval_id"),
             "request_id": mapping.get("request_id"),
+            "requester_id": mapping.get("requester_id"),
             "correlation_id": mapping.get("correlation_id"),
             "tenant_id": mapping.get("tenant_id"),
             "status": mapping.get("status"),
@@ -289,6 +292,7 @@ def create_approval(
     session_id: str = "",
     tenant_id: int = None,
     request_id: str = None,
+    requester_id: str = None,
     reason: str = None,
     metadata: dict = None,
 ) -> dict:
@@ -305,6 +309,7 @@ def create_approval(
     record = PersistentApprovalRecord({
         "approval_id":       approval_id,
         "request_id":        request_id,
+        "requester_id":      requester_id,
         "correlation_id":    correlation_id,
         "tenant_id":         tenant_id,
         "status":            "pending",

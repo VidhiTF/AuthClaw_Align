@@ -29,7 +29,8 @@ def context(monkeypatch):
         tenant, other_tenant = uuid.uuid4(), uuid.uuid4()
         requester, reviewer, outsider = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
         for user_id, tid in ((requester, tenant), (reviewer, tenant), (outsider, other_tenant)):
-            db.add(User(id=user_id, tenant_id=tid, email=f"{user_id}@example.test", role="admin",
+            role = "tenant_administrator" if user_id == requester else "approver"
+            db.add(User(id=user_id, tenant_id=tid, email=f"{user_id}@example.test", role=role,
                         is_active=True, mfa_enabled=True))
         db.flush()
         yield db, tenant, requester, reviewer, outsider
