@@ -289,6 +289,7 @@ jobs:
         working-directory: backend
         env:
           ENT022_EVIDENCE_DIR: ../ent022-recovery-evidence
+          ENT019_TEST_DATABASE_URL: ${{ env.OWNER_DATABASE_URL }}
         run: >-
           ../.ci-backend-integration/bin/python -m pytest -p no:cacheprovider -q
           tests/test_db_safety.py
@@ -305,6 +306,7 @@ jobs:
           tests/test_workflow_advisory_lock_postgres.py
           tests/test_t10_postgres.py
           tests/test_mfa_recovery_postgres.py
+          tests/test_audit_metrics.py
 
       - name: Preserve MFA recovery audit evidence
         if: always()
@@ -379,6 +381,7 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
+      ENT019_TEST_DATABASE_URL: postgresql+psycopg2://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
       ENT018_REDIS_URL: redis://localhost:6379
       ENT022_AGENT_POSTGRES_URL: postgresql+psycopg2://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
       QUOTA_TEST_REDIS_URL: redis://127.0.0.1:6379
@@ -400,13 +403,14 @@ jobs:
           cd services/agent
           ../../.ci-agent/bin/python -m pytest --noconftest -p no:cacheprovider \
             tests/test_sensitive_data_detection.py tests/test_audit_transport_contract.py \
+            smoke_tests/test_truthful_telemetry.py smoke_tests/test_trust_runtime_boundaries.py smoke_tests/test_token_truthfulness.py smoke_tests/test_telemetry_tenant_postgres.py smoke_tests/test_queue_health.py \
             smoke_tests/test_control_plane_auth.py smoke_tests/test_agent_execution_authorization.py \
             smoke_tests/test_control_plane_mfa_postgres.py \
             smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py \
             smoke_tests/test_gateway_provider.py smoke_tests/test_privileged_policy_invariants.py \
             smoke_tests/test_runtime_context_regressions.py \
             smoke_tests/test_quota_service.py smoke_tests/test_quota_http_boundary.py \
-            smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py \
+            smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py smoke_tests/test_document_provider_health.py smoke_tests/test_connector_truthfulness.py \
             smoke_tests/test_quota_redis.py smoke_tests/test_compliance_diagnostics.py -q
         env:
           ENT022_EVIDENCE_DIR: ${{ github.workspace }}/ent022-mfa-evidence

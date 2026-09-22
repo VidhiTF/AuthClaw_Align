@@ -1,15 +1,15 @@
 """Add pending-enrollment state for complete privileged MFA.
 
-Revision ID: 052
-Revises: 051
+Revision ID: 053
+Revises: 052
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = "052"
-down_revision = "051"
+revision = "053"
+down_revision = "052"
 branch_labels = None
 depends_on = None
 

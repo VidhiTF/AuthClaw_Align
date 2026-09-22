@@ -53,7 +53,8 @@ def test_audit_origin_reader_migration_follows_platform_history(monkeypatch):
     config = Config(str(backend / "alembic.ini"))
     config.set_main_option("script_location", str(backend / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["053"]
+    assert scripts.get_heads() == ["054"]
+    assert scripts.get_revision("054").down_revision == "053"
     assert scripts.get_revision("053").down_revision == "052"
     assert scripts.get_revision("052").down_revision == "051"
     assert scripts.get_revision("051").down_revision == "050"
@@ -82,12 +83,12 @@ def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch)
     from app.core.startup_checks import compatible_database_revisions
 
     monkeypatch.delenv("AUTHCLAW_EXPECTED_DB_REVISION", raising=False)
-    assert compatible_database_revisions() == ("053",)
+    assert compatible_database_revisions() == ("054",)
 
-    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "053")
-    assert compatible_database_revisions() == ("053",)
+    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "054")
+    assert compatible_database_revisions() == ("054",)
 
-    for invalid in ("052", "052,053", "053,053", "051", "051,052", "050", "050,051", "049", "049,050", "048,048", "47", "046,047", "046,047,048", "048,head"):
+    for invalid in ("053", "053,054", "054,054", "052", "052,053", "051", "051,052", "050", "050,051", "049", "049,050", "048,048", "47", "046,047", "046,047,048", "048,head"):
         monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", invalid)
         with pytest.raises(RuntimeError):
             compatible_database_revisions()

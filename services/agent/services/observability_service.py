@@ -6,12 +6,13 @@ import urllib.parse
 import urllib.request
 
 from database import engine
+from fastapi import HTTPException
 from services.event_pipeline import EventPipeline
 from sqlalchemy import text
 from verify_audit import clickhouse_pipeline_enabled, verify_audit_chain
 
 
-def _iso(value: Any) -> str:
+def _iso(value: Any) -> str | None:
     if value is None:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
@@ -21,38 +22,50 @@ def _int(value: Any) -> int:
     return int(value or 0)
 
 
-def _float(value: Any) -> float:
-    return round(float(value or 0), 2)
+def _float(value: Any) -> float | None:
+    return round(float(value), 2) if value is not None else None
+
+
+def aggregate_health(*states: str) -> str:
+    """Failure wins over missing observation; disabled checks cannot imply health."""
+    precedence = ("unavailable", "degraded", "unknown", "healthy", "not_applicable")
+    observed = {state if state in precedence else "unknown" for state in states}
+    return next((state for state in precedence if state in observed), "unknown")
 
 
 class ObservabilityService:
     def governance_analytics(self, tenant_id: int) -> Dict[str, Any]:
         tenant_id_text = str(tenant_id)
         clickhouse_status = self._clickhouse_status()
-
-        with engine.connect() as conn:
-            gateway = self._safe(
-                lambda: self._clickhouse_gateway_summary(tenant_id_text) or self._gateway_summary(conn, tenant_id_text),
-                self._empty_gateway(),
-            )
-            providers = self._safe(lambda: self._provider_usage(conn, tenant_id_text), [])
-            blocked = self._safe(lambda: self._blocked_requests(conn, tenant_id_text), {"by_risk_level": {}, "recent": []})
-            redactions = self._safe(lambda: self._redaction_summary(conn, tenant_id, tenant_id_text), self._empty_redactions())
-            approvals = self._safe(lambda: self._approval_summary(conn, tenant_id), self._empty_approvals())
-            approval_latency = self._safe(lambda: self._approval_latency(conn, tenant_id), {"avg_seconds": 0, "p95_seconds": 0})
-            provider_errors = self._safe(lambda: self._provider_errors(conn, tenant_id_text), {"total": 0, "by_provider": {}})
+        with self._safe(engine.connect) as conn:
+            gateway = self._safe(lambda: self._gateway_summary(conn, tenant_id_text))
+            providers = self._safe(lambda: self._provider_usage(conn, tenant_id_text))
+            blocked = self._safe(lambda: self._blocked_requests(conn, tenant_id_text))
+            redactions = self._safe(lambda: self._redaction_summary(conn, tenant_id, tenant_id_text))
+            approvals = self._safe(lambda: self._approval_summary(conn, tenant_id))
+            approval_latency = self._safe(lambda: self._approval_latency(conn, tenant_id))
+            provider_errors = self._safe(lambda: self._provider_errors(conn, tenant_id_text))
             rate_limits = self._safe(
                 lambda: self._rate_limit_summary(conn, tenant_id),
-                {"allowed": 0, "blocked": 0, "backend": "none", "min_remaining": None, "last_seen": None},
             )
-            worker_throttle = self._safe(lambda: self._worker_throttle_summary(conn, tenant_id), {"by_type": {}})
-            recent_requests = self._safe(lambda: self._recent_requests(conn, tenant_id_text), [])
-            latest_hash = self._safe(lambda: self._latest_audit_hash(conn, tenant_id), None)
+            worker_throttle = self._safe(lambda: self._worker_throttle_summary(conn, tenant_id))
+            recent_requests = self._safe(lambda: self._recent_requests(conn, tenant_id_text))
+            latest_hash = self._safe(lambda: self._latest_audit_hash(conn, tenant_id))
 
-        verification = self._safe(lambda: verify_audit_chain(tenant_id=tenant_id), {"valid": True, "records_checked": 0})
-        pipeline = self._safe(lambda: EventPipeline().delivery_metrics(), {"checkpoints": []})
+        if clickhouse_status["status"] == "unknown":
+            try:
+                mirror = self._clickhouse_gateway_summary(tenant_id_text)
+                if any(mirror[key] != gateway[key] for key in gateway if not key.startswith("tokens_")):
+                    clickhouse_status.update(status="degraded", message="ClickHouse mirror differs from PostgreSQL observations; ingestion may be delayed or incomplete.")
+            except HTTPException:
+                clickhouse_status.update(status="unavailable", message="ClickHouse analytics query failed; PostgreSQL observations remain available.")
+        gateway.update(source="postgresql", coverage="persisted_gateway_events_only")
+        verification = self._safe(lambda: verify_audit_chain(tenant_id=tenant_id))
+        pipeline = self._safe(lambda: EventPipeline().delivery_metrics())
+        queue = self._queue_lag(pipeline)
         audit = {
-            "valid": bool(verification.get("valid", True)),
+            "valid": verification.get("valid"),
+            "status": "unknown" if verification.get("valid") is None else "healthy" if verification["valid"] else "degraded",
             "records_checked": _int(verification.get("records_checked")),
             "chain_started_at": verification.get("chain_started_at"),
             "failed_record_id": verification.get("failed_record_id"),
@@ -65,6 +78,7 @@ class ObservabilityService:
         }
 
         return {
+            "status": aggregate_health(audit["status"], queue["status"], clickhouse_status["status"]),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "tenant_id": tenant_id,
             "gateway": gateway,
@@ -76,72 +90,43 @@ class ObservabilityService:
             "approval_latency": approval_latency,
             "audit": audit,
             "event_pipeline": pipeline,
-            "queue_lag": self._queue_lag(pipeline),
+            "queue_lag": queue,
             "rate_limits": rate_limits,
             "worker_throttle": worker_throttle,
             "recent_requests": recent_requests,
             "clickhouse_pipeline": clickhouse_status,
         }
 
-    def _safe(self, loader, fallback):
+    def _safe(self, loader):
         try:
             return loader()
-        except Exception:
-            return fallback
-
-    def _empty_gateway(self) -> Dict[str, Any]:
-        return {
-            "total_requests": 0,
-            "allowed_requests": 0,
-            "blocked_requests": 0,
-            "pending_requests": 0,
-            "avg_duration_ms": 0,
-            "tokens_in": 0,
-            "tokens_out": 0,
-            "tokens_total": 0,
-        }
-
-    def _empty_redactions(self) -> Dict[str, Any]:
-        return {
-            "total_fields": 0,
-            "document_findings": 0,
-            "agent_redaction_events": 0,
-            "audit_redaction_records": 0,
-            "redacted_gateway_requests": 0,
-            "by_type": {},
-        }
-
-    def _empty_approvals(self) -> Dict[str, Any]:
-        return {
-            "total": 0,
-            "pending": 0,
-            "approved": 0,
-            "rejected": 0,
-            "executed": 0,
-            "expired": 0,
-            "by_status": {},
-        }
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Telemetry source unavailable") from exc
 
     def _clickhouse_status(self) -> Dict[str, Any]:
         enabled = clickhouse_pipeline_enabled()
         if not enabled:
             return {
                 "enabled": False,
-                "status": "disabled",
+                "status": "not_applicable",
+                "alertable": False,
                 "message": "ClickHouse analytics mirror is disabled by configuration.",
             }
         try:
-            self._clickhouse_query_json("SELECT 1 AS ok FORMAT JSONEachRow", timeout=0.5)
+            if self._clickhouse_query_json("SELECT 1 AS ok FORMAT JSONEachRow", timeout=0.5) != [{"ok": 1}]:
+                raise ValueError("Invalid ClickHouse health response")
             return {
                 "enabled": True,
-                "status": "connected",
-                "message": "ClickHouse analytics mirror is enabled and reachable.",
+                "status": "unknown",
+                "alertable": True,
+                "message": "ClickHouse is reachable; ingestion coverage is unverified. PostgreSQL observations are used.",
             }
         except Exception:
             return {
                 "enabled": True,
-                "status": "fallback",
-                "message": "ClickHouse analytics mirror is enabled; PostgreSQL RLS-backed analytics are serving as fallback.",
+                "status": "unavailable",
+                "alertable": True,
+                "message": "ClickHouse analytics mirror check failed; PostgreSQL analytics must be checked independently.",
             }
 
     def _clickhouse_query_json(self, query: str, *, timeout: float = 1.5) -> List[Dict[str, Any]]:
@@ -156,7 +141,7 @@ class ObservabilityService:
                     rows.append(json.loads(line))
             return rows
 
-    def _clickhouse_gateway_summary(self, tenant_id_text: str) -> Dict[str, Any]:
+    def _clickhouse_gateway_summary(self, tenant_id_text: str) -> Dict[str, Any] | None:
         if not clickhouse_pipeline_enabled():
             return None
         database = os.getenv("CLICKHOUSE_DATABASE", "authclaw")
@@ -168,30 +153,30 @@ class ObservabilityService:
                 countIf(allowed = 1 OR upper(coalesce(decision, '')) = 'ALLOW') AS allowed_requests,
                 countIf(allowed = 0 OR upper(coalesce(decision, status, '')) = 'BLOCK') AS blocked_requests,
                 countIf(upper(coalesce(decision, status, '')) IN ('REQUIRE_APPROVAL', 'PENDING_APPROVAL')) AS pending_requests,
-                avg(coalesce(duration_ms, 0)) AS avg_duration_ms,
-                sum(coalesce(tokens_in, 0)) AS tokens_in,
-                sum(coalesce(tokens_out, 0)) AS tokens_out
+                avgOrNull(duration_ms) AS avg_duration_ms
             FROM {database}.{view}
             WHERE toString(tenant_id) = '{tenant}'
             FORMAT JSONEachRow
         """  # nosec B608
         try:
             rows = self._clickhouse_query_json(query)
-            if not rows:
-                return None
+            if len(rows) != 1:
+                raise ValueError("Missing ClickHouse aggregate")
             row = rows[0]
+            if any(row.get(key) is None for key in ("total_requests", "allowed_requests", "blocked_requests", "pending_requests")) or "avg_duration_ms" not in row:
+                raise ValueError("Incomplete ClickHouse aggregate")
             return {
                 "total_requests": _int(row.get("total_requests")),
                 "allowed_requests": _int(row.get("allowed_requests")),
                 "blocked_requests": _int(row.get("blocked_requests")),
                 "pending_requests": _int(row.get("pending_requests")),
                 "avg_duration_ms": _float(row.get("avg_duration_ms")),
-                "tokens_in": _int(row.get("tokens_in")),
-                "tokens_out": _int(row.get("tokens_out")),
-                "tokens_total": _int(row.get("tokens_in")) + _int(row.get("tokens_out")),
+                "tokens_in": None,
+                "tokens_out": None,
+                "tokens_total": None,
             }
-        except Exception:
-            return None
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Analytics source unavailable") from exc
 
     def _gateway_summary(self, conn, tenant_id_text: str) -> Dict[str, Any]:
         row = conn.execute(
@@ -202,9 +187,9 @@ class ObservabilityService:
                     SUM(CASE WHEN allowed = TRUE OR upper(COALESCE(decision, '')) = 'ALLOW' THEN 1 ELSE 0 END) AS allowed_requests,
                     SUM(CASE WHEN allowed = FALSE OR upper(COALESCE(decision, status, '')) = 'BLOCK' THEN 1 ELSE 0 END) AS blocked_requests,
                     SUM(CASE WHEN upper(COALESCE(decision, status, '')) IN ('REQUIRE_APPROVAL', 'PENDING_APPROVAL') THEN 1 ELSE 0 END) AS pending_requests,
-                    AVG(COALESCE(duration_ms, latency, 0)) AS avg_duration_ms,
-                    SUM(COALESCE(tokens_in, 0)) AS tokens_in,
-                    SUM(COALESCE(tokens_out, 0)) AS tokens_out
+                    CASE WHEN COUNT(*) = COUNT(CASE WHEN latency_recorded THEN COALESCE(duration_ms, latency) END) THEN AVG(COALESCE(duration_ms, latency)) END AS avg_duration_ms,
+                    CASE WHEN COUNT(*) = COUNT(CASE WHEN token_usage_recorded THEN tokens_in END) THEN COALESCE(SUM(tokens_in), 0) END AS tokens_in,
+                    CASE WHEN COUNT(*) = COUNT(CASE WHEN token_usage_recorded THEN tokens_out END) THEN COALESCE(SUM(tokens_out), 0) END AS tokens_out
                 FROM gateway_requests
                 WHERE tenant_id = :tenant_id
                 """
@@ -218,9 +203,9 @@ class ObservabilityService:
             "blocked_requests": _int(row[2]),
             "pending_requests": _int(row[3]),
             "avg_duration_ms": _float(row[4]),
-            "tokens_in": _int(row[5]),
-            "tokens_out": _int(row[6]),
-            "tokens_total": _int(row[5]) + _int(row[6]),
+            "tokens_in": int(row[5]) if row[5] is not None else None,
+            "tokens_out": int(row[6]) if row[6] is not None else None,
+            "tokens_total": int(row[5]) + int(row[6]) if row[5] is not None and row[6] is not None else None,
         }
 
     def _provider_usage(self, conn, tenant_id_text: str) -> List[Dict[str, Any]]:
@@ -231,8 +216,8 @@ class ObservabilityService:
                     COALESCE(NULLIF(provider, ''), 'unknown') AS provider_name,
                     COUNT(*) AS request_count,
                     SUM(CASE WHEN allowed = FALSE OR upper(COALESCE(decision, status, '')) = 'BLOCK' THEN 1 ELSE 0 END) AS blocked_count,
-                    AVG(COALESCE(duration_ms, latency, 0)) AS avg_duration_ms,
-                    SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)) AS tokens_total,
+                    CASE WHEN COUNT(*) = COUNT(CASE WHEN latency_recorded THEN COALESCE(duration_ms, latency) END) THEN AVG(COALESCE(duration_ms, latency)) END AS avg_duration_ms,
+                    CASE WHEN COUNT(*) = COUNT(CASE WHEN token_usage_recorded THEN tokens_in + tokens_out END) THEN SUM(tokens_in + tokens_out) END AS tokens_total,
                     MAX(COALESCE(created_at, timestamp)) AS last_seen
                 FROM gateway_requests
                 WHERE tenant_id = :tenant_id
@@ -249,7 +234,7 @@ class ObservabilityService:
                 "requests": _int(row[1]),
                 "blocked": _int(row[2]),
                 "avg_duration_ms": _float(row[3]),
-                "tokens_total": _int(row[4]),
+                "tokens_total": int(row[4]) if row[4] is not None else None,
                 "last_seen": _iso(row[5]),
             }
             for row in rows
@@ -400,7 +385,7 @@ class ObservabilityService:
             ),
             {"tenant_id": tenant_id},
         ).fetchone()
-        return {"avg_seconds": _float(row[0] if row else 0), "p95_seconds": _float(row[1] if row else 0)}
+        return {"avg_seconds": _float(row[0] if row else None), "p95_seconds": _float(row[1] if row else None)}
 
     def _provider_errors(self, conn, tenant_id_text: str) -> Dict[str, Any]:
         rows = conn.execute(
@@ -477,18 +462,76 @@ class ObservabilityService:
         return {"by_type": by_type}
 
     def _queue_lag(self, pipeline: Dict[str, Any]) -> Dict[str, Any]:
-        max_lag = 0
-        dead_letters = 0
-        pending = 0
-        for checkpoint in pipeline.get("checkpoints", []):
-            max_lag = max(max_lag, _int(checkpoint.get("lag_seconds")))
-            dead_letters += _int(checkpoint.get("dead_letter_count"))
-            pending += _int(checkpoint.get("pending_events"))
+        unknown = {"status": "unknown", "max_lag_seconds": None, "pending_events": None,
+                   "dead_letter_count": None, "alertable": True}
+        try:
+            threshold = int(os.getenv("AUTHCLAW_QUEUE_LAG_ALERT_SECONDS", "300"))
+            if threshold <= 0:
+                raise ValueError("Invalid queue threshold")
+        except ValueError:
+            return {**unknown, "status": "unavailable", "reason": "Invalid queue lag configuration"}
+        if not isinstance(pipeline, dict):
+            return unknown
+        checkpoints = pipeline.get("checkpoints", [])
+        streams = pipeline.get("streams")
+        if not isinstance(streams, dict):
+            return unknown
+        try:
+            live_counts = [(counts.get("queued", 0), counts.get("dead_letter", 0)) for counts in streams.values()]
+            if any(type(value) is not int or value < 0 for counts in live_counts for value in counts):
+                return unknown
+            # Current delivery failures remain measured even when checkpoint lag is unknown.
+            unknown["pending_events"] = sum(queued + dead for queued, dead in live_counts)
+            unknown["dead_letter_count"] = sum(dead for _, dead in live_counts)
+            if unknown["dead_letter_count"]:
+                unknown["status"] = "degraded"
+        except AttributeError:
+            return unknown
+        if pipeline.get("external_delivery_status") == "unavailable":
+            return {**unknown, "status": "unavailable", "reason": "Required external delivery is not configured"}
+        # SMTP deliveries have no Kafka checkpoint. Completed alerts must not
+        # prevent recovery; pending/failed alerts still lack a measured lag.
+        pending_alert = False
+        security_observed = "security_alert" in streams
+        if "security_alert" in streams:
+            pending_alert = bool(streams["security_alert"].get("queued", 0) or streams["security_alert"].get("dead_letter", 0))
+            streams = {name: counts for name, counts in streams.items() if name != "security_alert"}
+            if not pending_alert and not streams and checkpoints == []:
+                return {**unknown, "status": "healthy", "max_lag_seconds": 0, "alertable": False}
+        if pipeline.get("external_delivery_status") == "not_applicable" and not unknown["pending_events"]:
+            return {**unknown, "status": "healthy" if security_observed else "not_applicable",
+                    "max_lag_seconds": 0, "alertable": False}
+        if not isinstance(checkpoints, list) or not checkpoints or any(not isinstance(cp, dict) or not isinstance(cp.get("stream"), str) or not cp["stream"] for cp in checkpoints):
+            return unknown
+        if set(streams) - {cp["stream"] for cp in checkpoints}:
+            return unknown
+        max_lag = dead_letters = pending = 0
+        for checkpoint in checkpoints:
+            try:
+                updated = datetime.fromisoformat(str(checkpoint["updated_at"]))
+                age = (datetime.now(timezone.utc) - updated.replace(tzinfo=updated.tzinfo or timezone.utc)).total_seconds()
+                lag, dead, queued = (checkpoint[key] for key in ("lag_seconds", "dead_letter_count", "pending_events"))
+                if any(type(value) is not int or value < 0 for value in (lag, dead, queued)) or not 0 <= age <= threshold:
+                    return unknown
+                counts = streams.get(checkpoint["stream"], {})
+                if int(counts.get("dead_letter", 0)) != dead or int(counts.get("queued", 0)) + dead != queued:
+                    return unknown
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return unknown
+            max_lag = max(max_lag, lag)
+            dead_letters += dead
+            pending += queued
+        alertable = max_lag > threshold or dead_letters > 0
+        if pending_alert:
+            if alertable:
+                unknown["status"] = "degraded"
+            return unknown
         return {
+            "status": "degraded" if alertable else "healthy",
             "max_lag_seconds": max_lag,
             "pending_events": pending,
             "dead_letter_count": dead_letters,
-            "alertable": max_lag > int(os.getenv("AUTHCLAW_QUEUE_LAG_ALERT_SECONDS", "300")) or dead_letters > 0,
+            "alertable": alertable,
         }
 
     def _recent_requests(self, conn, tenant_id_text: str) -> List[Dict[str, Any]]:
@@ -496,7 +539,7 @@ class ObservabilityService:
             text(
                 """
                 SELECT request_id, provider, model, risk_level, decision, status,
-                       COALESCE(duration_ms, latency, 0), COALESCE(created_at, timestamp)
+                       CASE WHEN latency_recorded THEN COALESCE(duration_ms, latency) END, COALESCE(created_at, timestamp)
                 FROM gateway_requests
                 WHERE tenant_id = :tenant_id
                 ORDER BY COALESCE(created_at, timestamp) DESC
@@ -513,7 +556,7 @@ class ObservabilityService:
                 "risk_level": row[3],
                 "decision": row[4],
                 "status": row[5],
-                "duration_ms": _int(row[6]),
+                "duration_ms": _float(row[6]),
                 "timestamp": _iso(row[7]),
             }
             for row in rows

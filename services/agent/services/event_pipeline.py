@@ -3,13 +3,14 @@ import os
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 from sqlalchemy import text
 
 from database import engine
 from services.audit_transport import AuditTopics, make_audit_publisher
+from services.tenant_context import get_current_tenant_id, validate_tenant_id
 
 
 def _truthy(name: str, default: bool = False) -> bool:
@@ -26,19 +27,27 @@ class EventPipeline:
         self.analytics_topic = topics.analytics
         self.dlq_topic = topics.dlq
         self.clickhouse_enabled = _truthy("AUTHCLAW_CLICKHOUSE_ENABLED", True)
+        self.clickhouse_required = _truthy("AUTHCLAW_REQUIRE_CLICKHOUSE", False)
+        self.audit_required = _truthy("AUTHCLAW_REQUIRE_KAFKA", False)
         self.max_attempts = int(os.getenv("AUTHCLAW_EVENT_DELIVERY_ATTEMPTS", "3"))
         self.timeout = float(os.getenv("AUTHCLAW_EVENT_DELIVERY_TIMEOUT_SECONDS", "1.5"))
         self.audit_publisher = make_audit_publisher(
             timeout=self.timeout,
-            required=_truthy("AUTHCLAW_REQUIRE_KAFKA", False),
+            required=self.audit_required,
         )
 
     def record_and_deliver(self, event: Dict[str, Any], stream: str = "audit") -> Dict[str, Any]:
+        return self.deliver_event(self.record_event(event, stream))
+
+    def record_event(self, event: Dict[str, Any], stream: str = "audit", *, connection=None) -> str:
         topic = self.audit_topic if stream == "audit" else self.analytics_topic
+        if stream == "security_alert":
+            validate_tenant_id(event.get("tenant_id"))
+            topic = "security_alert"
         event_id = self._event_id(event)
         tenant_id = self._event_tenant(event)
         payload = json.dumps(event, sort_keys=True, default=str)
-        with engine.connect() as conn:
+        with nullcontext(connection) if connection is not None else engine.connect() as conn:
             conn.execute(
                 text(
                     """
@@ -64,43 +73,52 @@ class EventPipeline:
                     "payload": payload,
                 },
             )
-            conn.commit()
-        return self.deliver_event(event_id)
+            if connection is None:
+                conn.commit()
+        return event_id
 
-    def deliver_event(self, event_id: str) -> Dict[str, Any]:
-        with engine.connect() as conn:
+    def deliver_event(self, event_id: str, *, retry: bool = False) -> Dict[str, Any]:
+        # Keep the row locked through delivery and result persistence. A crash
+        # rolls back the claim; concurrent workers cannot send the same alert.
+        with engine.begin() as conn:
             row = conn.execute(
-                text("SELECT * FROM event_delivery_records WHERE event_id = :event_id"),
+                text("SELECT * FROM event_delivery_records WHERE event_id = :event_id FOR UPDATE"),
                 {"event_id": event_id},
             ).fetchone()
-        if not row:
-            return {"status": "missing", "event_id": event_id}
-        record = dict(row._mapping)
-        event = json.loads(record["payload"])
-        attempts = int(record["attempts"] or 0)
-        errors = []
-        delivered = False
+            if not row:
+                return {"status": "missing", "event_id": event_id}
+            record = dict(row._mapping)
+            if record["status"] == "delivered":
+                return {"status": "delivered", "event_id": event_id}
+            if record["stream"] == "security_alert":
+                validate_tenant_id(record["tenant_id"])
+            event = json.loads(record["payload"])
+            attempts = 0 if retry else int(record["attempts"] or 0)
+            errors = []
+            delivered = False
+            applicable = record["stream"] == "security_alert" or self.audit_publisher.configured or self.audit_required or (
+                self.clickhouse_enabled and bool(os.getenv("CLICKHOUSE_HTTP_URL"))) or self.clickhouse_required
+            for attempt in (range(attempts + 1, self.max_attempts + 1) if applicable else ()):
+                try:
+                    if record["stream"] == "security_alert":
+                        from document_processing.alerts import trigger_security_alert
+                        trigger_security_alert(event, connection=conn)
+                    else:
+                        self.audit_publisher.publish(record["topic"], event, serialized=record["payload"])
+                        if self.clickhouse_required and not self.clickhouse_enabled:
+                            raise RuntimeError("ClickHouse delivery is required but disabled")
+                        if self.clickhouse_enabled:
+                            self._write_clickhouse(event)
+                    delivered = True
+                    attempts = attempt
+                    break
+                except Exception as exc:
+                    attempts = attempt
+                    errors.append(type(exc).__name__ if record["stream"] == "security_alert" else str(exc))
+                    time.sleep(min(0.05 * attempt, 0.25))
 
-        for attempt in range(attempts + 1, self.max_attempts + 1):
-            try:
-                self.audit_publisher.publish(
-                    record["topic"],
-                    event,
-                    serialized=record["payload"],
-                )
-                if self.clickhouse_enabled:
-                    self._write_clickhouse(event)
-                delivered = True
-                attempts = attempt
-                break
-            except Exception as exc:
-                attempts = attempt
-                errors.append(str(exc))
-                time.sleep(min(0.05 * attempt, 0.25))
-
-        status = "delivered" if delivered else "dead_letter"
-        error_message = "; ".join(errors[-3:]) if errors else None
-        with engine.connect() as conn:
+            status = "delivered" if delivered else "dead_letter" if applicable else "not_applicable"
+            error_message = None if status != "dead_letter" else "; ".join(errors[-3:]) or record["error_message"]
             conn.execute(
                 text(
                     """
@@ -109,7 +127,7 @@ class EventPipeline:
                         attempts = :attempts,
                         delivered_at = CASE WHEN :status = 'delivered' THEN NOW() ELSE delivered_at END,
                         error_message = :error_message,
-                        next_retry_at = CASE WHEN :status = 'dead_letter' THEN NULL ELSE NOW() END,
+                        next_retry_at = CASE WHEN :status IN ('dead_letter', 'not_applicable') THEN NULL ELSE NOW() END,
                         updated_at = NOW()
                     WHERE event_id = :event_id
                     """
@@ -148,8 +166,33 @@ class EventPipeline:
                         "attempts": attempts,
                     },
                 )
-            conn.commit()
-        self.refresh_checkpoint(record["stream"])
+            if record["stream"] == "security_alert":
+                if delivered:
+                    conn.execute(text("UPDATE event_dead_letters SET resolved_at = NOW() WHERE event_id = :id"), {"id": event_id})
+                scans = conn.execute(text("""
+                    UPDATE document_scans SET status = CASE WHEN :delivered THEN outputs_json::jsonb ->> 'scan_status'
+                        ELSE 'alert_delivery_failed' END,
+                        outputs_json = jsonb_set(
+                            jsonb_set(outputs_json::jsonb, '{alert_delivery,status}', CAST(:status AS jsonb)),
+                            '{health}', CASE WHEN :delivered THEN COALESCE(
+                                to_jsonb(outputs_json::jsonb ->> 'scan_health'),
+                                CASE outputs_json::jsonb #>> '{provider_review,status}'
+                                    WHEN 'unavailable' THEN '"degraded"'::jsonb
+                                    ELSE '"unknown"'::jsonb END)
+                                ELSE CAST(:health AS jsonb) END)::text
+                    WHERE tenant_id = :tenant AND document_id = :document AND outputs_json::jsonb #>> '{alert_delivery,event_id}' = :id
+                    RETURNING id, document_id, status
+                """), {"tenant": record["tenant_id"], "document": event["document_id"], "id": event_id,
+                         "delivered": delivered, "status": json.dumps(status),
+                         "health": json.dumps("degraded")}).all()
+                for scan in scans:
+                    conn.execute(text("""
+                        UPDATE documents SET status = :status WHERE id = :document AND tenant_id = :tenant
+                            AND status IN ('alert_delivery_pending', 'alert_delivery_failed') AND NOT EXISTS (
+                                SELECT 1 FROM document_scans WHERE document_id = :document AND tenant_id = :tenant AND id > :scan)
+                    """), {"status": scan.status, "document": scan.document_id, "tenant": record["tenant_id"], "scan": scan.id})
+        if record["stream"] != "security_alert":
+            self.refresh_checkpoint(record["stream"])
         return {"status": status, "event_id": event_id, "attempts": attempts, "error_message": error_message}
 
     def retry_dead_letters(self, limit: int = 100) -> Dict[str, Any]:
@@ -159,7 +202,7 @@ class EventPipeline:
                     """
                     SELECT event_id
                     FROM event_delivery_records
-                    WHERE status = 'dead_letter'
+                    WHERE status = 'dead_letter' OR (stream = 'security_alert' AND status = 'queued')
                     ORDER BY updated_at ASC
                     LIMIT :limit
                     """
@@ -169,13 +212,7 @@ class EventPipeline:
         delivered = 0
         failed = 0
         for row in rows:
-            with engine.connect() as conn:
-                conn.execute(
-                    text("UPDATE event_delivery_records SET status = 'queued', attempts = 0 WHERE event_id = :event_id"),
-                    {"event_id": row.event_id},
-                )
-                conn.commit()
-            result = self.deliver_event(row.event_id)
+            result = self.deliver_event(row.event_id, retry=True)
             if result["status"] == "delivered":
                 delivered += 1
             else:
@@ -183,73 +220,70 @@ class EventPipeline:
         return {"retried": len(rows), "delivered": delivered, "failed": failed}
 
     def refresh_checkpoint(self, stream: str) -> None:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text(
-                    """
-                    SELECT
-                        SUM(CASE WHEN status IN ('queued', 'dead_letter') THEN 1 ELSE 0 END) AS pending,
-                        SUM(CASE WHEN status = 'dead_letter' THEN 1 ELSE 0 END) AS dead_letters,
-                        EXTRACT(EPOCH FROM (
-                            NOW() - MIN(CASE WHEN status IN ('queued', 'dead_letter') THEN created_at ELSE NULL END)
-                        )) AS lag_seconds,
-                        MAX(delivered_at) AS last_delivered_at
-                    FROM event_delivery_records
-                    WHERE stream = :stream
-                    """
-                ),
-                {"stream": stream},
-            ).fetchone()
+        tenant_id = get_current_tenant_id()
+        validate_tenant_id(tenant_id)
+        with engine.begin() as conn:
+            # Acquire before reading counts, so concurrent refreshes cannot publish
+            # an older snapshot after a newer one for the same tenant and stream.
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                         {"key": f"checkpoint:{tenant_id}:{stream}"})
             conn.execute(
                 text(
                     """
                     INSERT INTO event_consumer_checkpoints (
-                        stream, consumer_group, pending_events, dead_letter_count,
+                        tenant_id, stream, consumer_group, pending_events, dead_letter_count,
                         lag_seconds, last_delivered_at, updated_at
                     )
-                    VALUES (
-                        :stream, :consumer_group, :pending_events, :dead_letter_count,
-                        :lag_seconds, :last_delivered_at, NOW()
-                    )
-                    ON CONFLICT (stream, consumer_group) DO UPDATE SET
+                    SELECT
+                        :tenant, :stream, 'authclaw-analytics-ingestor',
+                        COUNT(*) FILTER (WHERE status IN ('queued', 'dead_letter')),
+                        COUNT(*) FILTER (WHERE status = 'dead_letter'),
+                        COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() -
+                            MIN(created_at) FILTER (WHERE status IN ('queued', 'dead_letter'))))::integer, 0),
+                        MAX(delivered_at), clock_timestamp()
+                    FROM event_delivery_records
+                    WHERE tenant_id = :tenant AND stream = :stream
+                    ON CONFLICT (tenant_id, stream, consumer_group) DO UPDATE SET
                         pending_events = EXCLUDED.pending_events,
                         dead_letter_count = EXCLUDED.dead_letter_count,
                         lag_seconds = EXCLUDED.lag_seconds,
                         last_delivered_at = EXCLUDED.last_delivered_at,
-                        updated_at = NOW()
+                        updated_at = EXCLUDED.updated_at
                     """
                 ),
-                {
-                    "stream": stream,
-                    "consumer_group": "authclaw-analytics-ingestor",
-                    "pending_events": int(row.pending or 0),
-                    "dead_letter_count": int(row.dead_letters or 0),
-                    "lag_seconds": int(row.lag_seconds or 0),
-                    "last_delivered_at": row.last_delivered_at,
-                },
+                {"stream": stream, "tenant": tenant_id},
             )
-            conn.commit()
 
     def delivery_metrics(self) -> Dict[str, Any]:
+        tenant_id = get_current_tenant_id()
+        validate_tenant_id(tenant_id)
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
                     """
                     SELECT stream, status, COUNT(*), COALESCE(MAX(attempts), 0)
                     FROM event_delivery_records
+                    WHERE tenant_id = :tenant
                     GROUP BY stream, status
                     """
-                )
+                ), {"tenant": tenant_id},
             ).fetchall()
-            checkpoints = conn.execute(text("SELECT * FROM event_consumer_checkpoints ORDER BY stream")).fetchall()
+            checkpoints = conn.execute(text("SELECT * FROM event_consumer_checkpoints WHERE tenant_id = :tenant ORDER BY stream"), {"tenant": tenant_id}).fetchall()
         by_stream: Dict[str, Dict[str, Any]] = {}
         for stream, status, count, attempts in rows:
             by_stream.setdefault(stream, {"queued": 0, "delivered": 0, "dead_letter": 0, "max_attempts": 0})
             by_stream[stream][status] = int(count or 0)
             by_stream[stream]["max_attempts"] = max(by_stream[stream]["max_attempts"], int(attempts or 0))
+        alerts = by_stream.get("security_alert", {})
+        clickhouse_configured = self.clickhouse_enabled and bool(os.getenv("CLICKHOUSE_HTTP_URL"))
+        required_unavailable = (self.audit_required and not self.audit_publisher.configured) or (
+            self.clickhouse_required and not clickhouse_configured)
         return {
+            "security_alerts": {"status": "not_applicable" if not alerts else "unavailable" if alerts.get("dead_letter") else "unknown" if alerts.get("queued") or alerts.get("delivering") else "healthy", **alerts},
             "kafka_rest_configured": self.audit_publisher.configured,
             "clickhouse_enabled": self.clickhouse_enabled,
+            "external_delivery_status": "unavailable" if required_unavailable else "unknown" if (
+                self.audit_publisher.configured or clickhouse_configured) else "not_applicable",
             "streams": by_stream,
             "checkpoints": [dict(row._mapping) for row in checkpoints],
         }

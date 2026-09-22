@@ -150,6 +150,11 @@ class GatewayApprovalResponse(BaseModel):
     created_at: str
 
 
+class PendingApprovalCountResponse(BaseModel):
+    count: int = Field(ge=0)
+    complete: Literal[True] = True
+
+
 def _approval_response(approval: PendingApproval) -> GatewayApprovalResponse:
     return GatewayApprovalResponse(
         id=str(approval.id),
@@ -601,6 +606,21 @@ def list_gateway_approvals(
         PendingApproval.action_type == "gateway_policy_egress",
     ).order_by(PendingApproval.created_at.desc()).limit(50).all()
     return [_approval_response(approval) for approval in approvals]
+
+
+@router.get("/approvals/pending-count", response_model=PendingApprovalCountResponse)
+def count_pending_gateway_approvals(
+    request: Request,
+    db: Session = Depends(get_tenant_db),
+    _auth=require_scopes(["read"]),
+):
+    """Return the complete unexpired gateway approval count."""
+    return {"count": db.query(PendingApproval).filter(
+        PendingApproval.tenant_id == uuid.UUID(str(request.state.tenant_id)),
+        PendingApproval.action_type == "gateway_policy_egress",
+        PendingApproval.status == "PENDING",
+        PendingApproval.expires_at >= datetime.now(timezone.utc),
+    ).count(), "complete": True}
 
 
 @router.post(

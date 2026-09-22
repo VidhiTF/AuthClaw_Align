@@ -58,8 +58,8 @@ interface ControlScore {
   name: string;
   description: string;
   weight: number;
-  score: number;
-  status: "compliant" | "partial" | "non_compliant";
+  score: number | null;
+  status: "compliant" | "partial" | "non_compliant" | "insufficient_evidence";
   evidence: string[];
   gaps: string[];
   evidence_assessment?: EvidenceAssessment;
@@ -80,7 +80,7 @@ interface ControlScore {
 interface FrameworkScore {
   calculation_version?: string;
   framework: FrameworkId;
-  score: number;
+  score: number | null;
   readiness_level: string;
   controls: ControlScore[];
   metrics: {
@@ -102,7 +102,9 @@ interface FrameworkScore {
 
 interface ComplianceScoreState {
   calculation_version?: string;
-  overall_score: number;
+  evidence_timestamp: string | null;
+  missing_control_treatment: string;
+  overall_score: number | null;
   readiness_level: string;
   frameworks: FrameworkScore[];
   generated_at: string;
@@ -114,7 +116,7 @@ interface ScoreHistoryItem {
   calculation_version?: string;
   framework: FrameworkId;
   snapshot_date: string;
-  overall_score: number;
+  overall_score: number | null;
   readiness_level: string;
   evidence_count: number;
   audit_event_count: number;
@@ -163,6 +165,7 @@ const frameworkMeta: Record<FrameworkId, { name: string; desc: string; accent: s
 };
 
 const statusClass = (status: ControlScore["status"]) => {
+  if (status === "insufficient_evidence") return "bg-slate-500/10 border-slate-500/20 text-slate-500";
   if (status === "compliant") return "bg-emerald-500/10 border-emerald-500/20 text-emerald-300";
   if (status === "partial") return "bg-amber-500/10 border-amber-500/20 text-amber-200";
   return "bg-red-500/10 border-red-500/20 text-red-300";
@@ -205,9 +208,9 @@ function TraceList({ title, items, empty }: { title: string; items: TraceItem[];
 
 export default function FrameworksPage() {
   const [scores, setScores] = useState<ComplianceScoreState | null>(null);
+  const scoreRequest = useRef(0);
   const [history, setHistory] = useState<ScoreHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const scoreRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [activeFramework, setActiveFramework] = useState<FrameworkId>("SOC2");
   const [exporting, setExporting] = useState(false);
@@ -232,7 +235,7 @@ export default function FrameworksPage() {
     setScores(null);
     setHistory([]);
     try {
-      const scoreRes = await fetch("/api/compliance-scores?persist_snapshot=false", { cache: "no-store" });
+      const scoreRes = await fetch("/api/compliance-scores?persist_snapshot=false", { cache: "no-store", signal: AbortSignal.timeout(15000) });
       if (scoreRes.status === 401) {
         window.location.href = "/login";
         return;
@@ -246,7 +249,7 @@ export default function FrameworksPage() {
           || calculationVersion(scoreData.trust_summary.calculation_version) !== calculationVersion(scoreData.calculation_version)))) {
         throw new Error("Compliance snapshot mismatch");
       }
-      const historyRes = await fetch(`/api/compliance-scores/history?framework=${activeFramework}&days=30`, { cache: "no-store" });
+      const historyRes = await fetch(`/api/compliance-scores/history?framework=${activeFramework}&days=30`, { cache: "no-store", signal: AbortSignal.timeout(15000) });
       if (historyRes.status === 401) {
         window.location.href = "/login";
         return;
@@ -257,13 +260,11 @@ export default function FrameworksPage() {
       setScores(scoreData);
       setHistory(historyData.items || []);
     } catch (err: unknown) {
+      if (request !== scoreRequest.current) return;
       const message = getErrorMessage(err, "Failed to load compliance scoring data");
+      setScores(null); setHistory([]);
       console.warn("Frameworks fetchScores failed:", message);
-      if (request === scoreRequest.current) {
-        setScores(null);
-        setHistory([]);
-        setError(message);
-      }
+      setError(message);
     } finally {
       if (request === scoreRequest.current) setLoading(false);
     }
@@ -399,7 +400,7 @@ export default function FrameworksPage() {
             Compliance Frameworks
           </h1>
           <p className="text-[#6B7488] text-sm mt-1">
-            Scores show weighted coverage of qualified control assessments. 0% means required reviewed evidence or control conditions are unmet. Activity counts cannot establish compliance.
+            Scores require current reviewed evidence. Unknown means evidence is insufficient; 0% means a reviewed control failed. Activity counts cannot establish compliance.
           </p>
         </div>
 
@@ -419,6 +420,7 @@ export default function FrameworksPage() {
           <p>{error}</p>
         </div>
       )}
+      {scores && <p className="text-xs text-[#475069]">Calculation: {scores.calculation_version}. Evidence timestamp: {scores.evidence_timestamp || "Unknown"}. {scores.missing_control_treatment}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {(Object.keys(frameworkMeta) as FrameworkId[]).map((framework) => {
@@ -441,7 +443,7 @@ export default function FrameworksPage() {
 
                 <div className="text-right">
                   <span className={`text-2xl font-black ${frameworkMeta[framework].accent}`}>
-                    {loading || !score ? "—" : `${score.score}%`}
+                    {loading ? "—" : score?.score == null ? "Unknown" : `${score.score}%`}
                   </span>
                   <span className="block text-[8px] text-[#6B7488] font-bold uppercase tracking-wider mt-0.5">
                     {score ? readinessLabel(score.readiness_level) : "NO DATA"}
@@ -453,12 +455,12 @@ export default function FrameworksPage() {
               <p className="text-[#6B7488] text-xs mt-1 leading-relaxed">{frameworkMeta[framework].desc}</p>
               {score && <p className="mt-2 text-[10px] text-[#6B7488]">Calculation version: {calculationVersion(score.calculation_version)}</p>}
 
-              <div className="w-full bg-[#F5F7FA]/60 h-1.5 rounded-full mt-4 overflow-hidden">
+              {score?.score != null && <div className="w-full bg-[#F5F7FA]/60 h-1.5 rounded-full mt-4 overflow-hidden">
                 <div
                   className="bg-indigo-500 h-full rounded-full transition-all duration-500"
-                  style={{ width: `${score?.score ?? 0}%` }}
+                  style={{ width: `${score.score}%` }}
                 />
-              </div>
+              </div>}
             </button>
           );
         })}
@@ -476,7 +478,7 @@ export default function FrameworksPage() {
                 {activeFramework} Control Assessments
               </h3>
               <span className="text-[10px] text-[#6B7488] font-bold">
-                {activeScore?.controls.length || 0} controls
+                {activeScore?.controls.length ?? "Unknown"} controls
               </span>
             </div>
 
@@ -500,7 +502,7 @@ export default function FrameworksPage() {
                         {control.status === "compliant" && <CheckCircle2 className="w-3 h-3" />}
                         {control.status === "partial" && <AlertCircle className="w-3 h-3" />}
                         {control.status === "non_compliant" && <XCircle className="w-3 h-3" />}
-                        {control.status.replace("_", " ").toUpperCase()} - {control.score}%
+                        {control.status.replaceAll("_", " ").toUpperCase()} - {control.score == null ? "Unknown" : `${control.score}%`}
                       </span>
                     </div>
 
@@ -530,7 +532,7 @@ export default function FrameworksPage() {
                     </div>
 
                     <div className="h-1.5 w-full rounded-full bg-[#F5F7FA] overflow-hidden">
-                      <div className="h-full rounded-full bg-indigo-500" style={{ width: `${control.score}%` }} />
+                      {control.score != null && <div className="h-full rounded-full bg-indigo-500" style={{ width: `${control.score}%` }} />}
                     </div>
 
                     <div className="grid gap-3 md:grid-cols-2">
@@ -651,7 +653,7 @@ export default function FrameworksPage() {
               ].map(([label, value]) => (
                 <div key={label} className="flex justify-between py-1.5 border-b border-[#E6E9F0] last:border-b-0">
                   <span className="text-[#6B7488]">{label}</span>
-                  <span className="font-bold text-[#0E1726] font-mono">{loading || !activeScore ? "—" : value ?? 0}</span>
+                  <span className="font-bold text-[#0E1726] font-mono">{loading ? "-" : value ?? "Unknown"}</span>
                 </div>
               ))}
             </div>
@@ -661,18 +663,18 @@ export default function FrameworksPage() {
             <h3 className="text-xs font-bold uppercase tracking-wider text-[#6B7488]">30-Day Score History</h3>
             <div className="space-y-2">
               {history.length === 0 ? (
-                <div className="text-xs text-[#6B7488]">No score snapshots yet.</div>
+                <div className="text-xs text-[#6B7488]">{loading ? "Loading score history..." : error ? "Score history unavailable" : "No score snapshots yet."}</div>
               ) : (
                 scoreHistoryEntries(history).map(({ item, key, version, methodChanged }) => (
                   <div key={key} className="rounded-lg border border-[#E6E9F0] bg-[#F5F7FA] p-3">
                     {methodChanged && <p className="mb-2 border-b border-amber-300 pb-2 text-xs text-amber-800">Calculation method changed. Scores across this boundary are not comparable.</p>}
                     <div className="flex justify-between text-xs">
                       <span className="text-[#6B7488]">{item.snapshot_date}</span>
-                      <span className="font-bold text-[#0E1726]">{item.overall_score}%</span>
+                      <span className="font-bold text-[#0E1726]">{item.overall_score == null ? "Unknown" : `${item.overall_score}%`}</span>
                     </div>
                     <p className="mt-1 text-[10px] text-[#6B7488]">Calculation version: {version}</p>
                     <div className="mt-2 h-1.5 rounded-full bg-[#F5F7FA] overflow-hidden">
-                      <div className="h-full rounded-full bg-indigo-500" style={{ width: `${item.overall_score}%` }} />
+                      {item.overall_score != null && <div className="h-full rounded-full bg-indigo-500" style={{ width: `${item.overall_score}%` }} />}
                     </div>
                   </div>
                 ))

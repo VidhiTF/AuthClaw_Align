@@ -78,14 +78,33 @@ class ProviderQuotaTests(unittest.TestCase):
         self.assertEqual(admit.call_count, 2)
         post.assert_called_once()
 
-    def test_embeddings_quota_failure_does_not_disable_or_fallback(self):
+    def test_embeddings_quota_failure_does_not_fallback(self):
         from rag import embeddings
         for error in (QuotaUnavailable("outage"), QuotaExceeded("expensive_model")):
-            with patch.dict(os.environ, {"GOOGLE_API_KEY": "test", "AUTHCLAW_DISABLE_REMOTE_EMBEDDINGS": "false"}), patch.object(embeddings, "_remote_embeddings_disabled", False), patch.object(embeddings, "admit_provider_call", side_effect=error), patch("requests.post") as post:
+            with patch.dict(os.environ, {"GOOGLE_API_KEY": "test", "AUTHCLAW_DISABLE_REMOTE_EMBEDDINGS": "false"}), patch.object(embeddings, "admit_provider_call", side_effect=error), patch("requests.post") as post:
                 with self.assertRaises(type(error)):
                     embeddings.generate_embedding("hello")
-                self.assertFalse(embeddings._remote_embeddings_disabled)
                 post.assert_not_called()
+
+    def test_embeddings_retry_after_transient_failure(self):
+        from rag import embeddings
+        failure = self.response(503)
+        success = self.response()
+        success.json.return_value = {"embedding": {"values": [0.5]}}
+        with patch.dict(os.environ, {"GOOGLE_API_KEY": "test", "AUTHCLAW_DISABLE_REMOTE_EMBEDDINGS": "false"}), \
+                patch.object(embeddings, "admit_provider_call"), \
+                patch("requests.post", side_effect=[failure, success]) as post:
+            with self.assertRaises(RuntimeError):
+                embeddings.generate_embedding("hello")
+            self.assertEqual(len(embeddings.generate_embedding("hello")), 768)
+        self.assertEqual(post.call_count, 2)
+
+    def test_explicit_offline_embeddings_remain_available(self):
+        from rag import embeddings
+        with patch.dict(os.environ, {"GOOGLE_API_KEY": "configured", "AUTHCLAW_DISABLE_REMOTE_EMBEDDINGS": "true"}), \
+                patch("requests.post") as post:
+            self.assertEqual(len(embeddings.generate_embedding("hello")), 768)
+        post.assert_not_called()
 
     def test_llm_worker_preserves_context_and_propagates_quota_failure(self):
         # Execute the production function with audit/storage seams isolated.

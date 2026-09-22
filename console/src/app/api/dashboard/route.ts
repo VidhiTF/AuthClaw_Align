@@ -3,71 +3,51 @@ import { getSessionContext, handleApiError } from "@/lib/api-client";
 
 export const dynamic = "force-dynamic";
 
-interface AuditMetricRecord { action?: string | null;
-  duration_ms?: number | null;
-  duration?: number | null;
-  timestamp?: string | null;
-  created_at?: string | null;
-}
-
-interface AuditMetricResponse {
-  total?: number;
-  records?: AuditMetricRecord[];
-}
-
 export async function GET(request: Request) {
-  try { const context = await getSessionContext(); if ("response" in context) return context.response;
-    const hours = Math.max(1, Math.min(720, Number(new URL(request.url).searchParams.get("hours")) || 24)); const headers = { Authorization: `Bearer ${context.session.apiKey}` }; const apiUrl = process.env.API_URL || "http://localhost:8000";
-    const [approvalsResponse, auditResponse] = await Promise.all([fetch(`${apiUrl}/v1/workflows/approvals`, { headers, cache: "no-store", signal: AbortSignal.timeout(15000) }), fetch(`${apiUrl}/v1/audit-logs?limit=100`, { headers, cache: "no-store", signal: AbortSignal.timeout(15000) })]);
-    if (!approvalsResponse.ok || !auditResponse.ok) throw new Error("Dashboard backend request failed");
-    const [approvals, auditMetrics] = await Promise.all([approvalsResponse.json() as Promise<Array<{ status: string }>>, auditResponse.json() as Promise<AuditMetricResponse>]);
-    const openApprovals = approvals.filter((item) => item.status === "PENDING").length;
-    const redactions24h = (auditMetrics.records || []).filter((record) => record.action === "redact" && new Date(record.timestamp || record.created_at || "").getTime() >= Date.now() - hours * 3600000).length;
-
-    let requestsPerSec: number | null = null;
-    let p99LatencyMs: number | null = null;
-    let totalRequests = 0;
-
-    try {
-      const logsData = auditMetrics;
-      const records = (logsData.records || []).filter((record) => new Date(record.timestamp || record.created_at || "").getTime() >= Date.now() - hours * 3600000); if (records.length > 0) {
-        totalRequests = records.length;
-        const latencies = records
-          .map((record) => record.duration_ms || record.duration)
-          .filter((latency): latency is number => latency !== undefined && latency !== null)
-          .sort((a: number, b: number) => a - b);
-
-        if (latencies.length > 0) {
-          const p99Index = Math.min(
-            latencies.length - 1,
-            Math.ceil(latencies.length * 0.99) - 1
-          );
-          p99LatencyMs = latencies[p99Index];
-        }
-
-        const timestamps = records
-          .map((record) => new Date(record.timestamp || record.created_at || "").getTime())
-          .filter((t: number) => !isNaN(t));
-
-        if (timestamps.length > 1) {
-          const maxTime = Math.max(...timestamps);
-          const minTime = Math.min(...timestamps);
-          const diffSeconds = (maxTime - minTime) / 1000;
-          if (diffSeconds > 0) {
-            requestsPerSec = Number((timestamps.length / diffSeconds).toFixed(2));
-          }
-        }
-      }
-    } catch (err) {
-      console.warn("Failed to fetch traffic metrics from ClickHouse/Postgres audit logs:", err);
-    }
-
+  try {
+    const context = await getSessionContext();
+    if ("response" in context) return context.response;
+    const hours = Math.max(1, Math.min(720, Math.trunc(Number(new URL(request.url).searchParams.get("hours"))) || 24));
+    const headers = { Authorization: `Bearer ${context.session.apiKey}` };
+    const apiUrl = process.env.API_URL || "http://localhost:8000";
+    const results = await Promise.allSettled([
+      "/v1/workflows/approvals/pending-count", `/v1/audit-logs/metrics?hours=${hours}`, "/v1/audit-logs?limit=8",
+    ].map(async (path) => {
+      const response = await fetch(`${apiUrl}${path}`, { headers, cache: "no-store", signal: AbortSignal.timeout(15000) });
+      if (!response.ok) throw new Error("Dashboard source unavailable");
+      return response.json();
+    }));
+    const [approvals, gateway, audit] = results.map((result) => result.status === "fulfilled" ? result.value : null);
+    const approvalValid = approvals?.complete === true && Number.isInteger(approvals.count) && approvals.count >= 0;
+    const approvalState = approvalValid ? "healthy" : approvals?.complete === false ? "unknown" : "unavailable";
+    const metricNames = ["totalRequests", "redactions24h", "requestsPerSec", "p99LatencyMs"] as const;
+    const gatewayValid = gateway?.source === "postgres" && typeof gateway.complete === "boolean"
+      && ["healthy", "degraded", "unknown", "unavailable", "not_applicable"].includes(gateway.status)
+      && [gateway.windowStart, gateway.windowEnd].every((value) => typeof value === "string" && Number.isFinite(Date.parse(value)))
+      && metricNames.every((name) => gateway[name] === null || (typeof gateway[name] === "number" && Number.isFinite(gateway[name]) && gateway[name] >= 0));
+    const auditValid = Array.isArray(audit?.records) && audit.records.every((record: { record_id?: string; action?: string; timestamp?: string }) =>
+      typeof record?.record_id === "string" && typeof record.action === "string" && typeof record.timestamp === "string" && Number.isFinite(Date.parse(record.timestamp)));
+    const generatedAt = new Date().toISOString();
+    const sources = {
+      approvals: { status: approvalState, source: "postgres", observedAt: generatedAt },
+      gateway: { status: !gatewayValid ? "unavailable" : gateway.status, source: "postgres", observedAt: gatewayValid ? gateway.windowEnd : generatedAt },
+      audit: { status: !auditValid ? "unavailable" : audit.source === "postgres" ? "healthy" : "unknown", source: auditValid ? audit.source : null, observedAt: generatedAt },
+    };
+    const metrics = Object.fromEntries(metricNames.map((name) => [name, gatewayValid && gateway.complete && gateway.status === "healthy" ? gateway[name] : null]));
+    const metricStates = {
+      openApprovals: sources.approvals.status,
+      ...Object.fromEntries(metricNames.map((name) => [name, sources.gateway.status !== "healthy" ? sources.gateway.status : metrics[name] === null ? "unknown" : "healthy"])),
+    };
+    const states = [...Object.values(sources).map((source) => source.status), ...Object.values(metricStates)];
+    // Failures outrank missing observations; a successful source never masks another's failure.
+    const status = ["unavailable", "degraded", "unknown", "healthy", "not_applicable"].find((state) => states.includes(state)) || "unknown";
     return NextResponse.json({
-      openApprovals,
-      redactions24h,
-      totalRequests,
-      requestsPerSec,
-      p99LatencyMs, recentActivity: (auditMetrics.records || []).slice(0, 8),
+      status, sources, metricStates, generatedAt,
+      coverageReason: gatewayValid && !gateway.complete ? (typeof gateway.reason === "string" ? gateway.reason : "Gateway collection coverage is unverified.") : null,
+      complete: gatewayValid ? gateway.complete : false,
+      windowStart: gatewayValid ? gateway.windowStart : null, windowEnd: gatewayValid ? gateway.windowEnd : null,
+      openApprovals: approvalValid ? approvals.count : null,
+      ...metrics, recentActivity: auditValid ? audit.records.slice(0, 8) : [],
     });
   } catch (error: unknown) {
     console.error("Dashboard API Error:", error);

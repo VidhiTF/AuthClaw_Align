@@ -338,6 +338,8 @@ def build_public_package(
             bucket: len(trust_summary[bucket]) for bucket in ("verified", "in_progress", "planned")
         }
     scores["overall_score"], scores["readiness_level"] = compliance_scoring.aggregate_readiness(scores["frameworks"])
+    timestamps = [item.get("evidence_timestamp") for item in scores["frameworks"]]
+    scores["evidence_timestamp"] = min(timestamps) if timestamps and all(timestamps) else None
     for framework in scores["frameworks"]:
         catalog = {item["id"]: item for item in compliance_scoring.CONTROL_CATALOG[framework["framework"]]}
         for control in framework.get("controls", []):

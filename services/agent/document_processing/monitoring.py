@@ -12,6 +12,7 @@ from services.document_monitor_status import monitor_status, update_monitor_stat
 from document_processing.orchestrator import run_document_scan_pipeline
 from document_processing.auditor import create_document_audit
 from document_processing.connectors import (
+    require_source_tenant,
     is_real_connectors_enabled,
     discover_s3_buckets,
     scan_s3_bucket_security,
@@ -40,6 +41,11 @@ def _scan_request_context(doc_id: int, requested_by: str = None) -> dict:
         "requested_by": requested_by or MONITOR_REQUESTER_ID,
     }
 
+
+def _scan_failed(result):
+    return result["status"] == "alert_delivery_failed" or result.get("health") in {"degraded", "unavailable"}
+
+
 def get_watched_directory() -> str:
     if not os.path.exists(WATCH_DIR):
         os.makedirs(WATCH_DIR)
@@ -59,7 +65,6 @@ def start_background_monitoring(tenant_id=None):
         update_monitor_status(enabled=False, status="disabled", tenant_configured=False)
         raise ValueError("Background document monitoring requires an explicitly authorized positive tenant ID")
 
-    get_watched_directory()
     _stop_event.clear()
     update_monitor_status(enabled=True, status="starting", tenant_configured=True, last_error_type=None)
     _monitor_thread = threading.Thread(
@@ -90,6 +95,16 @@ def sync_sources(requested_by: str = None):
     if tenant_id is None:
         record_unavailable()
         raise QuotaUnavailable("Document synchronization requires a verified tenant")
+    require_source_tenant()
+    with engine.begin() as guard:
+        if not guard.execute(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+                             {"key": f"document-sync:{tenant_id}"}).scalar_one():
+            raise RuntimeError("Document synchronization already in progress")
+        _sync_sources(tenant_id, requested_by=requested_by)
+
+
+def _sync_sources(tenant_id, requested_by: str = None):
+    failures = set()
     # 1. Local watched documents directory
     try:
         get_watched_directory()
@@ -103,7 +118,10 @@ def sync_sources(requested_by: str = None):
             # Check DB
             with engine.connect() as conn:
                 doc = conn.execute(
-                    text("SELECT id, size_bytes, status FROM documents WHERE filename = :name AND source = 'watched' AND tenant_id = :tenant_id"),
+                    text("""SELECT d.id, d.size_bytes, d.status, (SELECT s.outputs_json::jsonb ->> 'health'
+                        FROM document_scans s WHERE s.document_id = d.id AND s.tenant_id = d.tenant_id
+                        ORDER BY s.id DESC LIMIT 1) FROM documents d
+                        WHERE d.filename = :name AND d.source = 'watched' AND d.tenant_id = :tenant_id"""),
                     {"name": filename, "tenant_id": tenant_id}
                 ).fetchone()
                 
@@ -121,8 +139,12 @@ def sync_sources(requested_by: str = None):
                     doc_id = res.fetchone()[0]
                     conn.commit()
                 with open(filepath, "rb") as f:
-                    run_document_scan_pipeline(doc_id, f.read(), filename, source="watched", tenant_id=tenant_id, **_scan_request_context(doc_id, requested_by))
-            elif doc[1] != size:
+                    if _scan_failed(run_document_scan_pipeline(
+                        doc_id, f.read(), filename, source="watched", tenant_id=tenant_id,
+                        **_scan_request_context(doc_id, requested_by),
+                    )):
+                        failures.add("local")
+            elif doc[1] != size or doc[2] in {"pending", "scanning"}:
                 # Rescan modified
                 with engine.connect() as conn:
                     conn.execute(
@@ -131,10 +153,17 @@ def sync_sources(requested_by: str = None):
                     )
                     conn.commit()
                 with open(filepath, "rb") as f:
-                    run_document_scan_pipeline(doc[0], f.read(), filename, source="watched", tenant_id=tenant_id, **_scan_request_context(doc[0], requested_by))
+                    if _scan_failed(run_document_scan_pipeline(
+                        doc[0], f.read(), filename, source="watched", tenant_id=tenant_id,
+                        **_scan_request_context(doc[0], requested_by),
+                    )):
+                        failures.add("local")
+            elif doc[2] in {"alert_delivery_pending", "alert_delivery_failed"} or len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
+                failures.add("local")
     except (QuotaExceeded, QuotaUnavailable):
         raise
     except Exception as e:
+        failures.add("local")
         logger.error(f"Error syncing local watched folder: {e}")
 
     # 2. Cloud Sources
@@ -147,6 +176,13 @@ def sync_sources(requested_by: str = None):
                 for b in buckets:
                     # Run configuration security scan
                     findings = scan_s3_bucket_security(b)
+                    if not findings:
+                        with engine.begin() as conn:
+                            conn.execute(text("""DELETE FROM document_findings
+                                WHERE tenant_id = :tenant_id AND document_id IN (
+                                    SELECT id FROM documents WHERE tenant_id = :tenant_id
+                                    AND source = 's3_config' AND filename = :name)"""),
+                                {"tenant_id": tenant_id, "name": f"s3://{b}/configuration"})
                     if findings:
                         # Register S3 config finding as a system virtual document
                         v_filename = f"s3://{b}/configuration"
@@ -199,7 +235,6 @@ def sync_sources(requested_by: str = None):
                             
             # Sync files
             discovered_files = list_cloud_source_files(src)
-            discovered_ids = {f["id"] for f in discovered_files}
             
             # Check deletions
             with engine.connect() as conn:
@@ -236,8 +271,9 @@ def sync_sources(requested_by: str = None):
                     # Trigger snap to alert on drift drop
                     try:
                         from document_processing.drift import record_compliance_snapshot
-                        record_compliance_snapshot()
+                        record_compliance_snapshot(tenant_id)
                     except Exception as drift_err:
+                        failures.add(src)
                         logger.error(f"Failed to record compliance snapshot: {drift_err}")
             
             # Process discovered files
@@ -245,10 +281,15 @@ def sync_sources(requested_by: str = None):
                 filename = f["name"]
                 size = f["size_bytes"]
                 file_id = f["id"]
+                if type(size) is not int or size < 0:
+                    raise RuntimeError("Document size unavailable")
                 
                 with engine.connect() as conn:
                     doc = conn.execute(
-                        text("SELECT id, size_bytes FROM documents WHERE filename = :name AND source = :src AND tenant_id = :tenant_id"),
+                        text("""SELECT d.id, d.size_bytes, d.status, (SELECT s.outputs_json::jsonb ->> 'health'
+                            FROM document_scans s WHERE s.document_id = d.id AND s.tenant_id = d.tenant_id
+                            ORDER BY s.id DESC LIMIT 1) FROM documents d
+                            WHERE d.filename = :name AND d.source = :src AND d.tenant_id = :tenant_id"""),
                         {"name": filename, "src": src, "tenant_id": tenant_id}
                     ).fetchone()
                     
@@ -284,11 +325,15 @@ def sync_sources(requested_by: str = None):
                             file_bytes = fetch_dropbox_document(file_id)
                     except Exception as fetch_err:
                         logger.error(f"Failed to fetch content for {filename} from {src}: {fetch_err}")
+                        raise
                         
-                    if file_bytes:
-                        run_document_scan_pipeline(doc_id, file_bytes, filename, source=src, tenant_id=tenant_id, **_scan_request_context(doc_id, requested_by))
+                    if _scan_failed(run_document_scan_pipeline(
+                        doc_id, file_bytes, filename, source=src, tenant_id=tenant_id,
+                        **_scan_request_context(doc_id, requested_by),
+                    )):
+                        failures.add(src)
                         
-                elif doc[1] != size:
+                elif doc[1] != size or doc[2] in {"pending", "scanning"}:
                     # Modified File
                     with engine.connect() as conn:
                         conn.execute(
@@ -313,14 +358,23 @@ def sync_sources(requested_by: str = None):
                             file_bytes = fetch_dropbox_document(file_id)
                     except Exception as fetch_err:
                         logger.error(f"Failed to fetch updated content for {filename} from {src}: {fetch_err}")
+                        raise
                         
-                    if file_bytes:
-                        run_document_scan_pipeline(doc[0], file_bytes, filename, source=src, tenant_id=tenant_id, **_scan_request_context(doc[0], requested_by))
+                    if _scan_failed(run_document_scan_pipeline(
+                        doc[0], file_bytes, filename, source=src, tenant_id=tenant_id,
+                        **_scan_request_context(doc[0], requested_by),
+                    )):
+                        failures.add(src)
+                elif doc[2] in {"alert_delivery_pending", "alert_delivery_failed"} or len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
+                    failures.add(src)
                         
         except (QuotaExceeded, QuotaUnavailable):
             raise
         except Exception as src_err:
+            failures.add(src)
             logger.error(f"Failed sync execution on cloud source {src}: {src_err}")
+    if failures:
+        raise RuntimeError("Document synchronization incomplete: " + ", ".join(sorted(failures)))
 
 def _monitor_loop(tenant_id):
     """

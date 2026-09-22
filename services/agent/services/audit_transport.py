@@ -84,6 +84,13 @@ class KafkaRestAuditPublisher:
         with urllib.request.urlopen(request, timeout=self._timeout) as response:  # nosec B310
             if response.status < 200 or response.status >= 300:
                 raise RuntimeError(f"Kafka REST returned {response.status}")
+            offsets = json.load(response)["offsets"]
+            if not isinstance(offsets, list) or len(offsets) != 1 or not isinstance(offsets[0], dict):
+                raise RuntimeError("Kafka REST acknowledgement must contain one record")
+            record = offsets[0]
+            if (record.get("error_code") is not None or record.get("error") is not None
+                    or any(type(record.get(key)) is not int or record[key] < 0 for key in ("partition", "offset"))):
+                raise RuntimeError("Kafka REST did not acknowledge the record")
 
 
 def make_audit_publisher(*, timeout: float, required: bool) -> AuditPublisher:

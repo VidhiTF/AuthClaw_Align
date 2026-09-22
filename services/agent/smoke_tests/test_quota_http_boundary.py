@@ -170,10 +170,10 @@ class QuotaHTTPBoundaryTests(unittest.TestCase):
     def test_liveness_is_coarse_and_does_not_depend_on_database_or_redis(self):
         self.ns["admit"] = Mock(side_effect=RuntimeError("down"))
         self.ns["check_available"] = Mock(side_effect=RuntimeError("down"))
-        self.assertEqual(self.client.get("/health").json(), {"status": "healthy"})
+        self.assertEqual(self.client.get("/health").json(), {"status": "alive", "scope": "process_liveness"})
         response = self.client.get("/health?metrics=true")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "healthy"})
+        self.assertEqual(response.json(), {"status": "alive", "scope": "process_liveness"})
         self.ns["check_available"].assert_not_called()
 
     def test_quota_metrics_require_dedicated_service_secret(self):

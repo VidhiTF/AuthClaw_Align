@@ -174,6 +174,8 @@ class GatewayService:
             model=resolved_model,
             duration_ms=latency_ms,
             decision=decision,
+            tokens_in=result.get("tokens_in"),
+            tokens_out=result.get("tokens_out"),
         )
 
         trace = self.get_trace(request_id=request_id, session_id=resolved_session_id, tenant_id=tenant_id)
@@ -312,6 +314,8 @@ class GatewayService:
             model=resolved_model,
             duration_ms=latency_ms,
             decision=decision,
+            tokens_in=result.get("tokens_in"),
+            tokens_out=result.get("tokens_out"),
         )
 
         if pre_effect_check is not None:

@@ -131,6 +131,9 @@ def test_unknown_and_out_of_order_pass_do_not_erase_newer_failure(context):
     approve(context, {**current, "observed_at": current["observed_at"] - timedelta(seconds=1),
                       "period_end": current["period_end"] - timedelta(seconds=1)})
     assert decision(context)["state"] == "blocked"
+    assert "unknown_assessment" in decision(context)["reason_codes"]
+    assert "failed_assessment" not in decision(context)["reason_codes"]
+    assert decision(context)["evidence_timestamp"] == current["observed_at"].isoformat()
 
 
 @pytest.mark.parametrize("case", ["self", "cross_tenant", "stale_mfa", "future_mfa", "inactive", "viewer", "disabled_mfa", "expired"])

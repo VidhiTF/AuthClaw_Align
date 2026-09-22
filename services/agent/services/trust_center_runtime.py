@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 
 from database import engine
+from services.tenant_context import get_current_tenant_id, validate_tenant_id
 
 
 _CACHE: Dict[str, Any] = {"expires_at": 0.0, "payload": None}
@@ -88,26 +89,31 @@ def _metrics_summary(tenant_id: int) -> Dict[str, Any]:
     }
 
 
-def _active_tenant_row():
+def _active_tenant_row(tenant_id: int):
     with engine.connect() as conn:
         return conn.execute(
             text(
                 """
                 SELECT id, name, domain
                 FROM tenants
-                WHERE COALESCE(status, 'active') = 'active'
-                ORDER BY id ASC
-                LIMIT 1
+                WHERE id = :tenant_id AND COALESCE(status, 'active') = 'active'
                 """
-            )
+            ), {"tenant_id": tenant_id},
         ).fetchone()
 
 
 def build_public_trust_state(*, force_refresh: bool = False) -> Dict[str, Any]:
+    tenant_id = get_current_tenant_id()
+    validate_tenant_id(tenant_id)
+    tenant_id = int(tenant_id)
+    row = _active_tenant_row(tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="No active tenant trust state is available")
     ttl_seconds = max(5, int(os.getenv("AUTHCLAW_TRUST_CENTER_CACHE_SECONDS", "60")))
     now = time.time()
     with _CACHE_LOCK:
-        if not force_refresh and _CACHE["payload"] and now < float(_CACHE["expires_at"]):
+        if (not force_refresh and _CACHE["payload"] and now < float(_CACHE["expires_at"])
+                and _CACHE["payload"]["payload"]["tenant_id"] == tenant_id):
             cached = dict(_CACHE["payload"])
             cached["cache"] = {"hit": True, "ttl_seconds": ttl_seconds}
             return cached
@@ -117,11 +123,6 @@ def build_public_trust_state(*, force_refresh: bool = False) -> Dict[str, Any]:
     from services.secret_manager import SecretManager
     from verify_audit import create_signed_export_package, verify_audit_chain, verify_signed_export_package
 
-    row = _active_tenant_row()
-    if not row:
-        raise HTTPException(status_code=404, detail="No active tenant trust state is available")
-
-    tenant_id = int(row.id)
     evidence_engine = ComplianceEvidenceEngine()
     audit_chain = verify_audit_chain(tenant_id=tenant_id)
     payload = {
@@ -134,8 +135,8 @@ def build_public_trust_state(*, force_refresh: bool = False) -> Dict[str, Any]:
         "audit_chain": audit_chain,
         "corpus": evidence_engine.corpus_status(),
         "runtime": {
-            "backend": {"status": "operational"},
-            "gateway": {"status": "operational"},
+            "backend": {"status": "unknown"},
+            "gateway": {"status": "unknown"},
             "metrics": _metrics_summary(tenant_id),
             "audit_status": audit_chain,
             "provider_status": _provider_status(tenant_id),
@@ -168,10 +169,21 @@ def build_public_trust_state(*, force_refresh: bool = False) -> Dict[str, Any]:
 
 def trust_runtime_health() -> Dict[str, Any]:
     try:
-        state = build_public_trust_state()
+        from services.observability_service import ObservabilityService, aggregate_health
+
+        state = build_public_trust_state(force_refresh=True)
         runtime = state.get("payload", {}).get("runtime", {})
+        audit_valid = runtime.get("audit_status", {}).get("valid")
+        checks = {
+            "publication": "healthy" if state.get("status") == "published" and state.get("verification", {}).get("valid") is True else "degraded",
+            "audit": "unknown" if audit_valid is None else "healthy" if audit_valid else "degraded",
+            "compliance_evidence": "unknown",  # Agent activity scores are diagnostic, never qualified control assessments.
+            "queue": ObservabilityService()._queue_lag(runtime.get("event_pipeline", {}))["status"],
+        }
         return {
-            "status": "healthy" if state.get("verification", {}).get("valid") else "degraded",
+            "status": aggregate_health(*checks.values()),
+            "scope": "trust_evidence",
+            "checks": checks,
             "trust_center": {
                 "published": state.get("status") == "published",
                 "signature_valid": state.get("verification", {}).get("valid") is True,
@@ -179,5 +191,5 @@ def trust_runtime_health() -> Dict[str, Any]:
             },
             "runtime": runtime,
         }
-    except Exception as exc:
-        return {"status": "unhealthy", "error": str(exc)}
+    except Exception:
+        return {"status": "unavailable", "scope": "trust_evidence", "error": "Trust telemetry source unavailable"}

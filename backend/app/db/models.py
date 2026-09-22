@@ -1040,7 +1040,7 @@ class ComplianceScoreSnapshot(Base):
     snapshot_date = Column(String(10), nullable=False)
     calculation_version = Column(String(100), nullable=False, default="legacy_unversioned", server_default="legacy_unversioned")
     assessment_metadata = Column(JSON, nullable=False, default=dict, server_default="{}")
-    overall_score = Column(Float, nullable=False, default=0.0)
+    overall_score = Column(Float, nullable=True)
     readiness_level = Column(String(50), nullable=False, default="insufficient_evidence")
     control_scores = Column(JSON, nullable=False, default=dict)
     evidence_count = Column(Integer, nullable=False, default=0)

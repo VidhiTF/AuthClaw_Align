@@ -70,6 +70,7 @@ def test_score_control_penalizes_open_critical_findings():
     scored = compliance_scoring.score_control(
         control,
         _metrics(open_findings=4, critical_findings=2, high_findings=1, remediation_audit_count=0, resolved_findings=0),
+        _qualified(),
     )
 
     assert scored["status"] in {"partial", "non_compliant"}
@@ -128,8 +129,8 @@ def test_open_evidence_gap_cannot_be_reported_compliant():
 
     scored = compliance_scoring.score_control(control, _metrics(active_api_key_count=0))
 
-    assert scored["score"] == 0
-    assert scored["status"] == "non_compliant"
+    assert scored["score"] is None
+    assert scored["status"] == "insufficient_evidence"
     assert scored["exceptions"]
     assert any("API key" in item for item in scored["activity_diagnostics"]["gaps"])
 
@@ -202,6 +203,35 @@ def test_readiness_levels_are_stable():
     assert compliance_scoring.readiness_level(20) == "insufficient_evidence"
 
 
+def test_score_provenance_and_missing_evidence(monkeypatch):
+    from app.api.v1.endpoints.compliance_scores import ComplianceScoreResponse
+    for activity in (0, 100):
+        monkeypatch.setattr(compliance_scoring, "collect_metrics", lambda _db, _tenant, framework:
+                            _metrics(framework=framework, audit_event_count=activity, active_policy_count=activity))
+        result = ComplianceScoreResponse.model_validate(compliance_scoring.score_all_frameworks(
+            object(), "00000000-0000-0000-0000-000000000001", persist=False, include_traceability=False))
+        assert result.calculation_version == compliance_scoring.control_assessments.CALCULATION_VERSION
+        assert result.evidence_timestamp is None
+        assert result.overall_score is None
+        assert result.inputs_as_of == result.generated_at
+        assert "source errors abort" in result.missing_control_treatment
+        assert all(item.evidence_timestamp is None and item.score is None for item in result.frameworks)
+
+
+def test_historical_snapshot_does_not_invent_calculation_provenance():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    db = MagicMock()
+    row = SimpleNamespace(id="legacy", calculation_version="legacy_unversioned", assessment_metadata={}, framework="SOC2", snapshot_date="2026-09-01", overall_score=75,
+                          readiness_level="monitor", evidence_count=2, audit_event_count=3,
+                          open_findings=1, critical_findings=0, generated_at=None, control_scores={})
+    db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [row]
+    result = compliance_scoring.score_history(db, "00000000-0000-0000-0000-000000000001")[0]
+    assert result["calculation_version"] == "legacy_unversioned"
+    assert result["evidence_timestamp"] is None
+    assert result["missing_control_treatment"] is None
+
+
 def test_trust_summary_maps_existing_control_statuses_once():
     frameworks = [
         {
@@ -244,7 +274,7 @@ def test_t10_activity_counts_never_qualify_control():
     control = next(item for item in compliance_scoring.CONTROL_CATALOG["SOC2"] if item["id"] == "CC7.2")
     result = compliance_scoring.score_control(control, _metrics())
     assert result["status"] != "compliant"
-    assert result["score"] == 0
+    assert result["score"] is None
     assert result["evidence_assessment"]["state"] == "blocked"
     assert "missing_assessment" in result["evidence_assessment"]["reason_codes"]
     assert result["activity_diagnostics"]["score"] == 100
@@ -256,9 +286,9 @@ def test_product_activity_cannot_generate_framework_or_aggregate_points(monkeypa
                         lambda db, tenant, framework: _metrics(framework=framework))
     result = compliance_scoring.score_all_frameworks(object(), "00000000-0000-0000-0000-000000000001",
                                                     persist=False, include_traceability=False)
-    assert result["overall_score"] == 0
+    assert result["overall_score"] is None
     assert result["readiness_level"] == "insufficient_evidence"
-    assert all(row["score"] == 0 and row["readiness_level"] == "insufficient_evidence"
+    assert all(row["score"] is None and row["readiness_level"] == "insufficient_evidence"
                for row in result["frameworks"])
     assert result["trust_summary"]["counts"]["verified"] == 0
 
@@ -277,7 +307,7 @@ def test_qualified_control_score_is_independent_of_product_activity():
 def test_t10_aggregate_preserves_child_readiness_restriction():
     frameworks = [{"framework": "SOC2", "score": 94.0, "readiness_level": "monitor"}]
     assert compliance_scoring.aggregate_readiness(frameworks) == (94.0, "monitor")
-    assert compliance_scoring.aggregate_readiness([]) == (0.0, "insufficient_evidence")
+    assert compliance_scoring.aggregate_readiness([]) == (None, "insufficient_evidence")
 
 
 def test_t10_qualification_is_independent_of_traceability(monkeypatch):
@@ -298,3 +328,29 @@ def test_t10_findings_block_even_controls_without_finding_signal():
     assert result["status"] != "compliant"
     assert "open_finding" in result["evidence_assessment"]["reason_codes"]
     assert "ACCEPTED_RISK" not in compliance_scoring.RESOLVED_STATUSES
+
+
+@pytest.mark.parametrize("reason", ["missing_assessment", "unknown_assessment", "invalid_integrity", "stale_assessment", "untrusted_source", "unsupported_requirement"])
+def test_unknown_controls_cannot_be_failed_zeroes(reason):
+    control = compliance_scoring.CONTROL_CATALOG["SOC2"][0]
+    assessment = {**_qualified(), "state": "blocked", "reason_codes": [reason], "qualified_count": 0}
+    result = compliance_scoring.score_control(control, _metrics(), assessment)
+    assert result["score"] is None
+    assert result["status"] == "insufficient_evidence"
+
+
+def test_current_reviewed_failure_remains_a_measured_zero():
+    control = compliance_scoring.CONTROL_CATALOG["SOC2"][0]
+    assessment = {**_qualified(), "state": "blocked", "reason_codes": ["failed_assessment"], "qualified_count": 1}
+    result = compliance_scoring.score_control(control, _metrics(), assessment)
+    assert result["score"] == 0
+    assert result["status"] == "non_compliant"
+
+
+def test_partial_coverage_is_not_reported_as_a_numeric_framework_score(monkeypatch):
+    monkeypatch.setattr(compliance_scoring, "collect_metrics", lambda db, tid, framework: _metrics(framework=framework))
+    monkeypatch.setattr(compliance_scoring.control_assessments, "assess_framework", lambda *args: {"CC7.2": _qualified()})
+    result = compliance_scoring.score_framework(object(), "00000000-0000-0000-0000-000000000001", "SOC2", include_traceability=False)
+    assert result["score"] is None
+    assert result["readiness_level"] == "insufficient_evidence"
+    assert next(item for item in result["controls"] if item["id"] == "CC7.2")["score"] == 100

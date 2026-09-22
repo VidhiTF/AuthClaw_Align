@@ -8,9 +8,9 @@ def _migration():
         Path(__file__).parents[1]
         / "alembic"
         / "versions"
-        / "053_reconcile_approval_linkage.py"
+        / "054_reconcile_approval_linkage.py"
     )
-    spec = importlib.util.spec_from_file_location("migration_053", path)
+    spec = importlib.util.spec_from_file_location("migration_054", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -26,7 +26,7 @@ def test_upgrade_repairs_links_preserves_history_and_is_idempotent(monkeypatch):
 
     statements = [call.args[0] for call in execute.call_args_list[:17]]
     combined = "\n".join(statements)
-    assert "DROP TABLE IF EXISTS approval_linkage_053" in combined
+    assert "DROP TABLE IF EXISTS approval_linkage_054" in combined
     assert "first_value(id) OVER" in combined
     assert "cw.approval_id IS DISTINCT FROM canonical.keeper_id" in combined
     assert "UPDATE approval_audit" not in combined
