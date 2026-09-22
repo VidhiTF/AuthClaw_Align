@@ -188,10 +188,13 @@ class User(Base):
     email = Column(String(255), nullable=False)
     password_hash = Column(String(255), nullable=True)
     role = Column(
-    Enum("owner", "admin", "developer", "operator", "viewer", name="user_role"),
+    Enum(
+        "owner", "admin", "tenant_administrator", "developer", "operator",
+        "auditor", "approver", "viewer", name="user_role"
+    ),
     nullable=False,
     default="viewer"
-    )  # owner, admin, developer, operator, viewer
+    )  # owner/admin are compatibility aliases for tenant_administrator
     platform_role = Column(
         Enum("NONE", "ADMIN", name="platform_role"),
         nullable=False,

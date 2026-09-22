@@ -17,6 +17,7 @@ from sqlalchemy import text
 from database import engine
 from services.secret_manager import SecretManager
 from services.tenant_context import tenant_context
+from services.role_contract import TENANT_ROLES, ROLE_PLATFORM_ADMIN, normalize_role
 
 
 SUPPORTED_PROVIDER_TYPES = {
@@ -589,11 +590,18 @@ def map_role(provider: OIDCProviderConfig, claims: Dict[str, Any], userinfo: Dic
         groups = [groups_value]
     else:
         groups = list(groups_value or [])
+    matches = []
     for group in groups:
-        mapped = provider.role_mapping.get(group)
-        if mapped:
-            return mapped
-    return provider.role_mapping.get("*", DEFAULT_ROLE)
+        mapped = provider.role_mapping.get(str(group))
+        if mapped is None:
+            continue
+        role = normalize_role(mapped)
+        if role not in TENANT_ROLES or role == ROLE_PLATFORM_ADMIN:
+            raise EnterpriseIdentityError("OIDC group mapping contains an invalid role.")
+        matches.append(role)
+    if len(matches) != 1:
+        raise EnterpriseIdentityError("OIDC group mapping is missing or ambiguous.")
+    return matches[0]
 
 
 def permissions_for_role(role: str) -> str:

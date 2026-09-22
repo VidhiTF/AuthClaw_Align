@@ -3,9 +3,11 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any, Literal
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from app.core.authorization import validate_tenant_role
 
 PLATFORM_API_KEY_SCOPES = frozenset({"platform.admin"})
 TENANT_API_KEY_SCOPES = frozenset({"read", "write", "admin"})
+TENANT_ROLE_PATTERN = "^(owner|admin|tenant_administrator|developer|operator|auditor|approver|viewer)$"
 
 
 class AccessRequestCreate(BaseModel):
@@ -139,13 +141,29 @@ class UserCreate(BaseModel):
     """Schema for creating a user"""
     email: EmailStr
     password: str = Field(..., min_length=12)
-    role: str = Field(default="viewer", pattern="^(owner|admin|developer|operator|viewer)$")
+    role: str = Field(default="viewer", pattern=TENANT_ROLE_PATTERN)
+
+    @field_validator("role")
+    @classmethod
+    def canonical_role(cls, value: str) -> str:
+        # Preserve legacy enum values during expand/contract migration;
+        # authorization canonicalizes owner/admin to tenant_administrator.
+        normalized = str(value).strip().lower()
+        validate_tenant_role(normalized)
+        return normalized
 
 
 class UserInviteRequest(BaseModel):
     """Invite a user into the current tenant with email OTP verification."""
     email: EmailStr
-    role: str = Field(default="viewer", pattern="^(owner|admin|developer|operator|viewer)$")
+    role: str = Field(default="viewer", pattern=TENANT_ROLE_PATTERN)
+
+    @field_validator("role")
+    @classmethod
+    def canonical_role(cls, value: str) -> str:
+        normalized = str(value).strip().lower()
+        validate_tenant_role(normalized)
+        return normalized
 
 
 class UserInviteResponse(BaseModel):

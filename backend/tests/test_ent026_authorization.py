@@ -1,0 +1,77 @@
+import pytest
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+from uuid import uuid4
+
+from app.core.authorization import (
+    Role,
+    effective_scopes,
+    group_role_mapping,
+    role_allows,
+)
+from app.services.access_review import build_access_review_export
+from app.api.v1.endpoints.users import router as users_router
+
+
+def test_role_matrix_is_least_privilege_and_platform_is_separate():
+    assert effective_scopes(Role.VIEWER, ["read", "write", "admin"]) == ["read"]
+    assert effective_scopes(Role.DEVELOPER, ["read", "write", "admin"]) == ["read", "write"]
+    assert effective_scopes(Role.TENANT_ADMINISTRATOR, ["read", "write", "admin"]) == ["admin", "read", "write"]
+    assert effective_scopes(Role.PLATFORM_ADMINISTRATOR, ["read", "platform.admin"]) == ["platform.admin"]
+    assert not role_allows(Role.TENANT_ADMINISTRATOR, "platform.tenant.manage")
+    assert not role_allows(Role.PLATFORM_ADMINISTRATOR, "tenant.users.manage")
+
+
+def test_oidc_mapping_denies_missing_and_ambiguous_groups():
+    mapping = {"viewers": "viewer", "operators": "operator"}
+    with pytest.raises(PermissionError):
+        group_role_mapping([], mapping)
+    with pytest.raises(PermissionError):
+        group_role_mapping(["viewers", "operators"], mapping)
+
+
+def test_oidc_mapping_rejects_platform_role():
+    with pytest.raises(ValueError):
+        group_role_mapping(["platform"], {"platform": "platform_administrator"})
+
+
+def test_approver_permission_is_distinct_from_tenant_administrator():
+    assert role_allows(Role.APPROVER, "tenant.high_risk.approve")
+    assert not role_allows(Role.TENANT_ADMINISTRATOR, "tenant.high_risk.approve")
+    assert not role_allows(Role.OPERATOR, "tenant.high_risk.approve")
+
+
+def test_access_review_export_is_secret_free_and_integrity_protected():
+    user = SimpleNamespace(
+        id=uuid4(), email="viewer@example.com", is_active=True, role="viewer",
+        platform_role="NONE", mfa_enabled=True,
+        last_login=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    db = MagicMock()
+    users_query = MagicMock()
+    users_query.filter.return_value.order_by.return_value.all.return_value = [user]
+    keys_query = MagicMock()
+    keys_query.filter.return_value.all.return_value = []
+    db.query.side_effect = [users_query, keys_query]
+
+    export = build_access_review_export(db, "tenant-1")
+
+    assert export["format"] == "authclaw.access-review.v1"
+    assert export["records"][0]["role"] == "viewer"
+    assert "key_hash" not in export["records"][0]
+    assert len(export["integrity_sha256"]) == 64
+
+
+def test_access_review_route_requires_auditor_or_tenant_administrator():
+    route = next(route for route in users_router.routes if route.path == "/access-review")
+
+    def check(role):
+        request = SimpleNamespace(state=SimpleNamespace(user_role=role, scopes=["read"]))
+        for dependency in route.dependencies:
+            dependency.dependency(request)
+
+    check("auditor")
+    check("tenant_administrator")
+    with pytest.raises(Exception):
+        check("viewer")

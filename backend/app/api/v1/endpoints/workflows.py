@@ -21,6 +21,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.auth import (
     get_tenant_db,
+    require_roles,
     require_scopes,
     set_mfa_credentials,
 )
@@ -444,7 +445,7 @@ def approve_gateway_approval(
     request: Request,
     body: Optional[ApprovalRequest] = None,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_roles(["approver"]),
 ):
     """Approve a gateway HITL approval so the waiting request may continue (MFA challenged)."""
     tenant_id = str(request.state.tenant_id)
@@ -460,6 +461,8 @@ def approve_gateway_approval(
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
         raise HTTPException(status_code=400, detail=f"Approval already resolved: {approval.status}")
+    if approval.requester_id == user_id:
+        raise HTTPException(status_code=403, detail="Requester cannot approve their own action")
 
     # Verify MFA for the approving user (enforced when MFA is enabled on their account)
     user = db.query(User).filter(
@@ -500,7 +503,7 @@ def reject_gateway_approval(
     approval_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_roles(["approver"]),
 ):
     """Reject a gateway HITL approval so the waiting request is blocked."""
     tenant_id = str(request.state.tenant_id)
@@ -516,6 +519,8 @@ def reject_gateway_approval(
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
         raise HTTPException(status_code=400, detail=f"Approval already resolved: {approval.status}")
+    if approval.requester_id == user_id:
+        raise HTTPException(status_code=403, detail="Requester cannot reject their own action")
 
     approval.status = "REJECTED"
     approval.approver_id = user_id
@@ -574,7 +579,7 @@ def approve_workflow(
     request: Request,
     body: Optional[ApprovalRequest] = None,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_roles(["approver"]),
 ):
     """Approve a workflow's remediation plan and resume execution (MFA challenged)."""
     tenant_id = str(request.state.tenant_id)
@@ -614,6 +619,8 @@ def approve_workflow(
             status_code=400,
             detail=f"Approval request is already resolved (status={approval.status})",
         )
+    if approval.requester_id == user_id:
+        raise HTTPException(status_code=403, detail="Requester cannot approve their own action")
 
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
@@ -712,7 +719,7 @@ def reject_workflow(
     workflow_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_roles(["approver"]),
 ):
     """Reject a workflow's remediation plan."""
     tenant_id = str(request.state.tenant_id)
@@ -749,6 +756,8 @@ def reject_workflow(
             status_code=400,
             detail=f"Approval request is already resolved (status={approval.status})",
         )
+    if approval.requester_id == user_id:
+        raise HTTPException(status_code=403, detail="Requester cannot reject their own action")
 
     # Reject
     approval.status = "REJECTED"

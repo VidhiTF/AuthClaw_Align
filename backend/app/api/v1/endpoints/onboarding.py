@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, hash_key, require_scopes
+from app.core.authorization import normalize_role, Role
 from app.db.session import SessionLocal
 from app.core.crypto import get_session_key_ring
 from app.core.passwords import hash_password, validate_password
@@ -196,8 +197,11 @@ def _generate_session_token() -> str:
 
 
 def _scopes_for_role(role: str) -> list[str]:
-    if role in ("owner", "admin"):
+    canonical = normalize_role(role)
+    if canonical == Role.TENANT_ADMINISTRATOR.value:
         return ["admin", "read", "write"]
+    if canonical in {Role.DEVELOPER.value, Role.OPERATOR.value, Role.APPROVER.value}:
+        return ["read", "write"]
     return ["read"]
 
 

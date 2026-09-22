@@ -13,6 +13,10 @@ from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, object_session
 from app.db.session import SessionLocal, database_auth_context
 from app.db.dependencies import get_db, get_score_db
+from app.core.authorization import (
+    effective_scopes,
+    normalize_role as _canonical_role,
+)
 from app.core.crypto import (
     SECRET_ENVELOPE_PREFIX,
     SECRET_ENVELOPE_V2_PREFIX,
@@ -119,9 +123,7 @@ def verify_mfa_code(user, code: str) -> bool:
 
 
 def _normalize_role(role: str | None) -> str:
-    if not role:
-        return "viewer"
-    return str(role).lower()
+    return _canonical_role(role) or "unknown"
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -254,7 +256,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             # Inject tenant info, scopes, and role into request state.
             request.state.tenant_id = result.tenant_id
-            scopes = list(result.scopes or [])
+            user_role = _normalize_role(result.role)
+            scopes = effective_scopes(user_role, result.scopes or [])
             platform_role = str(result.platform_role).upper()
             request.state.scopes = scopes
             request.state.user_id = result.user_id
@@ -264,7 +267,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.api_key_id = (
                 result.credential_id if credential_kind == "api_key" else None
             )
-            request.state.user_role = _normalize_role(result.role)
+            request.state.user_role = user_role
             request.state.tenant_role = request.state.user_role
             request.state.platform_role = platform_role
             request.state.user_is_active = bool(result.user_is_active)
@@ -322,8 +325,6 @@ def require_scopes(required_scopes: List[str]):
 
     def dependency(request: Request):
         scopes = getattr(request.state, "scopes", [])
-        if "admin" in scopes:
-            return
         for scope in required_scopes:
             if scope not in scopes:
                 raise HTTPException(

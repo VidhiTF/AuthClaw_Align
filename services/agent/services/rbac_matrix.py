@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from services.role_contract import (
     ROLE_ADMIN,
+    ROLE_APPROVER,
     ROLE_AUDITOR,
     ROLE_COMPLIANCE_OFFICER,
     ROLE_DEVELOPER,
@@ -21,17 +22,16 @@ from services.role_contract import (
 
 ALL_ROLES = [
     ROLE_PLATFORM_ADMIN,
-    ROLE_OWNER,
-    ROLE_ADMIN,
-    ROLE_COMPLIANCE_OFFICER,
     ROLE_AUDITOR,
+    ROLE_APPROVER,
     ROLE_DEVELOPER,
     ROLE_OPERATOR,
+    ROLE_OWNER,
     ROLE_VIEWER,
 ]
 
 TENANT_ADMIN_ROLES = [ROLE_OWNER, ROLE_ADMIN]
-TENANT_READ_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR, ROLE_OPERATOR, ROLE_VIEWER]
+TENANT_READ_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR, ROLE_APPROVER, ROLE_OPERATOR, ROLE_VIEWER]
 GATEWAY_USER_ROLES = TENANT_READ_ROLES + [ROLE_DEVELOPER]
 RAG_EXECUTION_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER]
 REMEDIATION_PLAN_ROLES = TENANT_ADMIN_ROLES + [ROLE_COMPLIANCE_OFFICER]
@@ -101,9 +101,9 @@ ENDPOINT_RULES: List[EndpointRule] = [
     EndpointRule("*", "/sessions*", GATEWAY_USER_ROLES, "chat:use", True, False, "Legacy tenant chat session aliases."),
     EndpointRule("*", "/v1/chat/completions", GATEWAY_USER_ROLES, "gateway:invoke", True, True, "OpenAI-compatible gateway invocation."),
     EndpointRule("GET", "/approvals*", TENANT_READ_ROLES, "approvals:read", True, True, "Approval queue read."),
-    EndpointRule("POST", "/approve/*", TENANT_ADMIN_ROLES, "approvals:approve", True, True, "HITL approval."),
-    EndpointRule("POST", "/reject/*", TENANT_ADMIN_ROLES, "approvals:reject", True, True, "HITL rejection."),
-    EndpointRule("POST", "/execute/*", TENANT_ADMIN_ROLES, "approvals:execute", True, True, "HITL execution."),
+    EndpointRule("POST", "/approve/*", [ROLE_APPROVER], "approvals:approve", True, True, "HITL approval."),
+    EndpointRule("POST", "/reject/*", [ROLE_APPROVER], "approvals:reject", True, True, "HITL rejection."),
+    EndpointRule("POST", "/execute/*", [ROLE_APPROVER], "approvals:execute", True, True, "HITL execution."),
     EndpointRule("POST", "/test/*", [ROLE_OWNER], "testing:local", True, True, "Local test utilities."),
     EndpointRule("GET", "/audit*", [ROLE_OWNER, ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_AUDITOR], "audit:read", True, True, "Audit and signed export read."),
     EndpointRule("POST", "/audit/export/verify", ALL_ROLES, "audit:verify", False, False, "Public export verification."),
