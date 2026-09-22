@@ -11,7 +11,7 @@ Bridges the LangGraph compliance graph with AuthClaw infrastructure:
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -40,6 +40,18 @@ logger = logging.getLogger("orchestrator.runner")
 
 
 _kafka_producer = None
+
+
+class WorkflowResumeConflict(RuntimeError):
+    """A retryable approval authorization/linkage conflict."""
+
+
+class WorkflowAuthorizationError(PermissionError):
+    """The authenticated actor no longer has current workflow authority."""
+
+    def __init__(self, message: str, *, status_code: int = 403) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _init_kafka_producer():
@@ -372,7 +384,9 @@ def _check_approval_in_db(
             f"remediation_approval_{decision.status.lower()}_rejected_total"
         )
         db.flush()
-        if decision.status in {"EXPIRED", "REPLAYED", "ALTERED", "USER_MISMATCH", "ACTION_MISMATCH"}:
+        if decision.status in {"USER_MISMATCH", "ACTION_MISMATCH", "TENANT_MISMATCH"}:
+            raise WorkflowResumeConflict(decision.reason)
+        if decision.status in {"EXPIRED", "REPLAYED", "ALTERED"}:
             return "EXPIRED"
         return approval.status
 
@@ -506,10 +520,12 @@ class ComplianceWorkflowRunner:
         workflow_id: str,
         tenant_id: str,
         actor_id: str,
+        authorization_check: Optional[Callable[[], None]] = None,
     ) -> dict:
         """Resume a paused workflow (e.g., after approval)."""
         if not str(actor_id or "").strip():
             raise ValueError("Authenticated workflow actor identity is required")
+        actor_uuid = uuid.UUID(str(actor_id))
         lock_key = int(uuid.UUID(workflow_id).int & 0x7fffffffffffffff)
         with workflow_advisory_lock(self.db, lock_key, workflow_id):
             wf = self.db.query(ComplianceWorkflow).filter(
@@ -525,8 +541,65 @@ class ComplianceWorkflowRunner:
                     f"Workflow {workflow_id} cannot be resumed (status={wf.execution_status})"
                 )
 
+            # An approved remediation is a non-transferable capability.  Check
+            # its authoritative row before marking the workflow RUNNING so an
+            # unrelated same-tenant writer cannot consume or continue it.
+            approval = None
+            workflow_approval_id = getattr(wf, "approval_id", None)
+            if workflow_approval_id:
+                approval = self.db.query(PendingApproval).filter(
+                    PendingApproval.id == workflow_approval_id,
+                    PendingApproval.tenant_id == uuid.UUID(tenant_id),
+                ).with_for_update().first()
+                if authorization_check:
+                    authorization_check()
+                if approval and approval.status in {"APPROVED", "CONSUMED"}:
+                    if approval.action_type != "remediation" or approval.action_id != workflow_id:
+                        reason = "Approval is bound to another workflow"
+                        _record_approval_audit(
+                            self.db, approval, actor_uuid,
+                            "RESUME_AUTHORIZATION_REJECTED", reason,
+                        )
+                        self.db.commit()
+                        raise WorkflowResumeConflict(reason)
+                    if not approval.approver_id or str(approval.approver_id) != str(actor_id):
+                        reason = "Approved workflow may only be resumed by its recorded approver"
+                        _record_approval_audit(
+                            self.db, approval, actor_uuid,
+                            "RESUME_AUTHORIZATION_REJECTED", reason,
+                        )
+                        self.db.commit()
+                        raise WorkflowResumeConflict(reason)
+                    if (
+                        approval.status == "CONSUMED"
+                        and approval.consumed_by_id
+                        and str(approval.consumed_by_id) != str(actor_id)
+                    ):
+                        reason = "Consumed approval is bound to another executor"
+                        _record_approval_audit(
+                            self.db, approval, actor_uuid,
+                            "RESUME_AUTHORIZATION_REJECTED", reason,
+                        )
+                        self.db.commit()
+                        raise WorkflowResumeConflict(reason)
+            elif authorization_check:
+                authorization_check()
+
             # Restore state from snapshot
             state_data = wf.state_data or {}
+            if (
+                workflow_approval_id
+                and approval
+                and approval.status in {"APPROVED", "CONSUMED"}
+                and str(state_data.get("approval_id") or "") != str(workflow_approval_id)
+            ):
+                reason = "Workflow approval snapshot does not match its recorded approval"
+                _record_approval_audit(
+                    self.db, approval, actor_uuid,
+                    "RESUME_AUTHORIZATION_REJECTED", reason,
+                )
+                self.db.commit()
+                raise WorkflowResumeConflict(reason)
             requester_id = str(state_data.get("requester_id") or "").strip()
             if not requester_id:
                 raise ValueError("Workflow requester identity is unavailable")
@@ -633,7 +706,12 @@ class ComplianceWorkflowRunner:
             "completed_at": wf.completed_at.isoformat() if wf.completed_at else None,
         }
 
-    def recover_interrupted(self, tenant_id: str, actor_id: str) -> list[dict]:
+    def recover_interrupted(
+        self,
+        tenant_id: str,
+        actor_id: str,
+        authorization_check: Optional[Callable[[], None]] = None,
+    ) -> list[dict]:
         """Find and recover workflows that were interrupted (RUNNING but not completed)."""
         if not str(actor_id or "").strip():
             raise ValueError("Authenticated workflow actor identity is required")
@@ -646,8 +724,13 @@ class ComplianceWorkflowRunner:
         results = []
         for wf in interrupted:
             try:
-                result = self.resume(wf.workflow_id, tenant_id, actor_id)
+                result = self.resume(
+                    wf.workflow_id, tenant_id, actor_id,
+                    authorization_check=authorization_check,
+                )
                 results.append({"workflow_id": wf.workflow_id, "status": "recovered", "state": result})
+            except WorkflowAuthorizationError:
+                raise
             except Exception as exc:
                 results.append({"workflow_id": wf.workflow_id, "status": "failed", "error": str(exc)})
 

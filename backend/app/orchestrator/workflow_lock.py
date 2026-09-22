@@ -13,6 +13,10 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger("orchestrator.workflow_lock")
 
 
+class WorkflowBusyError(ValueError):
+    """The workflow is already held by another execution worker."""
+
+
 def _invalidate_connection(connection, workflow_id: str) -> None:
     try:
         connection.invalidate()
@@ -39,7 +43,9 @@ def workflow_advisory_lock(db: Session, lock_key: int, workflow_id: str) -> Iter
             ).scalar()
         )
         if not acquired:
-            raise ValueError(f"Workflow {workflow_id} is currently being processed by another worker")
+            raise WorkflowBusyError(
+                f"Workflow {workflow_id} is currently being processed by another worker"
+            )
         yield
     finally:
         if acquired:

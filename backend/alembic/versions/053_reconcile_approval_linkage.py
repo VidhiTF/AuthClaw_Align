@@ -16,8 +16,10 @@ depends_on = None
 def upgrade() -> None:
     # Keep one canonical approval per action. Prefer the most progressed approval,
     # then an existing workflow link, followed by stable timestamps/ID.
-    # Duplicate approval and audit rows are retained: non-canonical approvals are
-    # moved to a deterministic historical action key instead of being deleted.
+    # Duplicate approvals and their audit rows are retained: non-canonical
+    # approvals are moved to a deterministic historical action key and point to
+    # their canonical approval in resolution metadata.  Audit ownership is
+    # immutable forensic evidence and must never be re-parented.
     for table in ("pending_approvals", "compliance_workflows", "approval_audit"):
         op.execute(f"ALTER TABLE {table} NO FORCE ROW LEVEL SECURITY")
         op.execute(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY")
@@ -84,15 +86,6 @@ def upgrade() -> None:
           AND canonical.tenant_id = cw.tenant_id
           AND canonical.action_id = cw.workflow_id
           AND cw.approval_id IS DISTINCT FROM canonical.keeper_id
-        """
-    )
-    op.execute(
-        """
-        UPDATE approval_audit audit
-        SET approval_id = duplicate.keeper_id
-        FROM approval_linkage_053 duplicate
-        WHERE duplicate.duplicate_rank > 1
-          AND audit.approval_id = duplicate.id
         """
     )
     op.execute(

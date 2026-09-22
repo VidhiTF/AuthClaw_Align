@@ -10,9 +10,16 @@ from fastapi import HTTPException
 from app.api.v1.endpoints import apikeys, auth, users, workflows
 from app.core.auth import hash_key
 from app.core.crypto import decrypt_secret, encrypt_secret
-from app.db.models import ComplianceWorkflow, PendingApproval
+from app.db.models import ApprovalAudit, ComplianceWorkflow, PendingApproval
 from app.orchestrator import runner as workflow_runner
-from app.orchestrator.runner import ComplianceWorkflowRunner, _create_approval_in_db
+from app.orchestrator.runner import (
+    ComplianceWorkflowRunner,
+    WorkflowAuthorizationError,
+    WorkflowResumeConflict,
+    _check_approval_in_db,
+    _create_approval_in_db,
+)
+from app.orchestrator.workflow_lock import WorkflowBusyError
 from app.services.remediation_approval import build_action_payload, compute_action_hash
 
 
@@ -598,6 +605,239 @@ def test_historical_workflow_without_requester_cannot_resume():
 
     assert workflow.execution_status == "PAUSED"
     db.commit.assert_not_called()
+
+
+def test_resume_authorization_mismatch_is_retryable_and_non_terminal():
+    tenant_id = uuid.uuid4()
+    approver_id = uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    plan = [{"action": "redact", "destructive": False}]
+    payload = build_action_payload(workflow_id, plan)
+    approval = SimpleNamespace(
+        id=uuid.uuid4(), tenant_id=tenant_id, action_type="remediation",
+        action_id=workflow_id, action_payload=payload,
+        action_hash=compute_action_hash(
+            tenant_id=str(tenant_id), action_payload=payload, expires_at=expires_at,
+        ),
+        status="APPROVED", requester_id=uuid.uuid4(), approver_id=approver_id,
+        consumed_at=None, consumed_by_id=None, expires_at=expires_at,
+        mfa_verified=True, mfa_timestamp=datetime.now(timezone.utc),
+        resolution_reason="approved",
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = approval
+
+    with pytest.raises(WorkflowResumeConflict, match="another user"):
+        _check_approval_in_db(
+            db, str(approval.id), str(tenant_id), str(uuid.uuid4()), workflow_id, plan
+        )
+
+    assert approval.status == "APPROVED"
+    assert approval.consumed_at is None
+    assert approval.consumed_by_id is None
+
+
+def test_resume_endpoint_denies_non_interactive_credentials_before_execution():
+    request = SimpleNamespace(state=SimpleNamespace(
+        credential_kind="api_key", tenant_id=uuid.uuid4(), user_id=uuid.uuid4()
+    ))
+
+    with pytest.raises(HTTPException) as denied:
+        workflows.resume_workflow(str(uuid.uuid4()), request, MagicMock())
+
+    assert denied.value.status_code == 403
+
+
+def test_recovery_endpoint_denies_non_interactive_credentials_before_execution():
+    request = SimpleNamespace(state=SimpleNamespace(
+        credential_kind="api_key", tenant_id=uuid.uuid4(), user_id=uuid.uuid4()
+    ))
+
+    with pytest.raises(HTTPException) as denied:
+        workflows.recover_workflows(request, MagicMock())
+
+    assert denied.value.status_code == 403
+
+
+def test_resume_revalidates_current_role_and_scope_after_actor_lock(monkeypatch):
+    tenant_id = uuid.uuid4()
+    actor_id = uuid.uuid4()
+    user = SimpleNamespace(
+        id=actor_id, tenant_id=tenant_id, is_active=True, role="viewer"
+    )
+    request = SimpleNamespace(state=SimpleNamespace(
+        tenant_id=tenant_id, user_id=actor_id, credential_kind="session"
+    ))
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
+    monkeypatch.setattr(
+        workflows,
+        "revalidate_tenant_credential",
+        lambda *_args: SimpleNamespace(role="viewer", scopes=["read", "write", "admin"]),
+    )
+
+    with pytest.raises(WorkflowAuthorizationError, match="owner or admin"):
+        workflows._revalidate_privileged_workflow_actor(request, db)
+
+    db.refresh.assert_called_once_with(user, attribute_names=["is_active", "role"])
+    db.rollback.assert_called_once()
+
+
+def test_post_lock_expired_session_is_typed_authorization_failure(monkeypatch):
+    tenant_id = uuid.uuid4()
+    actor_id = uuid.uuid4()
+    user = SimpleNamespace(
+        id=actor_id, tenant_id=tenant_id, is_active=True, role="admin"
+    )
+    request = SimpleNamespace(state=SimpleNamespace(
+        tenant_id=tenant_id, user_id=actor_id, credential_kind="session"
+    ))
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
+    monkeypatch.setattr(
+        workflows,
+        "revalidate_tenant_credential",
+        MagicMock(side_effect=HTTPException(
+            status_code=401, detail="Authentication context expired"
+        )),
+    )
+
+    with pytest.raises(
+        WorkflowAuthorizationError, match="Authentication context expired"
+    ) as expired:
+        workflows._revalidate_privileged_workflow_actor(request, db)
+
+    assert expired.value.status_code == 401
+    db.rollback.assert_called_once()
+
+
+def test_resume_and_recovery_preserve_revoked_session_authentication_status(monkeypatch):
+    request = SimpleNamespace(state=SimpleNamespace(
+        credential_kind="session", tenant_id=uuid.uuid4(), user_id=uuid.uuid4()
+    ))
+    runner = MagicMock()
+    runner.resume.side_effect = WorkflowAuthorizationError(
+        "Authentication context expired", status_code=401
+    )
+    runner.recover_interrupted.side_effect = WorkflowAuthorizationError(
+        "Authentication context expired", status_code=401
+    )
+    monkeypatch.setattr(workflows, "ComplianceWorkflowRunner", lambda _db: runner)
+
+    with pytest.raises(HTTPException) as resume_denied:
+        workflows.resume_workflow(str(uuid.uuid4()), request, MagicMock())
+    with pytest.raises(HTTPException) as recovery_denied:
+        workflows.recover_workflows(request, MagicMock())
+
+    assert resume_denied.value.status_code == 401
+    assert recovery_denied.value.status_code == 401
+
+
+def test_resume_preflight_conflict_is_durably_audited_without_state_transfer(monkeypatch):
+    tenant_id = uuid.uuid4()
+    approver_id = uuid.uuid4()
+    attacker_id = uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
+    approval_id = uuid.uuid4()
+    workflow = SimpleNamespace(
+        workflow_id=workflow_id, tenant_id=tenant_id, execution_status="PAUSED",
+        current_state="AWAITING_APPROVAL", approval_id=approval_id,
+        approval_status="APPROVED", state_data={"approval_id": str(approval_id)},
+    )
+    approval = SimpleNamespace(
+        id=approval_id, tenant_id=tenant_id, action_type="remediation",
+        action_id=workflow_id, status="APPROVED", approver_id=approver_id,
+        consumed_by_id=None, action_hash="a" * 64, mfa_verified=True,
+        mfa_timestamp=datetime.now(timezone.utc), resolution_reason="approved",
+    )
+    workflow_query = MagicMock()
+    workflow_query.filter.return_value.first.return_value = workflow
+    approval_query = MagicMock()
+    approval_query.filter.return_value.with_for_update.return_value.first.return_value = approval
+    db = MagicMock()
+    db.query.side_effect = lambda model: (
+        workflow_query if model is ComplianceWorkflow else approval_query
+    )
+    authorize = MagicMock()
+    runner = ComplianceWorkflowRunner.__new__(ComplianceWorkflowRunner)
+    runner.db = db
+    monkeypatch.setattr(
+        workflow_runner, "workflow_advisory_lock",
+        lambda *_args: __import__("contextlib").nullcontext(),
+    )
+
+    with pytest.raises(WorkflowResumeConflict, match="recorded approver"):
+        runner.resume(
+            workflow_id, str(tenant_id), str(attacker_id),
+            authorization_check=authorize,
+        )
+
+    authorize.assert_called_once_with()
+    audit = db.add.call_args.args[0]
+    assert isinstance(audit, ApprovalAudit)
+    assert audit.approval_id == approval_id
+    assert audit.actor_id == attacker_id
+    assert audit.action == "RESUME_AUTHORIZATION_REJECTED"
+    assert approval.status == "APPROVED" and approval.consumed_by_id is None
+    assert workflow.execution_status == "PAUSED"
+    db.commit.assert_called_once()
+
+
+def test_resume_stops_when_post_lock_authority_is_revoked(monkeypatch):
+    tenant_id = uuid.uuid4()
+    actor_id = uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
+    approval_id = uuid.uuid4()
+    workflow = SimpleNamespace(
+        execution_status="PAUSED", current_state="AWAITING_APPROVAL",
+        approval_id=approval_id, state_data={"approval_id": str(approval_id)},
+    )
+    approval = SimpleNamespace(
+        id=approval_id, tenant_id=tenant_id, action_type="remediation",
+        action_id=workflow_id, status="APPROVED", approver_id=actor_id,
+        consumed_by_id=None,
+    )
+    workflow_query = MagicMock()
+    workflow_query.filter.return_value.first.return_value = workflow
+    approval_query = MagicMock()
+    approval_query.filter.return_value.with_for_update.return_value.first.return_value = approval
+    db = MagicMock()
+    db.query.side_effect = lambda model: (
+        workflow_query if model is ComplianceWorkflow else approval_query
+    )
+    runner = ComplianceWorkflowRunner.__new__(ComplianceWorkflowRunner)
+    runner.db = db
+    monkeypatch.setattr(
+        workflow_runner, "workflow_advisory_lock",
+        lambda *_args: __import__("contextlib").nullcontext(),
+    )
+
+    with pytest.raises(WorkflowAuthorizationError, match="demoted"):
+        runner.resume(
+            workflow_id, str(tenant_id), str(actor_id),
+            authorization_check=MagicMock(
+                side_effect=WorkflowAuthorizationError("actor was demoted")
+            ),
+        )
+
+    assert approval.status == "APPROVED"
+    assert workflow.execution_status == "PAUSED"
+    db.commit.assert_not_called()
+
+
+def test_resume_endpoint_maps_workflow_lock_contention_to_conflict(monkeypatch):
+    request = SimpleNamespace(state=SimpleNamespace(
+        credential_kind="session", tenant_id=uuid.uuid4(), user_id=uuid.uuid4()
+    ))
+    runner = MagicMock()
+    runner.resume.side_effect = WorkflowBusyError("currently being processed")
+    monkeypatch.setattr(workflows, "ComplianceWorkflowRunner", lambda _db: runner)
+
+    with pytest.raises(HTTPException) as conflict:
+        workflows.resume_workflow(str(uuid.uuid4()), request, MagicMock())
+
+    assert conflict.value.status_code == 409
 
 
 def test_remediation_preserves_workflow_requester_and_binds_current_initiator(monkeypatch):

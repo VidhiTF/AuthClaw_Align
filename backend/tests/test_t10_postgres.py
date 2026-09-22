@@ -31,7 +31,11 @@ from app.services import abuse_controls, audit_store, compliance_scoring, contro
 from app.api.v1.endpoints.trust_center import get_public_trust_center
 from app.api.v1.endpoints import compliance_scores
 from app.api.v1.endpoints import workflows as workflow_endpoints
-from app.orchestrator.runner import _create_approval_in_db
+from app.orchestrator.runner import (
+    ComplianceWorkflowRunner,
+    WorkflowResumeConflict,
+    _create_approval_in_db,
+)
 from starlette.requests import Request
 from tests.db_safety import destructive_test_urls
 from tests.test_tenant_isolation import Identity, IsolationHarness
@@ -60,10 +64,11 @@ def postgres():
         assert (result.returncode == 0) is succeeds, result.stderr
         return result
 
-    legacy_tenant, legacy_snapshot, legacy_user = uuid4(), uuid4(), uuid4()
+    legacy_tenant, legacy_snapshot = uuid4(), uuid4()
+    legacy_user, legacy_user_two = uuid4(), uuid4()
     linkage_workflow = f"workflow-linkage-{uuid4()}"
     duplicate_pending, duplicate_approved, orphan_approval = uuid4(), uuid4(), uuid4()
-    duplicate_audit = uuid4()
+    pending_audit, approved_audit = uuid4(), uuid4()
     with admin.connect() as conn:
         conn.execute(text(f'CREATE DATABASE "{name}"'))
     try:
@@ -80,8 +85,10 @@ def postgres():
         command("-m", "alembic", "upgrade", "050")
         with owner.begin() as conn:
             conn.execute(text("""INSERT INTO users (id,tenant_id,email,role,platform_role,is_active,mfa_enabled,mfa_secret)
-                VALUES (:id,:tenant,'legacy-mfa@example.invalid','admin','NONE',true,true,'legacy-test-enrollment')"""),
-                {"id": legacy_user, "tenant": legacy_tenant})
+                VALUES (:id,:tenant,:email,'admin','NONE',true,true,'legacy-test-enrollment')"""), [
+                {"id": legacy_user, "tenant": legacy_tenant, "email": "legacy-mfa@example.invalid"},
+                {"id": legacy_user_two, "tenant": legacy_tenant, "email": "legacy-mfa-two@example.invalid"},
+            ])
         command("-m", "alembic", "upgrade", "051")
         command("-m", "alembic", "upgrade", "052")
         with owner.begin() as conn:
@@ -92,19 +99,27 @@ def postgres():
                 VALUES (:id,:tenant,:workflow,'SOC2','AWAITING_APPROVAL','PAUSED',
                         '{}'::json,now(),now())
             """), {"id": uuid4(), "tenant": legacy_tenant, "workflow": linkage_workflow})
-            for approval_id, status, created_at in (
-                (duplicate_pending, "PENDING", datetime(2026, 1, 1, tzinfo=timezone.utc)),
-                (duplicate_approved, "APPROVED", datetime(2026, 1, 2, tzinfo=timezone.utc)),
+            for approval_id, status, requester, payload, action_hash, expires_at, resolution, created_at in (
+                (duplicate_pending, "PENDING", legacy_user,
+                 '{"plan":[{"action":"retain-pending"}]}', "1" * 64,
+                 datetime(2026, 2, 1, tzinfo=timezone.utc), "pending historical reason",
+                 datetime(2026, 1, 1, tzinfo=timezone.utc)),
+                (duplicate_approved, "APPROVED", legacy_user_two,
+                 '{"plan":[{"action":"retain-approved","destructive":true}]}', "2" * 64,
+                 datetime(2026, 3, 1, tzinfo=timezone.utc), "approved historical reason",
+                 datetime(2026, 1, 2, tzinfo=timezone.utc)),
             ):
                 conn.execute(text("""
                     INSERT INTO pending_approvals
                         (id,tenant_id,action_id,action_type,action_description,action_payload,
-                         status,requester_id,mfa_verified,expires_at,created_at,updated_at)
-                    VALUES (:id,:tenant,:action,'remediation','legacy duplicate','{}'::json,
-                            :status,:user,false,now()+interval '1 hour',:created,:created)
-                """), {"id": approval_id, "tenant": legacy_tenant,
-                         "action": linkage_workflow, "status": status,
-                         "user": legacy_user, "created": created_at})
+                         action_hash,status,requester_id,mfa_verified,expires_at,resolution_reason,
+                         created_at,updated_at)
+                    VALUES (:id,:tenant,:action,'remediation','legacy duplicate',CAST(:payload AS jsonb),
+                            :action_hash,:status,:requester,false,:expires,:resolution,:created,:created)
+                """), {"id": approval_id, "tenant": legacy_tenant, "action": linkage_workflow,
+                         "payload": payload, "action_hash": action_hash, "status": status,
+                         "requester": requester, "expires": expires_at,
+                         "resolution": resolution, "created": created_at})
             conn.execute(text("""
                 INSERT INTO pending_approvals
                     (id,tenant_id,action_id,action_type,action_description,action_payload,
@@ -114,10 +129,17 @@ def postgres():
             """), {"id": orphan_approval, "tenant": legacy_tenant, "user": legacy_user})
             conn.execute(text("""
                 INSERT INTO approval_audit
-                    (id,tenant_id,approval_id,actor_id,action,mfa_verified,created_at)
-                VALUES (:id,:tenant,:approval,:user,'CREATED',false,now())
-            """), {"id": duplicate_audit, "tenant": legacy_tenant,
-                     "approval": duplicate_pending, "user": legacy_user})
+                    (id,tenant_id,approval_id,actor_id,action,action_hash,reason,details,
+                     mfa_verified,created_at)
+                VALUES (:pending_audit,:tenant,:pending,:pending_actor,'CREATED',:pending_hash,
+                        'pending audit evidence','{"source":"pending"}'::jsonb,false,now()),
+                       (:approved_audit,:tenant,:approved,:approved_actor,'APPROVED',:approved_hash,
+                        'approved audit evidence','{"source":"approved"}'::jsonb,true,now())
+            """), {"pending_audit": pending_audit, "approved_audit": approved_audit,
+                     "tenant": legacy_tenant, "pending": duplicate_pending,
+                     "approved": duplicate_approved, "pending_actor": legacy_user,
+                     "approved_actor": legacy_user_two, "pending_hash": "1" * 64,
+                     "approved_hash": "2" * 64})
             conn.execute(
                 text("UPDATE compliance_workflows SET approval_id=:approval WHERE workflow_id=:workflow"),
                 {"approval": duplicate_pending, "workflow": linkage_workflow},
@@ -131,7 +153,22 @@ def postgres():
             "keeper_id": duplicate_approved,
             "duplicate_id": duplicate_pending,
             "orphan_id": orphan_approval,
-            "audit_id": duplicate_audit,
+            "requesters": {duplicate_pending: legacy_user, duplicate_approved: legacy_user_two},
+            "payloads": {
+                duplicate_pending: {"plan": [{"action": "retain-pending"}]},
+                duplicate_approved: {"plan": [{"action": "retain-approved", "destructive": True}]},
+            },
+            "hashes": {duplicate_pending: "1" * 64, duplicate_approved: "2" * 64},
+            "statuses": {duplicate_pending: "PENDING", duplicate_approved: "APPROVED"},
+            "expiries": {
+                duplicate_pending: datetime(2026, 2, 1, tzinfo=timezone.utc),
+                duplicate_approved: datetime(2026, 3, 1, tzinfo=timezone.utc),
+            },
+            "resolutions": {
+                duplicate_pending: "pending historical reason",
+                duplicate_approved: "approved historical reason",
+            },
+            "audits": {pending_audit: duplicate_pending, approved_audit: duplicate_approved},
         }
         yield harness, command, legacy_snapshot
     finally:
@@ -166,10 +203,15 @@ def test_approval_linkage_upgrade_repairs_duplicates_orphans_and_reruns(postgres
                 text("SELECT count(*) FROM pending_approvals WHERE id=:id"),
                 {"id": evidence["orphan_id"]},
             ).scalar_one()
-            audit_approval = conn.execute(
-                text("SELECT approval_id FROM approval_audit WHERE id=:id"),
-                {"id": evidence["audit_id"]},
-            ).scalar_one()
+            approvals = conn.execute(text("""
+                SELECT id,requester_id,action_payload,action_hash,status,expires_at,resolution_reason
+                FROM pending_approvals WHERE id IN (:duplicate,:keeper)
+            """), {"duplicate": evidence["duplicate_id"], "keeper": evidence["keeper_id"]}).mappings().all()
+            audits = dict(conn.execute(
+                text("SELECT id,approval_id FROM approval_audit WHERE id IN (:pending,:approved)"),
+                {"pending": next(iter(evidence["audits"])),
+                 "approved": next(reversed(evidence["audits"]))},
+            ).all())
             canonical_count = conn.execute(text("""
                 SELECT count(*) FROM pending_approvals
                 WHERE tenant_id=:tenant AND action_type='remediation' AND action_id=:workflow
@@ -177,7 +219,15 @@ def test_approval_linkage_upgrade_repairs_duplicates_orphans_and_reruns(postgres
         assert workflow_approval == evidence["keeper_id"]
         assert duplicate.endswith(f"#superseded:{evidence['duplicate_id']}")
         assert orphan_count == 1
-        assert audit_approval == evidence["keeper_id"]
+        assert audits == evidence["audits"]
+        for approval in approvals:
+            approval_id = approval["id"]
+            assert approval["requester_id"] == evidence["requesters"][approval_id]
+            assert approval["action_payload"] == evidence["payloads"][approval_id]
+            assert approval["action_hash"] == evidence["hashes"][approval_id]
+            assert approval["status"] == evidence["statuses"][approval_id]
+            assert approval["expires_at"] == evidence["expiries"][approval_id]
+            assert evidence["resolutions"][approval_id] in approval["resolution_reason"]
         assert canonical_count == 1
 
     assert_reconciled()
@@ -221,6 +271,102 @@ def test_concurrent_approval_retry_reuses_single_upgraded_link(postgres):
             SELECT count(*) FROM pending_approvals
             WHERE tenant_id=:tenant AND action_type='remediation' AND action_id=:workflow
         """), {"tenant": identity.tenant_id, "workflow": workflow_id}).scalar_one() == 1
+
+
+def test_two_sessions_cannot_transfer_or_race_approved_workflow_resume(postgres):
+    harness, _, _ = postgres
+    requester = harness.create_identity("resume-requester")
+    approver = reviewer(harness, requester)
+    attacker = reviewer(harness, requester)
+    workflow_id = str(uuid4())
+    approval_id = uuid4()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    plan = [{"action": "redact", "destructive": False}]
+    payload = workflow_endpoints.build_action_payload(workflow_id, plan)
+    action_hash = workflow_endpoints.compute_action_hash(
+        tenant_id=str(requester.tenant_id), action_payload=payload, expires_at=expires_at
+    )
+    state_data = {
+        "workflow_id": workflow_id,
+        "tenant_id": str(requester.tenant_id),
+        "request_id": "resume-race",
+        "requester_id": str(requester.user_id),
+        "framework": "SOC2",
+        "current_state": "AWAITING_APPROVAL",
+        "remediation_plan": plan,
+        "approval_id": str(approval_id),
+        "approval_status": "APPROVED",
+        "execution_status": "PAUSED",
+    }
+    with harness.session_for(requester) as db:
+        db.add(PendingApproval(
+            id=approval_id, tenant_id=requester.tenant_id, action_id=workflow_id,
+            action_type="remediation", action_description="resume race",
+            action_payload=payload, action_hash=action_hash, status="APPROVED",
+            requester_id=requester.user_id, approver_id=approver.user_id,
+            approved_at=datetime.now(timezone.utc), mfa_verified=True,
+            mfa_timestamp=datetime.now(timezone.utc), expires_at=expires_at,
+        ))
+        db.add(ComplianceWorkflow(
+            tenant_id=requester.tenant_id, workflow_id=workflow_id,
+            framework="SOC2", current_state="AWAITING_APPROVAL",
+            remediation_plan=plan, approval_id=approval_id,
+            approval_status="APPROVED", execution_status="PAUSED",
+            state_data=state_data,
+        ))
+        db.commit()
+
+    with harness.session_for(attacker) as db:
+        with pytest.raises(WorkflowResumeConflict, match="recorded approver"):
+            ComplianceWorkflowRunner(db).resume(
+                workflow_id, str(requester.tenant_id), str(attacker.user_id)
+            )
+    with harness.session_for(requester) as db:
+        approval = db.get(PendingApproval, approval_id)
+        workflow = db.query(ComplianceWorkflow).filter(
+            ComplianceWorkflow.workflow_id == workflow_id
+        ).one()
+        assert approval.status == "APPROVED" and approval.consumed_at is None
+        assert workflow.execution_status == "PAUSED"
+        assert workflow.current_state == "AWAITING_APPROVAL"
+        assert workflow.approval_status == "APPROVED"
+
+    barrier = Barrier(2)
+
+    def resume_as(identity):
+        barrier.wait(timeout=15)
+        with harness.session_for(identity) as db:
+            runner = ComplianceWorkflowRunner(db)
+            runner._drive_remediation_states = lambda state: state
+            try:
+                result = runner.resume(
+                    workflow_id, str(requester.tenant_id), str(identity.user_id)
+                )
+                return "RESUMED", result
+            except WorkflowResumeConflict:
+                return "CONFLICT", None
+            except ValueError as exc:
+                assert "currently being processed" in str(exc)
+                return "BUSY", None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        approver_future = pool.submit(resume_as, approver)
+        attacker_future = pool.submit(resume_as, attacker)
+        approver_result = approver_future.result(timeout=30)[0]
+        attacker_result = attacker_future.result(timeout=30)[0]
+
+    assert attacker_result in {"CONFLICT", "BUSY"}
+    assert approver_result in {"RESUMED", "BUSY"}
+    if approver_result == "BUSY":
+        with harness.session_for(approver) as db:
+            runner = ComplianceWorkflowRunner(db)
+            runner._drive_remediation_states = lambda state: state
+            runner.resume(workflow_id, str(requester.tenant_id), str(approver.user_id))
+
+    with harness.session_for(requester) as db:
+        approval = db.get(PendingApproval, approval_id)
+        assert approval.status == "CONSUMED"
+        assert approval.consumed_by_id == approver.user_id
 
 
 def score(score_value, *, generated_at=None):

@@ -23,12 +23,18 @@ from app.core.auth import (
     get_tenant_db,
     revalidate_tenant_credential,
     require_interactive_session,
+    require_roles,
     require_scopes,
 )
 from app.api.v1.endpoints.onboarding import _get_redis
 from app.core.startup_checks import is_production
 from app.db.models import PendingApproval, ComplianceWorkflow, User, ApprovalAudit, Tenant
-from app.orchestrator.runner import ComplianceWorkflowRunner
+from app.orchestrator.runner import (
+    ComplianceWorkflowRunner,
+    WorkflowAuthorizationError,
+    WorkflowResumeConflict,
+)
+from app.orchestrator.workflow_lock import WorkflowBusyError
 from app.services.notifications import create_notification
 from app.services.remediation_approval import (
     build_action_payload,
@@ -196,6 +202,42 @@ def _tenant_tier(db: Session, tenant_id: str) -> str:
     return tenant.tier if tenant else "starter"
 
 
+def _revalidate_privileged_workflow_actor(
+    request: Request,
+    db: Session,
+    user: User | None = None,
+) -> None:
+    """Fail closed if the locked actor lost current workflow authority."""
+    if user is None:
+        user = db.query(User).filter(
+            User.id == request.state.user_id,
+            User.tenant_id == request.state.tenant_id,
+        ).with_for_update().first()
+    if user is not None:
+        db.refresh(user, attribute_names=["is_active", "role"])
+    try:
+        bound = revalidate_tenant_credential(request, db)
+    except HTTPException as exc:
+        db.rollback()
+        raise WorkflowAuthorizationError(
+            str(exc.detail), status_code=exc.status_code
+        ) from exc
+    current_role = str(user.role).lower() if user is not None else ""
+    bound_role = str(bound.role).lower() if bound is not None else ""
+    current_scopes = set(bound.scopes or []) if bound is not None else set()
+    if (
+        user is None
+        or not user.is_active
+        or current_role not in {"owner", "admin"}
+        or bound_role not in {"owner", "admin"}
+        or "admin" not in current_scopes
+    ):
+        db.rollback()
+        raise WorkflowAuthorizationError(
+            "Active tenant owner or admin with admin scope required"
+        )
+
+
 @router.post("", response_model=WorkflowResponse, status_code=201)
 def create_workflow(
     body: WorkflowCreateRequest,
@@ -230,19 +272,38 @@ def create_workflow(
     return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/resume", response_model=WorkflowResponseVariant)
+@router.post(
+    "/{workflow_id}/resume",
+    response_model=WorkflowResponseVariant,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def resume_workflow(
     workflow_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["write"]),
+    _auth=require_scopes(["admin"]),
 ):
     """Resume a paused workflow (typically after approval)."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
 
     try:
         runner = ComplianceWorkflowRunner(db)
-        result = runner.resume(workflow_id, tenant_id, actor_id=str(request.state.user_id))
+        result = runner.resume(
+            workflow_id,
+            tenant_id,
+            actor_id=str(request.state.user_id),
+            authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
+        )
+    except WorkflowResumeConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    except WorkflowBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -741,7 +802,10 @@ def get_workflow(
 @router.post(
     "/{workflow_id}/approve",
     response_model=WorkflowResponseVariant,
-    dependencies=[Depends(require_interactive_session)],
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
 )
 def approve_workflow(
     workflow_id: str,
@@ -822,7 +886,10 @@ def approve_workflow(
 
     # Close the authenticate/wait/revoke/commit race using the credential that
     # authenticated this request, after the approval and user locks are held.
-    revalidate_tenant_credential(request, db)
+    try:
+        _revalidate_privileged_workflow_actor(request, db, user)
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
     requires_fresh_mfa = _approval_requires_fresh_mfa(approval)
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
@@ -891,7 +958,12 @@ def approve_workflow(
 
     # Resume workflow execution
     try:
-        result = runner.resume(workflow_id, tenant_id, actor_id=str(user_id))
+        result = runner.resume(
+            workflow_id,
+            tenant_id,
+            actor_id=str(user_id),
+            authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
+        )
         remediation_state = str(result.get("remediation_state") or "")
         if remediation_state in {"SUCCEEDED", "FAILED", "PARTIAL_FAILED", "ROLLBACK_FAILED"}:
             failed = remediation_state != "SUCCEEDED"
@@ -904,13 +976,24 @@ def approve_workflow(
                 body=f"{workflow_id} finished with remediation state {remediation_state}.",
                 link="/agent",
             )
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    except (WorkflowResumeConflict, WorkflowBusyError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
         logger.error("Failed to approve/resume workflow: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
     return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/reject", response_model=WorkflowResponseVariant)
+@router.post(
+    "/{workflow_id}/reject",
+    response_model=WorkflowResponseVariant,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def reject_workflow(
     workflow_id: str,
     request: Request,
@@ -918,6 +1001,7 @@ def reject_workflow(
     _auth=require_scopes(["admin"]),
 ):
     """Reject a workflow's remediation plan."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
     user_id = request.state.user_id
 
@@ -942,7 +1026,7 @@ def reject_workflow(
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_id == workflow_id,
         PendingApproval.action_type == "remediation",
-    ).first()
+    ).with_for_update().first()
 
     if not approval:
         raise HTTPException(status_code=404, detail="Approval record not found")
@@ -952,6 +1036,11 @@ def reject_workflow(
             status_code=400,
             detail=f"Approval request is already resolved (status={approval.status})",
         )
+
+    try:
+        _revalidate_privileged_workflow_actor(request, db)
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
     # Reject only if the approval is still pending and unexpired.
     decision_at = datetime.now(timezone.utc)
@@ -1120,17 +1209,32 @@ def remediate_workflow(
     return _workflow_response(result)
 
 
-@router.post("/recover", response_model=RecoveryResponse)
+@router.post(
+    "/recover",
+    response_model=RecoveryResponse,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def recover_workflows(
     request: Request,
     db: Session = Depends(get_tenant_db),
     _auth=require_scopes(["admin"]),
 ):
     """Recover all interrupted workflows for the current tenant."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
 
     runner = ComplianceWorkflowRunner(db)
-    results = runner.recover_interrupted(tenant_id, actor_id=str(request.state.user_id))
+    try:
+        results = runner.recover_interrupted(
+            tenant_id,
+            actor_id=str(request.state.user_id),
+            authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
+        )
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
     return RecoveryResponse(
         recovered=len([r for r in results if r["status"] == "recovered"]),
