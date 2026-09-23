@@ -235,7 +235,11 @@ func KafkaMetricsHandler(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)
 	}
 	for name, value := range AuditMetricsSnapshot() {
-		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)
+		metricType := "counter"
+		if strings.HasSuffix(name, "_backlog") || strings.HasSuffix(name, "_oldest_age_seconds") {
+			metricType = "gauge"
+		}
+		fmt.Fprintf(w, "# TYPE %s %s\n%s %d\n", name, metricType, name, value)
 	}
 	for name, value := range RedactionMetricsSnapshot() {
 		fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, value)

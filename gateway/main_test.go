@@ -22,11 +22,14 @@ import (
 )
 
 type closingAuditStream struct {
-	auditStream
 	closed chan struct{}
 }
 
-func (s *closingAuditStream) Close() { close(s.closed) }
+func (*closingAuditStream) Enabled() bool                             { return false }
+func (*closingAuditStream) PublishEvent(*AuditEvent) error            { return nil }
+func (*closingAuditStream) PublishOutboxPayload(string, []byte) error { return nil }
+func (*closingAuditStream) PublishDLQ([]byte, string, string, string) {}
+func (s *closingAuditStream) Close()                                  { close(s.closed) }
 
 func lifecycleClients(t *testing.T) (*sql.DB, *redis.Client, <-chan struct{}) {
 	t.Helper()
@@ -194,9 +197,9 @@ func TestAuditDrainDeadlineDurablySpillsActiveQueuedAndOverflowEvents(t *testing
 	for range cap(auditAsyncSlots) {
 		<-entered
 	}
-	overflow, err := os.ReadFile(outbox)
-	if err != nil || !strings.Contains(string(overflow), ids[len(ids)-1]) {
-		t.Fatalf("overflow event was not durably recovered: err=%v data=%s", err, overflow)
+	overflow := readAuditRecoveryData(t)
+	if !strings.Contains(string(overflow), ids[len(ids)-1]) {
+		t.Fatalf("overflow event was not durably recovered: data=%s", overflow)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -204,10 +207,7 @@ func TestAuditDrainDeadlineDurablySpillsActiveQueuedAndOverflowEvents(t *testing
 	if err := drainAuditEvents(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("drain error=%v, want context cancellation", err)
 	}
-	data, err := os.ReadFile(outbox)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := readAuditRecoveryData(t)
 	for _, id := range ids {
 		if count := strings.Count(string(data), id); count != 1 {
 			t.Fatalf("event %s recovery count=%d, want 1", id, count)
@@ -271,10 +271,7 @@ func TestAuditDrainDeadlinePreventsQueuedEmitAfterSpill(t *testing.T) {
 		t.Fatalf("event %s emitted after dependencies closed", id)
 	default:
 	}
-	data, err := os.ReadFile(outbox)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := readAuditRecoveryData(t)
 	if count := strings.Count(string(data), targetID); count != 1 {
 		t.Fatalf("queued event recovery count=%d, want 1", count)
 	}
@@ -283,7 +280,11 @@ func TestAuditDrainDeadlinePreventsQueuedEmitAfterSpill(t *testing.T) {
 func TestAuditDrainFailedSpillRemainsRecoverable(t *testing.T) {
 	lifecycleClients(t)
 	t.Setenv("AUDIT_FAIL_CLOSED", "false")
-	t.Setenv("AUDIT_OUTBOX_PATH", t.TempDir())
+	blocked := filepath.Join(t.TempDir(), "blocked")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUDIT_OUTBOX_PATH", filepath.Join(blocked, "audit.ndjson"))
 	oldEmitter := auditEventEmitter
 	entered, release := make(chan struct{}), make(chan struct{})
 	releaseAudit := sync.OnceFunc(func() { close(release) })
@@ -313,9 +314,9 @@ func TestAuditDrainFailedSpillRemainsRecoverable(t *testing.T) {
 	if err := drainAuditEvents(drained); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(outbox)
-	if err != nil || strings.Count(string(data), "spill-retry") != 1 {
-		t.Fatalf("retry recovery missing or duplicated: err=%v data=%s", err, data)
+	data := readAuditRecoveryData(t)
+	if strings.Count(string(data), "spill-retry") != 1 {
+		t.Fatalf("retry recovery missing or duplicated: data=%s", data)
 	}
 }
 
@@ -358,10 +359,7 @@ func TestAuditDrainPartialSpillRollsBackBeforeRetry(t *testing.T) {
 	if err := drainAuditEvents(drained); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(outbox)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := readAuditRecoveryData(t)
 	var envelope auditOutboxEnvelope
 	if strings.Count(string(data), "\n") != 1 {
 		t.Fatalf("partial spill left an invalid record count: %s", data)
@@ -374,60 +372,21 @@ func TestAuditDrainPartialSpillRollsBackBeforeRetry(t *testing.T) {
 	}
 }
 
-func TestAuditDrainCloseFailureAfterSyncDoesNotRetry(t *testing.T) {
+func TestAuditDrainDirectorySyncFailureDoesNotDuplicate(t *testing.T) {
 	lifecycleClients(t)
 	t.Setenv("AUDIT_FAIL_CLOSED", "false")
 	outbox := filepath.Join(t.TempDir(), "audit.ndjson")
 	t.Setenv("AUDIT_OUTBOX_PATH", outbox)
-	oldEmitter, oldWrite, oldClose := auditEventEmitter, auditOutboxWrite, auditOutboxClose
-	t.Cleanup(func() {
-		auditEventEmitter, auditOutboxWrite, auditOutboxClose = oldEmitter, oldWrite, oldClose
-	})
-	entered := make(chan struct{})
-	auditEventEmitter = func(ctx context.Context, _ *AuditEvent) error {
-		close(entered)
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	var writes atomic.Int32
-	auditOutboxWrite = func(file *os.File, payload []byte) (int, error) {
-		writes.Add(1)
-		return file.Write(payload)
-	}
-	auditOutboxClose = func(file *os.File) error {
-		if err := file.Close(); err != nil {
-			return err
-		}
-		return errors.New("forced close error")
-	}
-
-	EmitAuditEventAsync(context.Background(), &AuditEvent{ID: "close-after-sync", TenantID: "tenant"})
-	<-entered
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := drainAuditEvents(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("drain error=%v, want context cancellation", err)
-	}
-	drained, stop := context.WithTimeout(context.Background(), time.Second)
-	defer stop()
-	if err := drainAuditEvents(drained); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(outbox)
-	if err != nil || writes.Load() != 1 || strings.Count(string(data), "close-after-sync") != 1 {
-		t.Fatalf("durable record retried after close error: err=%v writes=%d data=%s", err, writes.Load(), data)
-	}
-}
-
-func TestAuditDrainRollbackFailureIsNotRetried(t *testing.T) {
-	lifecycleClients(t)
-	t.Setenv("AUDIT_FAIL_CLOSED", "false")
-	t.Setenv("AUDIT_OUTBOX_PATH", filepath.Join(t.TempDir(), "audit.ndjson"))
-	oldEmitter, oldWrite, oldTruncate := auditEventEmitter, auditOutboxWrite, auditOutboxTruncate
-	t.Cleanup(func() {
-		auditEventEmitter, auditOutboxWrite, auditOutboxTruncate = oldEmitter, oldWrite, oldTruncate
-	})
+	oldEmitter, oldWrite, oldSyncDir := auditEventEmitter, auditOutboxWrite, auditOutboxSyncDir
 	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		auditEventEmitter, auditOutboxWrite, auditOutboxSyncDir = oldEmitter, oldWrite, oldSyncDir
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
 	auditEventEmitter = func(ctx context.Context, event *AuditEvent) error {
 		close(entered)
 		<-release
@@ -437,22 +396,17 @@ func TestAuditDrainRollbackFailureIsNotRetried(t *testing.T) {
 	var writes atomic.Int32
 	auditOutboxWrite = func(file *os.File, payload []byte) (int, error) {
 		writes.Add(1)
-		written, err := file.Write(payload[:len(payload)/2])
-		if err != nil {
-			return written, err
-		}
-		return written, errors.New("forced partial write")
+		return file.Write(payload)
 	}
-	auditOutboxTruncate = func(*os.File, int64) error { return errors.New("forced rollback failure") }
+	auditOutboxSyncDir = func(string) error { return errors.New("forced directory sync failure") }
 
 	EmitAuditEventAsync(context.Background(), &AuditEvent{ID: "indeterminate-spill", TenantID: "tenant"})
 	<-entered
-	ctx, cancel := context.WithCancel(context.Background())
+	deadline, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := drainAuditEvents(ctx)
 	var indeterminate *auditOutboxIndeterminateError
-	if !errors.As(err, &indeterminate) {
-		t.Fatalf("drain error=%v, want indeterminate outbox error", err)
+	if err := drainAuditEvents(deadline); !errors.As(err, &indeterminate) {
+		t.Fatalf("drain error=%v, want indeterminate durability", err)
 	}
 	close(release)
 	drained, stop := context.WithTimeout(context.Background(), time.Second)
@@ -460,8 +414,13 @@ func TestAuditDrainRollbackFailureIsNotRetried(t *testing.T) {
 	if err := drainAuditEvents(drained); err != nil {
 		t.Fatal(err)
 	}
-	if writes.Load() != 1 {
-		t.Fatalf("indeterminate outbox write retried %d times, want 1", writes.Load())
+	files, err := filepath.Glob(outbox + ".*.ready")
+	if err != nil || len(files) != 1 || writes.Load() != 1 {
+		t.Fatalf("ready files=%v writes=%d err=%v", files, writes.Load(), err)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil || strings.Count(string(data), "indeterminate-spill") != 1 {
+		t.Fatalf("indeterminate recovery missing or duplicated: err=%v data=%s", err, data)
 	}
 }
 
@@ -571,8 +530,8 @@ func TestInternalQuotaMetricsRequireDedicatedSecret(t *testing.T) {
 		if response.Code != tc.status {
 			t.Fatalf("token=%q status=%d, want %d", tc.token, response.Code, tc.status)
 		}
-		if tc.status == http.StatusOK && !strings.Contains(response.Body.String(), "authclaw_quota_available") {
-			t.Fatal("authorized metrics response omitted quota telemetry")
+		if tc.status == http.StatusOK && (!strings.Contains(response.Body.String(), "authclaw_quota_available") || !strings.Contains(response.Body.String(), "authclaw_gateway_audit_recovery_backlog")) {
+			t.Fatal("authorized metrics response omitted quota or audit recovery telemetry")
 		}
 	}
 }

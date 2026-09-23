@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,23 +48,24 @@ type AuditEvent struct {
 }
 
 var (
-	auditPostgresFailures      atomic.Uint64
-	auditOutboxWrites          atomic.Uint64
-	auditOutboxFailures        atomic.Uint64
-	auditFailClosedFailures    atomic.Uint64
-	auditIdempotencyCollisions atomic.Uint64
-	auditOutboxBacklog         atomic.Uint64
-	auditOutboxOldestAge       atomic.Uint64
-	auditFailOpenLosses        atomic.Uint64
-	auditPostResponseFailures  atomic.Uint64
-	auditOutboxMu              sync.Mutex
+	auditPostgresFailures       atomic.Uint64
+	auditOutboxWrites           atomic.Uint64
+	auditOutboxFailures         atomic.Uint64
+	auditFailClosedFailures     atomic.Uint64
+	auditIdempotencyCollisions  atomic.Uint64
+	auditOutboxBacklog          atomic.Uint64
+	auditOutboxOldestAge        atomic.Uint64
+	auditRecoveryReplayFailures atomic.Uint64
+	auditRecoveryScanFailures   atomic.Uint64
+	auditFailOpenLosses         atomic.Uint64
+	auditPostResponseFailures   atomic.Uint64
 )
 
 var (
-	auditEventEmitter   = EmitAuditEvent
-	auditOutboxWrite    = func(file *os.File, payload []byte) (int, error) { return file.Write(payload) }
-	auditOutboxClose    = func(file *os.File) error { return file.Close() }
-	auditOutboxTruncate = func(file *os.File, size int64) error { return file.Truncate(size) }
+	auditEventEmitter    = EmitAuditEvent
+	auditRecoveryPersist = persistAuditMetadata
+	auditOutboxWrite     = func(file *os.File, payload []byte) (int, error) { return file.Write(payload) }
+	auditOutboxSyncDir   = syncAuditDirectory
 )
 
 type auditOutboxEnvelope struct {
@@ -79,6 +83,8 @@ type auditOutboxIndeterminateError struct{ cause error }
 
 func (e *auditOutboxIndeterminateError) Error() string { return e.cause.Error() }
 func (e *auditOutboxIndeterminateError) Unwrap() error { return e.cause }
+
+const auditRecoveryReplayLimit = 100
 
 func (e *auditPersistenceError) Error() string { return e.cause.Error() }
 func (e *auditPersistenceError) Unwrap() error { return e.cause }
@@ -99,66 +105,509 @@ func writeAuditOutbox(event *AuditEvent, reason error) error {
 }
 
 func writeAuditOutboxBatch(events []*AuditEvent, reason error) error {
+	return writeAuditOutboxBatchAt(events, reason, time.Now().UTC())
+}
+
+func writeAuditOutboxBatchAt(events []*AuditEvent, reason error, failedAt time.Time) error {
+	if len(events) == 0 {
+		return fmt.Errorf("audit recovery batch is empty")
+	}
 	payload := make([]byte, 0, len(events)*512)
-	failedAt := time.Now().UTC()
+	reasonText := "unknown"
+	if reason != nil {
+		reasonText = reason.Error()
+	}
+	tenantID := ""
 	for _, event := range events {
 		if event == nil {
 			return fmt.Errorf("audit event is nil")
 		}
-		line, err := json.Marshal(auditOutboxEnvelope{FailedAt: failedAt, ErrorReason: reason.Error(), Event: event})
+		if tenantID == "" {
+			tenantID = event.TenantID
+		} else if event.TenantID != tenantID {
+			return fmt.Errorf("audit recovery batch spans multiple tenants")
+		}
+		line, err := json.Marshal(auditOutboxEnvelope{FailedAt: failedAt, ErrorReason: reasonText, Event: event})
 		if err != nil {
 			return err
 		}
 		payload = append(payload, line...)
 		payload = append(payload, '\n')
 	}
-	path := auditOutboxPath()
-	auditOutboxMu.Lock()
-	defer auditOutboxMu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := writeAuditRecoveryPayload(payload, tenantID, failedAt); err != nil {
 		return err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	offset, err := file.Seek(0, io.SeekEnd)
-	if err != nil {
-		_ = file.Close()
-		return err
-	}
-	written, err := auditOutboxWrite(file, payload)
-	if err == nil && written != len(payload) {
-		err = io.ErrShortWrite
-	}
-	if err != nil {
-		return rollbackAuditOutboxWrite(file, offset, err)
-	}
-	if err := file.Sync(); err != nil {
-		return rollbackAuditOutboxWrite(file, offset, err)
-	}
-	if err := auditOutboxClose(file); err != nil {
-		log.Printf("[AUDIT] durable outbox close failed: %v", err)
 	}
 	auditOutboxWrites.Add(uint64(len(events)))
 	return nil
 }
 
-func rollbackAuditOutboxWrite(file *os.File, size int64, cause error) error {
-	var rollbackErr error
-	if err := auditOutboxTruncate(file, size); err != nil {
-		rollbackErr = fmt.Errorf("rollback partial audit outbox write: %w", err)
+func writeAuditRecoveryPayload(payload []byte, tenantID string, failedAt time.Time) error {
+	path := auditOutboxPath()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(dir, ".audit-recovery-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	written, err := auditOutboxWrite(file, payload)
+	if err == nil && written != len(payload) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return errors.Join(err, file.Close())
 	}
 	if err := file.Sync(); err != nil {
-		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("sync audit outbox rollback: %w", err))
+		return errors.Join(err, file.Close())
 	}
 	if err := file.Close(); err != nil {
-		cause = errors.Join(cause, err)
+		return err
 	}
-	if rollbackErr != nil {
-		return &auditOutboxIndeterminateError{cause: errors.Join(cause, rollbackErr)}
+	readyPath := auditRecoveryReadyPath(path, payload, tenantID, failedAt)
+	if err := os.Rename(tempPath, readyPath); err != nil {
+		if _, statErr := os.Stat(readyPath); statErr != nil {
+			return err
+		}
 	}
-	return cause
+	if err := auditOutboxSyncDir(dir); err != nil {
+		return &auditOutboxIndeterminateError{cause: err}
+	}
+	return nil
+}
+
+func auditRecoveryReadyPath(path string, payload []byte, tenantID string, failedAt time.Time) string {
+	tenantHash, payloadHash := sha256.Sum256([]byte(tenantID)), sha256.Sum256(payload)
+	return fmt.Sprintf("%s.%020d.%x.%x.ready", path, failedAt.UnixNano(), tenantHash, payloadHash)
+}
+
+func syncAuditDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
+}
+
+func removeAuditRecovery(path string) error {
+	var err error
+	for range 100 {
+		if err = os.Remove(path); err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return err
+}
+
+func statAuditRecovery(path string) (os.FileInfo, error) {
+	var info os.FileInfo
+	var err error
+	for range 100 {
+		if info, err = os.Stat(path); err == nil || os.IsNotExist(err) {
+			return info, err
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return nil, err
+}
+
+func decodeAuditRecovery(reader io.Reader) ([]auditOutboxEnvelope, error) {
+	decoder := json.NewDecoder(reader)
+	var envelopes []auditOutboxEnvelope
+	for {
+		var envelope auditOutboxEnvelope
+		if err := decoder.Decode(&envelope); errors.Is(err, io.EOF) {
+			return envelopes, nil
+		} else if err != nil {
+			return nil, err
+		}
+		if envelope.Event == nil {
+			return nil, fmt.Errorf("audit recovery record has no event")
+		}
+		envelopes = append(envelopes, envelope)
+	}
+}
+
+func recoverAuditTemps(path string) error {
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".audit-recovery-") || !strings.HasSuffix(entry.Name(), ".tmp") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || time.Since(info.ModTime()) < time.Minute {
+			continue
+		}
+		tempPath := filepath.Join(dir, entry.Name())
+		payload, readErr := os.ReadFile(tempPath)
+		if os.IsNotExist(readErr) {
+			continue
+		}
+		if readErr != nil {
+			return readErr
+		}
+		envelopes, decodeErr := decodeAuditRecovery(bytes.NewReader(payload))
+		failedAt, tenantID := info.ModTime(), ""
+		if decodeErr == nil && len(envelopes) > 0 {
+			tenantID = envelopes[0].Event.TenantID
+			for _, envelope := range envelopes {
+				if envelope.Event.TenantID != tenantID {
+					decodeErr = fmt.Errorf("audit recovery batch spans multiple tenants")
+					break
+				}
+				if !envelope.FailedAt.IsZero() && envelope.FailedAt.Before(failedAt) {
+					failedAt = envelope.FailedAt
+				}
+			}
+		}
+		readyPath := auditRecoveryReadyPath(path, payload, tenantID, failedAt)
+		if decodeErr != nil || len(envelopes) == 0 {
+			readyPath = fmt.Sprintf("%s.%020d.invalid.%x.ready", path, failedAt.UnixNano(), sha256.Sum256(payload))
+		}
+		if err := os.Rename(tempPath, readyPath); err != nil {
+			if _, statErr := os.Stat(readyPath); statErr != nil {
+				return err
+			}
+		}
+		if err := auditOutboxSyncDir(dir); err != nil {
+			return &auditOutboxIndeterminateError{cause: err}
+		}
+	}
+	return nil
+}
+
+func auditRecoveryFiles() ([]string, error) {
+	path := auditOutboxPath()
+	if err := recoverAuditTemps(path); err != nil {
+		return nil, err
+	}
+	if legacyPath, err := claimLegacyAuditRecovery(path); err != nil {
+		return nil, err
+	} else if legacyPath != "" {
+		if err := migrateLegacyAuditRecovery(legacyPath); err != nil {
+			return nil, err
+		}
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	prefix := filepath.Base(path) + "."
+	files := make([]string, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) && strings.HasSuffix(entry.Name(), ".ready") && !strings.HasSuffix(entry.Name(), ".legacy.ready") {
+			files = append(files, filepath.Join(filepath.Dir(path), entry.Name()))
+		}
+	}
+	return files, nil
+}
+
+func claimLegacyAuditRecovery(path string) (string, error) {
+	legacyPath := path + ".legacy.ready"
+	if _, err := statAuditRecovery(legacyPath); err == nil {
+		return legacyPath, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	if info, err := statAuditRecovery(path); err != nil || info.IsDir() {
+		if os.IsNotExist(err) || err == nil {
+			return "", nil
+		}
+		return "", err
+	}
+	if err := os.Link(path, legacyPath); err != nil {
+		if _, statErr := os.Stat(legacyPath); statErr == nil {
+			return legacyPath, nil
+		} else if os.IsNotExist(statErr) {
+			if _, sourceErr := os.Stat(path); os.IsNotExist(sourceErr) {
+				return "", nil
+			}
+		}
+		return "", err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := auditOutboxSyncDir(filepath.Dir(path)); err != nil {
+		return "", &auditOutboxIndeterminateError{cause: err}
+	}
+	return legacyPath, nil
+}
+
+func migrateLegacyAuditRecovery(path string) error {
+	info, statErr := statAuditRecovery(path)
+	if os.IsNotExist(statErr) {
+		return nil
+	}
+	if statErr != nil {
+		return statErr
+	}
+	var envelopes []auditOutboxEnvelope
+	var err error
+	for range 100 {
+		envelopes, err = readAuditRecovery(path)
+		var pathErr *os.PathError
+		if err == nil || os.IsNotExist(err) || !errors.As(err, &pathErr) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		payload, readErr := os.ReadFile(path)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				return nil
+			}
+			return readErr
+		}
+		invalid := fmt.Sprintf("%s.%020d.invalid.%x.ready", strings.TrimSuffix(path, ".legacy.ready"), info.ModTime().UnixNano(), sha256.Sum256(payload))
+		if renameErr := os.Rename(path, invalid); renameErr != nil {
+			if _, statErr := os.Stat(invalid); statErr != nil {
+				return renameErr
+			}
+		}
+		return auditOutboxSyncDir(filepath.Dir(path))
+	}
+	type group struct {
+		events   []*AuditEvent
+		failedAt time.Time
+	}
+	groups := make(map[string]*group)
+	for _, envelope := range envelopes {
+		if envelope.FailedAt.IsZero() {
+			envelope.FailedAt = info.ModTime()
+		}
+		batch := groups[envelope.Event.TenantID]
+		if batch == nil {
+			batch = &group{failedAt: envelope.FailedAt}
+			groups[envelope.Event.TenantID] = batch
+		}
+		batch.events = append(batch.events, envelope.Event)
+		if envelope.FailedAt.Before(batch.failedAt) {
+			batch.failedAt = envelope.FailedAt
+		}
+	}
+	for _, batch := range groups {
+		for start := 0; start < len(batch.events); start += auditRecoveryReplayLimit {
+			end := min(start+auditRecoveryReplayLimit, len(batch.events))
+			if err := writeAuditOutboxBatchAt(batch.events[start:end], errors.New("legacy audit recovery"), batch.failedAt.Add(time.Duration(start))); err != nil {
+				return err
+			}
+		}
+	}
+	if err := removeAuditRecovery(path); err != nil {
+		return err
+	}
+	return auditOutboxSyncDir(filepath.Dir(path))
+}
+
+func readAuditRecovery(path string) ([]auditOutboxEnvelope, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return decodeAuditRecovery(file)
+}
+
+func checkpointAuditRecovery(path string, envelopes []auditOutboxEnvelope) error {
+	payload := make([]byte, 0, len(envelopes)*512)
+	for _, envelope := range envelopes {
+		line, err := json.Marshal(envelope)
+		if err != nil {
+			return err
+		}
+		payload = append(payload, append(line, '\n')...)
+	}
+	if err := writeAuditRecoveryPayload(payload, envelopes[0].Event.TenantID, envelopes[0].FailedAt); err != nil {
+		return err
+	}
+	if err := removeAuditRecovery(path); err != nil {
+		return err
+	}
+	return auditOutboxSyncDir(filepath.Dir(path))
+}
+
+func replayAuditRecovery(ctx context.Context, tenantID string, persist func(context.Context, *AuditEvent) error) bool {
+	files, err := auditRecoveryFiles()
+	if err != nil {
+		auditRecoveryReplayFailures.Add(1)
+		log.Printf("[AUDIT] recovery scan failed: %v", err)
+		return false
+	}
+	replayed := 0
+	tenantMarker := fmt.Sprintf(".%x.", sha256.Sum256([]byte(tenantID)))
+	for _, path := range files {
+		name := filepath.Base(path)
+		if !strings.Contains(name, tenantMarker) && !strings.Contains(name, ".legacy.") && !strings.Contains(name, ".invalid.") {
+			continue
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		envelopes, err := readAuditRecovery(path)
+		if err != nil {
+			auditRecoveryReplayFailures.Add(1)
+			log.Printf("[AUDIT] recovery read failed path=%s err=%v", path, err)
+			continue
+		}
+		if len(envelopes) == 0 || envelopes[0].Event.TenantID != tenantID {
+			continue
+		}
+		for _, envelope := range envelopes {
+			if envelope.Event.TenantID != tenantID {
+				err = fmt.Errorf("recovery file spans multiple tenants")
+				break
+			}
+		}
+		completed := 0
+		if err == nil {
+			for completed < len(envelopes) && replayed < auditRecoveryReplayLimit && ctx.Err() == nil {
+				if err = persist(ctx, envelopes[completed].Event); err != nil {
+					break
+				}
+				completed++
+				replayed++
+			}
+			if completed == len(envelopes) {
+				err = removeAuditRecovery(path)
+			} else if completed > 0 {
+				err = errors.Join(err, checkpointAuditRecovery(path, envelopes[completed:]))
+			}
+		}
+		if err != nil {
+			auditRecoveryReplayFailures.Add(1)
+			log.Printf("[AUDIT] recovery replay failed path=%s tenant=%s err=%v", path, tenantID, err)
+			continue
+		}
+		if replayed >= auditRecoveryReplayLimit {
+			return true
+		}
+	}
+	return false
+}
+
+type auditRecoveryRequest struct {
+	ctx      context.Context
+	tenantID string
+	task     *pendingAuditEvent
+}
+
+var auditRecoveryQueue struct {
+	sync.Mutex
+	running bool
+	pending map[string]struct{}
+	dirty   map[string]bool
+	items   []auditRecoveryRequest
+}
+
+const auditRecoveryQueueLimit = 64
+
+var auditRecoveryAdmissions = make(chan struct{}, auditRecoveryQueueLimit)
+
+func scheduleAuditRecovery(ctx context.Context, tenantID string) {
+	auditRecoveryQueue.Lock()
+	if _, pending := auditRecoveryQueue.pending[tenantID]; pending {
+		auditRecoveryQueue.dirty[tenantID] = true
+		auditRecoveryQueue.Unlock()
+		return
+	}
+	auditRecoveryQueue.Unlock()
+	select {
+	case auditRecoveryAdmissions <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	auditAsync.Lock()
+	if auditAsync.closing {
+		auditAsync.Unlock()
+		<-auditRecoveryAdmissions
+		return
+	}
+	auditRecoveryQueue.Lock()
+	if _, pending := auditRecoveryQueue.pending[tenantID]; pending {
+		auditRecoveryQueue.dirty[tenantID] = true
+		auditRecoveryQueue.Unlock()
+		auditAsync.Unlock()
+		<-auditRecoveryAdmissions
+		return
+	}
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	task := &pendingAuditEvent{cancel: cancel}
+	ctx = context.WithValue(ctx, pendingAuditContextKey{}, task)
+	if auditAsync.active == nil {
+		auditAsync.active = make(map[*pendingAuditEvent]struct{})
+	}
+	auditAsync.active[task] = struct{}{}
+	startPendingAudit()
+	if auditRecoveryQueue.pending == nil {
+		auditRecoveryQueue.pending = make(map[string]struct{})
+		auditRecoveryQueue.dirty = make(map[string]bool)
+	}
+	auditRecoveryQueue.pending[tenantID] = struct{}{}
+	auditRecoveryQueue.items = append(auditRecoveryQueue.items, auditRecoveryRequest{ctx, tenantID, task})
+	start := !auditRecoveryQueue.running
+	auditRecoveryQueue.running = true
+	auditRecoveryQueue.Unlock()
+	auditAsync.Unlock()
+	if start {
+		go runAuditRecoveryQueue()
+	}
+}
+
+func runAuditRecoveryQueue() {
+	for {
+		auditRecoveryQueue.Lock()
+		if len(auditRecoveryQueue.items) == 0 {
+			auditRecoveryQueue.running = false
+			auditRecoveryQueue.Unlock()
+			return
+		}
+		request := auditRecoveryQueue.items[0]
+		auditRecoveryQueue.items = auditRecoveryQueue.items[1:]
+		auditRecoveryQueue.Unlock()
+
+		ctx, stop := context.WithTimeout(request.ctx, 5*time.Second)
+		more := replayAuditRecovery(ctx, request.tenantID, auditRecoveryPersist)
+		if ctx.Err() == nil {
+			if err := publishPendingAuditOutbox(ctx, request.tenantID, auditRecoveryReplayLimit); err != nil {
+				log.Printf("[AUDIT] recovery transport publish failed tenant=%s err=%v", request.tenantID, err)
+			}
+		}
+		stop()
+		auditRecoveryQueue.Lock()
+		auditRecoveryQueue.dirty[request.tenantID] = auditRecoveryQueue.dirty[request.tenantID] || more
+		if auditRecoveryQueue.dirty[request.tenantID] && request.ctx.Err() == nil {
+			auditRecoveryQueue.dirty[request.tenantID] = false
+			auditRecoveryQueue.items = append(auditRecoveryQueue.items, request)
+			auditRecoveryQueue.Unlock()
+			continue
+		}
+		delete(auditRecoveryQueue.dirty, request.tenantID)
+		delete(auditRecoveryQueue.pending, request.tenantID)
+		auditRecoveryQueue.Unlock()
+		<-auditRecoveryAdmissions
+		finishPendingAudit(request.task)
+	}
 }
 
 // EmitAuditEvent appends in Postgres, then publishes committed outbox rows.
@@ -185,6 +634,7 @@ func EmitAuditEvent(ctx context.Context, event *AuditEvent) error {
 		log.Printf("[AUDIT] class=%s provider=%s result=fail_open recovery_available=%t err=%v", event.Action, event.Provider, outboxAvailable, err)
 		return nil
 	}
+	defer scheduleAuditRecovery(ctx, event.TenantID)
 
 	// Attempt transport publish first.
 	if err := publishPendingAuditOutbox(ctx, event.TenantID, 100); err != nil {
@@ -315,7 +765,8 @@ func recoverAuditEvent(ctx context.Context, event *AuditEvent, cause error) (boo
 	task, _ := ctx.Value(pendingAuditContextKey{}).(*pendingAuditEvent)
 	if task == nil {
 		err := writeAuditOutbox(event, cause)
-		return err == nil, err
+		var indeterminate *auditOutboxIndeterminateError
+		return err == nil || errors.As(err, &indeterminate), err
 	}
 	return recoverPendingAuditEvent(task, event, cause)
 }
@@ -327,14 +778,14 @@ func recoverPendingAuditEvent(task *pendingAuditEvent, event *AuditEvent, cause 
 		case auditRecoveryDurable:
 			auditAsync.Unlock()
 			return true, nil
-		case auditRecoveryIndeterminate:
-			err := task.recoveryErr
-			auditAsync.Unlock()
-			return false, err
 		case auditRecoveryClaimed:
 			done := task.spillDone
 			auditAsync.Unlock()
 			<-done
+		case auditRecoveryIndeterminate:
+			err := task.recoveryErr
+			auditAsync.Unlock()
+			return false, err
 		default:
 			err := writeAuditOutbox(event, cause)
 			if err == nil {
@@ -387,24 +838,30 @@ func drainAuditEvents(ctx context.Context) error {
 	case <-ctx.Done():
 		err := fmt.Errorf("audit drain: %w", ctx.Err())
 		auditAsync.Lock()
-		tasks := make([]*pendingAuditEvent, 0, len(auditAsync.active))
-		spill := make([]*AuditEvent, 0, len(auditAsync.active))
+		tasksByTenant := make(map[string][]*pendingAuditEvent)
 		cancels := make([]context.CancelFunc, 0, len(auditAsync.active))
 		for task := range auditAsync.active {
+			if task.recovery == nil {
+				cancels = append(cancels, task.cancel)
+				continue
+			}
 			if task.recoveryState != auditRecoveryPending {
 				continue
 			}
 			task.recoveryState = auditRecoveryClaimed
 			task.spillDone = make(chan struct{})
-			tasks = append(tasks, task)
-			spill = append(spill, task.recovery)
+			tasksByTenant[task.recovery.TenantID] = append(tasksByTenant[task.recovery.TenantID], task)
 			cancels = append(cancels, task.cancel)
 		}
 		auditAsync.Unlock()
 		for _, cancel := range cancels {
 			cancel()
 		}
-		if len(tasks) > 0 {
+		for _, tasks := range tasksByTenant {
+			spill := make([]*AuditEvent, len(tasks))
+			for index, task := range tasks {
+				spill[index] = task.recovery
+			}
 			spillErr := writeAuditOutboxBatch(spill, err)
 			auditAsync.Lock()
 			for _, task := range tasks {
@@ -412,8 +869,7 @@ func drainAuditEvents(ctx context.Context) error {
 				if spillErr == nil {
 					task.recoveryState = auditRecoveryDurable
 				} else if errors.As(spillErr, &indeterminate) {
-					task.recoveryState = auditRecoveryIndeterminate
-					task.recoveryErr = spillErr
+					task.recoveryState, task.recoveryErr = auditRecoveryIndeterminate, spillErr
 				} else {
 					task.recoveryState = auditRecoveryPending
 				}
@@ -681,7 +1137,46 @@ func publishPendingAuditOutbox(parent context.Context, tenantID string, limit in
 	})
 }
 
+func auditRecoveryMetrics() (uint64, uint64) {
+	files, err := auditRecoveryFiles()
+	if err != nil {
+		auditRecoveryScanFailures.Add(1)
+		return 0, 0
+	}
+	var backlog uint64
+	var oldest time.Time
+	for _, path := range files {
+		envelopes, readErr := readAuditRecovery(path)
+		if readErr != nil || len(envelopes) == 0 {
+			if readErr != nil {
+				auditRecoveryScanFailures.Add(1)
+			}
+			backlog++
+			if info, statErr := os.Stat(path); statErr == nil && (oldest.IsZero() || info.ModTime().Before(oldest)) {
+				oldest = info.ModTime()
+			}
+			continue
+		}
+		backlog += uint64(len(envelopes))
+		info, _ := os.Stat(path)
+		for _, envelope := range envelopes {
+			failedAt := envelope.FailedAt
+			if failedAt.IsZero() && info != nil {
+				failedAt = info.ModTime()
+			}
+			if !failedAt.IsZero() && (oldest.IsZero() || failedAt.Before(oldest)) {
+				oldest = failedAt
+			}
+		}
+	}
+	if oldest.IsZero() || oldest.After(time.Now()) {
+		return backlog, 0
+	}
+	return backlog, uint64(time.Since(oldest).Seconds())
+}
+
 func AuditMetricsSnapshot() map[string]uint64 {
+	recoveryBacklog, recoveryOldestAge := auditRecoveryMetrics()
 	return map[string]uint64{
 		"authclaw_gateway_audit_postgres_failures_total":      auditPostgresFailures.Load(),
 		"authclaw_gateway_audit_outbox_writes_total":          auditOutboxWrites.Load(),
@@ -690,6 +1185,10 @@ func AuditMetricsSnapshot() map[string]uint64 {
 		"authclaw_gateway_audit_idempotency_collisions_total": auditIdempotencyCollisions.Load(),
 		"authclaw_gateway_audit_outbox_backlog":               auditOutboxBacklog.Load(),
 		"authclaw_gateway_audit_outbox_oldest_age_seconds":    auditOutboxOldestAge.Load(),
+		"authclaw_gateway_audit_recovery_backlog":             recoveryBacklog,
+		"authclaw_gateway_audit_recovery_oldest_age_seconds":  recoveryOldestAge,
+		"authclaw_gateway_audit_replay_failures_total":        auditRecoveryReplayFailures.Load(),
+		"authclaw_gateway_audit_recovery_scan_failures_total": auditRecoveryScanFailures.Load(),
 		"authclaw_gateway_audit_fail_open_losses_total":       auditFailOpenLosses.Load(),
 		"authclaw_gateway_audit_post_response_failures_total": auditPostResponseFailures.Load(),
 	}

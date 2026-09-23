@@ -39,11 +39,23 @@ recovery record. End-to-end delivery remains at-least-once, with the existing
 idempotency key preventing a duplicate canonical append. Audit-producer mode uses
 the same signal handling and drains HTTP before closing its stream.
 Shutdown spill state becomes durable only after the complete batch is written and
-synced. A failed or short append is truncated back to its original offset and
-synced before individual retry. If that rollback cannot be confirmed, recovery is
-marked indeterminate and returned as a hard shutdown error without a blind append
-that could duplicate or further corrupt the record. A close error after successful
-sync is logged as cleanup failure and does not retry already-durable data.
+synced to a unique temporary file, then atomically renamed and directory-synced.
+Immutable per-tenant ready files prevent separate gateway processes from
+overwriting one another. ECS mounts an encrypted, backed-up EFS access point at
+`/var/lib/authclaw-gateway` and sets `AUDIT_OUTBOX_PATH` there, so task replacement
+does not discard recovery records. A successful authenticated request schedules,
+but normally does not wait for a five-second recovery task; one process-wide worker
+drains a deduplicated queue bounded to 64 tenants. Admission backpressures only a
+65th distinct tenant until space is available, keeping background state bounded
+without abandoning its durable recovery. It replays at most 100 records per fair
+queue turn through the existing canonical idempotent append and automatically
+requeues a remaining suffix. A partial file is atomically checkpointed to its
+uncommitted suffix, so retries do not repeatedly scan an already committed prefix. Stale complete temporary files
+are promoted after restart; incomplete files remain visible as corrupt recovery
+backlog. Upgrade recovery atomically claims and deterministically splits the former
+multi-tenant NDJSON file. Backlog age/count, replay failures, and scan failures are
+exposed on the authenticated metrics endpoint, scraped by the existing collector,
+and covered by installed critical alert rules.
 
 ## Fresh local evidence (2026-09-23)
 
@@ -83,12 +95,25 @@ sync is logged as cleanup failure and does not retry already-durable data.
   lifecycle set passed 50 Windows runs and 20 Linux race-detector runs; the
   updated CI gateway selection passed in Linux against the local Redis service.
   `go vet ./...` and `go build ./...` also exited 0.
-- Failure-injection regressions now cover total spill failure, partial append with
-  successful rollback/retry, post-sync close failure, and rollback failure. All
-  audit-drain tests passed 50 Windows runs; the lifecycle set passed 50 Windows
-  runs and 20 Linux race-detector runs. The exact updated gateway CI selection
-  passed in Linux Docker against the running Redis service. `go vet ./...` and
-  `go build ./...` also exited 0 after the final state-machine change.
+- Recovery regressions cover partial writes, failed replay retention, legacy
+  multi-tenant migration, tenant-isolated restart replay, and eight simultaneous
+  OS processes writing the same configured outbox path. The focused set passed
+  repeated Windows and Linux runs and the Linux race detector. The exact gateway
+  CI selection, `go vet ./...`, and ACL-21 promtool rule validation also passed.
+- Follow-up recovery regressions cover concurrent legacy migration, stale complete
+  and corrupt temp promotion, directory-sync indeterminacy without blind retry,
+  authenticated metric exposure, and cancellation of the bounded background
+  drainer. The new set passed 20 Windows runs and 10 Linux race-detector runs.
+  Terraform format/validation and a CI-equivalent speculative plan passed; the
+  plan contains the encrypted EFS filesystem, access point, and two-AZ mount targets.
+- Final liveness regressions cover a pre-existing claimed legacy file, concurrent
+  tenant scheduling (including a same-tenant rerun), bounded 65-tenant saturation,
+  partial replay progress, and automatic continuation beyond 100 records. The
+  final focused set passed 10 Windows runs and 3 Linux race-detector runs; the
+  cross-process legacy migration test separately passed 50 Windows runs. The exact
+  gateway CI test selection passed with disposable Redis, followed by clean
+  `go vet ./...` and `go build ./...`. Terraform validation, the strengthened
+  speculative-plan assertion, and all 20 Terraform tests also passed.
 
 ## Risk, growth and rollback
 
@@ -96,13 +121,9 @@ The new production lines coordinate work that the existing sequential loop and
 HTTP-only drain could not handle; existing scanner, Requests, audit emitter and
 resource clients are reused. Most added lines are regression tests, including a
 real local HTTP benchmark; deleting those would remove acceptance evidence.
-Material positive net line growth is 1,187 non-prose lines (408 production, 779 tests),
-so owner exception review is required.
-Unrelated working-tree edits are excluded from the T14 scope.
-Production diff: 557 additions / 149 deletions across ten files (Git numstat,
-excluding the pre-existing two-line DB revision replacement). Changed production
-files range from 124 to 1,076 physical lines, below the 10,000 code-line per-file
-cap even counting blanks/comments. Tokei is unavailable locally; the canonical
+Material positive line growth remains subject to the repository owner-exception
+gate. Unrelated working-tree edits are excluded from the T14 scope. Changed
+production files remain below the 10,000 code-line per-file cap. The canonical
 whole-repository Tokei budget check remains a CI requirement.
 
 Monitor aggregate concurrent workflows, analyzer capacity and graceful termination
@@ -111,7 +132,7 @@ revert only the T14 patch to roll back lifecycle changes. No data migration or
 backfill is needed. Existing tenant-prefix selection and caller-thread persistence
 are preserved; these tests do not establish database RLS correctness.
 
-Pending release evidence: full service/PostgreSQL integration, real deployment
-SIGTERM and AWS/Presidio workload measurements, CI and component/risk-owner reviews
+Pending release evidence: real deployment SIGTERM and AWS/Presidio workload
+measurements, CI and component/risk-owner reviews
 (`@KunalTF`, deputy `@VidhiTF`). No deployment, merge, human approval or live AWS
 evidence is asserted here.

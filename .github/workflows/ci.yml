@@ -492,6 +492,12 @@ jobs:
           -v "${{ github.workspace }}/infra/observability:/rules:ro" -w /rules
           prom/prometheus:v3.5.1@sha256:38c3b05c3bc744ff1b0b7b4eb82196026442845e62a1e2073795565da506d7a2
           test rules quota-alerts.test.yml
+      - name: Verify audit alert rules
+        run: >-
+          docker run --rm --entrypoint /bin/promtool
+          -v "${{ github.workspace }}/infra/observability:/rules:ro" -w /rules
+          prom/prometheus:v3.5.1@sha256:38c3b05c3bc744ff1b0b7b4eb82196026442845e62a1e2073795565da506d7a2
+          check rules acl21-alerts.yml
 
   console:
     name: Console Tests and Build

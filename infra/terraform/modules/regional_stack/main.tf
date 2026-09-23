@@ -1720,6 +1720,21 @@ resource "aws_ecs_task_definition" "service" {
   }
 
   dynamic "volume" {
+    for_each = each.key == "gateway" ? [1] : []
+    content {
+      name = "audit-recovery"
+      efs_volume_configuration {
+        file_system_id     = aws_efs_file_system.audit_recovery.id
+        transit_encryption = "ENABLED"
+        authorization_config {
+          access_point_id = aws_efs_access_point.audit_recovery.id
+          iam             = "DISABLED"
+        }
+      }
+    }
+  }
+
+  dynamic "volume" {
     for_each = contains(local.tls_services, each.key) ? ["tmp"] : []
     content { name = "tls-${volume.value}" }
   }
@@ -1753,7 +1768,8 @@ resource "aws_ecs_task_definition" "service" {
           { name = "AUDIT_PRODUCER_URL", value = "${local.internal_urls.audit_producer}/v1/audit" }
         ] : [],
         each.key == "gateway" ? [
-          { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" }
+          { name = "REDACTION_RUNTIME_CONFIG_CACHE_TTL_MS", value = "60000" },
+          { name = "AUDIT_OUTBOX_PATH", value = "/var/lib/authclaw-gateway/audit-outbox.ndjson" }
         ] : [],
         each.key == "backend" ? [
           { name = "WORKER_TOKEN_HMAC_ACTIVE_VERSION", value = "v1" },
@@ -1771,11 +1787,18 @@ resource "aws_ecs_task_definition" "service" {
       readonlyRootFilesystem = true
       privileged             = false
       stopTimeout            = 30
-      mountPoints = [for index, path in local.service_writable_paths[each.key] : {
-        sourceVolume  = "writable-${index}"
-        containerPath = path
-        readOnly      = false
-      }]
+      mountPoints = concat(
+        [for index, path in local.service_writable_paths[each.key] : {
+          sourceVolume  = "writable-${index}"
+          containerPath = path
+          readOnly      = false
+        }],
+        each.key == "gateway" ? [{
+          sourceVolume  = "audit-recovery"
+          containerPath = "/var/lib/authclaw-gateway"
+          readOnly      = false
+        }] : []
+      )
       linuxParameters = {
         initProcessEnabled = true
         capabilities       = { drop = ["ALL"] }
@@ -1881,8 +1904,10 @@ resource "aws_ecs_service" "public" {
   }
 
   network_configuration {
-    subnets          = values(aws_subnet.private)[*].id
-    security_groups  = each.key == "console" ? [aws_security_group.console_ingress.id] : [aws_security_group.app.id]
+    subnets = values(aws_subnet.private)[*].id
+    security_groups = each.key == "console" ? [aws_security_group.console_ingress.id] : (
+      each.key == "gateway" ? [aws_security_group.app.id, aws_security_group.audit_recovery_client.id] : [aws_security_group.app.id]
+    )
     assign_public_ip = false
   }
 
@@ -1896,7 +1921,7 @@ resource "aws_ecs_service" "public" {
     registry_arn = aws_service_discovery_service.service[each.key].arn
   }
 
-  depends_on = [aws_lb_listener.service, aws_ecs_cluster_capacity_providers.main]
+  depends_on = [aws_lb_listener.service, aws_ecs_cluster_capacity_providers.main, aws_efs_mount_target.audit_recovery]
   tags       = var.tags
 }
 
@@ -1926,7 +1951,7 @@ resource "aws_ecs_service" "private" {
 
   network_configuration {
     subnets          = values(aws_subnet.private)[*].id
-    security_groups  = [aws_security_group.app.id]
+    security_groups  = each.key == "gateway" ? [aws_security_group.app.id, aws_security_group.audit_recovery_client.id] : [aws_security_group.app.id]
     assign_public_ip = false
   }
 
@@ -1934,7 +1959,7 @@ resource "aws_ecs_service" "private" {
     registry_arn = aws_service_discovery_service.service[each.key].arn
   }
 
-  depends_on = [aws_ecs_cluster_capacity_providers.main]
+  depends_on = [aws_ecs_cluster_capacity_providers.main, aws_efs_mount_target.audit_recovery]
   tags       = var.tags
 }
 

@@ -87,6 +87,7 @@ func QuotaMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "authclaw_quota_available %d\nauthclaw_quota_admitted_total %d\nauthclaw_quota_rejected_total %d\nauthclaw_quota_decisions_total %d\nauthclaw_quota_latency_seconds_sum %f\nauthclaw_quota_unavailable_total %d\nauthclaw_quota_ambiguous_total %d\n", quotaAvailable.Load(), quotaAdmitted.Load(), quotaRejected.Load(), quotaDecisions.Load(), float64(quotaLatencyMicros.Load())/1e6, rateLimitUnavailableTotal.Load(), rateLimitAmbiguousTotal.Load())
+	KafkaMetricsHandler(w, r)
 }
 
 func NewGatewayRouter(proxy http.Handler) http.Handler {

@@ -61,6 +61,13 @@ resource "aws_prometheus_rule_group_namespace" "quota" {
   data         = file("${path.module}/../../../observability/quota-alerts.yml")
 }
 
+resource "aws_prometheus_rule_group_namespace" "audit" {
+  count        = local.quota_observability_enabled ? 1 : 0
+  name         = "authclaw-audit"
+  workspace_id = aws_prometheus_workspace.quota[0].id
+  data         = file("${path.module}/../../../observability/acl21-alerts.yml")
+}
+
 resource "aws_iam_role" "quota_alertmanager" {
   count                = local.quota_observability_enabled ? 1 : 0
   name                 = "${var.name}-quota-alertmanager"
