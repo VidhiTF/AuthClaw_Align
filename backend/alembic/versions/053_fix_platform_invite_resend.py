@@ -14,12 +14,17 @@ def upgrade() -> None:
                 'authn.create_platform_tenant_owner_invite(uuid,text,text,timestamptz)'::regprocedure
             );
             legacy text := 'resend_count = COALESCE(resend_count, 0)';
+            fixed text := 'resend_count = COALESCE(v_invite.resend_count, 0)';
+            legacy_count integer := array_length(string_to_array(definition, legacy), 1);
+            fixed_count integer := array_length(string_to_array(definition, fixed), 1);
         BEGIN
-            IF definition IS NULL OR array_length(string_to_array(definition, legacy), 1) <> 2 THEN
-                RAISE EXCEPTION 'Expected exactly one platform invitation resend counter';
+            IF definition IS NULL THEN
+                RAISE EXCEPTION 'Platform invitation function is missing';
+            ELSIF legacy_count = 2 AND fixed_count = 1 THEN
+                EXECUTE replace(definition, legacy, fixed);
+            ELSIF legacy_count <> 1 OR fixed_count <> 2 THEN
+                RAISE EXCEPTION 'Expected exactly one legacy or qualified platform invitation resend counter';
             END IF;
-            EXECUTE replace(definition, legacy,
-                'resend_count = COALESCE(v_invite.resend_count, 0)');
         END $$;
     """)
 

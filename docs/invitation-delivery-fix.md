@@ -31,6 +31,9 @@ signature, ACL, owner, and security context unchanged. Advance the existing
 backend/gateway/Compose/Terraform revision gates to the bounded 052/053 window.
 The effective SQL correction is one expression; the migration ensures existing
 installations receive it on upgrade without editing historical migration 043.
+Migration 053 accepts either exactly one legacy expression (which it replaces) or
+exactly one already-qualified expression (a no-op), so recovery-applied databases
+can rejoin the managed migration chain without weakening validation of unknown bodies.
 
 Use the existing local outbox, as explicitly selected by the user. Fresh local
 invitations must retain their link and verification code. Detect incomplete SMTP
@@ -60,7 +63,8 @@ function body; signature, ownership, grants, and security context are unchanged.
 For rolling deployment, deploy the updated backend/gateway with the explicit
 052,053 compatibility window, apply 053 through the ownership-prepared migration
 pipeline, then tighten to 053. Operators enabling SMTP must supply complete
-credentials. No live 053 migration or deployment is claimed; those remain release
+credentials. A local persisted revision-052 database successfully advanced to 053,
+including grant and security verification; production deployment remains release
 evidence. Terraform formatting, initialization, validation, and the CI plan were
 checked with the repository's cached container.
 
@@ -88,7 +92,7 @@ authentication even with an empty password. Reuse that check at both boundaries;
 keep the existing transport and outbox. Regression tests exercise the failure
 and intended local behavior. Original delivery recovery adds 20 net production
 Python lines. The review retry adds 13 net service lines and 8 net UI lines;
-migration 053 adds 28 lines, while revision-gate replacements add no net lines.
+migration 053 adds 33 lines, while revision-gate replacements add no net lines.
 Counts include whitespace. Affected files contain 162 physical lines (email
 service), 300 (startup checks), 712 (onboarding), 371 (access requests), and 345
 (review client), each
@@ -105,10 +109,10 @@ must continue to report failure. No weakening of transport security is planned.
 
 ## Material line-growth exception
 
-This patch adds 268 positive net non-prose lines: template 2, SMTP service 16,
+This patch adds 275 positive net non-prose lines: template 2, SMTP service 16,
 startup checks 3, onboarding 1, access-request service 13, review client 8,
-migration 28, auth tests 36, access-request tests 102, migration/deployment tests
-40, Terraform CI plan fixture 17, and Compose contract
+migration 33, auth tests 36, access-request tests 102, migration/deployment tests
+42, Terraform CI plan fixture 17, and Compose contract
 2. Counts are against current `align/master` and exclude unrelated working-tree
 changes.
 Most growth is regression coverage; existing production paths were reused. Removing
@@ -202,7 +206,12 @@ Fresh rebase verification on 2026-09-23 against `align/master`:
   fixture's stale revision, plaintext placeholder, missing alarm targets, and
   incomplete audit-consumer inputs; regression assertions now keep that fixture
   aligned with the fail-closed module contract.
-  A live 053 migration, production SMTP, deployment, and full database-backed
+- Real Compose startup against the existing revision-052 PostgreSQL volume exposed
+  that migration 053 rejected an already-qualified function left by recovery. After
+  the idempotency fix, the same volume advanced to 053; backend/agent migrations,
+  database grants, and the database security check all exited 0. The full stack
+  became healthy and `scripts/smoke_test.py` passed.
+- Production migration, production SMTP, deployment, and full database-backed
   integration remain release-stage evidence.
 
 Test settings used dummy PostgreSQL URLs on 127.0.0.1:1, REDIS_URL on the same closed
@@ -213,7 +222,8 @@ unavailable database. They are not passing integration evidence. No destructive
 database suite was run on the user's live local database. Browser QA used the
 available in-app controls at the default 1265x712 desktop viewport; no external
 Playwright fallback or new browser dependency was needed. Mobile and other
-browsers, full HTTP integration suites, and production SMTP were not tested.
+browsers, full HTTP integration suites, production migration, and production SMTP
+were not tested.
 
 ## Risk
 

@@ -87,6 +87,8 @@ def test_platform_invite_resend_migration_qualifies_counter(monkeypatch):
     monkeypatch.setattr(migration.op, "execute", statements.append)
     migration.upgrade()
     assert "resend_count = COALESCE(v_invite.resend_count, 0)" in statements[0]
+    assert "legacy_count = 2 AND fixed_count = 1" in statements[0]
+    assert "legacy_count <> 1 OR fixed_count <> 2" in statements[0]
     with pytest.raises(RuntimeError, match="restores broken invitation retries"):
         migration.downgrade()
 
