@@ -24,6 +24,9 @@ class FakeS3:
             "Metadata": obj.get("Metadata", {}),
         }
 
+    def close(self):
+        pass
+
     def put_object(
         self,
         Bucket,

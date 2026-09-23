@@ -179,12 +179,13 @@ def _enroll_mfa(client: TestClient, headers: dict[str, str]):
 def _create_workflow_approval(client: TestClient, headers: dict[str, str]):
     with patch("app.orchestrator.connectors.DocumentScanner.list_documents") as mock_list, \
          patch("app.orchestrator.connectors.DocumentScanner.fetch_and_extract_text") as mock_fetch, \
-         patch("requests.post") as mock_post:
+         patch("requests.Session.post") as mock_post:
         mock_list.return_value = [{"object_key": "test-doc.txt", "file_name": "test-doc.txt", "size": 1024}]
         mock_fetch.return_value = "My email is jane@example.com"
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = [{"entity_type": "EMAIL_ADDRESS"}]
+        mock_resp.__enter__.return_value = mock_resp
         mock_post.return_value = mock_resp
         response_wf = client.post("/v1/workflows", headers=headers, json={"framework": "HIPAA"})
     assert response_wf.status_code == status.HTTP_201_CREATED

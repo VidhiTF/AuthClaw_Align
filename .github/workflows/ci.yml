@@ -208,7 +208,7 @@ jobs:
             tests/test_s3_remediation_protocol.py tests/test_s3_remediation_recovery.py \
             tests/test_remediation_connector.py tests/test_connector_target_binding.py tests/test_remediation_failure_rollback.py \
             tests/test_workflow_response_contract.py tests/test_workflow_response_http.py \
-            tests/test_orchestrator.py tests/test_acl18_remediation_approval.py
+            tests/test_orchestrator.py tests/test_evidence_scan_lifecycle.py tests/test_acl18_remediation_approval.py
 
   backend-integration:
     name: Backend PostgreSQL Integration

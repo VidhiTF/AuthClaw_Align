@@ -1008,7 +1008,7 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     
     with patch("app.orchestrator.connectors.DocumentScanner.list_documents") as mock_list, \
          patch("app.orchestrator.connectors.DocumentScanner.fetch_and_extract_text") as mock_fetch, \
-         patch("requests.post") as mock_post:
+         patch("requests.Session.post") as mock_post:
          
         mock_list.return_value = [{"object_key": "test-doc.txt", "file_name": "test-doc.txt", "size": 1024}]
         mock_fetch.return_value = "My email is john@example.com"
@@ -1016,6 +1016,7 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = [{"entity_type": "EMAIL_ADDRESS"}]
+        mock_resp.__enter__.return_value = mock_resp
         mock_post.return_value = mock_resp
 
         response = client.post(
