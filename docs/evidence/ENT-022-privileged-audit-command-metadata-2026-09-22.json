@@ -1,9 +1,9 @@
 {
-  "subject": "PR #58 at 372b746 plus tenant_status test fixture and ENT-022 evidence",
-  "generated_at_utc": "2026-09-23T08:17:43Z",
+  "subject": "PR #58 proposed recovery step-up fix on 181dd432; historical audit outputs retained",
+  "generated_at_utc": "2026-09-23T10:26:04Z",
   "binding": {
     "method": "SHA-256 of sorted UTF-8 '<Git mode> <Git blob> <path>\\n' records from the proposed tracked tree, excluding docs/evidence/ENT-022-*",
-    "scope_sha256": "2714f57394709edf19b4cfd8a61ad0ef810edfe3ee3b341c7aa074f3ebd41096",
+    "scope_sha256": "7cb77bb7fe8e87760ab5a5f0d6ad0ccf1143c55d42b1d9d46c8a52a0045968ac",
     "fixture_blob": "ba518001792b9e6c56ad5fe56fc06e8fdb516a1a"
   },
   "environment": {
@@ -67,13 +67,44 @@
   "artifacts": [
     {
       "path": "ENT-022-privileged-audit-raw-2026-09-22.json",
-      "sha256": "793ae8b31fc09c8b82dd2841c0e9dbad2e88f2196335232063d85e4bb3323085",
+      "sha256": "f78c1480ba97e6286555d280a49c076a04e6748442cf87249d80d3f823215564",
       "description": "Generated disposable test audit outputs with no factor material."
     },
     {
       "path": "ENT-022-privileged-audit-redacted-2026-09-22.json",
       "sha256": "3bcc36dcc70264ffb29857b9376bfd1013b5540f933ed2cc238004f8f5ffc6b7",
       "description": "Key-based redaction of identifiers, request IDs, timestamps and integrity values; semantic view unchanged by the fresh random identifiers."
+    },
+    {
+      "path": "ENT-022-recovery-step-up-audit-2026-09-23.json",
+      "sha256": "97ba526bbb71f8d726ff248e5ba86119e0a5a8518f82124f405f1d7c42d02725",
+      "description": "Selected persisted PostgreSQL approval-audit fields from the consumed-approval recovery race; no identifiers or factor material."
     }
+  ],
+  "recovery_fix_checks": [
+    {
+      "name": "complete backend MFA selection on proposed recovery fix",
+      "command": "python -m pytest -p no:cacheprovider -q --disable-warnings tests/test_auth_baseline.py tests/test_mfa_replay.py tests/test_ent022_mfa_security.py tests/test_mfa_credential_purpose.py tests/test_authorization_matrix.py",
+      "result": "173 passed, 93 warnings",
+      "exit_code": 0
+    },
+    {
+      "name": "PostgreSQL concurrent recovery step-up and existing two-session resume",
+      "command": "python -m pytest -p no:cacheprovider -q --disable-warnings --tb=short tests/test_t10_postgres.py -k 'concurrent_recovery_step_up_consumes_same_totp_once or two_sessions_cannot_transfer_or_race_approved_workflow_resume'",
+      "result": "2 passed, 29 deselected, 22 warnings",
+      "exit_code": 0
+    },
+    {
+      "name": "PostgreSQL post-step-up demotion race and persisted recovery audit",
+      "command": "python -m pytest -p no:cacheprovider -q -s --disable-warnings --tb=short tests/test_t10_postgres.py -k consumed_recovery_rechecks_revocation_after_step_up_commit",
+      "result": "1 passed, 31 deselected, 18 warnings; ENT022_RECOVERY_AUDIT_EVIDENCE shows CONSUMED, RESUME_MFA_VERIFIED, zero effects after revocation",
+      "exit_code": 0
+    }
+  ],
+  "artifact_hash_method": "SHA-256 of canonical Git blob bytes. Existing artifacts use HEAD blobs; the proposed recovery artifact is LF-only so its working-tree bytes equal its future Git blob bytes.",
+  "artifact_hash_commands": [
+    "python -c \"import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(['git','show','HEAD:docs/evidence/ENT-022-privileged-audit-raw-2026-09-22.json'])).hexdigest())\"",
+    "python -c \"import hashlib,subprocess; print(hashlib.sha256(subprocess.check_output(['git','show','HEAD:docs/evidence/ENT-022-privileged-audit-redacted-2026-09-22.json'])).hexdigest())\"",
+    "python -c \"import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('docs/evidence/ENT-022-recovery-step-up-audit-2026-09-23.json').read_bytes()).hexdigest())\""
   ]
 }

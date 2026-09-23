@@ -1049,6 +1049,132 @@ def test_real_totp_cannot_be_reused_across_distinct_approvals_and_next_step_succ
         assert db.get(User, state.approver.user_id).mfa_last_totp_step == consumed_step + 1
 
 
+def test_concurrent_recovery_step_up_consumes_same_totp_once(real_mfa, monkeypatch):
+    state = real_mfa
+    monkeypatch.setattr(
+        workflow_endpoints, "_revalidate_privileged_workflow_actor", lambda *_args: None,
+    )
+    code = pyotp.TOTP(state.secret).now()
+    barrier = Barrier(2)
+
+    class RecoveryRunner:
+        def __init__(self, db):
+            self.db = db
+
+        def recover_interrupted(self, _tenant_id, *, actor_id, authorization_check, step_up_check):
+            step_up_check()
+            self.db.commit()
+            return [{"workflow_id": "privileged", "status": "recovered"}]
+
+    monkeypatch.setattr(workflow_endpoints, "ComplianceWorkflowRunner", RecoveryRunner)
+
+    def recover_step_up():
+        request = Request({"type": "http", "headers": [], "query_string": b""})
+        request.state.tenant_id = state.approver.tenant_id
+        request.state.user_id = state.approver.user_id
+        request.state.credential_kind = "session"
+        with state.harness.session_for(state.approver) as db:
+            barrier.wait(timeout=15)
+            try:
+                result = workflow_endpoints.recover_workflows(
+                    request, db, workflow_endpoints.ApprovalRequest(totp_code=code),
+                )
+                assert result.recovered == 1
+                return "verified"
+            except HTTPException as exc:
+                assert exc.status_code == 400
+                return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result(timeout=30) for future in (
+            pool.submit(recover_step_up), pool.submit(recover_step_up),
+        )]
+    assert sorted(results) == ["rejected", "verified"]
+    with state.harness.session_for(state.approver) as db:
+        assert db.get(User, state.approver.user_id).mfa_last_totp_step is not None
+
+
+def test_consumed_recovery_rechecks_revocation_after_step_up_commit(postgres, monkeypatch):
+    from app.orchestrator import connectors
+
+    harness, _, _ = postgres
+    requester = harness.create_identity("recovery-effect-race")
+    approver = reviewer(harness, requester)
+    workflow_id, approval_id = str(uuid4()), uuid4()
+    plan = [{"action": "redact", "destructive": True}]
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    payload = workflow_endpoints.build_action_payload(workflow_id, plan)
+    with harness.session_for(requester) as db:
+        db.add(PendingApproval(
+            id=approval_id, tenant_id=requester.tenant_id, action_id=workflow_id,
+            action_type="remediation", action_description="recovery race",
+            action_payload=payload, action_hash=workflow_endpoints.compute_action_hash(
+                tenant_id=str(requester.tenant_id), action_payload=payload, expires_at=expires_at,
+            ), status="CONSUMED", requester_id=requester.user_id,
+            approver_id=approver.user_id, consumed_by_id=approver.user_id,
+            consumed_at=datetime.now(timezone.utc), mfa_verified=True,
+            mfa_timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
+            expires_at=expires_at,
+        ))
+        db.add(ComplianceWorkflow(
+            tenant_id=requester.tenant_id, workflow_id=workflow_id, framework="SOC2",
+            current_state="ROLLBACK_REMEDIATION", execution_status="RUNNING",
+            remediation_plan=plan, approval_id=approval_id, approval_status="CONSUMED",
+            state_data={
+                "workflow_id": workflow_id, "tenant_id": str(requester.tenant_id),
+                "requester_id": str(requester.user_id), "approval_id": str(approval_id),
+                "current_state": "ROLLBACK_REMEDIATION", "remediation_plan": plan,
+                "remediation_actions": [{"id": "action-1", "index": 0,
+                    "status": "SUCCEEDED", "rollback_plan": {"rollback_ref": {"target_key": "test"}}}],
+            },
+        ))
+        db.commit()
+
+    effects, committed, proceed = [], Event(), Event()
+    monkeypatch.setattr(connectors, "DocumentScanner", lambda: SimpleNamespace(
+        rollback_remediation=lambda _plan: effects.append("rollback") or {"status": "success"},
+    ))
+    def recover():
+        with harness.session_for(approver) as db:
+            original_commit = db.commit
+            def commit_after_step_up():
+                original_commit()
+                if not committed.is_set():
+                    committed.set()
+                    assert proceed.wait(10)
+            db.commit = commit_after_step_up
+            return ComplianceWorkflowRunner(db).resume(
+                workflow_id, str(requester.tenant_id), str(approver.user_id),
+                authorization_check=lambda: workflow_endpoints._revalidate_privileged_workflow_actor(
+                    _approval_request(approver), db,
+                ),
+                step_up_check=lambda: datetime.now(timezone.utc),
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(recover)
+        assert committed.wait(10)
+        with harness.owner_engine.begin() as conn:
+            conn.execute(text("UPDATE users SET role='viewer' WHERE id=:actor"),
+                {"actor": approver.user_id})
+        proceed.set()
+        future.result(timeout=20)
+
+    with harness.owner_engine.connect() as conn:
+        audit = conn.execute(text("SELECT action,mfa_verified FROM approval_audit "
+            "WHERE approval_id=:approval AND action='RESUME_MFA_VERIFIED'"),
+            {"approval": approval_id}).one()
+        status = conn.execute(text("SELECT status FROM pending_approvals WHERE id=:approval"),
+            {"approval": approval_id}).scalar_one()
+    assert audit.action == "RESUME_MFA_VERIFIED" and audit.mfa_verified is True
+    assert status == "CONSUMED"
+    assert effects == []
+    print("ENT022_RECOVERY_AUDIT_EVIDENCE=" + json.dumps({
+        "approval_status": status, "audit_action": audit.action,
+        "audit_mfa_verified": audit.mfa_verified, "effects_after_revocation": len(effects),
+    }, sort_keys=True))
+
+
 def test_concurrent_same_totp_step_allows_exactly_one_approval(real_mfa):
     state = real_mfa
     proposals = [state.pending(), state.pending()]

@@ -1,14 +1,14 @@
 # ENT-022 MFA and privileged-action security evidence
 
-This record covers PR #58 at `372b746b61b6a9482e02db9960080ab06288df66`
-plus the single test-fixture change in
-`backend/tests/test_mfa_credential_purpose.py` and these ENT-022 evidence files.
+This record began at PR #58 `372b746b61b6a9482e02db9960080ab06288df66`.
+The current proposed patch on `181dd4324b87a0b1f3e54bdc8ce5728990be67c8`
+adds recovery step-up checks, regressions, and corrected artifact hashes.
 The proposed source tree is bound by SHA-256 of sorted UTF-8 records
 `<Git mode> <Git blob> <path>\n`, excluding `docs/evidence/ENT-022-*` to avoid
-self-reference: `2714f57394709edf19b4cfd8a61ad0ef810edfe3ee3b341c7aa074f3ebd41096`.
+self-reference: `7cb77bb7fe8e87760ab5a5f0d6ad0ccf1143c55d42b1d9d46c8a52a0045968ac`.
 The fixture blob is `ba518001792b9e6c56ad5fe56fc06e8fdb516a1a`.
-Recompute the binding after the final commit. The evidence directory is scanned
-separately.
+Recompute the binding after the final commit. The digest above includes all
+proposed source and test edits while excluding these ENT-022 evidence files.
 
 ## Test environment and provenance
 
@@ -27,7 +27,7 @@ separately.
   commit `1e40bdb5c8fd6b4e28c827035ab7d06645530ccb`, effective
   `2026-09-16T12:57:25Z`.
 
-## Fresh results
+## Baseline results before the recovery fix
 
 | Security contract and selection | Result | Exit |
 | --- | --- | ---: |
@@ -52,6 +52,27 @@ The previous 2026-09-22 evidence recorded a broader exact agent CI selection
 (265 passed, 174 subtests) and console signing tests (4 passed). Those selections
 were not rerun during this regeneration; the fresh selections above are the
 current local proof. CI and independent reviewer approval remain pending.
+
+## Recovery fix verification on the proposed tree
+
+- The complete backend MFA selection passed: `173 passed, 93 warnings`, exit
+  code 0. It includes regressions for consumed destructive approvals resumed
+  from EXECUTE_REMEDIATION, VERIFY_RESULTS, and ROLLBACK_REMEDIATION with
+  missing or stale step-up challenges, plus
+  body-only MFA enforcement for bulk recovery.
+- Disposable PostgreSQL 17 concurrency tests passed: `2 passed, 29 deselected,
+  22 warnings`, exit code 0. The new test runs two sessions with the same TOTP
+  `/recover` challenge and observes exactly one successful consumption; the
+  existing two-session resume authorization test also passes.
+- A Gitleaks 8.24.3 scan of the isolated proposed tracked tree found zero
+  leaks, exit code 0. The prior three scans below remain baseline evidence.
+- The original raw and redacted audit artifact hashes were verified against canonical `git show
+  HEAD:docs/evidence/<artifact>` bytes, independent of Windows checkout line
+  endings. The exact commands and digests are in the audit command metadata.
+- The post-step-up demotion race passed against disposable PostgreSQL:
+  `1 passed, 31 deselected`, exit code 0. The persisted `RESUME_MFA_VERIFIED`
+  row for a `CONSUMED` approval and zero connector effects after demotion are
+  recorded in `ENT-022-recovery-step-up-audit-2026-09-23.json`.
 
 `ENT-022-privileged-audit-raw-2026-09-22.json` combines six generated audit
 outputs. `ENT-022-privileged-audit-redacted-2026-09-22.json` masks identifiers,

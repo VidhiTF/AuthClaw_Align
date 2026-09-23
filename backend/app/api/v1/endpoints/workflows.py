@@ -298,6 +298,7 @@ def resume_workflow(
     workflow_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
+    body: Optional[ApprovalRequest] = None,
     _auth=require_scopes(["admin"]),
 ):
     """Resume a paused workflow (typically after approval)."""
@@ -311,6 +312,7 @@ def resume_workflow(
             tenant_id,
             actor_id=str(request.state.user_id),
             authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
+            step_up_check=_recovery_step_up(request, db, body),
         )
     except WorkflowResumeConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -573,6 +575,37 @@ def _has_fresh_mfa(mfa_verified: bool, mfa_timestamp: Optional[datetime]) -> boo
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     return timestamp >= datetime.now(timezone.utc) - timedelta(minutes=30)
+
+
+def _recovery_step_up(request: Request, db: Session, body: Optional[ApprovalRequest]):
+    """Consume one factor for this HTTP operation, under the runner's approval lock."""
+    verified_at = None
+
+    def check() -> datetime:
+        nonlocal verified_at
+        if verified_at is not None:
+            return verified_at
+        user = db.query(User).filter(
+            User.id == request.state.user_id,
+            User.tenant_id == request.state.tenant_id,
+        ).with_for_update().first()
+        _revalidate_privileged_workflow_actor(request, db, user)
+        try:
+            verified, timestamp = _verify_mfa_if_enabled(
+                user, request, body, required=True, operation="destructive_remediation",
+            )
+        except HTTPException as exc:
+            db.rollback()
+            raise WorkflowAuthorizationError(
+                str(exc.detail), status_code=exc.status_code,
+            ) from exc
+        if not _has_fresh_mfa(verified, timestamp):
+            db.rollback()
+            raise WorkflowAuthorizationError("Fresh MFA is required for destructive remediation")
+        verified_at = timestamp
+        return timestamp
+
+    return check
 
 
 @router.post("/mfa/setup", status_code=200)
@@ -1004,6 +1037,7 @@ def approve_workflow(
             tenant_id,
             actor_id=str(user_id),
             authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
+            step_up_check=(lambda: mfa_timestamp) if requires_fresh_mfa else None,
         )
         remediation_state = str(result.get("remediation_state") or "")
         if remediation_state in {"SUCCEEDED", "FAILED", "PARTIAL_FAILED", "ROLLBACK_FAILED"}:
@@ -1261,6 +1295,7 @@ def remediate_workflow(
 def recover_workflows(
     request: Request,
     db: Session = Depends(get_tenant_db),
+    body: Optional[ApprovalRequest] = None,
     _auth=require_scopes(["admin"]),
 ):
     """Recover all interrupted workflows for the current tenant."""
@@ -1273,6 +1308,7 @@ def recover_workflows(
             tenant_id,
             actor_id=str(request.state.user_id),
             authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
+            step_up_check=_recovery_step_up(request, db, body),
         )
     except WorkflowAuthorizationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc))

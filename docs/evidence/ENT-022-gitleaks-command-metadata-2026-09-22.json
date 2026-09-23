@@ -1,6 +1,6 @@
 {
-  "subject": "PR #58 at 372b746 plus tenant_status test fixture and ENT-022 evidence",
-  "generated_at_utc": "2026-09-23T08:19:16Z",
+  "subject": "PR #58 proposed recovery step-up fix on 181dd432; baseline scans retained",
+  "generated_at_utc": "2026-09-23T10:29:47Z",
   "tool": {
     "name": "gitleaks",
     "version": "8.24.3",
@@ -9,11 +9,11 @@
   },
   "binding": {
     "method": "SHA-256 of sorted UTF-8 '<Git mode> <Git blob> <path>\\n' records from the proposed tracked tree, excluding docs/evidence/ENT-022-*",
-    "scope_sha256": "2714f57394709edf19b4cfd8a61ad0ef810edfe3ee3b341c7aa074f3ebd41096",
+    "scope_sha256": "7cb77bb7fe8e87760ab5a5f0d6ad0ccf1143c55d42b1d9d46c8a52a0045968ac",
     "fixture_blob": "ba518001792b9e6c56ad5fe56fc06e8fdb516a1a",
     "exclusion_reason": "Evidence files are excluded to avoid a self-referential digest and scanned independently."
   },
-  "scans": [
+  "baseline_scans": [
     {
       "name": "full proposed tree",
       "input": "git archive HEAD plus explicit fixture and ENT-022 evidence files",
@@ -35,6 +35,26 @@
       "input": "proposed tree docs/evidence",
       "command": "gitleaks dir --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/proposed-evidence.json /scan/docs/evidence",
       "report": "ENT-022-gitleaks-evidence-files-2026-09-22.json",
+      "exit_code": 0,
+      "findings": 0
+    }
+  ],
+  "recovery_fix_scans": [
+    {
+      "name": "proposed tracked tree after recovery fix",
+      "input": "git archive HEAD plus the nine modified or new PR #58 source, test and ENT-022 evidence files; unrelated untracked files excluded",
+      "command": "gitleaks dir --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/ent022-recovery-proposed-181dd432-gitleaks.json /scan",
+      "report": "ENT-022-gitleaks-full-tree-2026-09-22.json",
+      "report_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "exit_code": 0,
+      "findings": 0
+    },
+    {
+      "name": "proposed ENT-022 evidence directory after recovery fix",
+      "input": "docs/evidence from the isolated proposed tracked tree",
+      "command": "gitleaks dir --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/ent022-recovery-evidence-181dd432-gitleaks.json /scan/docs/evidence",
+      "report": "ENT-022-gitleaks-evidence-files-2026-09-22.json",
+      "report_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
       "exit_code": 0,
       "findings": 0
     }

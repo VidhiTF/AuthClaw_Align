@@ -638,7 +638,9 @@ def test_historical_workflow_without_requester_cannot_resume():
     workflow_id = uuid.uuid4()
     workflow = SimpleNamespace(
         execution_status="PAUSED",
+        current_state="AWAITING_APPROVAL",
         state_data={},
+        remediation_plan=[],
     )
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = workflow
@@ -871,6 +873,105 @@ def test_resume_stops_when_post_lock_authority_is_revoked(monkeypatch):
     assert approval.status == "APPROVED"
     assert workflow.execution_status == "PAUSED"
     db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("current_state", [
+    "EXECUTE_REMEDIATION", "VERIFY_RESULTS", "ROLLBACK_REMEDIATION",
+])
+def test_consumed_destructive_resume_requires_new_mfa_before_execution(monkeypatch, current_state):
+    tenant_id, actor_id, approval_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    workflow_id = str(uuid.uuid4())
+    plan = [{"action": "redact", "destructive": True}]
+    workflow = SimpleNamespace(
+        workflow_id=workflow_id, tenant_id=tenant_id, execution_status="RUNNING",
+        current_state=current_state, approval_id=approval_id, remediation_plan=plan,
+        state_data={"requester_id": str(uuid.uuid4()), "approval_id": str(approval_id)},
+    )
+    approval = SimpleNamespace(
+        id=approval_id, tenant_id=tenant_id, action_type="remediation",
+        action_id=workflow_id, action_payload={"plan": plan}, action_hash="a" * 64,
+        status="CONSUMED", approver_id=actor_id, consumed_by_id=actor_id,
+        mfa_verified=True, mfa_timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    workflow_query, approval_query, db = MagicMock(), MagicMock(), MagicMock()
+    workflow_query.filter.return_value.first.return_value = workflow
+    approval_query.filter.return_value.with_for_update.return_value.first.return_value = approval
+    db.query.side_effect = lambda model: workflow_query if model is ComplianceWorkflow else approval_query
+    runner = ComplianceWorkflowRunner.__new__(ComplianceWorkflowRunner)
+    runner.db = db
+    execute = MagicMock(side_effect=lambda state: state)
+    runner._drive_remediation_states = execute
+    monkeypatch.setattr(workflow_runner, "workflow_advisory_lock", lambda *_: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(workflow_runner, "emit_audit_event", MagicMock())
+
+    with pytest.raises(WorkflowAuthorizationError, match="Fresh MFA"):
+        runner.resume(
+            workflow_id, str(tenant_id), str(actor_id), authorization_check=MagicMock(),
+        )
+    execute.assert_not_called()
+    assert workflow.execution_status == "RUNNING"
+    db.commit.assert_not_called()
+
+    with pytest.raises(WorkflowAuthorizationError, match="Fresh MFA"):
+        runner.resume(
+            workflow_id, str(tenant_id), str(actor_id),
+            authorization_check=MagicMock(),
+            step_up_check=lambda: datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+    execute.assert_not_called()
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+
+    runner.resume(
+        workflow_id, str(tenant_id), str(actor_id),
+        authorization_check=MagicMock(),
+        step_up_check=lambda: datetime.now(timezone.utc),
+    )
+    execute.assert_called_once()
+    audit = db.add.call_args.args[0]
+    assert audit.action == "RESUME_MFA_VERIFIED"
+    assert audit.mfa_verified is True and audit.approval_id == approval_id
+    db.commit.assert_called_once()
+
+
+def test_recovery_step_up_is_consumed_once_per_bulk_request(monkeypatch):
+    tenant_id, actor_id = uuid.uuid4(), uuid.uuid4()
+    user = SimpleNamespace(id=actor_id, tenant_id=tenant_id, mfa_enabled=True, mfa_secret="encrypted")
+    request = MagicMock(headers={})
+    request.state.tenant_id, request.state.user_id = tenant_id, actor_id
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
+    monkeypatch.setattr(workflows, "_revalidate_privileged_workflow_actor", MagicMock())
+    verify = MagicMock(return_value=(True, datetime.now(timezone.utc)))
+    monkeypatch.setattr(workflows, "_verify_mfa_if_enabled", verify)
+    check = workflows._recovery_step_up(request, db, workflows.ApprovalRequest(totp_code="123456"))
+
+    assert check() == check()
+    verify.assert_called_once()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.assert_called_once()
+
+
+def test_bulk_recovery_requires_body_mfa_when_privileged_work_is_reached(monkeypatch):
+    tenant_id, actor_id = uuid.uuid4(), uuid.uuid4()
+    request = MagicMock(headers={})
+    request.state.credential_kind = "session"
+    request.state.tenant_id, request.state.user_id = tenant_id, actor_id
+    user = SimpleNamespace(id=actor_id, tenant_id=tenant_id, mfa_enabled=True, mfa_secret="encrypted")
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
+    monkeypatch.setattr(workflows, "_revalidate_privileged_workflow_actor", MagicMock())
+
+    runner = MagicMock()
+    def recover(*_args, **kwargs):
+        kwargs["step_up_check"]()
+        return [{"workflow_id": "privileged", "status": "recovered"}]
+    runner.recover_interrupted.side_effect = recover
+    monkeypatch.setattr(workflows, "ComplianceWorkflowRunner", lambda _db: runner)
+
+    with pytest.raises(HTTPException) as denied:
+        workflows.recover_workflows(request, db)
+    assert denied.value.status_code == 400
+    assert runner.recover_interrupted.call_count == 1
 
 
 def test_resume_endpoint_maps_workflow_lock_contention_to_conflict(monkeypatch):

@@ -521,6 +521,7 @@ class ComplianceWorkflowRunner:
         tenant_id: str,
         actor_id: str,
         authorization_check: Optional[Callable[[], None]] = None,
+        step_up_check: Optional[Callable[[], datetime]] = None,
     ) -> dict:
         """Resume a paused workflow (e.g., after approval)."""
         if not str(actor_id or "").strip():
@@ -600,6 +601,44 @@ class ComplianceWorkflowRunner:
                 )
                 self.db.commit()
                 raise WorkflowResumeConflict(reason)
+            plans = [wf.remediation_plan or []]
+            if approval:
+                plans.append((approval.action_payload or {}).get("plan") or [])
+            destructive = any(
+                isinstance(item, dict) and bool(item.get("destructive"))
+                for plan in plans for item in plan
+            )
+            privileged_continuation = wf.current_state in {
+                WorkflowState.EXECUTE_REMEDIATION.value,
+                WorkflowState.VERIFY_RESULTS.value,
+                WorkflowState.ROLLBACK_REMEDIATION.value,
+            } or (
+                wf.current_state == WorkflowState.AWAITING_APPROVAL.value
+                and approval is not None
+                and approval.status in {"APPROVED", "CONSUMED"}
+            )
+            if destructive and privileged_continuation:
+                if approval is None or approval.status not in {"APPROVED", "CONSUMED"}:
+                    raise WorkflowAuthorizationError("Valid approval is required for destructive remediation")
+                if authorization_check is None:
+                    raise WorkflowAuthorizationError("Current workflow authority must be revalidated")
+                if step_up_check is None:
+                    raise WorkflowAuthorizationError("Fresh MFA is required to resume destructive remediation")
+                verified_at = step_up_check()
+                if verified_at is None or verified_at.tzinfo is None or not (
+                    now := datetime.now(timezone.utc)
+                ) - timedelta(minutes=30) <= verified_at <= now:
+                    raise WorkflowAuthorizationError("Fresh MFA is required to resume destructive remediation")
+                self.db.add(ApprovalAudit(
+                    id=uuid.uuid4(), tenant_id=approval.tenant_id,
+                    approval_id=approval.id, actor_id=actor_uuid,
+                    action="RESUME_MFA_VERIFIED", action_hash=approval.action_hash,
+                    reason="Fresh MFA authorized destructive workflow continuation",
+                    details={"workflow_id": workflow_id, "state": wf.current_state},
+                    mfa_verified=True, mfa_timestamp=verified_at,
+                ))
+                # Persist the factor consumption and audit before any external effect.
+                self.db.commit()
             requester_id = str(state_data.get("requester_id") or "").strip()
             if not requester_id:
                 raise ValueError("Workflow requester identity is unavailable")
@@ -608,6 +647,7 @@ class ComplianceWorkflowRunner:
                 "execution_status": ExecutionStatus.RUNNING.value,
                 "_emit_audit": emit_audit_event,
                 "_persist_state": lambda s: _persist_state_to_db(self.db, s),
+                "_authorization_check": authorization_check,
                 "_create_approval": lambda tid, wid, plan: _create_approval_in_db(
                     self.db, tid, wid, plan, requester_id
                 ),
@@ -711,6 +751,7 @@ class ComplianceWorkflowRunner:
         tenant_id: str,
         actor_id: str,
         authorization_check: Optional[Callable[[], None]] = None,
+        step_up_check: Optional[Callable[[], datetime]] = None,
     ) -> list[dict]:
         """Find and recover workflows that were interrupted (RUNNING but not completed)."""
         if not str(actor_id or "").strip():
@@ -727,6 +768,7 @@ class ComplianceWorkflowRunner:
                 result = self.resume(
                     wf.workflow_id, tenant_id, actor_id,
                     authorization_check=authorization_check,
+                    step_up_check=step_up_check,
                 )
                 results.append({"workflow_id": wf.workflow_id, "status": "recovered", "state": result})
             except WorkflowAuthorizationError:
