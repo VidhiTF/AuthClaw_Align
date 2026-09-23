@@ -11,7 +11,7 @@ Bridges the LangGraph compliance graph with AuthClaw infrastructure:
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -40,6 +40,18 @@ logger = logging.getLogger("orchestrator.runner")
 
 
 _kafka_producer = None
+
+
+class WorkflowResumeConflict(RuntimeError):
+    """A retryable approval authorization/linkage conflict."""
+
+
+class WorkflowAuthorizationError(PermissionError):
+    """The authenticated actor no longer has current workflow authority."""
+
+    def __init__(self, message: str, *, status_code: int = 403) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _init_kafka_producer():
@@ -139,23 +151,46 @@ def _create_approval_in_db(
     tenant_id: str,
     workflow_id: str,
     plan: list,
-    requester_id: Optional[str] = None,
+    requester_id: str,
 ) -> str:
-    """Create a pending_approvals record for HITL review."""
-    approval_id = str(uuid.uuid4())
+    """Create and link one remediation approval in the workflow transaction."""
+    if not str(requester_id or "").strip():
+        raise ValueError("Authenticated workflow requester identity is required")
+    resolved_requester_id = uuid.UUID(str(requester_id))
 
-    if requester_id:
-        resolved_requester_id = uuid.UUID(str(requester_id))
-    else:
-        # Legacy graph-created approvals do not carry an HTTP user context.
-        result = db.execute(
-            text("SELECT id FROM users WHERE tenant_id = :tid AND is_active = true LIMIT 1"),
-            {"tid": tenant_id},
-        ).first()
-        resolved_requester_id = result[0] if result else uuid.UUID(tenant_id)
-
+    workflow = db.query(ComplianceWorkflow).filter(
+        ComplianceWorkflow.workflow_id == workflow_id,
+        ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
+    ).with_for_update().first()
+    if not workflow:
+        raise ValueError(f"Workflow {workflow_id} not found for tenant {tenant_id}")
     expires_at = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
     action_payload = build_action_payload(workflow_id, plan)
+    existing = db.query(PendingApproval).filter(
+        PendingApproval.tenant_id == uuid.UUID(tenant_id),
+        PendingApproval.action_type == "remediation",
+        PendingApproval.action_id == workflow_id,
+    ).order_by(PendingApproval.created_at, PendingApproval.id).first()
+    if existing:
+        if existing.action_payload != action_payload:
+            raise ValueError("Existing remediation approval does not match the current plan")
+        expected_hash = compute_action_hash(
+            tenant_id=tenant_id,
+            action_payload=existing.action_payload,
+            expires_at=existing.expires_at,
+        )
+        if existing.action_hash and existing.action_hash != expected_hash:
+            raise ValueError("Existing remediation approval failed its integrity binding")
+        state_data = dict(workflow.state_data or {})
+        state_data["approval_id"] = str(existing.id)
+        workflow.approval_id = existing.id
+        workflow.approval_status = existing.status
+        workflow.state_data = state_data
+        workflow.updated_at = datetime.now(tz=timezone.utc)
+        db.commit()
+        return str(existing.id)
+
+    approval_id = str(uuid.uuid4())
 
     approval = PendingApproval(
         id=uuid.UUID(approval_id),
@@ -175,6 +210,19 @@ def _create_approval_in_db(
     )
 
     db.add(approval)
+    state_data = dict(workflow.state_data or {})
+    state_data.update({
+        "current_state": WorkflowState.AWAITING_APPROVAL.value,
+        "execution_status": ExecutionStatus.PAUSED.value,
+        "approval_status": "PENDING",
+        "approval_id": approval_id,
+    })
+    workflow.current_state = WorkflowState.AWAITING_APPROVAL.value
+    workflow.execution_status = ExecutionStatus.PAUSED.value
+    workflow.approval_status = "PENDING"
+    workflow.approval_id = approval.id
+    workflow.state_data = state_data
+    workflow.updated_at = datetime.now(tz=timezone.utc)
     db.commit()
 
     logger.info("Created approval %s for workflow %s", approval_id, workflow_id)
@@ -314,7 +362,7 @@ def _check_approval_in_db(
                 db, approval, uuid.UUID(actor_id), "EXPIRED", approval.resolution_reason
             )
             event_backbone.increment_metric("remediation_approval_expired_total")
-            db.commit()
+            db.flush()
             return "EXPIRED"
 
     decision = evaluate_approval(
@@ -335,8 +383,10 @@ def _check_approval_in_db(
         event_backbone.increment_metric(
             f"remediation_approval_{decision.status.lower()}_rejected_total"
         )
-        db.commit()
-        if decision.status in {"EXPIRED", "REPLAYED", "ALTERED", "USER_MISMATCH", "ACTION_MISMATCH"}:
+        db.flush()
+        if decision.status in {"USER_MISMATCH", "ACTION_MISMATCH", "TENANT_MISMATCH"}:
+            raise WorkflowResumeConflict(decision.reason)
+        if decision.status in {"EXPIRED", "REPLAYED", "ALTERED"}:
             return "EXPIRED"
         return approval.status
 
@@ -346,7 +396,7 @@ def _check_approval_in_db(
     approval.resolution_reason = "Approval consumed for one remediation execution"
     _record_approval_audit(db, approval, uuid.UUID(actor_id), "CONSUMED", approval.resolution_reason)
     event_backbone.increment_metric("remediation_approval_consumed_total")
-    db.commit()
+    db.flush()
     return "APPROVED"
 
 
@@ -361,9 +411,13 @@ class ComplianceWorkflowRunner:
         self,
         tenant_id: str,
         framework: str,
+        requester_id: str,
         request_id: Optional[str] = None,
     ) -> dict:
         """Start a new compliance workflow."""
+        if not str(requester_id or "").strip():
+            raise ValueError("Authenticated workflow requester identity is required")
+        requester_id = str(uuid.UUID(str(requester_id)))
         workflow_id = str(uuid.uuid4())
         now = datetime.now(tz=timezone.utc)
 
@@ -374,6 +428,10 @@ class ComplianceWorkflowRunner:
             workflow_id=workflow_id,
             request_id=request_id or "",
             framework=framework,
+            state_data={
+                "request_id": request_id or "",
+                "requester_id": requester_id,
+            },
             current_state=WorkflowState.GATHER_EVIDENCE.value,
             execution_status=ExecutionStatus.RUNNING.value,
             started_at=now,
@@ -391,6 +449,7 @@ class ComplianceWorkflowRunner:
             "workflow_id": workflow_id,
             "tenant_id": tenant_id,
             "request_id": request_id or "",
+            "requester_id": requester_id,
             "framework": framework,
             "current_state": WorkflowState.GATHER_EVIDENCE.value,
             "findings": [],
@@ -410,7 +469,9 @@ class ComplianceWorkflowRunner:
             "completed_at": "",
             "_emit_audit": emit_audit_event,
             "_persist_state": lambda s: _persist_state_to_db(self.db, s),
-            "_create_approval": lambda tid, wid, plan: _create_approval_in_db(self.db, tid, wid, plan),
+            "_create_approval": lambda tid, wid, plan: _create_approval_in_db(
+                self.db, tid, wid, plan, requester_id
+            ),
             "_check_approval": lambda aid: _check_approval_in_db(self.db, aid),
             "_store_evidence": _make_store_evidence_fn(self.db),
             "_store_finding": _make_store_finding_fn(self.db),
@@ -458,9 +519,14 @@ class ComplianceWorkflowRunner:
         self,
         workflow_id: str,
         tenant_id: str,
-        actor_id: Optional[str] = None,
+        actor_id: str,
+        authorization_check: Optional[Callable[[], None]] = None,
+        step_up_check: Optional[Callable[[], datetime]] = None,
     ) -> dict:
         """Resume a paused workflow (e.g., after approval)."""
+        if not str(actor_id or "").strip():
+            raise ValueError("Authenticated workflow actor identity is required")
+        actor_uuid = uuid.UUID(str(actor_id))
         lock_key = int(uuid.UUID(workflow_id).int & 0x7fffffffffffffff)
         with workflow_advisory_lock(self.db, lock_key, workflow_id):
             wf = self.db.query(ComplianceWorkflow).filter(
@@ -476,19 +542,120 @@ class ComplianceWorkflowRunner:
                     f"Workflow {workflow_id} cannot be resumed (status={wf.execution_status})"
                 )
 
+            # An approved remediation is a non-transferable capability.  Check
+            # its authoritative row before marking the workflow RUNNING so an
+            # unrelated same-tenant writer cannot consume or continue it.
+            approval = None
+            workflow_approval_id = getattr(wf, "approval_id", None)
+            if workflow_approval_id:
+                approval = self.db.query(PendingApproval).filter(
+                    PendingApproval.id == workflow_approval_id,
+                    PendingApproval.tenant_id == uuid.UUID(tenant_id),
+                ).with_for_update().first()
+                if authorization_check:
+                    authorization_check()
+                if approval and approval.status in {"APPROVED", "CONSUMED"}:
+                    if approval.action_type != "remediation" or approval.action_id != workflow_id:
+                        reason = "Approval is bound to another workflow"
+                        _record_approval_audit(
+                            self.db, approval, actor_uuid,
+                            "RESUME_AUTHORIZATION_REJECTED", reason,
+                        )
+                        self.db.commit()
+                        raise WorkflowResumeConflict(reason)
+                    if not approval.approver_id or str(approval.approver_id) != str(actor_id):
+                        reason = "Approved workflow may only be resumed by its recorded approver"
+                        _record_approval_audit(
+                            self.db, approval, actor_uuid,
+                            "RESUME_AUTHORIZATION_REJECTED", reason,
+                        )
+                        self.db.commit()
+                        raise WorkflowResumeConflict(reason)
+                    if (
+                        approval.status == "CONSUMED"
+                        and approval.consumed_by_id
+                        and str(approval.consumed_by_id) != str(actor_id)
+                    ):
+                        reason = "Consumed approval is bound to another executor"
+                        _record_approval_audit(
+                            self.db, approval, actor_uuid,
+                            "RESUME_AUTHORIZATION_REJECTED", reason,
+                        )
+                        self.db.commit()
+                        raise WorkflowResumeConflict(reason)
+            elif authorization_check:
+                authorization_check()
+
             # Restore state from snapshot
             state_data = wf.state_data or {}
+            if (
+                workflow_approval_id
+                and approval
+                and approval.status in {"APPROVED", "CONSUMED"}
+                and str(state_data.get("approval_id") or "") != str(workflow_approval_id)
+            ):
+                reason = "Workflow approval snapshot does not match its recorded approval"
+                _record_approval_audit(
+                    self.db, approval, actor_uuid,
+                    "RESUME_AUTHORIZATION_REJECTED", reason,
+                )
+                self.db.commit()
+                raise WorkflowResumeConflict(reason)
+            plans = [wf.remediation_plan or []]
+            if approval:
+                plans.append((approval.action_payload or {}).get("plan") or [])
+            destructive = any(
+                isinstance(item, dict) and bool(item.get("destructive"))
+                for plan in plans for item in plan
+            )
+            privileged_continuation = wf.current_state in {
+                WorkflowState.EXECUTE_REMEDIATION.value,
+                WorkflowState.VERIFY_RESULTS.value,
+                WorkflowState.ROLLBACK_REMEDIATION.value,
+            } or (
+                wf.current_state == WorkflowState.AWAITING_APPROVAL.value
+                and approval is not None
+                and approval.status in {"APPROVED", "CONSUMED"}
+            )
+            if destructive and privileged_continuation:
+                if approval is None or approval.status not in {"APPROVED", "CONSUMED"}:
+                    raise WorkflowAuthorizationError("Valid approval is required for destructive remediation")
+                if authorization_check is None:
+                    raise WorkflowAuthorizationError("Current workflow authority must be revalidated")
+                if step_up_check is None:
+                    raise WorkflowAuthorizationError("Fresh MFA is required to resume destructive remediation")
+                verified_at = step_up_check()
+                if verified_at is None or verified_at.tzinfo is None or not (
+                    now := datetime.now(timezone.utc)
+                ) - timedelta(minutes=30) <= verified_at <= now:
+                    raise WorkflowAuthorizationError("Fresh MFA is required to resume destructive remediation")
+                self.db.add(ApprovalAudit(
+                    id=uuid.uuid4(), tenant_id=approval.tenant_id,
+                    approval_id=approval.id, actor_id=actor_uuid,
+                    action="RESUME_MFA_VERIFIED", action_hash=approval.action_hash,
+                    reason="Fresh MFA authorized destructive workflow continuation",
+                    details={"workflow_id": workflow_id, "state": wf.current_state},
+                    mfa_verified=True, mfa_timestamp=verified_at,
+                ))
+                # Persist the factor consumption and audit before any external effect.
+                self.db.commit()
+            requester_id = str(state_data.get("requester_id") or "").strip()
+            if not requester_id:
+                raise ValueError("Workflow requester identity is unavailable")
             state: ComplianceState = {
                 **state_data,
                 "execution_status": ExecutionStatus.RUNNING.value,
                 "_emit_audit": emit_audit_event,
                 "_persist_state": lambda s: _persist_state_to_db(self.db, s),
-                "_create_approval": lambda tid, wid, plan: _create_approval_in_db(self.db, tid, wid, plan),
+                "_authorization_check": authorization_check,
+                "_create_approval": lambda tid, wid, plan: _create_approval_in_db(
+                    self.db, tid, wid, plan, requester_id
+                ),
                 "_check_approval": lambda aid: _check_approval_in_db(
                     self.db,
                     aid,
                     tenant_id,
-                    actor_id or "",
+                    actor_id,
                     workflow_id,
                     wf.remediation_plan or [],
                 ),
@@ -502,7 +669,7 @@ class ComplianceWorkflowRunner:
             # Update DB status
             wf.execution_status = ExecutionStatus.RUNNING.value
             wf.updated_at = datetime.now(tz=timezone.utc)
-            self.db.commit()
+            self.db.flush()
 
             # Execute remaining nodes from current state
             try:
@@ -522,9 +689,23 @@ class ComplianceWorkflowRunner:
 
             except Exception as exc:
                 logger.error("Workflow %s resume failed: %s", workflow_id, exc)
+                self.db.rollback()
                 emit_audit_event(workflow_id, tenant_id, state.get("request_id", ""),
                                  "FAILED", "workflow_resume_error", str(exc))
-                wf.execution_status = ExecutionStatus.FAILED.value
+                wf = self.db.query(ComplianceWorkflow).filter(
+                    ComplianceWorkflow.workflow_id == workflow_id,
+                    ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
+                ).with_for_update().first()
+                if wf is None:
+                    raise
+                # A failure while consuming an approval must leave both the
+                # workflow and approval retryable; the rollback above restores
+                # the APPROVED approval and this durable pause advertises recovery.
+                awaiting = wf.current_state == WorkflowState.AWAITING_APPROVAL.value
+                wf.execution_status = (
+                    ExecutionStatus.PAUSED.value if awaiting
+                    else ExecutionStatus.FAILED.value
+                )
                 wf.error_message = str(exc)
                 wf.updated_at = datetime.now(tz=timezone.utc)
                 self.db.commit()
@@ -565,8 +746,16 @@ class ComplianceWorkflowRunner:
             "completed_at": wf.completed_at.isoformat() if wf.completed_at else None,
         }
 
-    def recover_interrupted(self, tenant_id: str) -> list[dict]:
+    def recover_interrupted(
+        self,
+        tenant_id: str,
+        actor_id: str,
+        authorization_check: Optional[Callable[[], None]] = None,
+        step_up_check: Optional[Callable[[], datetime]] = None,
+    ) -> list[dict]:
         """Find and recover workflows that were interrupted (RUNNING but not completed)."""
+        if not str(actor_id or "").strip():
+            raise ValueError("Authenticated workflow actor identity is required")
         interrupted = self.db.query(ComplianceWorkflow).filter(
             ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
             ComplianceWorkflow.execution_status.in_(["RUNNING"]),
@@ -576,8 +765,14 @@ class ComplianceWorkflowRunner:
         results = []
         for wf in interrupted:
             try:
-                result = self.resume(wf.workflow_id, tenant_id)
+                result = self.resume(
+                    wf.workflow_id, tenant_id, actor_id,
+                    authorization_check=authorization_check,
+                    step_up_check=step_up_check,
+                )
                 results.append({"workflow_id": wf.workflow_id, "status": "recovered", "state": result})
+            except WorkflowAuthorizationError:
+                raise
             except Exception as exc:
                 results.append({"workflow_id": wf.workflow_id, "status": "failed", "error": str(exc)})
 

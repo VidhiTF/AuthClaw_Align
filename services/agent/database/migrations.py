@@ -252,6 +252,9 @@ def run_startup_migrations():
         email_verified BOOLEAN DEFAULT FALSE,
         mfa_enabled BOOLEAN DEFAULT TRUE,
         totp_secret VARCHAR(32),
+        mfa_last_totp_counter BIGINT,
+        mfa_failed_attempts INTEGER NOT NULL DEFAULT 0,
+        mfa_locked_until TIMESTAMP,
         status VARCHAR(20) DEFAULT 'active',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -263,6 +266,9 @@ def run_startup_migrations():
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN DEFAULT TRUE;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS totp_secret VARCHAR(32);
+    ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_last_totp_counter BIGINT;
+    ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_failed_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_locked_until TIMESTAMP;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP;
@@ -473,6 +479,7 @@ def run_startup_migrations():
         correlation_id VARCHAR(100),
         tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
         status VARCHAR(50) NOT NULL,
+        requested_by VARCHAR(255),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         expires_at TIMESTAMP,
         approved_at TIMESTAMP,
@@ -498,7 +505,13 @@ def run_startup_migrations():
         execution_mfa_counter BIGINT,
         execution_token_hash VARCHAR(64),
         execution_token_used_at TIMESTAMP,
-        execution_expires_at TIMESTAMP
+        execution_expires_at TIMESTAMP,
+        execution_operation_id VARCHAR(100),
+        execution_provider_operation_id VARCHAR(255),
+        execution_outcome TEXT,
+        execution_reconcile_after TIMESTAMP,
+        execution_worker_id VARCHAR(255),
+        execution_fence_token VARCHAR(100)
     );
 
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS approval_id VARCHAR(100);
@@ -506,6 +519,7 @@ def run_startup_migrations():
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(100);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS status VARCHAR(50);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS requested_by VARCHAR(255);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP;
@@ -532,6 +546,12 @@ def run_startup_migrations():
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_token_hash VARCHAR(64);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_token_used_at TIMESTAMP;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_expires_at TIMESTAMP;
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_operation_id VARCHAR(100);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_provider_operation_id VARCHAR(255);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_outcome TEXT;
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_reconcile_after TIMESTAMP;
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_worker_id VARCHAR(255);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_fence_token VARCHAR(100);
 
     CREATE TABLE IF NOT EXISTS approval_audit_events (
         id SERIAL PRIMARY KEY,
@@ -1208,6 +1228,9 @@ def run_startup_migrations():
     CREATE INDEX IF NOT EXISTS idx_tenant_credentials_provider ON tenant_credentials(tenant_id, provider);
     CREATE INDEX IF NOT EXISTS idx_agent_events_tenant_id ON agent_events(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_gateway_approvals_tenant_id ON gateway_approvals(tenant_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_gateway_approval_execution_operation
+        ON gateway_approvals(tenant_id, execution_operation_id)
+        WHERE execution_operation_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_approval_audit_events_tenant_id ON approval_audit_events(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_approval_audit_events_approval_id ON approval_audit_events(approval_id);
     CREATE INDEX IF NOT EXISTS idx_policies_tenant_id ON policies(tenant_id);

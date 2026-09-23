@@ -1,0 +1,292 @@
+{
+  "agent-terminal-outcomes.json": [
+    {
+      "execution_outcome": {
+        "allowed": false,
+        "decision": "DENY",
+        "executed": false,
+        "outcome": "policy_denied",
+        "provider": "test",
+        "status": "denied"
+      },
+      "final_status": "execution_failed",
+      "http_status": 403,
+      "immutable_audit_metadata": {
+        "allowed": false,
+        "executed": false,
+        "execution_mfa_binding_hash": "[REDACTED]",
+        "execution_operation_id": "[REDACTED]",
+        "execution_request_id": "[REDACTED]",
+        "model": "test",
+        "outcome": "policy_denied",
+        "provider": "test"
+      },
+      "scenario": "policy_denied"
+    },
+    {
+      "execution_outcome": {
+        "allowed": false,
+        "decision": "DENY",
+        "executed": false,
+        "outcome": "execution_error",
+        "provider": "test",
+        "status": "failed"
+      },
+      "final_status": "execution_failed",
+      "http_status": 502,
+      "immutable_audit_metadata": {
+        "allowed": false,
+        "executed": false,
+        "execution_mfa_binding_hash": "[REDACTED]",
+        "execution_operation_id": "[REDACTED]",
+        "execution_request_id": "[REDACTED]",
+        "model": "test",
+        "outcome": "execution_error",
+        "provider": "test"
+      },
+      "scenario": "execution_error"
+    },
+    {
+      "execution_outcome": {
+        "allowed": false,
+        "error": "provider_unavailable",
+        "executed": false,
+        "outcome": "provider_unavailable",
+        "status": "indeterminate"
+      },
+      "final_status": "execution_indeterminate",
+      "http_status": 503,
+      "immutable_audit_metadata": {
+        "allowed": false,
+        "error": "provider_unavailable",
+        "executed": false,
+        "execution_operation_id": "[REDACTED]",
+        "outcome": "provider_unavailable",
+        "request_id": "[REDACTED]"
+      },
+      "scenario": "provider_unavailable"
+    },
+    {
+      "execution_outcome": {
+        "allowed": true,
+        "decision": "ALLOW",
+        "executed": true,
+        "outcome": "succeeded",
+        "provider": "test",
+        "status": "succeeded"
+      },
+      "final_status": "executed",
+      "http_status": 200,
+      "immutable_audit_metadata": {
+        "allowed": true,
+        "executed": true,
+        "execution_mfa_binding_hash": "[REDACTED]",
+        "execution_operation_id": "[REDACTED]",
+        "execution_request_id": "[REDACTED]",
+        "model": "test",
+        "outcome": "succeeded",
+        "provider": "test"
+      },
+      "scenario": "succeeded"
+    }
+  ],
+  "backend-assertion-audit.json": [
+    {
+      "id": "[REDACTED]",
+      "model": "",
+      "action": "mfa:agent_assertion_issued",
+      "reason": "POST /approve/approval-postgres-17",
+      "actor_id": "[REDACTED]",
+      "provider": "control-plane-mfa",
+      "policy_id": "",
+      "record_id": "[REDACTED]",
+      "tenant_id": "[REDACTED]",
+      "timestamp": "[REDACTED]",
+      "actor_type": "backend",
+      "prior_hash": "[REDACTED]",
+      "request_id": "[REDACTED]",
+      "duration_ms": 0,
+      "prompt_count": 0,
+      "request_size": 0,
+      "chain_version": 2,
+      "integrity_hash": "[REDACTED]",
+      "execution_trace": "[REDACTED]",
+      "idempotency_key": "[REDACTED]",
+      "response_status": 200,
+      "tenant_sequence": 2,
+      "canonical_payload": "[REDACTED]",
+      "frameworks_affected": []
+    },
+    {
+      "id": "[REDACTED]",
+      "model": "",
+      "action": "mfa:agent_assertion_issued",
+      "reason": "POST /execute/approval-postgres-17",
+      "actor_id": "[REDACTED]",
+      "provider": "control-plane-mfa",
+      "policy_id": "",
+      "record_id": "[REDACTED]",
+      "tenant_id": "[REDACTED]",
+      "timestamp": "[REDACTED]",
+      "actor_type": "backend",
+      "prior_hash": "[REDACTED]",
+      "request_id": "[REDACTED]",
+      "duration_ms": 0,
+      "prompt_count": 0,
+      "request_size": 0,
+      "chain_version": 2,
+      "integrity_hash": "[REDACTED]",
+      "execution_trace": "[REDACTED]",
+      "idempotency_key": "[REDACTED]",
+      "response_status": 200,
+      "tenant_sequence": 6,
+      "canonical_payload": "[REDACTED]",
+      "frameworks_affected": []
+    }
+  ],
+  "agent-UTC-audit.json": {
+    "gateway_approval": {
+      "status": "executed",
+      "execution_outcome": {
+        "allowed": true,
+        "decision": "ALLOW",
+        "executed": true,
+        "outcome": "succeeded",
+        "provider": "test",
+        "status": "succeeded"
+      }
+    },
+    "audit_events": [
+      {
+        "action": "approved",
+        "actor": "[REDACTED]",
+        "tenant_id": "[REDACTED]",
+        "approval_id": "[REDACTED]",
+        "mfa_verified": true,
+        "created_at": "[REDACTED]"
+      },
+      {
+        "action": "executing",
+        "actor": "[REDACTED]",
+        "tenant_id": "[REDACTED]",
+        "approval_id": "[REDACTED]",
+        "mfa_verified": true,
+        "created_at": "[REDACTED]"
+      },
+      {
+        "action": "executed",
+        "actor": "[REDACTED]",
+        "tenant_id": "[REDACTED]",
+        "approval_id": "[REDACTED]",
+        "mfa_verified": true,
+        "created_at": "[REDACTED]"
+      }
+    ]
+  },
+  "agent-America-Los_Angeles-audit.json": {
+    "gateway_approval": {
+      "status": "executed",
+      "execution_outcome": {
+        "allowed": true,
+        "decision": "ALLOW",
+        "executed": true,
+        "outcome": "succeeded",
+        "provider": "test",
+        "status": "succeeded"
+      }
+    },
+    "audit_events": [
+      {
+        "action": "approved",
+        "actor": "[REDACTED]",
+        "tenant_id": "[REDACTED]",
+        "approval_id": "[REDACTED]",
+        "mfa_verified": true,
+        "created_at": "[REDACTED]"
+      },
+      {
+        "action": "executing",
+        "actor": "[REDACTED]",
+        "tenant_id": "[REDACTED]",
+        "approval_id": "[REDACTED]",
+        "mfa_verified": true,
+        "created_at": "[REDACTED]"
+      },
+      {
+        "action": "executed",
+        "actor": "[REDACTED]",
+        "tenant_id": "[REDACTED]",
+        "approval_id": "[REDACTED]",
+        "mfa_verified": true,
+        "created_at": "[REDACTED]"
+      }
+    ]
+  },
+  "agent-Asia-Kolkata-audit.json": {
+    "gateway_approval": {
+      "status": "executed",
+      "execution_outcome": {
+        "allowed": true,
+        "decision": "ALLOW",
+        "executed": true,
+        "outcome": "succeeded",
+        "provider": "test",
+        "status": "succeeded"
+      }
+    },
+    "audit_events": [
+      {
+        "action": "approved",
+        "actor": "[REDACTED]",
+        "tenant_id": "[REDACTED]",
+        "approval_id": "[REDACTED]",
+        "mfa_verified": true,
+        "created_at": "[REDACTED]"
+      },
+      {
+        "action": "executing",
+        "actor": "[REDACTED]",
+        "tenant_id": "[REDACTED]",
+        "approval_id": "[REDACTED]",
+        "mfa_verified": true,
+        "created_at": "[REDACTED]"
+      },
+      {
+        "action": "executed",
+        "actor": "[REDACTED]",
+        "tenant_id": "[REDACTED]",
+        "approval_id": "[REDACTED]",
+        "mfa_verified": true,
+        "created_at": "[REDACTED]"
+      }
+    ]
+  },
+  "backend-recovery-audit.json": [
+    {
+      "id": "[REDACTED]",
+      "model": "",
+      "action": "mfa:recovery_reset",
+      "reason": "separate_owner_verified",
+      "actor_id": "[REDACTED]",
+      "provider": "totp",
+      "policy_id": "",
+      "record_id": "[REDACTED]",
+      "tenant_id": "[REDACTED]",
+      "timestamp": "[REDACTED]",
+      "actor_type": "backend",
+      "prior_hash": "[REDACTED]",
+      "request_id": "[REDACTED]",
+      "duration_ms": 0,
+      "prompt_count": 0,
+      "request_size": 0,
+      "chain_version": 2,
+      "integrity_hash": "[REDACTED]",
+      "execution_trace": "[REDACTED]",
+      "idempotency_key": "[REDACTED]",
+      "response_status": 200,
+      "tenant_sequence": 2,
+      "canonical_payload": "[REDACTED]",
+      "frameworks_affected": []
+    }
+  ]
+}

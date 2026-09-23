@@ -59,8 +59,8 @@ def test_risk_scoring_logic(clean_db):
     with engine.connect() as conn:
         res = conn.execute(
             text("""
-            INSERT INTO documents (filename, source, size_bytes, status, risk_score, severity)
-            VALUES ('test_risk.txt', 'local', 100, 'pending', 0, 'LOW')
+            INSERT INTO documents (tenant_id, filename, source, size_bytes, status, risk_score, severity)
+            VALUES (42, 'test_risk.txt', 'local', 100, 'pending', 0, 'LOW')
             RETURNING id
             """)
         )
@@ -75,7 +75,14 @@ def test_risk_scoring_logic(clean_db):
     
     # Run scan pipeline (using fake LLM path or rules offline)
     os.environ["GOOGLE_API_KEY"] = "dummy" # Enforce rule fallback
-    pipeline_res = run_document_scan_pipeline(doc_id, text_content.encode("utf-8"), "test_risk.txt")
+    pipeline_res = run_document_scan_pipeline(
+        doc_id,
+        text_content.encode("utf-8"),
+        "test_risk.txt",
+        tenant_id=42,
+        request_id="document-test-risk",
+        requested_by="oidc|document-test-requester",
+    )
     
     assert pipeline_res["document_id"] == doc_id
     assert pipeline_res["risk_score"] < 100

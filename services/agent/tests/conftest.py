@@ -102,13 +102,6 @@ def mock_resolve(self, qname, rdtype='A', *args, **kwargs):
 dns.resolver.Resolver.resolve = mock_resolve
 
 
-@pytest.fixture(autouse=True)
-def isolate_runtime_test_flags(monkeypatch):
-    # Local manual runs may export this for usability. Tests should start from
-    # production-like MFA behavior unless an individual test opts into bypass.
-    monkeypatch.delenv("DISABLE_MFA_FOR_TESTING", raising=False)
-
-
 class GatewayTestProvider:
     model_name = "pytest-gateway-model"
     api_url = "pytest://gateway-provider"

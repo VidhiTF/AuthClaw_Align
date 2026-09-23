@@ -84,6 +84,7 @@ class ComplianceState(TypedDict, total=False):
     workflow_id: str
     tenant_id: str
     request_id: str
+    requester_id: str
     framework: str  # GDPR, HIPAA, SOC2
     current_state: str
     findings: list[dict]
@@ -421,11 +422,6 @@ def awaiting_approval(state: ComplianceState) -> ComplianceState:
             persist(new_state)
         return new_state
     
-    emit = state.get("_emit_audit")
-    if emit:
-        emit(state["workflow_id"], state["tenant_id"], state.get("request_id", ""),
-             f"AWAITING_APPROVAL→{next_state}", "approval_resolved", status.lower())
-    
     persist = state.get("_persist_state")
     new_state = {
         **state,
@@ -436,6 +432,10 @@ def awaiting_approval(state: ComplianceState) -> ComplianceState:
     }
     if persist:
         persist(new_state)
+    emit = state.get("_emit_audit")
+    if emit:
+        emit(state["workflow_id"], state["tenant_id"], state.get("request_id", ""),
+             f"AWAITING_APPROVAL→{next_state}", "approval_resolved", status.lower())
     return new_state
 
 
@@ -649,6 +649,8 @@ def execute_remediation(state: ComplianceState) -> ComplianceState:
                 and hasattr(scanner, "apply_prepared_remediation")
             )
             if durable_s3_protocol:
+                if state.get("_authorization_check"):
+                    state["_authorization_check"]()
                 prepared = scanner.prepare_remediation(
                     state["workflow_id"],
                     action["id"],
@@ -661,8 +663,12 @@ def execute_remediation(state: ComplianceState) -> ComplianceState:
                     raise RuntimeError(prepared.get("conflict") or "Remediation state requires operator reconciliation")
                 prepared["phase"] = "APPLYING"
                 _persist_remediation_progress(state, actions)
+                if state.get("_authorization_check"):
+                    state["_authorization_check"]()
                 res = scanner.apply_prepared_remediation(prepared, plan_item)
             else:
+                if state.get("_authorization_check"):
+                    state["_authorization_check"]()
                 res = scanner.execute_remediation(state["workflow_id"], action["id"], plan_item)
             if res.get("mutation_state"):
                 action["mutation_state"] = res["mutation_state"]
@@ -897,6 +903,8 @@ def rollback_remediation(state: ComplianceState) -> ComplianceState:
         try:
             from app.orchestrator.connectors import DocumentScanner
             scanner = DocumentScanner()
+            if state.get("_authorization_check"):
+                state["_authorization_check"]()
             rollback_result = scanner.rollback_remediation(action.get("rollback_plan") or {})
             action.update({
                 "status": RemediationActionStatus.ROLLED_BACK.value,

@@ -63,7 +63,16 @@ class DirectAWSChecks(unittest.TestCase):
             ring = json.loads(value.strip("'"))
             key = ring["keys"][ring["active_key_id"]]
             self.assertEqual((key["service"], key["audience"]), ("console", "agent"))
-            self.assertEqual(set(key["endpoints"]), {"GET /api/v1/agent/health/ready", "GET /remediation/connectors", "GET /remediation/findings"})
+            self.assertEqual(
+                set(key["endpoints"]),
+                {
+                    "GET /api/v1/agent/health/ready",
+                    "GET /remediation/connectors",
+                    "GET /remediation/findings",
+                    "POST /approve/*",
+                    "POST /execute/*",
+                },
+            )
             self.assertEqual(key["secret"], "REPLACE_ME")  # Too short to authenticate accidentally.
 
     def test_kms_rotation_rollback_and_denial(self):

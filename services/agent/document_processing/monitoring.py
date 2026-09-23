@@ -5,7 +5,7 @@ import threading
 from datetime import datetime, timezone
 from sqlalchemy import text
 from database import engine
-from services.tenant_context import get_current_tenant_id, tenant_context
+from services.tenant_context import get_current_request_id, get_current_tenant_id, tenant_context
 from services.quota_service import QuotaExceeded, QuotaUnavailable, record_unavailable
 from services.document_monitor_status import monitor_status, update_monitor_status
 
@@ -27,11 +27,19 @@ from document_processing.connectors import (
 logger = logging.getLogger("authclaw.document_processing.monitoring")
 
 WATCH_DIR = "watched_documents"
+MONITOR_REQUESTER_ID = "service:document-monitor"
 _stop_event = threading.Event()
 _monitor_thread = None
 
 # Track last sync time globally for stats APIs
 last_sync_time = "N/A"
+
+
+def _scan_request_context(doc_id: int, requested_by: str = None) -> dict:
+    return {
+        "request_id": get_current_request_id() or f"document-monitor-{doc_id}-{time.time_ns()}",
+        "requested_by": requested_by or MONITOR_REQUESTER_ID,
+    }
 
 
 def _scan_failed(result):
@@ -71,15 +79,17 @@ def stop_background_monitoring():
     update_monitor_status(enabled=False, status="stopping")
     logger.info("Signaled document monitor thread to stop.")
 
-def trigger_manual_sync() -> dict:
+def trigger_manual_sync(requested_by: str) -> dict:
     """Trigger sync instantly."""
     global last_sync_time
     logger.info("Manual synchronization triggered.")
-    sync_sources()
+    if not requested_by or not requested_by.strip():
+        raise ValueError("Manual document synchronization requires requester identity.")
+    sync_sources(requested_by=requested_by.strip())
     last_sync_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return {"status": "success", "synced_at": last_sync_time}
 
-def sync_sources():
+def sync_sources(requested_by: str = None):
     """Executes a single pass of file and config syncing across local and cloud sources."""
     tenant_id = get_current_tenant_id()
     if tenant_id is None:
@@ -90,10 +100,10 @@ def sync_sources():
         if not guard.execute(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
                              {"key": f"document-sync:{tenant_id}"}).scalar_one():
             raise RuntimeError("Document synchronization already in progress")
-        _sync_sources(tenant_id)
+        _sync_sources(tenant_id, requested_by=requested_by)
 
 
-def _sync_sources(tenant_id):
+def _sync_sources(tenant_id, requested_by: str = None):
     failures = set()
     # 1. Local watched documents directory
     try:
@@ -129,7 +139,10 @@ def _sync_sources(tenant_id):
                     doc_id = res.fetchone()[0]
                     conn.commit()
                 with open(filepath, "rb") as f:
-                    if _scan_failed(run_document_scan_pipeline(doc_id, f.read(), filename, source="watched", tenant_id=tenant_id)):
+                    if _scan_failed(run_document_scan_pipeline(
+                        doc_id, f.read(), filename, source="watched", tenant_id=tenant_id,
+                        **_scan_request_context(doc_id, requested_by),
+                    )):
                         failures.add("local")
             elif doc[1] != size or doc[2] in {"pending", "scanning"}:
                 # Rescan modified
@@ -140,7 +153,10 @@ def _sync_sources(tenant_id):
                     )
                     conn.commit()
                 with open(filepath, "rb") as f:
-                    if _scan_failed(run_document_scan_pipeline(doc[0], f.read(), filename, source="watched", tenant_id=tenant_id)):
+                    if _scan_failed(run_document_scan_pipeline(
+                        doc[0], f.read(), filename, source="watched", tenant_id=tenant_id,
+                        **_scan_request_context(doc[0], requested_by),
+                    )):
                         failures.add("local")
             elif doc[2] in {"alert_delivery_pending", "alert_delivery_failed"} or len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
                 failures.add("local")
@@ -311,7 +327,10 @@ def _sync_sources(tenant_id):
                         logger.error(f"Failed to fetch content for {filename} from {src}: {fetch_err}")
                         raise
                         
-                    if _scan_failed(run_document_scan_pipeline(doc_id, file_bytes, filename, source=src, tenant_id=tenant_id)):
+                    if _scan_failed(run_document_scan_pipeline(
+                        doc_id, file_bytes, filename, source=src, tenant_id=tenant_id,
+                        **_scan_request_context(doc_id, requested_by),
+                    )):
                         failures.add(src)
                         
                 elif doc[1] != size or doc[2] in {"pending", "scanning"}:
@@ -341,7 +360,10 @@ def _sync_sources(tenant_id):
                         logger.error(f"Failed to fetch updated content for {filename} from {src}: {fetch_err}")
                         raise
                         
-                    if _scan_failed(run_document_scan_pipeline(doc[0], file_bytes, filename, source=src, tenant_id=tenant_id)):
+                    if _scan_failed(run_document_scan_pipeline(
+                        doc[0], file_bytes, filename, source=src, tenant_id=tenant_id,
+                        **_scan_request_context(doc[0], requested_by),
+                    )):
                         failures.add(src)
                 elif doc[2] in {"alert_delivery_pending", "alert_delivery_failed"} or len(doc) < 4 or doc[3] not in {"healthy", "not_applicable"}:
                     failures.add(src)

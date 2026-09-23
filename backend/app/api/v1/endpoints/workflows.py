@@ -12,22 +12,29 @@ Provides REST endpoints for managing LangGraph compliance workflows:
 import logging
 import uuid
 from typing import Annotated, Literal, Optional
-import pyotp
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Discriminator, Field, Tag, TypeAdapter, ValidationError, field_validator
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.auth import (
     get_tenant_db,
+    revalidate_tenant_credential,
+    require_interactive_session,
+    require_roles,
     require_scopes,
-    set_mfa_credentials,
 )
 from app.api.v1.endpoints.onboarding import _get_redis
 from app.core.startup_checks import is_production
 from app.db.models import PendingApproval, ComplianceWorkflow, User, ApprovalAudit, Tenant
-from app.orchestrator.runner import ComplianceWorkflowRunner
+from app.orchestrator.runner import (
+    ComplianceWorkflowRunner,
+    WorkflowAuthorizationError,
+    WorkflowResumeConflict,
+)
+from app.orchestrator.workflow_lock import WorkflowBusyError
 from app.services.notifications import create_notification
 from app.services.remediation_approval import (
     build_action_payload,
@@ -165,9 +172,84 @@ def _approval_response(approval: PendingApproval) -> GatewayApprovalResponse:
     )
 
 
+def _enforce_separate_approver(
+    db: Session,
+    approval: PendingApproval,
+    tenant_id: str,
+    actor_id: uuid.UUID,
+) -> None:
+    """Reject maker/checker conflicts without resolving the pending approval."""
+    if approval.requester_id != actor_id:
+        return
+    db.add(
+        ApprovalAudit(
+            id=uuid.uuid4(),
+            tenant_id=uuid.UUID(tenant_id),
+            approval_id=approval.id,
+            actor_id=actor_id,
+            action="SELF_APPROVAL_REJECTED",
+            action_hash=approval.action_hash,
+            reason="The requesting actor cannot approve this privileged action",
+            details={"action_id": approval.action_id, "action_type": approval.action_type},
+            mfa_verified=False,
+            mfa_timestamp=None,
+        )
+    )
+    db.commit()
+    raise HTTPException(
+        status_code=403,
+        detail="A privileged action must be approved by a different authorized user",
+    )
+
+
 def _tenant_tier(db: Session, tenant_id: str) -> str:
     tenant = db.query(Tenant).filter(Tenant.id == uuid.UUID(tenant_id)).first()
     return tenant.tier if tenant else "starter"
+
+
+def _revalidate_privileged_workflow_actor(
+    request: Request,
+    db: Session,
+    user: User | None = None,
+    *,
+    http_error: bool = False,
+) -> None:
+    """Fail closed if the locked actor lost current workflow authority."""
+    if user is None:
+        user = db.query(User).filter(
+            User.id == request.state.user_id,
+            User.tenant_id == request.state.tenant_id,
+        ).with_for_update().first()
+    if user is not None:
+        db.refresh(user, attribute_names=["is_active", "role"])
+    try:
+        bound = revalidate_tenant_credential(request, db)
+    except HTTPException as exc:
+        db.rollback()
+        if http_error:
+            raise
+        raise WorkflowAuthorizationError(
+            str(exc.detail), status_code=exc.status_code
+        ) from exc
+    current_role = str(user.role).lower() if user is not None else ""
+    bound_role = str(bound.role).lower() if bound is not None else ""
+    current_scopes = set(bound.scopes or []) if bound is not None else set()
+    if (
+        user is None
+        or not user.is_active
+        or current_role not in {"owner", "admin"}
+        or bound_role not in {"owner", "admin"}
+        or "admin" not in current_scopes
+    ):
+        db.rollback()
+        if http_error:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Active tenant owner or admin with admin scope required",
+            )
+        raise WorkflowAuthorizationError(
+            "Active tenant owner or admin with admin scope required"
+        )
 
 
 @router.post("", response_model=WorkflowResponse, status_code=201)
@@ -195,6 +277,7 @@ def create_workflow(
         result = runner.start(
             tenant_id=tenant_id,
             framework=framework,
+            requester_id=str(request.state.user_id),
             request_id=body.request_id,
         )
     except Exception as exc:
@@ -203,19 +286,40 @@ def create_workflow(
     return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/resume", response_model=WorkflowResponseVariant)
+@router.post(
+    "/{workflow_id}/resume",
+    response_model=WorkflowResponseVariant,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def resume_workflow(
     workflow_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["write"]),
+    body: Optional[ApprovalRequest] = None,
+    _auth=require_scopes(["admin"]),
 ):
     """Resume a paused workflow (typically after approval)."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
 
     try:
         runner = ComplianceWorkflowRunner(db)
-        result = runner.resume(workflow_id, tenant_id, actor_id=str(request.state.user_id))
+        result = runner.resume(
+            workflow_id,
+            tenant_id,
+            actor_id=str(request.state.user_id),
+            authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
+            step_up_check=_recovery_step_up(request, db, body),
+        )
+    except WorkflowResumeConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    except WorkflowBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
@@ -224,39 +328,141 @@ def resume_workflow(
     return _workflow_response(result)
 
 
-def _auto_expire_stale(db: Session, tenant_id: str, actor_id: uuid.UUID) -> None:
-    """Helper to auto-expire stale PENDING approvals and write immutable logs."""
+def _expire_pending_approval(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    approval_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    expired_at: datetime,
+) -> bool:
+    """Atomically expire one still-pending approval and stage its audit evidence."""
+    expired = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == tenant_id,
+            PendingApproval.id == approval_id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at <= expired_at,
+        )
+        .values(status="EXPIRED", updated_at=expired_at)
+        .returning(
+            PendingApproval.id,
+            PendingApproval.action_hash,
+            PendingApproval.action_id,
+        )
+        .execution_options(synchronize_session="fetch")
+    ).first()
+    if expired is None:
+        return False
+
+    db.execute(
+        update(ComplianceWorkflow)
+        .where(
+            ComplianceWorkflow.tenant_id == tenant_id,
+            ComplianceWorkflow.approval_id == expired.id,
+            ComplianceWorkflow.approval_status == "PENDING",
+        )
+        .values(
+            approval_status="EXPIRED",
+            execution_status="COMPLETED",
+            updated_at=expired_at,
+        )
+        .execution_options(synchronize_session="fetch")
+    )
+    db.add(ApprovalAudit(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        approval_id=expired.id,
+        actor_id=actor_id,
+        action="EXPIRED",
+        action_hash=expired.action_hash,
+        reason="Approval expired before a human decision",
+        details={"action_id": expired.action_id, "status": "EXPIRED"},
+        mfa_verified=False,
+        mfa_timestamp=None,
+    ))
+    return True
+
+
+def _auto_expire_stale(db: Session, tenant_id: str, actor_id: uuid.UUID) -> int:
+    """Atomically expire stale approvals without overwriting concurrent decisions."""
+    tenant_uuid = uuid.UUID(tenant_id)
     now = datetime.now(timezone.utc)
-    stale = db.query(PendingApproval).filter(
-        PendingApproval.tenant_id == uuid.UUID(tenant_id),
-        PendingApproval.status == "PENDING",
-        PendingApproval.expires_at < now
+    stale_ids = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == tenant_uuid,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at <= now,
+        )
+        .values(status="EXPIRED", updated_at=now)
+        .returning(
+            PendingApproval.id,
+            PendingApproval.action_hash,
+            PendingApproval.action_id,
+        )
+        .execution_options(synchronize_session="fetch")
     ).all()
-    
-    for approval in stale:
-        approval.status = "EXPIRED"
-        wf = db.query(ComplianceWorkflow).filter(
-            ComplianceWorkflow.approval_id == approval.id
-        ).first()
-        if wf:
-            wf.approval_status = "EXPIRED"
-            wf.execution_status = "COMPLETED"
-            
-        audit = ApprovalAudit(
+    if not stale_ids:
+        return 0
+
+    approval_ids = [row.id for row in stale_ids]
+    db.execute(
+        update(ComplianceWorkflow)
+        .where(
+            ComplianceWorkflow.tenant_id == tenant_uuid,
+            ComplianceWorkflow.approval_id.in_(approval_ids),
+            ComplianceWorkflow.approval_status == "PENDING",
+        )
+        .values(approval_status="EXPIRED", execution_status="COMPLETED", updated_at=now)
+        .execution_options(synchronize_session="fetch")
+    )
+    for row in stale_ids:
+        db.add(ApprovalAudit(
             id=uuid.uuid4(),
-            tenant_id=uuid.UUID(tenant_id),
-            approval_id=approval.id,
+            tenant_id=tenant_uuid,
+            approval_id=row.id,
             actor_id=actor_id,
             action="EXPIRED",
-            action_hash=approval.action_hash,
+            action_hash=row.action_hash,
             reason="Approval expired before a human decision",
-            details={"action_id": approval.action_id, "status": "EXPIRED"},
+            details={"action_id": row.action_id, "status": "EXPIRED"},
             mfa_verified=False,
             mfa_timestamp=None,
-        )
-        db.add(audit)
-    if stale:
+        ))
+    db.commit()
+    return len(stale_ids)
+
+
+def _commit_expiry_or_raise_conflict(
+    db: Session,
+    *,
+    approval: PendingApproval,
+    tenant_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    decision_at: datetime,
+) -> None:
+    """Resolve a failed decision CAS without rewriting a concurrent terminal state."""
+    if _expire_pending_approval(
+        db,
+        tenant_id=tenant_id,
+        approval_id=approval.id,
+        actor_id=actor_id,
+        expired_at=decision_at,
+    ):
         db.commit()
+        raise HTTPException(status_code=400, detail="Approval already resolved: EXPIRED")
+
+    db.rollback()
+    current = db.query(PendingApproval.status).filter(
+        PendingApproval.tenant_id == tenant_id,
+        PendingApproval.id == approval.id,
+    ).scalar()
+    raise HTTPException(
+        status_code=400,
+        detail=f"Approval already resolved: {current or 'NOT_FOUND'}",
+    )
 
 
 def _record_altered_approval_rejection(
@@ -320,14 +526,20 @@ def _verify_mfa_if_enabled(
             )
         return False, None
 
-    # Collect TOTP code from body → query param → header (in that priority order)
-    totp_code: Optional[str] = None
-    if body:
-        totp_code = body.totp_code
-    if not totp_code:
-        totp_code = request.query_params.get("totp_code")
-    if not totp_code:
-        totp_code = request.headers.get("X-MFA-Code") or request.headers.get("X-TOTP-Code")
+    header_names = {str(name).lower() for name in request.headers.keys()}
+    if (
+        "totp_code" in request.query_params
+        or "x-mfa-code" in header_names
+        or "x-totp-code" in header_names
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="MFA credentials must be provided in the JSON request body",
+        )
+
+    # Secrets are accepted only in the request body so URLs and headers cannot
+    # retain them in proxy, access-log, or APM metadata.
+    totp_code = body.totp_code if body else None
 
     if not totp_code:
         raise HTTPException(
@@ -365,6 +577,37 @@ def _has_fresh_mfa(mfa_verified: bool, mfa_timestamp: Optional[datetime]) -> boo
     return timestamp >= datetime.now(timezone.utc) - timedelta(minutes=30)
 
 
+def _recovery_step_up(request: Request, db: Session, body: Optional[ApprovalRequest]):
+    """Consume one factor for this HTTP operation, under the runner's approval lock."""
+    verified_at = None
+
+    def check() -> datetime:
+        nonlocal verified_at
+        if verified_at is not None:
+            return verified_at
+        user = db.query(User).filter(
+            User.id == request.state.user_id,
+            User.tenant_id == request.state.tenant_id,
+        ).with_for_update().first()
+        _revalidate_privileged_workflow_actor(request, db, user)
+        try:
+            verified, timestamp = _verify_mfa_if_enabled(
+                user, request, body, required=True, operation="destructive_remediation",
+            )
+        except HTTPException as exc:
+            db.rollback()
+            raise WorkflowAuthorizationError(
+                str(exc.detail), status_code=exc.status_code,
+            ) from exc
+        if not _has_fresh_mfa(verified, timestamp):
+            db.rollback()
+            raise WorkflowAuthorizationError("Fresh MFA is required for destructive remediation")
+        verified_at = timestamp
+        return timestamp
+
+    return check
+
+
 @router.post("/mfa/setup", status_code=200)
 def mfa_setup(
     request: Request,
@@ -372,36 +615,11 @@ def mfa_setup(
     db: Session = Depends(get_tenant_db),
     _auth=require_scopes(["admin"]),
 ):
-    """Generate TOTP secret and 5 backup codes for the current admin user."""
-    user_id = request.state.user_id
-    user = db.query(User).filter(User.id == user_id).with_for_update().first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if user.mfa_enabled:
-        if not body or not body.totp_code:
-            raise HTTPException(status_code=400, detail="Current MFA token or backup code required")
-        if not verify_mfa_challenge(
-            _get_redis(), user, body.totp_code,
-            tenant_id=str(user.tenant_id), operation="mfa_replace",
-            request_id=request.headers.get("x-request-id", ""),
-        ):
-            raise HTTPException(status_code=400, detail="Current MFA token or backup code required")
-        
-    secret = pyotp.random_base32()
-    backup_codes = [pyotp.random_base32()[:8].lower() for _ in range(5)]
-    
-    set_mfa_credentials(user, secret, backup_codes)
-    db.commit()
-    
-    totp = pyotp.TOTP(secret)
-    uri = totp.provisioning_uri(name=user.email, issuer_name="AuthClaw")
-    
-    return {
-        "mfa_secret": secret,
-        "provisioning_uri": uri,
-        "backup_codes": backup_codes,
-        "mfa_enabled": True
-    }
+    """Retired unsafe one-step enrollment path."""
+    raise HTTPException(
+        status_code=410,
+        detail="Use /v1/users/me/mfa/setup and /v1/users/me/mfa/confirm",
+    )
 
 
 @router.post("/approvals/expire-stale", status_code=200)
@@ -414,18 +632,7 @@ def expire_stale_approvals(
     tenant_id = str(request.state.tenant_id)
     user_id = request.state.user_id
     
-    now = datetime.now(timezone.utc)
-    stale = db.query(PendingApproval).filter(
-        PendingApproval.tenant_id == uuid.UUID(tenant_id),
-        PendingApproval.status == "PENDING",
-        PendingApproval.expires_at < now
-    ).all()
-    
-    expired_count = len(stale)
-    if expired_count > 0:
-        _auto_expire_stale(db, tenant_id, user_id)
-        
-    return {"expired_count": expired_count}
+    return {"expired_count": _auto_expire_stale(db, tenant_id, user_id)}
 
 
 @router.get("/approvals", response_model=list[GatewayApprovalResponse])
@@ -458,7 +665,14 @@ def count_pending_gateway_approvals(
     ).count(), "complete": True}
 
 
-@router.post("/approvals/{approval_id}/approve", response_model=GatewayApprovalResponse)
+@router.post(
+    "/approvals/{approval_id}/approve",
+    response_model=GatewayApprovalResponse,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def approve_gateway_approval(
     approval_id: str,
     request: Request,
@@ -467,6 +681,7 @@ def approve_gateway_approval(
     _auth=require_scopes(["admin"]),
 ):
     """Approve a gateway HITL approval so the waiting request may continue (MFA challenged)."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
     user_id = request.state.user_id
     _auto_expire_stale(db, tenant_id, user_id)
@@ -475,11 +690,12 @@ def approve_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).first()
+    ).with_for_update().first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
         raise HTTPException(status_code=400, detail=f"Approval already resolved: {approval.status}")
+    _enforce_separate_approver(db, approval, tenant_id, user_id)
 
     # Verify MFA for the approving user (enforced when MFA is enabled on their account)
     user = db.query(User).filter(
@@ -488,16 +704,42 @@ def approve_gateway_approval(
     ).with_for_update().first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
+    # Authentication happens before handler-level lock waits. Re-bind the exact
+    # session/API key after all authorization rows are locked so revocation wins
+    # the race before MFA consumption or the privileged state transition.
+    _revalidate_privileged_workflow_actor(request, db, user, http_error=True)
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
-        user, request, body, operation="gateway_approval"
+        user, request, body, required=True, operation="gateway_approval"
     )
 
-    approval.status = "APPROVED"
-    approval.approver_id = user_id
-    approval.approved_at = datetime.now(timezone.utc)
-    approval.updated_at = datetime.now(timezone.utc)
-    approval.mfa_verified = mfa_verified
-    approval.mfa_timestamp = mfa_timestamp
+    decision_at = datetime.now(timezone.utc)
+    transitioned = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == uuid.UUID(tenant_id),
+            PendingApproval.id == approval.id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at > decision_at,
+        )
+        .values(
+            status="APPROVED",
+            approver_id=user_id,
+            approved_at=decision_at,
+            updated_at=decision_at,
+            mfa_verified=mfa_verified,
+            mfa_timestamp=mfa_timestamp,
+        )
+        .returning(PendingApproval.id)
+        .execution_options(synchronize_session="fetch")
+    ).scalar_one_or_none()
+    if transitioned is None:
+        _commit_expiry_or_raise_conflict(
+            db,
+            approval=approval,
+            tenant_id=uuid.UUID(tenant_id),
+            actor_id=user_id,
+            decision_at=decision_at,
+        )
 
     # Write immutable audit entry (was previously missing for gateway approvals)
     audit = ApprovalAudit(
@@ -515,7 +757,14 @@ def approve_gateway_approval(
     return _approval_response(approval)
 
 
-@router.post("/approvals/{approval_id}/reject", response_model=GatewayApprovalResponse)
+@router.post(
+    "/approvals/{approval_id}/reject",
+    response_model=GatewayApprovalResponse,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def reject_gateway_approval(
     approval_id: str,
     request: Request,
@@ -531,16 +780,52 @@ def reject_gateway_approval(
         PendingApproval.tenant_id == uuid.UUID(tenant_id),
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_type == "gateway_policy_egress",
-    ).first()
+    ).with_for_update().first()
     if not approval:
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
         raise HTTPException(status_code=400, detail=f"Approval already resolved: {approval.status}")
 
-    approval.status = "REJECTED"
-    approval.approver_id = user_id
-    approval.approved_at = datetime.now(timezone.utc)
-    approval.updated_at = datetime.now(timezone.utc)
+    _revalidate_privileged_workflow_actor(request, db, http_error=True)
+
+    decision_at = datetime.now(timezone.utc)
+    transitioned = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == uuid.UUID(tenant_id),
+            PendingApproval.id == approval.id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at > decision_at,
+        )
+        .values(
+            status="REJECTED",
+            approver_id=user_id,
+            approved_at=decision_at,
+            updated_at=decision_at,
+        )
+        .returning(PendingApproval.id)
+        .execution_options(synchronize_session="fetch")
+    ).scalar_one_or_none()
+    if transitioned is None:
+        _commit_expiry_or_raise_conflict(
+            db,
+            approval=approval,
+            tenant_id=uuid.UUID(tenant_id),
+            actor_id=user_id,
+            decision_at=decision_at,
+        )
+    db.add(ApprovalAudit(
+        id=uuid.uuid4(),
+        tenant_id=uuid.UUID(tenant_id),
+        approval_id=approval.id,
+        actor_id=user_id,
+        action="REJECTED",
+        action_hash=approval.action_hash,
+        reason="Human approver rejected gateway egress",
+        details={"action_id": approval.action_id, "status": "REJECTED"},
+        mfa_verified=False,
+        mfa_timestamp=None,
+    ))
     db.commit()
     db.refresh(approval)
     return _approval_response(approval)
@@ -588,7 +873,14 @@ def get_workflow(
     return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/approve", response_model=WorkflowResponseVariant)
+@router.post(
+    "/{workflow_id}/approve",
+    response_model=WorkflowResponseVariant,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def approve_workflow(
     workflow_id: str,
     request: Request,
@@ -597,6 +889,7 @@ def approve_workflow(
     _auth=require_scopes(["admin"]),
 ):
     """Approve a workflow's remediation plan and resume execution (MFA challenged)."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
     user_id = request.state.user_id
     
@@ -624,7 +917,7 @@ def approve_workflow(
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_id == workflow_id,
         PendingApproval.action_type == "remediation",
-    ).first()
+    ).with_for_update().first()
     
     if not approval:
         raise HTTPException(status_code=404, detail="Approval record not found")
@@ -634,6 +927,7 @@ def approve_workflow(
             status_code=400,
             detail=f"Approval request is already resolved (status={approval.status})",
         )
+    _enforce_separate_approver(db, approval, tenant_id, user_id)
 
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
@@ -664,6 +958,13 @@ def approve_workflow(
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
 
+    # Close the authenticate/wait/revoke/commit race using the credential that
+    # authenticated this request, after the approval and user locks are held.
+    try:
+        _revalidate_privileged_workflow_actor(request, db, user)
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
     requires_fresh_mfa = _approval_requires_fresh_mfa(approval)
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
         user,
@@ -675,18 +976,41 @@ def approve_workflow(
     if requires_fresh_mfa and not _has_fresh_mfa(mfa_verified, mfa_timestamp):
         raise HTTPException(status_code=403, detail="Fresh MFA is required for destructive remediation")
 
-    # Update PendingApproval (non-transferable, bound to current user)
-    approval.status = "APPROVED"
-    approval.approver_id = user_id
-    approval.approved_at = datetime.now(timezone.utc)
-    approval.mfa_verified = mfa_verified
-    approval.mfa_timestamp = mfa_timestamp
+    # Update PendingApproval (non-transferable, bound to current user).
+    decision_at = datetime.now(timezone.utc)
+    transitioned = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == uuid.UUID(tenant_id),
+            PendingApproval.id == approval.id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at > decision_at,
+        )
+        .values(
+            status="APPROVED",
+            approver_id=user_id,
+            approved_at=decision_at,
+            updated_at=decision_at,
+            mfa_verified=mfa_verified,
+            mfa_timestamp=mfa_timestamp,
+        )
+        .returning(PendingApproval.id)
+        .execution_options(synchronize_session="fetch")
+    ).scalar_one_or_none()
+    if transitioned is None:
+        _commit_expiry_or_raise_conflict(
+            db,
+            approval=approval,
+            tenant_id=uuid.UUID(tenant_id),
+            actor_id=user_id,
+            decision_at=decision_at,
+        )
 
     # Sync workflow status
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
         ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
     if wf:
         wf.approval_status = "APPROVED"
         
@@ -708,7 +1032,13 @@ def approve_workflow(
 
     # Resume workflow execution
     try:
-        result = runner.resume(workflow_id, tenant_id, actor_id=str(user_id))
+        result = runner.resume(
+            workflow_id,
+            tenant_id,
+            actor_id=str(user_id),
+            authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
+            step_up_check=(lambda: mfa_timestamp) if requires_fresh_mfa else None,
+        )
         remediation_state = str(result.get("remediation_state") or "")
         if remediation_state in {"SUCCEEDED", "FAILED", "PARTIAL_FAILED", "ROLLBACK_FAILED"}:
             failed = remediation_state != "SUCCEEDED"
@@ -721,13 +1051,24 @@ def approve_workflow(
                 body=f"{workflow_id} finished with remediation state {remediation_state}.",
                 link="/agent",
             )
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    except (WorkflowResumeConflict, WorkflowBusyError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
         logger.error("Failed to approve/resume workflow: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
     return _workflow_response(result)
 
 
-@router.post("/{workflow_id}/reject", response_model=WorkflowResponseVariant)
+@router.post(
+    "/{workflow_id}/reject",
+    response_model=WorkflowResponseVariant,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def reject_workflow(
     workflow_id: str,
     request: Request,
@@ -735,6 +1076,7 @@ def reject_workflow(
     _auth=require_scopes(["admin"]),
 ):
     """Reject a workflow's remediation plan."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
     user_id = request.state.user_id
 
@@ -759,7 +1101,7 @@ def reject_workflow(
         PendingApproval.id == uuid.UUID(approval_id),
         PendingApproval.action_id == workflow_id,
         PendingApproval.action_type == "remediation",
-    ).first()
+    ).with_for_update().first()
 
     if not approval:
         raise HTTPException(status_code=404, detail="Approval record not found")
@@ -770,10 +1112,38 @@ def reject_workflow(
             detail=f"Approval request is already resolved (status={approval.status})",
         )
 
-    # Reject
-    approval.status = "REJECTED"
-    approval.approver_id = user_id
-    approval.approved_at = datetime.now(timezone.utc)
+    try:
+        _revalidate_privileged_workflow_actor(request, db)
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
+    # Reject only if the approval is still pending and unexpired.
+    decision_at = datetime.now(timezone.utc)
+    transitioned = db.execute(
+        update(PendingApproval)
+        .where(
+            PendingApproval.tenant_id == uuid.UUID(tenant_id),
+            PendingApproval.id == approval.id,
+            PendingApproval.status == "PENDING",
+            PendingApproval.expires_at > decision_at,
+        )
+        .values(
+            status="REJECTED",
+            approver_id=user_id,
+            approved_at=decision_at,
+            updated_at=decision_at,
+        )
+        .returning(PendingApproval.id)
+        .execution_options(synchronize_session="fetch")
+    ).scalar_one_or_none()
+    if transitioned is None:
+        _commit_expiry_or_raise_conflict(
+            db,
+            approval=approval,
+            tenant_id=uuid.UUID(tenant_id),
+            actor_id=user_id,
+            decision_at=decision_at,
+        )
 
     # Sync workflow status
     wf = db.query(ComplianceWorkflow).filter(
@@ -838,6 +1208,26 @@ def remediate_workflow(
             status_code=400,
             detail="No remediation plan is available for this workflow",
         )
+
+    state_data = dict(wf.state_data or {})
+    workflow_requester_id = str(state_data.get("requester_id") or "").strip()
+    try:
+        uuid.UUID(workflow_requester_id)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(
+            status_code=409,
+            detail="Workflow requester identity is unavailable; remediation is denied",
+        )
+
+    remediation_requester_id = str(request.state.user_id)
+    existing_remediation_requester = str(
+        state_data.get("remediation_requester_id") or ""
+    ).strip()
+    if existing_remediation_requester and existing_remediation_requester != remediation_requester_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Workflow remediation requester identity is immutable",
+        )
     allowed, retry_after = check_worker_throttle(tenant_id, "remediation", tier=_tenant_tier(db, tenant_id))
     if not allowed:
         raise HTTPException(status_code=429, detail=f"Remediation worker throttle exceeded. Retry after {retry_after:.0f}s.")
@@ -849,7 +1239,7 @@ def remediate_workflow(
         tenant_id,
         workflow_id,
         wf.remediation_plan,
-        requester_id=str(request.state.user_id),
+        requester_id=remediation_requester_id,
     )
 
     # Transition workflow to PAUSED/AWAITING_APPROVAL
@@ -859,9 +1249,9 @@ def remediate_workflow(
     wf.approval_id = uuid.UUID(approval_id)
 
     # Update state_data
-    state_data = wf.state_data or {}
     state_data.update({
         "current_state": "AWAITING_APPROVAL",
+        "remediation_requester_id": remediation_requester_id,
         "execution_status": "PAUSED",
         "remediation_state": "NOT_STARTED",
         "remediation_actions": [],
@@ -894,17 +1284,34 @@ def remediate_workflow(
     return _workflow_response(result)
 
 
-@router.post("/recover", response_model=RecoveryResponse)
+@router.post(
+    "/recover",
+    response_model=RecoveryResponse,
+    dependencies=[
+        Depends(require_interactive_session),
+        require_roles(["owner", "admin"]),
+    ],
+)
 def recover_workflows(
     request: Request,
     db: Session = Depends(get_tenant_db),
+    body: Optional[ApprovalRequest] = None,
     _auth=require_scopes(["admin"]),
 ):
     """Recover all interrupted workflows for the current tenant."""
+    require_interactive_session(request)
     tenant_id = str(request.state.tenant_id)
 
     runner = ComplianceWorkflowRunner(db)
-    results = runner.recover_interrupted(tenant_id)
+    try:
+        results = runner.recover_interrupted(
+            tenant_id,
+            actor_id=str(request.state.user_id),
+            authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
+            step_up_check=_recovery_step_up(request, db, body),
+        )
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
     return RecoveryResponse(
         recovered=len([r for r in results if r["status"] == "recovered"]),

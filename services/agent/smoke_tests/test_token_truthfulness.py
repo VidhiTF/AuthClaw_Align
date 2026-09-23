@@ -150,7 +150,11 @@ def test_gateway_usage_flows_through_real_registrar(telemetry, approval, failure
     with patch.object(service, "get_trace", return_value=[]), patch.object(service, "persist_latest_message_trace"), patch.object(gateway, "log_agent_event"):
         kwargs = {"authorization": None, "x_api_key": None}
         if approval:
-            invoke = lambda: service.execute_approval(approval_record={"tenant_id": 7, "query": "test", "approval_id": "a"}, **kwargs)
+            invoke = lambda: service.execute_approval(
+                approval_record={"tenant_id": 7, "query": "test", "approval_id": "a"},
+                idempotency_key="token-truthfulness-approval",
+                **kwargs,
+            )
         else:
             invoke = lambda: service.execute_chat(message="test", session_id="test", **kwargs)
         if failure:

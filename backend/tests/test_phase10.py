@@ -1,8 +1,12 @@
 import uuid
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 import pytest
+import pyotp
 from unittest.mock import MagicMock, patch
 from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
@@ -89,6 +93,89 @@ def _create_admin_tenant(db_session: Session, name: str, email: str, api_key_raw
     return tenant_id, user_id, {"Authorization": f"Bearer {api_key_raw}"}
 
 
+def _create_tenant_approver(
+    db_session: Session,
+    tenant_id,
+    email: str,
+    api_key_raw: str,
+    *,
+    role: str = "admin",
+):
+    user_id = uuid.uuid4()
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+    db_session.add(User(id=user_id, tenant_id=tenant_id, email=email, role=role, is_active=True))
+    db_session.flush()
+    db_session.add(APIKey(
+        id=uuid.uuid4(), tenant_id=tenant_id, key_hash=hash_key(api_key_raw),
+        name="Separate Approver Key", scopes=["admin", "read", "write"],
+        is_active=True, created_by=user_id,
+    ))
+    session_token = "acl_session_" + uuid.uuid4().hex
+    db_session.execute(text("""SELECT authn.create_session(
+        :hash, :tenant, :user, 'mfa-test', now()+interval '10 minutes', '{}'::jsonb)"""),
+        {"hash": hash_key(session_token), "tenant": tenant_id, "user": user_id})
+    db_session.commit()
+    db_session.execute(text("SET app.current_tenant_id = ''"))
+    return user_id, {"Authorization": f"Bearer {session_token}"}
+
+
+def test_gateway_decisions_require_interactive_privileged_role(
+    client: TestClient,
+    db_session: Session,
+):
+    tenant_id, requester_id, machine_headers = _create_admin_tenant(
+        db_session,
+        "Gateway Decision Auth Tenant",
+        "requester@gateway-decision-auth.example",
+        "gateway_decision_requester_key",
+    )
+    _, viewer_headers = _create_tenant_approver(
+        db_session,
+        tenant_id,
+        "viewer@gateway-decision-auth.example",
+        "gateway_decision_viewer_key",
+        role="viewer",
+    )
+    approval_id = _create_gateway_approval(
+        db_session,
+        tenant_id,
+        requester_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    approve = client.post(
+        f"/v1/workflows/approvals/{approval_id}/approve",
+        headers=viewer_headers,
+        json={"totp_code": "654321"},
+    )
+    reject = client.post(
+        f"/v1/workflows/approvals/{approval_id}/reject",
+        headers=viewer_headers,
+    )
+    machine_reject = client.post(
+        f"/v1/workflows/approvals/{approval_id}/reject",
+        headers=machine_headers,
+    )
+
+    assert approve.status_code == status.HTTP_403_FORBIDDEN
+    assert reject.status_code == status.HTTP_403_FORBIDDEN
+    assert machine_reject.status_code == status.HTTP_403_FORBIDDEN
+
+
+def _enroll_mfa(client: TestClient, headers: dict[str, str]):
+    setup = client.post("/v1/users/me/mfa/setup", headers=headers)
+    assert setup.status_code == status.HTTP_200_OK
+    data = setup.json()
+    confirmation = client.post(
+        "/v1/users/me/mfa/confirm",
+        headers=headers,
+        json={"code": pyotp.TOTP(data["mfa_secret"]).now()},
+    )
+    assert confirmation.status_code == status.HTTP_200_OK
+    assert confirmation.json()["mfa_enabled"] is True
+    return data
+
+
 def _create_workflow_approval(client: TestClient, headers: dict[str, str]):
     with patch("app.orchestrator.connectors.DocumentScanner.list_documents") as mock_list, \
          patch("app.orchestrator.connectors.DocumentScanner.fetch_and_extract_text") as mock_fetch, \
@@ -109,6 +196,32 @@ def _create_workflow_approval(client: TestClient, headers: dict[str, str]):
     return workflow_id, response_remediate.json()["approval_id"]
 
 
+def _create_gateway_approval(
+    db_session: Session,
+    tenant_id,
+    requester_id,
+    *,
+    expires_at: datetime,
+) -> uuid.UUID:
+    approval_id = uuid.uuid4()
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+    db_session.add(PendingApproval(
+        id=approval_id,
+        tenant_id=tenant_id,
+        action_id=f"gateway-{approval_id}",
+        action_type="gateway_policy_egress",
+        action_description="Release a held gateway request",
+        action_payload={"request_id": f"request-{approval_id}"},
+        action_hash="a" * 64,
+        status="PENDING",
+        requester_id=requester_id,
+        expires_at=expires_at,
+    ))
+    db_session.commit()
+    db_session.execute(text("SET app.current_tenant_id = ''"))
+    return approval_id
+
+
 def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Session):
     """Verify MFA registration, TOTP validation, backup codes validation, and ApprovalAudit."""
     tenant_id, user_id, headers = _create_admin_tenant(
@@ -118,9 +231,10 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
         "system_admin_key_tenant_d",
     )
 
-    response = client.post("/v1/workflows/mfa/setup", headers=headers)
-    assert response.status_code == status.HTTP_200_OK
-    mfa_data = response.json()
+    approver_id, approver_headers = _create_tenant_approver(
+        db_session, tenant_id, "approver@tenantD.com", "approver_key_tenant_d"
+    )
+    mfa_data = _enroll_mfa(client, approver_headers)
     assert "mfa_secret" in mfa_data
     assert "provisioning_uri" in mfa_data
     assert len(mfa_data["backup_codes"]) == 5
@@ -128,13 +242,13 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
 
     workflow_id, approval_id = _create_workflow_approval(client, headers)
 
-    response_no_mfa = client.post(f"/v1/workflows/{workflow_id}/approve", headers=headers)
+    response_no_mfa = client.post(f"/v1/workflows/{workflow_id}/approve", headers=approver_headers)
     assert response_no_mfa.status_code == status.HTTP_400_BAD_REQUEST
     assert "MFA token required" in response_no_mfa.json()["detail"]
 
     response_bad_mfa = client.post(
         f"/v1/workflows/{workflow_id}/approve",
-        headers=headers,
+        headers=approver_headers,
         json={"totp_code": "000000"}
     )
     assert response_bad_mfa.status_code == status.HTTP_400_BAD_REQUEST
@@ -153,7 +267,7 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
         }
         response_backup = client.post(
             f"/v1/workflows/{workflow_id}/approve",
-            headers=headers,
+            headers=approver_headers,
             json={"totp_code": backup_code_to_use}
         )
     assert response_backup.status_code == status.HTTP_200_OK
@@ -161,7 +275,7 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
     assert response_backup.json()["current_state"] == "COMPLETE"
 
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
-    user_db = db_session.query(User).filter(User.id == user_id).first()
+    user_db = db_session.query(User).filter(User.id == approver_id).first()
     assert backup_code_to_use not in user_db.mfa_backup_codes
     assert len(user_db.mfa_backup_codes) == 4
     assert decrypt_secret(user_db.mfa_secret) == mfa_data["mfa_secret"]
@@ -172,7 +286,7 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
     assert audit is not None
     assert audit.action == "APPROVED"
     assert audit.mfa_verified is True
-    assert audit.actor_id == user_id
+    assert audit.actor_id == approver_id
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
 
@@ -209,13 +323,16 @@ def test_phase10_stale_mfa_rejected_before_approval_commit(
         "system_admin_key_stale_mfa",
     )
     workflow_id, approval_id = _create_workflow_approval(client, headers)
+    _, approver_headers = _create_tenant_approver(
+        db_session, tenant_id, "approver@stale-mfa.example", "approver_key_stale_mfa"
+    )
     stale_timestamp = datetime.now(timezone.utc) - timedelta(minutes=31)
 
     with patch(
         "app.api.v1.endpoints.workflows._verify_mfa_if_enabled",
         return_value=(True, stale_timestamp),
     ):
-        response = client.post(f"/v1/workflows/{workflow_id}/approve", headers=headers)
+        response = client.post(f"/v1/workflows/{workflow_id}/approve", headers=approver_headers)
 
     assert response.status_code == status.HTTP_403_FORBIDDEN
     assert response.json()["detail"] == "Fresh MFA is required for destructive remediation"
@@ -267,6 +384,158 @@ def test_phase10_approval_expiration(client: TestClient, db_session: Session):
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
 
+def test_gateway_approval_expiring_during_mfa_is_not_approved(
+    client: TestClient,
+    db_session: Session,
+):
+    tenant_id, requester_id, _ = _create_admin_tenant(
+        db_session,
+        "Gateway Expiry Tenant",
+        "requester@gateway-expiry.example",
+        "gateway_expiry_requester_key",
+    )
+    approver_id, approver_headers = _create_tenant_approver(
+        db_session,
+        tenant_id,
+        "approver@gateway-expiry.example",
+        "gateway_expiry_approver_key",
+    )
+    approval_id = _create_gateway_approval(
+        db_session,
+        tenant_id,
+        requester_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(milliseconds=200),
+    )
+
+    with patch("app.api.v1.endpoints.workflows._auto_expire_stale", return_value=0), patch(
+        "app.api.v1.endpoints.workflows._verify_mfa_if_enabled",
+        side_effect=lambda *_args, **_kwargs: (time.sleep(0.3) or (True, datetime.now(timezone.utc))),
+    ):
+        response = client.post(
+            f"/v1/workflows/approvals/{approval_id}/approve",
+            headers=approver_headers,
+            json={"totp_code": "654321"},
+        )
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "EXPIRED" in response.json()["detail"]
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+    db_session.expire_all()
+    approval = db_session.get(PendingApproval, approval_id)
+    assert approval.status == "EXPIRED"
+    assert approval.approver_id is None
+    audit = db_session.query(ApprovalAudit).filter(
+        ApprovalAudit.approval_id == approval_id,
+        ApprovalAudit.action == "EXPIRED",
+    ).one()
+    assert audit.actor_id == approver_id
+    assert db_session.query(ApprovalAudit).filter(
+        ApprovalAudit.approval_id == approval_id,
+        ApprovalAudit.action == "APPROVED",
+    ).count() == 0
+    db_session.execute(text("SET app.current_tenant_id = ''"))
+
+
+def test_gateway_approve_reject_race_has_one_terminal_winner_and_audit(
+    client: TestClient,
+    db_session: Session,
+):
+    tenant_id, requester_id, _ = _create_admin_tenant(
+        db_session,
+        "Gateway Race Tenant",
+        "requester@gateway-race.example",
+        "gateway_race_requester_key",
+    )
+    _, approver_headers = _create_tenant_approver(
+        db_session,
+        tenant_id,
+        "approver@gateway-race.example",
+        "gateway_race_approver_key",
+    )
+    approval_id = _create_gateway_approval(
+        db_session,
+        tenant_id,
+        requester_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    mfa_started = Event()
+    release_mfa = Event()
+
+    def verify(*_args, **_kwargs):
+        mfa_started.set()
+        assert release_mfa.wait(timeout=5)
+        return True, datetime.now(timezone.utc)
+
+    with patch("app.api.v1.endpoints.workflows._verify_mfa_if_enabled", side_effect=verify):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            approve = pool.submit(
+                client.post,
+                f"/v1/workflows/approvals/{approval_id}/approve",
+                headers=approver_headers,
+                json={"totp_code": "654321"},
+            )
+            assert mfa_started.wait(timeout=5)
+            reject = pool.submit(
+                client.post,
+                f"/v1/workflows/approvals/{approval_id}/reject",
+                headers=approver_headers,
+            )
+            release_mfa.set()
+            responses = [approve.result(timeout=10), reject.result(timeout=10)]
+
+    statuses = sorted(response.status_code for response in responses)
+    assert statuses[0] == 200 and statuses[1] in {400, 404}, [
+        (response.status_code, response.text) for response in responses
+    ]
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+    db_session.expire_all()
+    assert db_session.get(PendingApproval, approval_id).status == "APPROVED"
+    actions = [row.action for row in db_session.query(ApprovalAudit).filter(
+        ApprovalAudit.approval_id == approval_id,
+    ).all()]
+    assert actions == ["APPROVED"]
+    db_session.execute(text("SET app.current_tenant_id = ''"))
+
+
+def test_gateway_rejection_has_immutable_audit_evidence(
+    client: TestClient,
+    db_session: Session,
+):
+    tenant_id, requester_id, _ = _create_admin_tenant(
+        db_session,
+        "Gateway Reject Tenant",
+        "requester@gateway-reject.example",
+        "gateway_reject_requester_key",
+    )
+    approver_id, approver_headers = _create_tenant_approver(
+        db_session,
+        tenant_id,
+        "approver@gateway-reject.example",
+        "gateway_reject_approver_key",
+    )
+    approval_id = _create_gateway_approval(
+        db_session,
+        tenant_id,
+        requester_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    response = client.post(
+        f"/v1/workflows/approvals/{approval_id}/reject",
+        headers=approver_headers,
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+    db_session.expire_all()
+    audit = db_session.query(ApprovalAudit).filter(
+        ApprovalAudit.approval_id == approval_id,
+        ApprovalAudit.action == "REJECTED",
+    ).one()
+    assert audit.actor_id == approver_id
+    assert audit.action_hash == "a" * 64
+    assert audit.details["status"] == "REJECTED"
+    db_session.execute(text("SET app.current_tenant_id = ''"))
 def test_pending_approval_count_is_complete_and_excludes_expired(client: TestClient, db_session: Session):
     tenant_id, user_id, headers = _create_admin_tenant(
         db_session, "Approval Count Tenant", "count@example.com", "approval_count_key")

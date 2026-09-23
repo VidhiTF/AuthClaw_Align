@@ -193,7 +193,7 @@ jobs:
           .ci-backend/bin/python -m pip install --require-hashes -r backend/requirements-test.txt
           cd backend
           ../.ci-backend/bin/python -m pytest -p no:cacheprovider -q \
-            tests/test_auth_baseline.py tests/test_mfa_replay.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
+            tests/test_auth_baseline.py tests/test_mfa_replay.py tests/test_ent022_mfa_security.py tests/test_mfa_credential_purpose.py tests/test_authorization_matrix.py tests/test_policy_engine.py \
             tests/test_client_ip.py tests/test_bff_client_ip.py tests/test_release4_abuse_controls.py \
             tests/test_oidc_transactions.py \
             tests/test_reset_abuse_security.py tests/test_review_logging_and_event_identity.py tests/test_debug_settings.py \
@@ -288,6 +288,7 @@ jobs:
       - name: Run destructive PostgreSQL suites serially
         working-directory: backend
         env:
+          ENT022_EVIDENCE_DIR: ../ent022-recovery-evidence
           ENT019_TEST_DATABASE_URL: ${{ env.OWNER_DATABASE_URL }}
         run: >-
           ../.ci-backend-integration/bin/python -m pytest -p no:cacheprovider -q
@@ -304,7 +305,17 @@ jobs:
           tests/test_worker_lifecycle_postgres.py
           tests/test_workflow_advisory_lock_postgres.py
           tests/test_t10_postgres.py
+          tests/test_mfa_recovery_postgres.py
           tests/test_audit_metrics.py
+
+      - name: Preserve MFA recovery audit evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ent022-recovery-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ent022-recovery-evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -350,12 +361,13 @@ jobs:
       postgres:
         image: postgres:16.10-alpine@sha256:029660641a0cfc575b14f336ba448fb8a75fd595d42e1fa316b9fb4378742297
         env:
-          POSTGRES_PASSWORD: ent019-test-only
-          POSTGRES_DB: ent019_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: authclaw-agent-ci-owner
+          POSTGRES_DB: authclaw_agent_ci_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d ent019_test"
+          --health-cmd "pg_isready -U postgres -d authclaw_agent_ci_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -369,8 +381,9 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
-      ENT019_TEST_DATABASE_URL: postgresql+psycopg2://postgres:ent019-test-only@127.0.0.1:5432/ent019_test
+      ENT019_TEST_DATABASE_URL: postgresql+psycopg2://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
       ENT018_REDIS_URL: redis://localhost:6379
+      ENT022_AGENT_POSTGRES_URL: postgresql+psycopg2://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
       QUOTA_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -392,10 +405,44 @@ jobs:
             tests/test_sensitive_data_detection.py tests/test_audit_transport_contract.py \
             smoke_tests/test_truthful_telemetry.py smoke_tests/test_trust_runtime_boundaries.py smoke_tests/test_token_truthfulness.py smoke_tests/test_telemetry_tenant_postgres.py smoke_tests/test_queue_health.py \
             smoke_tests/test_control_plane_auth.py smoke_tests/test_agent_execution_authorization.py \
+            smoke_tests/test_control_plane_mfa_postgres.py \
             smoke_tests/test_graph_security_decisions.py smoke_tests/test_graph_metadata_contract.py \
+            smoke_tests/test_gateway_provider.py smoke_tests/test_privileged_policy_invariants.py \
+            smoke_tests/test_runtime_context_regressions.py \
             smoke_tests/test_quota_service.py smoke_tests/test_quota_http_boundary.py \
             smoke_tests/test_provider_quotas.py smoke_tests/test_monitoring_quotas.py smoke_tests/test_document_provider_health.py smoke_tests/test_connector_truthfulness.py \
             smoke_tests/test_quota_redis.py smoke_tests/test_compliance_diagnostics.py -q
+        env:
+          ENT022_EVIDENCE_DIR: ${{ github.workspace }}/ent022-mfa-evidence
+      - name: Verify real backend TOTP through signed agent approval and execution
+        env:
+          ENT022_EVIDENCE_DIR: ${{ github.workspace }}/ent022-mfa-evidence
+          TEST_OWNER_DATABASE_URL: postgresql+psycopg://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
+          OWNER_DATABASE_URL: postgresql+psycopg://postgres:authclaw-agent-ci-owner@127.0.0.1:5432/authclaw_agent_ci_test
+          TEST_DATABASE_URL: postgresql+psycopg://authclaw_app:authclaw-ci-app@127.0.0.1:5432/authclaw_agent_ci_test
+          DATABASE_URL: postgresql+psycopg://authclaw_app:authclaw-ci-app@127.0.0.1:5432/authclaw_agent_ci_test
+          BACKEND_MIGRATION_DATABASE_URL: postgresql+psycopg://authclaw_migrator:authclaw-ci-migrator@127.0.0.1:5432/authclaw_agent_ci_test
+          BACKEND_MIGRATOR_PASSWORD: authclaw-ci-migrator
+          POSTGRES_APP_PASSWORD: authclaw-ci-app
+          REDIS_URL: redis://localhost:6379
+          ENVELOPE_KEY: YXV0aGNsYXctY2ktZW52ZWxvcGUta2V5LTMyaA==
+          API_KEY_HASH_SECRET: authclaw-ci-api-key-hash-secret
+          SESSION_SECRET: authclaw-ci-session-secret-material-32
+          AUTHCLAW_ENV: test
+        run: |
+          python -m venv .ci-mfa-backend
+          .ci-mfa-backend/bin/python -m pip install --require-hashes -r backend/requirements-test.txt
+          export ENT022_AGENT_PYTHON="$PWD/.ci-agent/bin/python"
+          cd backend
+          ../.ci-mfa-backend/bin/python -m pytest -p no:cacheprovider tests/test_agent_mfa_assertion_postgres.py -q
+      - name: Preserve privileged MFA audit evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ent022-mfa-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ent022-mfa-evidence/*.json
+          if-no-files-found: error
+          retention-days: 14
 
   sdk:
     name: Python SDK Tests

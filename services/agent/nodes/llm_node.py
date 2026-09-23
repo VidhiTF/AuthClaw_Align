@@ -77,6 +77,17 @@ def _provider_token_stream(provider, prompt: str):
     yield provider.generate(prompt)
 
 
+def _provider_call_kwargs(state):
+    """Bind approved executions to one stable provider-visible operation ID."""
+    idempotency_key = state.get("idempotency_key")
+    if not idempotency_key:
+        return {}
+    return {
+        "idempotency_key": idempotency_key,
+        "request_id": state.get("request_id") or idempotency_key,
+    }
+
+
 def stream_llm_node(state):
     """
     Additive streaming path for gateway callers that can consume chunks.
@@ -133,6 +144,10 @@ def llm_node(state):
             "response": "Policy Violation"
         }
 
+    pre_effect_check = state.get("pre_effect_check")
+    if pre_effect_check is not None:
+        pre_effect_check()
+
     session_id = state.get(
         "session_id",
         "default"
@@ -159,7 +174,12 @@ def llm_node(state):
         
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(copy_context().run, provider.generate, prompt)
+            future = executor.submit(
+                copy_context().run,
+                provider.generate,
+                prompt,
+                **_provider_call_kwargs(state),
+            )
             final_response = future.result(timeout=30.0)
         except concurrent.futures.TimeoutError as te:
             print("[Provider End] Timeout occurred", flush=True)

@@ -201,6 +201,11 @@ class User(Base):
     mfa_secret = Column(Text, nullable=True)  # Encrypted TOTP secret
     mfa_last_totp_step = Column(BigInteger, nullable=True)  # Last consumed step for this credential
     mfa_backup_codes = Column(ARRAY(String), nullable=True)  # Hashed one-time backup codes
+    mfa_pending_secret = Column(Text, nullable=True)
+    mfa_pending_last_totp_step = Column(BigInteger, nullable=True)
+    mfa_pending_backup_codes = Column(ARRAY(String), nullable=True)
+    mfa_pending_expires_at = Column(DateTime(timezone=True), nullable=True)
+    mfa_enrolled_at = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True)
     last_login = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
@@ -549,6 +554,10 @@ class PendingApproval(Base):
         Index("idx_approval_status", "status"),
         Index("idx_approval_expires", "expires_at"),
         Index("idx_approval_tenant_action_hash", "tenant_id", "action_hash"),
+        UniqueConstraint(
+            "tenant_id", "action_type", "action_id",
+            name="uq_pending_approval_tenant_action",
+        ),
     )
 
 

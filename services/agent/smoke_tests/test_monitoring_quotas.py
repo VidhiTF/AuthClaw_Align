@@ -9,7 +9,7 @@ from unittest.mock import Mock, mock_open, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services.quota_service import QuotaExceeded, QuotaUnavailable
-from services.tenant_context import get_current_tenant_id, tenant_context
+from services.tenant_context import get_current_request_id, get_current_tenant_id, tenant_context
 
 
 class MonitoringQuotaTests(unittest.TestCase):
@@ -17,7 +17,8 @@ class MonitoringQuotaTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / "document_processing/monitoring.py"
         nodes = [node for node in ast.parse(source.read_text()).body
                  if isinstance(node, ast.FunctionDef) and node.name in
-                 {"_scan_failed", "sync_sources", "_sync_sources", "trigger_manual_sync", "start_background_monitoring", "_monitor_loop"}]
+                 {"_scan_request_context", "_scan_failed", "sync_sources", "_sync_sources",
+                  "trigger_manual_sync", "start_background_monitoring", "_monitor_loop"}]
         self.conn = Mock()
         self.conn.execute.return_value.fetchone.return_value = (1, 2, "completed")
         self.conn.execute.return_value.fetchall.return_value = []
@@ -25,7 +26,8 @@ class MonitoringQuotaTests(unittest.TestCase):
         self.engine.connect.return_value.__enter__ = Mock(return_value=self.conn)
         self.engine.connect.return_value.__exit__ = Mock(return_value=False)
         self.engine.begin = self.engine.connect
-        self.ns = {"get_current_tenant_id": get_current_tenant_id,
+        self.ns = {"get_current_request_id": get_current_request_id,
+                   "get_current_tenant_id": get_current_tenant_id,
                    "QuotaExceeded": QuotaExceeded, "QuotaUnavailable": QuotaUnavailable,
                    "record_unavailable": Mock(), "engine": self.engine, "text": lambda value: value,
                    "require_source_tenant": Mock(),
@@ -37,7 +39,8 @@ class MonitoringQuotaTests(unittest.TestCase):
                    "datetime": datetime, "timezone": timezone, "last_sync_time": "N/A",
                    "tenant_context": tenant_context, "threading": threading,
                    "_monitor_thread": None,
-                   "_stop_event": Mock(), "time": Mock()}
+                   "_stop_event": Mock(), "time": Mock(),
+                   "MONITOR_REQUESTER_ID": "service:document-monitor"}
         self.monitor_state = {"enabled": False, "status": "disabled",
                               "tenant_configured": False, "failures_total": 0,
                               "last_error_type": None, "last_success_timestamp": None}
@@ -78,14 +81,19 @@ class MonitoringQuotaTests(unittest.TestCase):
         for failure in (QuotaExceeded("expensive_model"), QuotaUnavailable("Redis unavailable")):
             self.ns["run_document_scan_pipeline"].side_effect = failure
             with tenant_context(7), self.assertRaises(type(failure)):
-                self.ns["trigger_manual_sync"]()
+                self.ns["trigger_manual_sync"]("oidc|manual-requester")
             self.assertEqual(self.ns["last_sync_time"], "N/A")
             self.ns["list_cloud_source_files"].assert_not_called()
 
     def test_manual_passes_verified_tenant_and_scopes_queries(self):
         with tenant_context(7):
-            self.assertEqual(self.ns["trigger_manual_sync"]()["status"], "success")
+            self.assertEqual(self.ns["trigger_manual_sync"]("oidc|manual-requester")["status"], "success")
         self.assertEqual(self.ns["run_document_scan_pipeline"].call_args.kwargs["tenant_id"], "7")
+        self.assertEqual(
+            self.ns["run_document_scan_pipeline"].call_args.kwargs["requested_by"],
+            "oidc|manual-requester",
+        )
+        self.assertTrue(self.ns["run_document_scan_pipeline"].call_args.kwargs["request_id"])
         for call in self.conn.execute.call_args_list:
             if "pg_try_advisory_xact_lock" in call.args[0]:
                 self.assertEqual(call.args[1], {"key": "document-sync:7"})
@@ -97,7 +105,17 @@ class MonitoringQuotaTests(unittest.TestCase):
         self.ns["os"].listdir.return_value = []
         self.ns["list_cloud_source_files"].side_effect = QuotaUnavailable("quota unavailable")
         with tenant_context(7), self.assertRaises(QuotaUnavailable):
-            self.ns["trigger_manual_sync"]()
+            self.ns["trigger_manual_sync"]("oidc|manual-requester")
+
+    def test_manual_sync_rejects_missing_requester_identity(self):
+        with tenant_context(7), self.assertRaises(ValueError):
+            self.ns["trigger_manual_sync"]("")
+        self.ns["run_document_scan_pipeline"].assert_not_called()
+
+    def test_autonomous_scan_uses_monitor_service_identity(self):
+        context = self.ns["_scan_request_context"](71)
+        self.assertEqual(context["requested_by"], "service:document-monitor")
+        self.assertTrue(context["request_id"])
         self.assertEqual(self.ns["last_sync_time"], "N/A")
 
     def test_returned_pipeline_failure_propagates_without_rescanning_alerts(self):
@@ -130,7 +148,7 @@ class MonitoringQuotaTests(unittest.TestCase):
                         else:
                             with tenant_context(7), self.assertRaisesRegex(
                                     RuntimeError, "Document synchronization incomplete"):
-                                self.ns["trigger_manual_sync"]()
+                                self.ns["trigger_manual_sync"]("oidc|manual-requester")
                         self.assertEqual(self.ns["last_sync_time"], "previous success")
                         self.ns["run_document_scan_pipeline"].assert_called_once()
                         self.conn.execute.return_value.fetchone.side_effect = None
@@ -143,10 +161,10 @@ class MonitoringQuotaTests(unittest.TestCase):
                             self.conn.execute.return_value.fetchone.return_value = (1, 4, status, health)
                             with tenant_context(7):
                                 if status == "completed" and health in ("healthy", "not_applicable"):
-                                    self.assertEqual(self.ns["trigger_manual_sync"]()["status"], "success")
+                                    self.assertEqual(self.ns["trigger_manual_sync"]("oidc|manual-requester")["status"], "success")
                                 else:
                                     with self.assertRaisesRegex(RuntimeError, "Document synchronization incomplete"):
-                                        self.ns["trigger_manual_sync"]()
+                                        self.ns["trigger_manual_sync"]("oidc|manual-requester")
                                     if background:
                                         self.ns["_monitor_loop"]("7")
                                         self.assertEqual(observed[-1]["status"], "degraded")
@@ -173,7 +191,7 @@ class MonitoringQuotaTests(unittest.TestCase):
                 else:
                     with tenant_context(7), self.assertRaisesRegex(
                             RuntimeError, "Document synchronization incomplete"):
-                        self.ns["trigger_manual_sync"]()
+                        self.ns["trigger_manual_sync"]("oidc|manual-requester")
                 self.assertEqual(self.ns["last_sync_time"], "previous success")
 
     def test_unchanged_degraded_scan_does_not_claim_recovery(self):
@@ -182,14 +200,14 @@ class MonitoringQuotaTests(unittest.TestCase):
                 self.setUp()
                 self.conn.execute.return_value.fetchone.return_value = (1, 4, "completed", health)
                 with tenant_context(7), self.assertRaisesRegex(RuntimeError, "Document synchronization incomplete"):
-                    self.ns["trigger_manual_sync"]()
+                    self.ns["trigger_manual_sync"]("oidc|manual-requester")
                 self.ns["run_document_scan_pipeline"].assert_not_called()
                 self.assertEqual(self.ns["last_sync_time"], "N/A")
 
     def test_source_failure_preserves_success_time_and_recovery(self):
         self.engine.connect.side_effect = ConnectionError("database unavailable")
         with tenant_context(7), self.assertRaises(ConnectionError):
-            self.ns["trigger_manual_sync"]()
+            self.ns["trigger_manual_sync"]("oidc|manual-requester")
         self.assertEqual(self.ns["last_sync_time"], "N/A")
         observed = []
         def wait(seconds):
@@ -209,14 +227,14 @@ class MonitoringQuotaTests(unittest.TestCase):
         self.ns["os"].listdir.return_value = []
         self.ns["list_cloud_source_files"].side_effect = ConnectionError("source unavailable")
         with tenant_context(7), self.assertRaises(RuntimeError):
-            self.ns["trigger_manual_sync"]()
+            self.ns["trigger_manual_sync"]("oidc|manual-requester")
         self.assertEqual(self.conn.execute.call_count, 1)  # Only the synchronization lock.
         self.assertEqual(self.ns["list_cloud_source_files"].call_count, 5)
 
     def test_pending_same_size_document_is_retried(self):
         self.conn.execute.return_value.fetchone.return_value = (1, 4, "pending")
         with tenant_context(7):
-            self.ns["trigger_manual_sync"]()
+            self.ns["trigger_manual_sync"]("oidc|manual-requester")
         self.ns["run_document_scan_pipeline"].assert_called_once()
 
     def test_cloud_download_failure_is_retried_without_size_change(self):
@@ -226,12 +244,12 @@ class MonitoringQuotaTests(unittest.TestCase):
             {"id": "file-1", "name": "doc.txt", "size_bytes": 4}] if source == "gdrive" else [])
         self.ns["fetch_gdrive_document"] = Mock(side_effect=ConnectionError("download failed"))
         with tenant_context(7), self.assertRaises(RuntimeError):
-            self.ns["trigger_manual_sync"]()
+            self.ns["trigger_manual_sync"]("oidc|manual-requester")
         self.ns["run_document_scan_pipeline"].assert_not_called()
         self.ns["fetch_gdrive_document"].side_effect = None
         self.ns["fetch_gdrive_document"].return_value = b""
         with tenant_context(7):
-            self.assertEqual(self.ns["trigger_manual_sync"]()["status"], "success")
+            self.assertEqual(self.ns["trigger_manual_sync"]("oidc|manual-requester")["status"], "success")
         self.ns["run_document_scan_pipeline"].assert_called_once()
 
     def test_source_owner_is_checked_before_sync_io(self):
@@ -240,7 +258,7 @@ class MonitoringQuotaTests(unittest.TestCase):
         self.ns["require_source_tenant"] = require_source_tenant
         with patch.dict("os.environ", AUTHCLAW_CONNECTOR_TENANT_ID="8"), tenant_context(7):
             with self.assertRaises(HTTPException) as failure:
-                self.ns["trigger_manual_sync"]()
+                self.ns["trigger_manual_sync"]("oidc|manual-requester")
             self.assertEqual(failure.exception.status_code, 403)
         self.engine.connect.assert_not_called()
         self.ns["os"].listdir.assert_not_called()
@@ -267,7 +285,7 @@ class MonitoringQuotaTests(unittest.TestCase):
             self.ns["list_cloud_source_files"].side_effect = lambda source: ([
                 {"id": "file-1", "name": "doc.txt", "size_bytes": size}] if source == "gdrive" else [])
             with tenant_context(7), self.assertRaises(RuntimeError):
-                self.ns["trigger_manual_sync"]()
+                self.ns["trigger_manual_sync"]("oidc|manual-requester")
         self.assertFalse(any("INSERT" in call.args[0] for call in self.conn.execute.call_args_list))
 
 

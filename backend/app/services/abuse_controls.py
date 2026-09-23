@@ -41,7 +41,13 @@ redis.call('SET', KEYS[3], '1', 'PX', cooldown)
 return {failures, cooldown, level}
 """
 
-MFA_RESET_LUA = "return redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])"
+MFA_RESET_LUA = """
+local remaining = redis.call('PTTL', KEYS[3])
+if remaining == -1 then return redis.error_reply('invalid cooldown TTL') end
+if remaining > 0 then return remaining end
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+return 0
+"""
 
 
 @dataclass(frozen=True)
@@ -107,8 +113,10 @@ def atomic_increment(
 
 def _mfa_keys(tenant_id: str, user_id: str, operation: str) -> tuple[str, str, str]:
     subject = hashlib.sha256(f"{tenant_id}:{user_id}".encode("utf-8")).hexdigest()[:32]
-    operation_name = operation.replace("_", "-")
-    prefix = f"authclaw:mfa:v2:{{{subject}}}:{operation_name}"
+    # A TOTP/recovery factor is shared by every privileged operation. The
+    # primary guessing budget must therefore be factor-wide; operation remains
+    # audit context, not a way to obtain another independent attempt budget.
+    prefix = f"authclaw:mfa:v3:{{{subject}}}:factor"
     return f"{prefix}:attempts", f"{prefix}:level", f"{prefix}:cooldown"
 
 
@@ -163,8 +171,9 @@ def verify_mfa_challenge(
     tenant_id: str,
     operation: str,
     request_id: str = "",
+    pending_enrollment: bool = False,
 ) -> bool:
-    """Verify MFA with an atomic, per-user/per-operation bounded cooldown."""
+    """Verify MFA with an atomic, factor-wide per-user bounded cooldown."""
     attempts_key, level_key, cooldown_key = _mfa_keys(
         tenant_id, str(user.id), operation
     )
@@ -185,17 +194,34 @@ def verify_mfa_challenge(
             headers={"Retry-After": str(max(1, (cooldown_ms + 999) // 1000))},
         )
 
-    from app.core.auth import verify_mfa_code
+    from app.core.auth import verify_mfa_code_result
 
-    if verify_mfa_code(user, code):
+    verification = (
+        verify_mfa_code_result(user, code, pending_enrollment=True)
+        if pending_enrollment
+        else verify_mfa_code_result(user, code)
+    )
+    if verification.verified:
         try:
-            client.eval(MFA_RESET_LUA, 3, attempts_key, level_key, cooldown_key)
+            cooldown_ms = int(client.eval(
+                MFA_RESET_LUA, 3, attempts_key, level_key, cooldown_key
+            ))
         except redis.RedisError as exc:
             raise _redis_failure(
                 exc, tenant_id, str(user.id), operation, request_id
             ) from exc
+        if cooldown_ms > 0:
+            _audit(tenant_id, str(user.id), operation, "cooldown", request_id)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many MFA attempts. Try again later.",
+                headers={"Retry-After": str(max(1, (cooldown_ms + 999) // 1000))},
+            )
         _audit(tenant_id, str(user.id), operation, "reset", request_id)
         return True
+
+    if verification.reason == "replay":
+        _audit(tenant_id, str(user.id), operation, "replay_rejected", request_id)
 
     try:
         result = client.eval(

@@ -523,6 +523,10 @@ def test_workflow_response_routes_respect_authenticated_postgres_boundary(isolat
         db.commit()
     request = Request({"type": "http", "headers": []})
     request.state.tenant_id, request.state.user_id = tenant_a.tenant_id, tenant_a.user_id
+    request.state.credential_kind = "session"
+    request.state.credential_hash = tenant_a.session_hash
+    request.state.scopes = ["admin"]
+    request.state.user_role = "admin"
     with isolation.session_for(tenant_a) as db:
         assert db.execute(text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")).scalar_one() is False
         assert db.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'compliance_workflows'::regclass")).scalar_one() is True

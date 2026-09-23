@@ -55,7 +55,12 @@ class GraphSecurityDecisionTests(unittest.TestCase):
         workflow.add_conditional_edges("policy", lambda state: "risk" if state.get("allowed", True) else END)
         workflow.add_edge("risk", "approval")
         workflow.add_edge("approval", END)
-        return workflow.compile().invoke({"message": "Please process this record", "tenant_id": 42})
+        return workflow.compile().invoke({
+            "message": "Please process this record",
+            "tenant_id": 42,
+            "request_id": "request-42",
+            "requester_id": "oidc|requester-42",
+        })
 
     def test_security_block_survives_node_boundary(self):
         result = self.run_graph(security_action="block")

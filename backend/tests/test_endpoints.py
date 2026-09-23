@@ -9,6 +9,7 @@ import uuid
 from uuid import uuid4, UUID
 import os
 import base64
+import pyotp
 from datetime import datetime, timedelta, timezone
 from main import app
 
@@ -973,6 +974,11 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
     user = User(id=user_id, tenant_id=tenant_id, email="admin@tenantC.com", role="admin", is_active=True)
     db_session.add(user)
+    approver_id = uuid4()
+    db_session.add(User(
+        id=approver_id, tenant_id=tenant_id, email="approver@tenantC.com",
+        role="admin", is_active=True,
+    ))
     db_session.commit()
 
     api_key = APIKey(
@@ -985,10 +991,17 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         created_by=user_id
     )
     db_session.add(api_key)
+    approver_api_key_raw = "separate_approver_key_tenant_c"
+    db_session.add(APIKey(
+        id=uuid4(), tenant_id=tenant_id, key_hash=hash_key(approver_api_key_raw),
+        name="Separate Approver Key C", scopes=["admin", "read", "write"],
+        is_active=True, created_by=approver_id,
+    ))
     db_session.commit()
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
     headers = {"Authorization": f"Bearer {api_key_raw}"}
+    approver_headers = {"Authorization": f"Bearer {approver_api_key_raw}"}
 
     # 2. Create compliance workflow (scan executes to completion)
     from unittest.mock import patch, MagicMock
@@ -1050,9 +1063,23 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     assert db_app.approver_id is None
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
-    mfa_setup = client.post("/v1/workflows/mfa/setup", headers=headers)
+    legacy_setup = client.post("/v1/workflows/mfa/setup", headers=approver_headers)
+    assert legacy_setup.status_code == status.HTTP_410_GONE
+    session_token = "acl_session_" + uuid4().hex
+    db_session.execute(text("""SELECT authn.create_session(
+        :hash, :tenant, :user, 'mfa-test', now()+interval '10 minutes', '{}'::jsonb)"""),
+        {"hash": hash_key(session_token), "tenant": tenant_id, "user": approver_id})
+    db_session.commit()
+    mfa_headers = {"Authorization": f"Bearer {session_token}"}
+    mfa_setup = client.post("/v1/users/me/mfa/setup", headers=mfa_headers)
     assert mfa_setup.status_code == status.HTTP_200_OK
     backup_code = mfa_setup.json()["backup_codes"][0]
+    mfa_confirm = client.post(
+        "/v1/users/me/mfa/confirm",
+        headers=mfa_headers,
+        json={"code": pyotp.TOTP(mfa_setup.json()["mfa_secret"]).now()},
+    )
+    assert mfa_confirm.status_code == status.HTTP_200_OK
 
     # 3. Approve workflow
     with patch("app.orchestrator.connectors.DocumentScanner.execute_remediation") as mock_execute:
@@ -1067,19 +1094,20 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         }
         response_approve = client.post(
             f"/v1/workflows/{workflow_id}/approve",
-            headers=headers,
+            headers=mfa_headers,
             json={"totp_code": backup_code},
         )
     assert response_approve.status_code == status.HTTP_200_OK
     wf_approved_data = response_approve.json()
 
     # Expected outcomes
-    assert wf_approved_data["current_state"] == "COMPLETE"
+    assert wf_approved_data["current_state"] == "COMPLETE", wf_approved_data
     assert wf_approved_data["execution_status"] == "COMPLETED"
     assert wf_approved_data["approval_status"] == "APPROVED"
 
     # Verify db states
     db_session.rollback()
+    db_session.expire_all()  # Session provisioning committed the owner's earlier snapshot.
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
     db_wf_final = db_session.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id
@@ -1093,7 +1121,7 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     ).first()
     assert db_app_final.status == "CONSUMED"
     assert db_app_final.approved_at is not None
-    assert db_app_final.approver_id == user_id
+    assert db_app_final.approver_id == approver_id
     assert db_app_final.consumed_at is not None
-    assert db_app_final.consumed_by_id == user_id
+    assert db_app_final.consumed_by_id == approver_id
     db_session.execute(text("SET app.current_tenant_id = ''"))

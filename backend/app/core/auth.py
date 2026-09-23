@@ -3,6 +3,7 @@
 import hmac
 import logging
 import os
+from dataclasses import dataclass
 import time
 from typing import Generator, List
 import pyotp
@@ -53,38 +54,55 @@ def set_mfa_credentials(user, secret: str, backup_codes: list[str]) -> None:
     user.mfa_enabled = True
 
 
-def verify_mfa_code(user, code: str) -> bool:
-    """Consume an enrolled user's factor; the caller owns commit or rollback."""
+@dataclass(frozen=True)
+class MFAVerification:
+    verified: bool
+    method: str | None = None
+    reason: str = "invalid"
+    counter: int | None = None
+
+
+def verify_mfa_code_result(
+    user, code: str, *, pending_enrollment: bool = False
+) -> MFAVerification:
+    """Consume a database-attached factor; the caller owns commit or rollback."""
     from app.db.models import User
 
     if not isinstance(user, User) or not isinstance(code, str):
-        return False
+        return MFAVerification(False, reason="invalid_identity")
     db = object_session(user)
     state = inspect(user)
     if db is None or not state.persistent:
-        return False
+        return MFAVerification(False, reason="invalid_identity")
     with db.no_autoflush:
         if (
             state.attrs.id.history.has_changes()
             or state.attrs.tenant_id.history.has_changes()
             or user.tenant_id is None
         ):
-            return False
+            return MFAVerification(False, reason="invalid_identity")
         # Refresh credentials and replay state after acquiring the same-tenant lock.
         # Never authorize against a stale identity-map copy or flush local changes first.
-        user = db.query(User).filter(
+        query = db.query(User).filter(
             User.id == state.identity[0], User.tenant_id == user.tenant_id,
-            User.is_active.is_(True), User.mfa_enabled.is_(True),
-        ).populate_existing().with_for_update().first()
-    if user is None or not user.mfa_secret:
-        return False
+            User.is_active.is_(True),
+        )
+        if not pending_enrollment:
+            query = query.filter(User.mfa_enabled.is_(True))
+        user = query.populate_existing().with_for_update().first()
+    stored_secret = (
+        user.mfa_pending_secret if user is not None and pending_enrollment
+        else user.mfa_secret if user is not None
+        else ""
+    ) or ""
+    if not stored_secret:
+        return MFAVerification(False, reason="not_configured")
     code = code.strip().lower()
-    stored_secret = user.mfa_secret or ""
     encrypted = stored_secret.startswith(
         (SECRET_ENVELOPE_PREFIX, SECRET_ENVELOPE_V2_PREFIX)
     )
     secret = decrypt_secret(stored_secret) if encrypted else stored_secret
-    backup_codes = list(user.mfa_backup_codes or [])
+    backup_codes = [] if pending_enrollment else list(user.mfa_backup_codes or [])
     normalized_codes = [
         stored if len(stored) == 64 else hash_key(f"mfa-backup:{stored.lower()}")
         for stored in backup_codes
@@ -97,25 +115,50 @@ def verify_mfa_code(user, code: str) -> bool:
         default=None,
     )
     if matched_step is not None:
-        if user.mfa_last_totp_step is not None and matched_step <= user.mfa_last_totp_step:
-            return False
-        user.mfa_last_totp_step = matched_step
+        last_step = (
+            user.mfa_pending_last_totp_step
+            if pending_enrollment else user.mfa_last_totp_step
+        )
+        if last_step is not None and matched_step <= last_step:
+            return MFAVerification(
+                False, method="totp", reason="replay", counter=matched_step
+            )
+        if pending_enrollment:
+            user.mfa_pending_last_totp_step = matched_step
+        else:
+            user.mfa_last_totp_step = matched_step
+        method = "totp"
     else:
+        if pending_enrollment:
+            return MFAVerification(False)
         candidate = hash_key(f"mfa-backup:{code}")
         remaining_codes = [
             stored for stored in normalized_codes
             if not hmac.compare_digest(candidate, stored)
         ]
         if len(remaining_codes) == len(normalized_codes):
-            return False
+            return MFAVerification(False)
         normalized_codes = remaining_codes
+        method = "recovery_code"
     if not encrypted:
-        user.mfa_secret = encrypt_secret(secret)
-    user.mfa_backup_codes = normalized_codes
+        if pending_enrollment:
+            user.mfa_pending_secret = encrypt_secret(secret)
+        else:
+            user.mfa_secret = encrypt_secret(secret)
+    if not pending_enrollment:
+        user.mfa_backup_codes = normalized_codes
     # Later authorization refreshes must see consumption; success is durable only
     # when the protected action commits, so a rolled-back action can retry safely.
     db.flush()
-    return True
+    return MFAVerification(
+        True, method=method, reason="verified",
+        counter=matched_step if method == "totp" else None,
+    )
+
+
+def verify_mfa_code(user, code: str) -> bool:
+    """Compatibility wrapper for callers that only need a boolean result."""
+    return verify_mfa_code_result(user, code).verified
 
 
 def _normalize_role(role: str | None) -> str:
@@ -124,12 +167,24 @@ def _normalize_role(role: str | None) -> str:
     return str(role).lower()
 
 
+def _canonical_request_path(request: Request) -> str:
+    path = getattr(getattr(request, "url", None), "path", "")
+    return path[4:] if path.startswith("/api/v1/") else path
+
+
+def _is_tenant_lifecycle_path(request: Request) -> bool:
+    return _canonical_request_path(request) in {
+        "/v1/tenants/current",
+        "/v1/tenants/current/status",
+    }
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Middleware to validate API keys and inject tenant_id and scopes"""
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        canonical_path = path[4:] if path.startswith("/api/v1/") else path
+        canonical_path = _canonical_request_path(request)
 
         # Bypass authentication for public routes
         public_paths = {
@@ -223,11 +278,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     content={"detail": "Unauthorized: User is inactive or not found"},
                 )
-            tenant_lifecycle_path = canonical_path in {
-                "/v1/tenants/current",
-                "/v1/tenants/current/status",
-            }
-            if result.tenant_status != "active" and not tenant_lifecycle_path:
+            if result.tenant_status != "active" and not _is_tenant_lifecycle_path(request):
                 return JSONResponse(
                     status_code=status.HTTP_403_FORBIDDEN,
                     content={"detail": "Forbidden: Tenant is not active"},
@@ -286,6 +337,18 @@ def get_tenant_db(
     request: Request, db: Session = Depends(get_db)
 ) -> Generator[Session, None, None]:
     """Re-bind the vetted credential inside the handler transaction."""
+    revalidate_tenant_credential(request, db)
+    yield db
+
+
+def require_interactive_session(request: Request) -> None:
+    """Machine credentials must not manage or attest an interactive factor."""
+    if getattr(request.state, "credential_kind", None) != "session":
+        raise HTTPException(status_code=403, detail="Interactive tenant session required")
+
+
+def revalidate_tenant_credential(request: Request, db: Session):
+    """Check revocation again after waiting on a credential-owner row lock."""
     kind = getattr(request.state, "credential_kind", None)
     credential_hash = getattr(request.state, "credential_hash", None)
     expected_tenant = getattr(request.state, "tenant_id", None)
@@ -299,17 +362,30 @@ def get_tenant_db(
         else "authn.bind_api_key_context"
     )
     bound = db.execute(
-        text(f"SELECT tenant_id FROM {resolver}(:credential_hash)"),
+        text(
+            f"SELECT tenant_id, user_id, role, scopes, tenant_status "
+            f"FROM {resolver}(:credential_hash)"
+        ),
         {"credential_hash": credential_hash},
     ).first()
-    if not bound or str(bound.tenant_id) != str(expected_tenant):
+    if (not bound or str(bound.tenant_id) != str(expected_tenant)
+            or str(bound.user_id) != str(getattr(request.state, "user_id", None))):
         db.rollback()
         raise HTTPException(status_code=401, detail="Authentication context expired")
+    if (
+        str(bound.tenant_status).lower() != "active"
+        and not _is_tenant_lifecycle_path(request)
+    ):
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Tenant is not active",
+        )
     # Retain only the already-validated request credential for same-request
     # transactions that must be re-bound after a commit (for example, audit
     # appends).  This is cleared with the request-scoped SQLAlchemy session.
     db.info["authclaw_database_auth_context"] = (kind, credential_hash)
-    yield db
+    return bound
 
 
 def get_tenant_score_db(request: Request, db: Session = Depends(get_score_db)) -> Generator[Session, None, None]:

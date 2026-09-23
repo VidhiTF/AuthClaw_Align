@@ -164,6 +164,34 @@ resource "aws_wafv2_web_acl" "edge" {
     allow {}
   }
 
+  # MFA secrets belong in JSON request bodies. Block the legacy query channel at
+  # the public edge so it cannot reach origin access logs or application tracing.
+  rule {
+    name     = "block-mfa-credentials-outside-body"
+    priority = 5
+    action {
+      block {}
+    }
+    statement {
+      size_constraint_statement {
+        comparison_operator = "GT"
+        size                = 0
+        field_to_match {
+          single_query_argument { name = "totp_code" }
+        }
+        text_transformation {
+          priority = 0
+          type     = "NONE"
+        }
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${local.name}-mfa-credential-transport"
+      sampled_requests_enabled   = false
+    }
+  }
+
   rule {
     name     = "aws-common-rules"
     priority = 10
@@ -248,6 +276,12 @@ resource "aws_wafv2_web_acl_logging_configuration" "edge" {
   }
   redacted_fields {
     single_header { name = "cookie" }
+  }
+  redacted_fields {
+    single_header { name = "x-mfa-code" }
+  }
+  redacted_fields {
+    single_header { name = "x-totp-code" }
   }
   redacted_fields {
     query_string {}

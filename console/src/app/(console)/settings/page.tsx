@@ -77,6 +77,7 @@ interface SecurityState {
   email: string;
   role: string;
   mfa_enabled: boolean;
+  enrollment_pending?: boolean;
 }
 
 interface MFASetupState extends SecurityState {
@@ -261,6 +262,7 @@ export default function SettingsPage() {
   const [apiKeys, setApiKeys] = useState<APIKeyItem[]>([]);
   const [securityState, setSecurityState] = useState<SecurityState | null>(null);
   const [mfaSetup, setMfaSetup] = useState<MFASetupState | null>(null);
+  const [mfaRecoveryCodes, setMfaRecoveryCodes] = useState<string[]>([]);
   const [mfaBusy, setMfaBusy] = useState(false);
   const [mfaError, setMfaError] = useState<string | null>(null);
   const [usageLimits, setUsageLimits] = useState<UsageLimitState | null>(null);
@@ -495,9 +497,27 @@ export default function SettingsPage() {
       if (!res.ok) throw new Error(data.error || "Failed to enable MFA");
       setMfaSetup(data);
       setSecurityState(data);
-      await fetchUsersAndKeys();
     } catch (err: unknown) {
       setMfaError(getErrorMessage(err, "Could not enable MFA"));
+    } finally {
+      setMfaBusy(false);
+    }
+  };
+
+  const handleConfirmMfa = async () => {
+    const code = prompt("Enter the 6-digit code from your authenticator to finish enrollment:")?.trim();
+    if (!code) return;
+    setMfaBusy(true);
+    setMfaError(null);
+    try {
+      const res = await fetch("/api/users/me/mfa/confirm", jsonRequest("POST", { code }));
+      const data = await responseJson<{ error?: string } & SecurityState>(res);
+      if (!res.ok) throw new Error(data.error || "Failed to confirm MFA");
+      setSecurityState(data);
+      setMfaSetup(null);
+      await fetchUsersAndKeys();
+    } catch (err: unknown) {
+      setMfaError(getErrorMessage(err, "Could not confirm MFA"));
     } finally {
       setMfaBusy(false);
     }
@@ -518,6 +538,23 @@ export default function SettingsPage() {
       await fetchUsersAndKeys();
     } catch (err: unknown) {
       setMfaError(getErrorMessage(err, "Could not disable MFA"));
+    } finally {
+      setMfaBusy(false);
+    }
+  };
+
+  const handleRegenerateMfaRecoveryCodes = async () => {
+    const code = prompt("Enter your current TOTP or backup code to replace all recovery codes:")?.trim();
+    if (!code) return;
+    setMfaBusy(true);
+    setMfaError(null);
+    try {
+      const res = await fetch("/api/users/me/mfa/recovery-codes", jsonRequest("POST", { code }));
+      const data = await responseJson<{ error?: string; backup_codes?: string[] }>(res);
+      if (!res.ok || !data.backup_codes) throw new Error(data.error || "Failed to regenerate recovery codes");
+      setMfaRecoveryCodes(data.backup_codes);
+    } catch (err: unknown) {
+      setMfaError(getErrorMessage(err, "Could not regenerate recovery codes"));
     } finally {
       setMfaBusy(false);
     }
@@ -608,11 +645,19 @@ export default function SettingsPage() {
     setKeyError(null);
     setGeneratedKey(null);
 
+    const mfaCode = prompt("Enter your current TOTP or backup code to create this API key:")?.trim();
+    if (!mfaCode) {
+      setKeySubmitting(false);
+      setKeyError("MFA code is required to create an API key.");
+      return;
+    }
+
     try {
       const res = await fetch("/api/api-keys", jsonRequest("POST", {
         name: keyName,
         scopes: keyScopes,
-        expires_in_days: keyExpiresInDays
+        expires_in_days: keyExpiresInDays,
+        mfa_code: mfaCode
       }));
       const data = await responseJson<{ error?: string; api_key: string }>(res);
       if (!res.ok) {
@@ -634,8 +679,10 @@ export default function SettingsPage() {
   const handleRevokeKey = async (id: string) => {
     if (!isOwner) return;
     if (!confirm("Are you sure you want to revoke this API key? Systems utilizing this key will be rejected immediately.")) return;
+    const mfaCode = prompt("Enter your current TOTP or backup code to revoke this API key:")?.trim();
+    if (!mfaCode) return;
     try {
-      const res = await fetch(`/api/api-keys/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/api-keys/${id}`, jsonRequest("DELETE", { mfa_code: mfaCode }));
       if (!res.ok) throw new Error("Failed to revoke key");
       setApiKeys(apiKeys.filter((k) => k.id !== id));
     } catch (err: unknown) {
@@ -646,11 +693,14 @@ export default function SettingsPage() {
   const handleRotateKey = async (key: APIKeyItem) => {
     if (!isOwner) return;
     if (!confirm("Rotate this API key? The old secret will stop working immediately.")) return;
+    const mfaCode = prompt("Enter your current TOTP or backup code to rotate this API key:")?.trim();
+    if (!mfaCode) return;
     try {
       const res = await fetch(`/api/api-keys/${key.id}/rotate`, jsonRequest("POST", {
         name: key.name,
         scopes: key.scopes,
-        expires_in_days: 90
+        expires_in_days: 90,
+        mfa_code: mfaCode
       }));
       const data = await responseJson<{ error?: string; api_key: string }>(res);
       if (!res.ok) throw new Error(data.error || "Failed to rotate key");
@@ -1152,16 +1202,42 @@ export default function SettingsPage() {
                   {mfaBusy ? "Enabling..." : "Enable MFA"}
                 </button>
               ) : (
-                <button
-                  type="button"
-                  onClick={handleDisableMfa}
-                  disabled={mfaBusy}
-                  className="rounded-lg border border-red-900/50 bg-red-950/20 px-4 py-2 text-xs font-semibold text-red-200 hover:bg-red-950/50 disabled:opacity-60"
-                >
-                  {mfaBusy ? "Disabling..." : "Disable MFA"}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={handleRegenerateMfaRecoveryCodes}
+                    disabled={mfaBusy}
+                    className="rounded-lg border border-indigo-300 bg-indigo-50 px-4 py-2 text-xs font-semibold text-indigo-800 hover:bg-indigo-100 disabled:opacity-60"
+                  >
+                    {mfaBusy ? "Verifying..." : "Replace recovery codes"}
+                  </button>
+                  {!(["owner", "admin"].includes(securityState?.role || "")) && (
+                    <button
+                      type="button"
+                      onClick={handleDisableMfa}
+                      disabled={mfaBusy}
+                      className="rounded-lg border border-red-900/50 bg-red-950/20 px-4 py-2 text-xs font-semibold text-red-200 hover:bg-red-950/50 disabled:opacity-60"
+                    >
+                      {mfaBusy ? "Disabling..." : "Disable MFA"}
+                    </button>
+                  )}
+                </>
               )}
             </div>
+
+            {mfaRecoveryCodes.length > 0 && (
+              <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-4">
+                <div className="text-xs font-semibold text-amber-950">New one-time recovery codes</div>
+                <p className="mt-1 text-xs text-amber-900">Save these now. The previous recovery codes no longer work.</p>
+                <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+                  {mfaRecoveryCodes.map((code) => (
+                    <span key={code} className="select-all rounded border border-amber-300 bg-white px-2 py-1 text-center font-mono text-xs text-amber-950">
+                      {code}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {mfaSetup && (
               <div className="mt-6 grid gap-4 md:grid-cols-2">
@@ -1192,6 +1268,20 @@ export default function SettingsPage() {
                       </span>
                     ))}
                   </div>
+                </div>
+                <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 md:col-span-2">
+                  <div className="text-xs font-semibold text-amber-950">Enrollment is not active yet</div>
+                  <p className="mt-1 text-xs text-amber-900">
+                    Save the backup codes, then confirm a current authenticator code. Until confirmation, the existing factor remains active.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleConfirmMfa}
+                    disabled={mfaBusy}
+                    className="mt-3 rounded-lg bg-amber-900 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-800 disabled:opacity-60"
+                  >
+                    {mfaBusy ? "Confirming..." : "Confirm MFA enrollment"}
+                  </button>
                 </div>
               </div>
             )}

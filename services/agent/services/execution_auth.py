@@ -25,7 +25,7 @@ def authorize_agent_operation(
     if not agent_operation_allowed(role, operation):
         raise PermissionError("Role is not authorized for this agent operation.")
 
-    user_id = payload.get("sub") or payload.get("email") or payload.get("user_id")
+    user_id = payload.get("sub")
     if not isinstance(user_id, str) or not user_id.strip():
         raise ValueError("Authenticated user identity required.")
 

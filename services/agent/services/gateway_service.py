@@ -1,9 +1,11 @@
 from services.quota_service import QuotaExceeded, QuotaUnavailable
+import hashlib
 import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Callable, Dict, Optional
 
 from database import engine
@@ -21,15 +23,27 @@ from verify_audit import (
 logger = logging.getLogger("authclaw.gateway_service")
 
 
+class ExecutionLeaseLostError(RuntimeError):
+    """The executing worker no longer owns its fenced approval lease."""
+
+
 class GatewayProviderConfigurationError(Exception):
     pass
 
 
 class GatewayProviderUnavailableError(Exception):
-    def __init__(self, message: str, *, request_id: Optional[str] = None, trace: Optional[list] = None):
+    def __init__(self, message: str, *, request_id: Optional[str] = None, provider_operation_id: Optional[str] = None, trace: Optional[list] = None):
         super().__init__(message)
         self.request_id = request_id
+        self.provider_operation_id = provider_operation_id
         self.trace = trace or []
+
+
+class GatewayExecutionOutcome(str, Enum):
+    SUCCEEDED = "succeeded"
+    POLICY_DENIED = "policy_denied"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    EXECUTION_ERROR = "execution_error"
 
 
 @dataclass
@@ -43,6 +57,8 @@ class GatewayExecution:
     model: str
     route_id: Optional[str]
     decision: Optional[str]
+    provider_operation_id: Optional[str] = None
+    outcome: GatewayExecutionOutcome = GatewayExecutionOutcome.EXECUTION_ERROR
 
 
 class GatewayService:
@@ -79,6 +95,11 @@ class GatewayService:
         )
         resolved_session_id = execution_context["session_id"]
         resolved_username = username or self._username_from_authorization(authorization)
+        requester_id = (
+            username
+            or self._requester_id_from_authorization(authorization)
+            or self._requester_id_from_api_key(x_api_key)
+        )
 
         start = time.perf_counter()
         token = set_agent_event_context(request_id)
@@ -87,6 +108,7 @@ class GatewayService:
                 {
                     "message": message,
                     "username": resolved_username,
+                    "requester_id": requester_id,
                     **execution_context,
                     "gateway_api_key": x_api_key,
                     "route_id": route_id,
@@ -94,6 +116,8 @@ class GatewayService:
                     "model": model,
                 }
             )
+            if result.get("provider_status") == "offline_fallback":
+                raise RuntimeError("Approved execution did not receive an upstream provider response")
         except (QuotaExceeded, QuotaUnavailable):
             raise
         except ValueError as e:
@@ -115,7 +139,12 @@ class GatewayService:
             )
             trace = self.get_trace(request_id=request_id, session_id=resolved_session_id, tenant_id=tenant_id)
             self.persist_latest_message_trace(resolved_session_id, trace)
-            raise GatewayProviderUnavailableError(str(e), request_id=request_id, trace=trace) from e
+            raise GatewayProviderUnavailableError(
+                str(e),
+                request_id=request_id,
+                provider_operation_id=request_id,
+                trace=trace,
+            ) from e
         finally:
             clear_agent_event_context(token)
 
@@ -162,6 +191,14 @@ class GatewayService:
             model=resolved_model,
             route_id=resolved_route_id,
             decision=decision,
+            provider_operation_id=request_id,
+            outcome=(
+                GatewayExecutionOutcome.SUCCEEDED
+                if allowed and result.get("provider_status") == "ok"
+                else GatewayExecutionOutcome.POLICY_DENIED
+                if not allowed
+                else GatewayExecutionOutcome.EXECUTION_ERROR
+            ),
         )
 
     def execute_approval(
@@ -170,6 +207,8 @@ class GatewayService:
         approval_record: Dict[str, Any],
         authorization: Optional[str],
         x_api_key: Optional[str],
+        idempotency_key: str,
+        pre_effect_check: Optional[Callable[[], None]] = None,
         username: Optional[str] = None,
         provider: str = "AuthClaw Gateway",
         model: str = "authclaw-gateway",
@@ -179,7 +218,7 @@ class GatewayService:
             tenant_id = self.resolve_tenant(x_api_key, authorization)
         tenant_id = int(tenant_id)
 
-        request_id = f"req-{uuid.uuid4()}"
+        request_id = f"approval-exec-{idempotency_key}"
         resolved_session_id = approval_record.get("correlation_id") or f"approval-{approval_record['approval_id']}"
         resolved_username = username or self._username_from_authorization(authorization)
 
@@ -207,11 +246,17 @@ class GatewayService:
                     "approval_id": approval_record["approval_id"],
                     "approval_status": "APPROVED",
                     "original_request_id": approval_record.get("request_id"),
+                    "idempotency_key": idempotency_key,
+                    "pre_effect_check": pre_effect_check,
                     "provider": provider,
                     "model": model,
                 }
             )
-        except (QuotaExceeded, QuotaUnavailable):
+            if result.get("provider_status") == "offline_fallback":
+                raise RuntimeError(
+                    "Approved execution did not receive an upstream provider response"
+                )
+        except (QuotaExceeded, QuotaUnavailable, ExecutionLeaseLostError):
             raise
         except ValueError as e:
             raise GatewayProviderConfigurationError(str(e)) from e
@@ -232,18 +277,30 @@ class GatewayService:
             )
             trace = self.get_trace(request_id=request_id, session_id=resolved_session_id, tenant_id=tenant_id)
             self.persist_latest_message_trace(resolved_session_id, trace)
-            raise GatewayProviderUnavailableError(str(e), request_id=request_id, trace=trace) from e
+            raise GatewayProviderUnavailableError(
+                str(e),
+                request_id=request_id,
+                provider_operation_id=request_id,
+                trace=trace,
+            ) from e
         finally:
             clear_agent_event_context(token)
 
         latency_ms = int((time.perf_counter() - start) * 1000)
-        allowed = result.get("allowed", True)
+        allowed = result.get("allowed") is True
         risk_level = result.get("risk_level", approval_record.get("risk_level", "LOW"))
         status = "allowed" if allowed else "blocked"
         resolved_route_id = result.get("route_id")
         resolved_provider = result.get("provider") or provider
         resolved_model = result.get("model") or model
         decision = result.get("decision")
+        outcome = (
+            GatewayExecutionOutcome.POLICY_DENIED
+            if not allowed
+            else GatewayExecutionOutcome.SUCCEEDED
+            if result.get("provider_status") == "ok"
+            else GatewayExecutionOutcome.EXECUTION_ERROR
+        )
 
         RegistrarService().register_gateway_request(
             risk_level=risk_level,
@@ -261,6 +318,9 @@ class GatewayService:
             tokens_out=result.get("tokens_out"),
         )
 
+        if pre_effect_check is not None:
+            pre_effect_check()
+
         trace = self.get_trace(request_id=request_id, session_id=resolved_session_id, tenant_id=tenant_id)
         self.persist_latest_message_trace(resolved_session_id, trace)
 
@@ -274,6 +334,8 @@ class GatewayService:
             model=resolved_model,
             route_id=resolved_route_id,
             decision=decision,
+            provider_operation_id=request_id if outcome == GatewayExecutionOutcome.SUCCEEDED else None,
+            outcome=outcome,
         )
 
     def format_chat_response(self, execution: GatewayExecution) -> Dict[str, Any]:
@@ -399,3 +461,22 @@ class GatewayService:
         except Exception:
             pass
         return "admin_user"
+
+    def _requester_id_from_authorization(self, authorization: Optional[str]) -> Optional[str]:
+        if not authorization:
+            return None
+        token = authorization[7:] if authorization.startswith("Bearer ") else authorization
+        try:
+            payload = self.decode_jwt(token)
+            subject = payload.get("sub") if payload else None
+            if isinstance(subject, str) and subject.strip():
+                return subject.strip()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _requester_id_from_api_key(x_api_key: Optional[str]) -> Optional[str]:
+        if not isinstance(x_api_key, str) or not x_api_key:
+            return None
+        return f"api-key:{hashlib.sha256(x_api_key.encode('utf-8')).hexdigest()}"

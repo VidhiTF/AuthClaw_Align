@@ -20,7 +20,15 @@ from services.tenant_context import validate_tenant_id
 
 logger = logging.getLogger("authclaw.document_processing.orchestrator")
 
-def run_document_scan_pipeline(doc_id: int, file_bytes: bytes, filename: str, source: str = "local", tenant_id: int = None) -> dict:
+def run_document_scan_pipeline(
+    doc_id: int,
+    file_bytes: bytes,
+    filename: str,
+    source: str = "local",
+    tenant_id: int = None,
+    request_id: str = None,
+    requested_by: str = None,
+) -> dict:
     """
     Executes the complete document security & compliance scanning pipeline.
     """
@@ -285,12 +293,17 @@ Do not include markdown packaging like ```json.
         create_approval(
             query=f"Document Compliance Override: {filename}",
             risk_level=severity,
-            session_id=f"doc_{doc_id}"
+            session_id=f"doc_{doc_id}",
+            tenant_id=tenant_id,
+            request_id=request_id,
+            requested_by=requested_by,
+            reason="document_compliance_override",
+            metadata={"document_id": doc_id, "source": source},
         )
         create_document_audit(
             doc_id, 
             "approval_requested", 
-            "system", 
+            requested_by,
             f"Document flagged as {severity} risk (Score: {risk_score}). Verification requested in Approval Queue.",
             tenant_id=tenant_id
         )

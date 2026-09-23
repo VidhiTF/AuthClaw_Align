@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from threading import Barrier
+from threading import Barrier, Event
 from time import perf_counter
 import tracemalloc
 from types import SimpleNamespace
@@ -25,13 +25,19 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import ApprovalAudit, ComplianceScoreSnapshot, Notification, PendingApproval, TrustCenterAccessLog, TrustCenterShare, User
+from app.db.models import ApprovalAudit, ComplianceScoreSnapshot, ComplianceWorkflow, Notification, PendingApproval, TrustCenterAccessLog, TrustCenterShare, User
 from app.db import dependencies, session as database_session
 from app.core.auth import get_tenant_score_db, set_mfa_credentials
 from app.core.startup_checks import validate_database_security
 from app.services import abuse_controls, audit_store, compliance_scoring, control_assessments, event_backbone, evidence_service, trust_center
 from app.api.v1.endpoints.trust_center import get_public_trust_center
 from app.api.v1.endpoints import compliance_scores
+from app.api.v1.endpoints import workflows as workflow_endpoints
+from app.orchestrator.runner import (
+    ComplianceWorkflowRunner,
+    WorkflowResumeConflict,
+    _create_approval_in_db,
+)
 from starlette.requests import Request
 from tests.db_safety import destructive_test_urls
 from tests.test_tenant_isolation import Identity, IsolationHarness
@@ -61,6 +67,10 @@ def postgres():
         return result
 
     legacy_tenant, legacy_snapshot = uuid4(), uuid4()
+    legacy_user, legacy_user_two = uuid4(), uuid4()
+    linkage_workflow = f"workflow-linkage-{uuid4()}"
+    duplicate_pending, duplicate_approved, orphan_approval = uuid4(), uuid4(), uuid4()
+    pending_audit, approved_audit = uuid4(), uuid4()
     with admin.connect() as conn:
         conn.execute(text(f'CREATE DATABASE "{name}"'))
     try:
@@ -77,21 +87,101 @@ def postgres():
         command("-m", "alembic", "upgrade", "050")
         with owner.begin() as conn:
             conn.execute(text("""INSERT INTO users (id,tenant_id,email,role,platform_role,is_active,mfa_enabled,mfa_secret)
-                VALUES (:id,:tenant,'legacy-mfa@example.invalid','admin','NONE',true,true,'legacy-test-enrollment')"""),
-                {"id": uuid4(), "tenant": legacy_tenant})
+                VALUES (:id,:tenant,:email,'admin','NONE',true,true,'legacy-test-enrollment')"""), [
+                {"id": legacy_user, "tenant": legacy_tenant, "email": "legacy-mfa@example.invalid"},
+                {"id": legacy_user_two, "tenant": legacy_tenant, "email": "legacy-mfa-two@example.invalid"},
+            ])
         command("-m", "alembic", "upgrade", "051")
-        command("scripts/bootstrap_database_security.py", "finalize-backend")
-        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="051,052"), app.connect() as connection:
-            validate_database_security(connection)
+        with app.connect() as connection:
             with pytest.raises(HTTPException) as failure:
                 compliance_scores.require_snapshot_schema(connection)
             assert failure.value.status_code == 503
+        command("-m", "alembic", "upgrade", "052")
+        command("-m", "alembic", "upgrade", "053")
+        with owner.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO compliance_workflows
+                    (id,tenant_id,workflow_id,framework,current_state,execution_status,
+                     state_data,started_at,updated_at)
+                VALUES (:id,:tenant,:workflow,'SOC2','AWAITING_APPROVAL','PAUSED',
+                        '{}'::json,now(),now())
+            """), {"id": uuid4(), "tenant": legacy_tenant, "workflow": linkage_workflow})
+            for approval_id, status, requester, payload, action_hash, expires_at, resolution, created_at in (
+                (duplicate_pending, "PENDING", legacy_user,
+                 '{"plan":[{"action":"retain-pending"}]}', "1" * 64,
+                 datetime(2026, 2, 1, tzinfo=timezone.utc), "pending historical reason",
+                 datetime(2026, 1, 1, tzinfo=timezone.utc)),
+                (duplicate_approved, "APPROVED", legacy_user_two,
+                 '{"plan":[{"action":"retain-approved","destructive":true}]}', "2" * 64,
+                 datetime(2026, 3, 1, tzinfo=timezone.utc), "approved historical reason",
+                 datetime(2026, 1, 2, tzinfo=timezone.utc)),
+            ):
+                conn.execute(text("""
+                    INSERT INTO pending_approvals
+                        (id,tenant_id,action_id,action_type,action_description,action_payload,
+                         action_hash,status,requester_id,mfa_verified,expires_at,resolution_reason,
+                         created_at,updated_at)
+                    VALUES (:id,:tenant,:action,'remediation','legacy duplicate',CAST(:payload AS jsonb),
+                            :action_hash,:status,:requester,false,:expires,:resolution,:created,:created)
+                """), {"id": approval_id, "tenant": legacy_tenant, "action": linkage_workflow,
+                         "payload": payload, "action_hash": action_hash, "status": status,
+                         "requester": requester, "expires": expires_at,
+                         "resolution": resolution, "created": created_at})
+            conn.execute(text("""
+                INSERT INTO pending_approvals
+                    (id,tenant_id,action_id,action_type,action_description,action_payload,
+                     status,requester_id,mfa_verified,expires_at,created_at,updated_at)
+                VALUES (:id,:tenant,'orphan-action','remediation','legacy orphan','{}'::json,
+                        'PENDING',:user,false,now()+interval '1 hour',now(),now())
+            """), {"id": orphan_approval, "tenant": legacy_tenant, "user": legacy_user})
+            conn.execute(text("""
+                INSERT INTO approval_audit
+                    (id,tenant_id,approval_id,actor_id,action,action_hash,reason,details,
+                     mfa_verified,created_at)
+                VALUES (:pending_audit,:tenant,:pending,:pending_actor,'CREATED',:pending_hash,
+                        'pending audit evidence','{"source":"pending"}'::jsonb,false,now()),
+                       (:approved_audit,:tenant,:approved,:approved_actor,'APPROVED',:approved_hash,
+                        'approved audit evidence','{"source":"approved"}'::jsonb,true,now())
+            """), {"pending_audit": pending_audit, "approved_audit": approved_audit,
+                     "tenant": legacy_tenant, "pending": duplicate_pending,
+                     "approved": duplicate_approved, "pending_actor": legacy_user,
+                     "approved_actor": legacy_user_two, "pending_hash": "1" * 64,
+                     "approved_hash": "2" * 64})
+            conn.execute(
+                text("UPDATE compliance_workflows SET approval_id=:approval WHERE workflow_id=:workflow"),
+                {"approval": duplicate_pending, "workflow": linkage_workflow},
+            )
+        command("-m", "alembic", "upgrade", "054")
+        command("scripts/bootstrap_database_security.py", "finalize-backend")
         command("-m", "alembic", "upgrade", "head")
         command("scripts/bootstrap_database_security.py", "finalize-backend")
-        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="051,052"), app.connect() as connection:
+        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="054"), app.connect() as connection:
             validate_database_security(connection)
             compliance_scores.require_snapshot_schema(connection)
         harness = IsolationHarness(owner, app, sessionmaker(bind=app, expire_on_commit=False))
+        harness.approval_linkage_054 = {
+            "tenant_id": legacy_tenant,
+            "workflow_id": linkage_workflow,
+            "keeper_id": duplicate_approved,
+            "duplicate_id": duplicate_pending,
+            "orphan_id": orphan_approval,
+            "requesters": {duplicate_pending: legacy_user, duplicate_approved: legacy_user_two},
+            "payloads": {
+                duplicate_pending: {"plan": [{"action": "retain-pending"}]},
+                duplicate_approved: {"plan": [{"action": "retain-approved", "destructive": True}]},
+            },
+            "hashes": {duplicate_pending: "1" * 64, duplicate_approved: "2" * 64},
+            "statuses": {duplicate_pending: "PENDING", duplicate_approved: "APPROVED"},
+            "expiries": {
+                duplicate_pending: datetime(2026, 2, 1, tzinfo=timezone.utc),
+                duplicate_approved: datetime(2026, 3, 1, tzinfo=timezone.utc),
+            },
+            "resolutions": {
+                duplicate_pending: "pending historical reason",
+                duplicate_approved: "approved historical reason",
+            },
+            "audits": {pending_audit: duplicate_pending, approved_audit: duplicate_approved},
+        }
         yield harness, command, legacy_snapshot
     finally:
         owner.dispose()
@@ -105,6 +195,190 @@ def postgres():
 def evidence_scope(monkeypatch):
     monkeypatch.setattr(control_assessments.settings, "COMPLIANCE_ENVIRONMENT", "ci")
     monkeypatch.setattr(evidence_service, "_emit_evidence_audit", lambda *_: None)
+
+
+def test_approval_linkage_upgrade_repairs_duplicates_orphans_and_reruns(postgres):
+    harness, command, _ = postgres
+    evidence = harness.approval_linkage_054
+
+    def assert_reconciled():
+        with harness.owner_engine.connect() as conn:
+            workflow_approval = conn.execute(
+                text("SELECT approval_id FROM compliance_workflows WHERE workflow_id=:workflow"),
+                {"workflow": evidence["workflow_id"]},
+            ).scalar_one()
+            duplicate = conn.execute(
+                text("SELECT action_id FROM pending_approvals WHERE id=:id"),
+                {"id": evidence["duplicate_id"]},
+            ).scalar_one()
+            orphan_count = conn.execute(
+                text("SELECT count(*) FROM pending_approvals WHERE id=:id"),
+                {"id": evidence["orphan_id"]},
+            ).scalar_one()
+            approvals = conn.execute(text("""
+                SELECT id,requester_id,action_payload,action_hash,status,expires_at,resolution_reason
+                FROM pending_approvals WHERE id IN (:duplicate,:keeper)
+            """), {"duplicate": evidence["duplicate_id"], "keeper": evidence["keeper_id"]}).mappings().all()
+            audits = dict(conn.execute(
+                text("SELECT id,approval_id FROM approval_audit WHERE id IN (:pending,:approved)"),
+                {"pending": next(iter(evidence["audits"])),
+                 "approved": next(reversed(evidence["audits"]))},
+            ).all())
+            canonical_count = conn.execute(text("""
+                SELECT count(*) FROM pending_approvals
+                WHERE tenant_id=:tenant AND action_type='remediation' AND action_id=:workflow
+            """), {"tenant": evidence["tenant_id"], "workflow": evidence["workflow_id"]}).scalar_one()
+        assert workflow_approval == evidence["keeper_id"]
+        assert duplicate.endswith(f"#superseded:{evidence['duplicate_id']}")
+        assert orphan_count == 1
+        assert audits == evidence["audits"]
+        for approval in approvals:
+            approval_id = approval["id"]
+            assert approval["requester_id"] == evidence["requesters"][approval_id]
+            assert approval["action_payload"] == evidence["payloads"][approval_id]
+            assert approval["action_hash"] == evidence["hashes"][approval_id]
+            assert approval["status"] == evidence["statuses"][approval_id]
+            assert approval["expires_at"] == evidence["expiries"][approval_id]
+            assert evidence["resolutions"][approval_id] in approval["resolution_reason"]
+        assert canonical_count == 1
+
+    assert_reconciled()
+    command("-m", "alembic", "downgrade", "053")
+    command("-m", "alembic", "upgrade", "054")
+    assert_reconciled()
+
+
+def test_concurrent_approval_retry_reuses_single_upgraded_link(postgres):
+    harness, _, _ = postgres
+    identity = harness.create_identity("approval-retry")
+    workflow_id = f"workflow-retry-{uuid4()}"
+    with harness.owner_engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO compliance_workflows
+                (id,tenant_id,workflow_id,framework,current_state,execution_status,
+                 state_data,started_at,updated_at)
+            VALUES (:id,:tenant,:workflow,'SOC2','AWAITING_APPROVAL','PAUSED',
+                    '{}'::json,now(),now())
+        """), {"id": uuid4(), "tenant": identity.tenant_id, "workflow": workflow_id})
+
+    barrier = Barrier(2)
+
+    def create_or_reuse():
+        barrier.wait()
+        with harness.session_for(identity) as db:
+            return _create_approval_in_db(
+                db,
+                str(identity.tenant_id),
+                workflow_id,
+                [{"action": "redact", "destructive": False}],
+                str(identity.user_id),
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        approval_ids = list(pool.map(lambda _: create_or_reuse(), range(2)))
+
+    assert approval_ids[0] == approval_ids[1]
+    with harness.owner_engine.connect() as conn:
+        assert conn.execute(text("""
+            SELECT count(*) FROM pending_approvals
+            WHERE tenant_id=:tenant AND action_type='remediation' AND action_id=:workflow
+        """), {"tenant": identity.tenant_id, "workflow": workflow_id}).scalar_one() == 1
+
+
+def test_two_sessions_cannot_transfer_or_race_approved_workflow_resume(postgres):
+    harness, _, _ = postgres
+    requester = harness.create_identity("resume-requester")
+    approver = reviewer(harness, requester)
+    attacker = reviewer(harness, requester)
+    workflow_id = str(uuid4())
+    approval_id = uuid4()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    plan = [{"action": "redact", "destructive": False}]
+    payload = workflow_endpoints.build_action_payload(workflow_id, plan)
+    action_hash = workflow_endpoints.compute_action_hash(
+        tenant_id=str(requester.tenant_id), action_payload=payload, expires_at=expires_at
+    )
+    state_data = {
+        "workflow_id": workflow_id,
+        "tenant_id": str(requester.tenant_id),
+        "request_id": "resume-race",
+        "requester_id": str(requester.user_id),
+        "framework": "SOC2",
+        "current_state": "AWAITING_APPROVAL",
+        "remediation_plan": plan,
+        "approval_id": str(approval_id),
+        "approval_status": "APPROVED",
+        "execution_status": "PAUSED",
+    }
+    with harness.session_for(requester) as db:
+        db.add(PendingApproval(
+            id=approval_id, tenant_id=requester.tenant_id, action_id=workflow_id,
+            action_type="remediation", action_description="resume race",
+            action_payload=payload, action_hash=action_hash, status="APPROVED",
+            requester_id=requester.user_id, approver_id=approver.user_id,
+            approved_at=datetime.now(timezone.utc), mfa_verified=True,
+            mfa_timestamp=datetime.now(timezone.utc), expires_at=expires_at,
+        ))
+        db.add(ComplianceWorkflow(
+            tenant_id=requester.tenant_id, workflow_id=workflow_id,
+            framework="SOC2", current_state="AWAITING_APPROVAL",
+            remediation_plan=plan, approval_id=approval_id,
+            approval_status="APPROVED", execution_status="PAUSED",
+            state_data=state_data,
+        ))
+        db.commit()
+
+    with harness.session_for(attacker) as db:
+        with pytest.raises(WorkflowResumeConflict, match="recorded approver"):
+            ComplianceWorkflowRunner(db).resume(
+                workflow_id, str(requester.tenant_id), str(attacker.user_id)
+            )
+    with harness.session_for(requester) as db:
+        approval = db.get(PendingApproval, approval_id)
+        workflow = db.query(ComplianceWorkflow).filter(
+            ComplianceWorkflow.workflow_id == workflow_id
+        ).one()
+        assert approval.status == "APPROVED" and approval.consumed_at is None
+        assert workflow.execution_status == "PAUSED"
+        assert workflow.current_state == "AWAITING_APPROVAL"
+        assert workflow.approval_status == "APPROVED"
+
+    barrier = Barrier(2)
+
+    def resume_as(identity):
+        barrier.wait(timeout=15)
+        with harness.session_for(identity) as db:
+            runner = ComplianceWorkflowRunner(db)
+            runner._drive_remediation_states = lambda state: state
+            try:
+                result = runner.resume(
+                    workflow_id, str(requester.tenant_id), str(identity.user_id)
+                )
+                return "RESUMED", result
+            except WorkflowResumeConflict:
+                return "CONFLICT", None
+            except ValueError as exc:
+                assert "currently being processed" in str(exc)
+                return "BUSY", None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        approver_future = pool.submit(resume_as, approver)
+        attacker_future = pool.submit(resume_as, attacker)
+        approver_result = approver_future.result(timeout=30)[0]
+        attacker_result = attacker_future.result(timeout=30)[0]
+
+    assert attacker_result in {"CONFLICT", "BUSY"}
+    assert approver_result in {"RESUMED", "BUSY"}
+    if approver_result == "BUSY":
+        with harness.session_for(approver) as db:
+            runner = ComplianceWorkflowRunner(db)
+            runner._drive_remediation_states = lambda state: state
+            runner.resume(workflow_id, str(requester.tenant_id), str(approver.user_id))
+
+    with harness.session_for(requester) as db:
+        approval = db.get(PendingApproval, approval_id)
+        assert approval.status == "CONSUMED"
+        assert approval.consumed_by_id == approver.user_id
 
 
 def score(score_value, *, generated_at=None):
@@ -139,6 +413,160 @@ def reviewer(harness, requester):
     return identity
 
 
+def _approval_request(identity):
+    request = SimpleNamespace(headers={}, query_params={}, state=SimpleNamespace())
+    request.state.tenant_id = identity.tenant_id
+    request.state.user_id = identity.user_id
+    request.state.credential_kind = "session"
+    request.state.credential_hash = identity.session_hash
+    return request
+
+
+def _assert_revocation_wins_post_lock_race(
+    postgres, monkeypatch, *, remediation: bool, suspend_tenant: bool = False
+):
+    harness, _, _ = postgres
+    requester = harness.create_identity(
+        "revocation-race-remediation" if remediation else "revocation-race-gateway"
+    )
+    approver = reviewer(harness, requester)
+    approval_id = uuid4()
+    workflow_id = f"workflow-{uuid4()}"
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    action_payload = (
+        workflow_endpoints.build_action_payload(workflow_id, [])
+        if remediation
+        else {"request": "gateway egress"}
+    )
+    action_hash = workflow_endpoints.compute_action_hash(
+        tenant_id=str(requester.tenant_id),
+        action_payload=action_payload,
+        expires_at=expires_at,
+    )
+    with harness.session_for(requester) as db:
+        db.add(PendingApproval(
+            id=approval_id,
+            tenant_id=requester.tenant_id,
+            action_id=workflow_id if remediation else f"gateway-{uuid4()}",
+            action_type="remediation" if remediation else "gateway_policy_egress",
+            action_description="Post-lock revocation regression",
+            action_payload=action_payload,
+            action_hash=action_hash,
+            status="PENDING",
+            requester_id=requester.user_id,
+            expires_at=expires_at,
+        ))
+        if remediation:
+            db.add(ComplianceWorkflow(
+                tenant_id=requester.tenant_id,
+                workflow_id=workflow_id,
+                framework="SOC2",
+                current_state="HUMAN_APPROVAL",
+                remediation_plan=[],
+                approval_id=approval_id,
+                approval_status="PENDING",
+                execution_status="PAUSED",
+            ))
+        db.commit()
+
+    monkeypatch.setattr(
+        workflow_endpoints,
+        "_verify_mfa_if_enabled",
+        lambda *_args, **_kwargs: (True, datetime.now(timezone.utc)),
+    )
+    if remediation:
+        monkeypatch.setattr(
+            workflow_endpoints.ComplianceWorkflowRunner,
+            "get_status",
+            lambda *_args, **_kwargs: {
+                "execution_status": "PAUSED",
+                "approval_id": str(approval_id),
+            },
+        )
+
+    lock_requested = Event()
+
+    def observe_user_lock(_conn, _cursor, statement, _parameters, _context, _many):
+        normalized = " ".join(statement.upper().split())
+        if "FROM USERS" in normalized and "FOR UPDATE" in normalized:
+            lock_requested.set()
+
+    event.listen(harness.app_engine, "before_cursor_execute", observe_user_lock)
+    blocker = harness.owner_engine.connect()
+    transaction = blocker.begin()
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        blocker.execute(
+            text("SELECT id FROM users WHERE id=:id FOR UPDATE"),
+            {"id": approver.user_id},
+        )
+
+        def approve():
+            with harness.session_for(approver) as db:
+                request = _approval_request(approver)
+                body = workflow_endpoints.ApprovalRequest(totp_code="000000")
+                if remediation:
+                    return workflow_endpoints.approve_workflow(
+                        workflow_id, request, body, db
+                    )
+                return workflow_endpoints.approve_gateway_approval(
+                    str(approval_id), request, body, db
+                )
+
+        future = executor.submit(approve)
+        assert lock_requested.wait(timeout=10), "approval never reached the locked user row"
+        if suspend_tenant:
+            blocker.execute(
+                text("UPDATE tenants SET status='suspended' WHERE id=:tenant_id"),
+                {"tenant_id": approver.tenant_id},
+            )
+        else:
+            assert blocker.execute(
+                text("SELECT authn.revoke_session(:credential_hash)"),
+                {"credential_hash": approver.session_hash},
+            ).scalar_one()
+        transaction.commit()
+        with pytest.raises(HTTPException) as rejected:
+            future.result(timeout=15)
+        assert rejected.value.status_code == (403 if suspend_tenant else 401)
+    finally:
+        if transaction.is_active:
+            transaction.rollback()
+        blocker.close()
+        executor.shutdown(wait=True, cancel_futures=True)
+        event.remove(harness.app_engine, "before_cursor_execute", observe_user_lock)
+
+    with harness.owner_engine.connect() as conn:
+        assert conn.execute(
+            text("SELECT status FROM pending_approvals WHERE id=:id"),
+            {"id": approval_id},
+        ).scalar_one() == "PENDING"
+        assert conn.execute(
+            text("SELECT count(*) FROM approval_audit WHERE approval_id=:id"),
+            {"id": approval_id},
+        ).scalar_one() == 0
+
+
+def test_gateway_approval_cannot_commit_after_blocked_session_is_revoked(
+    postgres, monkeypatch
+):
+    _assert_revocation_wins_post_lock_race(postgres, monkeypatch, remediation=False)
+
+
+def test_remediation_approval_cannot_resume_after_blocked_session_is_revoked(
+    postgres, monkeypatch
+):
+    _assert_revocation_wins_post_lock_race(postgres, monkeypatch, remediation=True)
+
+
+def test_gateway_approval_cannot_commit_after_tenant_is_suspended_during_lock_wait(
+    postgres, monkeypatch
+):
+    _assert_revocation_wins_post_lock_race(
+        postgres, monkeypatch, remediation=False, suspend_tenant=True
+    )
+
+
 def pending_assessment(harness, requester):
     with harness.session_for(requester) as db:
         source = evidence_service.create_evidence(db, tenant_id=str(requester.tenant_id), workflow_id=None,
@@ -169,16 +597,21 @@ def reviewed_assessment(harness, requester, approver=None):
 
 def test_migration_preserves_legacy_rows_and_restricted_forced_rls(postgres):
     harness, _, legacy_id = postgres
+    linkage = harness.approval_linkage_054
     with harness.owner_engine.connect() as conn:
         row = conn.execute(text("SELECT * FROM compliance_score_snapshots WHERE id=:id"), {"id": legacy_id}).mappings().one()
         assert row["overall_score"] == 97.5
         assert row["control_scores"] == {"CC7.2": {"status": "compliant"}}
         assert row["calculation_version"] == "legacy_unversioned"
         assert row["assessment_metadata"] == {}
-        prior_user = conn.execute(text("SELECT mfa_enabled,mfa_last_totp_step FROM users WHERE tenant_id=:tenant"),
-                                 {"tenant": row["tenant_id"]}).one()
+        prior_user = conn.execute(text("""SELECT mfa_enabled,mfa_last_totp_step FROM users
+            WHERE tenant_id=:tenant AND id=:user"""),
+            {"tenant": row["tenant_id"],
+             "user": linkage["requesters"][linkage["duplicate_id"]]}).one()
         assert prior_user.mfa_enabled is True and prior_user.mfa_last_totp_step is None
-        assert conn.execute(text("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname='compliance_score_snapshots'")).scalar_one() == make_url(os.environ["BACKEND_MIGRATION_DATABASE_URL"]).username
+        assert conn.execute(text("""SELECT pg_get_userbyid(c.relowner)
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relname='compliance_score_snapshots'""")).scalar_one() == make_url(os.environ["BACKEND_MIGRATION_DATABASE_URL"]).username
         flags = conn.execute(text("""SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class
             WHERE relname IN ('compliance_score_snapshots','approval_audit','pending_approvals','evidence_records')""")).all()
         assert len(flags) == 4 and all(row.relrowsecurity and row.relforcerowsecurity for row in flags)
@@ -243,7 +676,7 @@ def test_request_dependency_uses_single_connection_and_resets_write_isolation(po
     monkeypatch.setenv("AUTHCLAW_RUNTIME_DB_ROLE", pool.url.username)
     event.listen(pool, "checkout", database_session.verify_runtime_database_identity)
     monkeypatch.setattr(dependencies, "SessionLocal", sessionmaker(bind=pool, expire_on_commit=False))
-    request = SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id,
+    request = SimpleNamespace(state=SimpleNamespace(tenant_id=tenant.tenant_id, user_id=tenant.user_id,
         credential_kind="session", credential_hash=tenant.session_hash))
     dependency = dependencies.get_score_db()
     db = next(dependency)
@@ -445,7 +878,7 @@ def test_downgrade_refuses_retained_versioned_history_and_keeps_rls(postgres):
     result = command("-m", "alembic", "downgrade", "049", succeeds=False)
     assert "downgrade refused" in result.stderr
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "052"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "054"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='compliance_score_snapshots'")).scalar_one()
 
 
@@ -570,7 +1003,7 @@ def real_mfa(postgres, monkeypatch):
             if script == abuse_controls.MFA_CHECK_LUA:
                 return -2
             if script == abuse_controls.MFA_RESET_LUA:
-                return 1
+                return 0
             if script == abuse_controls.MFA_FAILURE_LUA:
                 return [1, 0, 0]
             raise AssertionError("Unexpected Redis operation")
@@ -614,6 +1047,132 @@ def test_real_totp_cannot_be_reused_across_distinct_approvals_and_next_step_succ
     assert state.decide(second, next_code)["status"] == "CONSUMED"
     with state.harness.session_for(state.approver) as db:
         assert db.get(User, state.approver.user_id).mfa_last_totp_step == consumed_step + 1
+
+
+def test_concurrent_recovery_step_up_consumes_same_totp_once(real_mfa, monkeypatch):
+    state = real_mfa
+    monkeypatch.setattr(
+        workflow_endpoints, "_revalidate_privileged_workflow_actor", lambda *_args: None,
+    )
+    code = pyotp.TOTP(state.secret).now()
+    barrier = Barrier(2)
+
+    class RecoveryRunner:
+        def __init__(self, db):
+            self.db = db
+
+        def recover_interrupted(self, _tenant_id, *, actor_id, authorization_check, step_up_check):
+            step_up_check()
+            self.db.commit()
+            return [{"workflow_id": "privileged", "status": "recovered"}]
+
+    monkeypatch.setattr(workflow_endpoints, "ComplianceWorkflowRunner", RecoveryRunner)
+
+    def recover_step_up():
+        request = Request({"type": "http", "headers": [], "query_string": b""})
+        request.state.tenant_id = state.approver.tenant_id
+        request.state.user_id = state.approver.user_id
+        request.state.credential_kind = "session"
+        with state.harness.session_for(state.approver) as db:
+            barrier.wait(timeout=15)
+            try:
+                result = workflow_endpoints.recover_workflows(
+                    request, db, workflow_endpoints.ApprovalRequest(totp_code=code),
+                )
+                assert result.recovered == 1
+                return "verified"
+            except HTTPException as exc:
+                assert exc.status_code == 400
+                return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result(timeout=30) for future in (
+            pool.submit(recover_step_up), pool.submit(recover_step_up),
+        )]
+    assert sorted(results) == ["rejected", "verified"]
+    with state.harness.session_for(state.approver) as db:
+        assert db.get(User, state.approver.user_id).mfa_last_totp_step is not None
+
+
+def test_consumed_recovery_rechecks_revocation_after_step_up_commit(postgres, monkeypatch):
+    from app.orchestrator import connectors
+
+    harness, _, _ = postgres
+    requester = harness.create_identity("recovery-effect-race")
+    approver = reviewer(harness, requester)
+    workflow_id, approval_id = str(uuid4()), uuid4()
+    plan = [{"action": "redact", "destructive": True}]
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    payload = workflow_endpoints.build_action_payload(workflow_id, plan)
+    with harness.session_for(requester) as db:
+        db.add(PendingApproval(
+            id=approval_id, tenant_id=requester.tenant_id, action_id=workflow_id,
+            action_type="remediation", action_description="recovery race",
+            action_payload=payload, action_hash=workflow_endpoints.compute_action_hash(
+                tenant_id=str(requester.tenant_id), action_payload=payload, expires_at=expires_at,
+            ), status="CONSUMED", requester_id=requester.user_id,
+            approver_id=approver.user_id, consumed_by_id=approver.user_id,
+            consumed_at=datetime.now(timezone.utc), mfa_verified=True,
+            mfa_timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
+            expires_at=expires_at,
+        ))
+        db.add(ComplianceWorkflow(
+            tenant_id=requester.tenant_id, workflow_id=workflow_id, framework="SOC2",
+            current_state="ROLLBACK_REMEDIATION", execution_status="RUNNING",
+            remediation_plan=plan, approval_id=approval_id, approval_status="CONSUMED",
+            state_data={
+                "workflow_id": workflow_id, "tenant_id": str(requester.tenant_id),
+                "requester_id": str(requester.user_id), "approval_id": str(approval_id),
+                "current_state": "ROLLBACK_REMEDIATION", "remediation_plan": plan,
+                "remediation_actions": [{"id": "action-1", "index": 0,
+                    "status": "SUCCEEDED", "rollback_plan": {"rollback_ref": {"target_key": "test"}}}],
+            },
+        ))
+        db.commit()
+
+    effects, committed, proceed = [], Event(), Event()
+    monkeypatch.setattr(connectors, "DocumentScanner", lambda: SimpleNamespace(
+        rollback_remediation=lambda _plan: effects.append("rollback") or {"status": "success"},
+    ))
+    def recover():
+        with harness.session_for(approver) as db:
+            original_commit = db.commit
+            def commit_after_step_up():
+                original_commit()
+                if not committed.is_set():
+                    committed.set()
+                    assert proceed.wait(10)
+            db.commit = commit_after_step_up
+            return ComplianceWorkflowRunner(db).resume(
+                workflow_id, str(requester.tenant_id), str(approver.user_id),
+                authorization_check=lambda: workflow_endpoints._revalidate_privileged_workflow_actor(
+                    _approval_request(approver), db,
+                ),
+                step_up_check=lambda: datetime.now(timezone.utc),
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(recover)
+        assert committed.wait(10)
+        with harness.owner_engine.begin() as conn:
+            conn.execute(text("UPDATE users SET role='viewer' WHERE id=:actor"),
+                {"actor": approver.user_id})
+        proceed.set()
+        future.result(timeout=20)
+
+    with harness.owner_engine.connect() as conn:
+        audit = conn.execute(text("SELECT action,mfa_verified FROM approval_audit "
+            "WHERE approval_id=:approval AND action='RESUME_MFA_VERIFIED'"),
+            {"approval": approval_id}).one()
+        status = conn.execute(text("SELECT status FROM pending_approvals WHERE id=:approval"),
+            {"approval": approval_id}).scalar_one()
+    assert audit.action == "RESUME_MFA_VERIFIED" and audit.mfa_verified is True
+    assert status == "CONSUMED"
+    assert effects == []
+    print("ENT022_RECOVERY_AUDIT_EVIDENCE=" + json.dumps({
+        "approval_status": status, "audit_action": audit.action,
+        "audit_mfa_verified": audit.mfa_verified, "effects_after_revocation": len(effects),
+    }, sort_keys=True))
 
 
 def test_concurrent_same_totp_step_allows_exactly_one_approval(real_mfa):
@@ -692,5 +1251,5 @@ def test_durable_mfa_state_prevents_schema_downgrade(real_mfa, postgres):
     result = command("-m", "alembic", "downgrade", "050", succeeds=False)
     assert "mfa" in result.stderr.lower() and "downgrade" in result.stderr.lower()
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "052"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "054"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='users'")).scalar_one()
