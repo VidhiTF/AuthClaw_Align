@@ -38,7 +38,7 @@ require_immutable_images = true
 
 # Use "production" only after regional ACM certificates, SMTP, and HTTPS DNS are configured.
 authclaw_env = "staging"
-expected_db_revision = "047"
+expected_db_revision = "053"
 
 # Region-local approved notification routes for managed quota alerts.
 quota_alert_sns_topic_arns = {

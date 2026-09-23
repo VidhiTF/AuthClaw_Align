@@ -15,7 +15,7 @@ def rendered_compose_config(
     env_file: str = ".env.full.example", **overrides: str
 ) -> dict:
     environment = os.environ.copy()
-    for name in ("DEBUG", "API_DEBUG", "AUTHCLAW_ENV"):
+    for name in ("DEBUG", "API_DEBUG", "AUTHCLAW_ENV", "SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"):
         environment.pop(name, None)
     environment["GEMINI_API_KEY"] = DUMMY_GEMINI_KEY
     environment.update(overrides)
@@ -49,6 +49,8 @@ def main() -> None:
     assert backend_environment["DEBUG"] == "true"
     assert "API_DEBUG" not in backend_environment
     assert backend_environment["AUTHCLAW_ENV"] == "local"
+    for name in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"):
+        assert backend_environment[name] == "", f"Local template must not enable incomplete SMTP: {name}"
     audit_environment = config["services"]["audit_consumer"]["environment"]
     assert audit_environment["AUTHCLAW_ENV"] == backend_environment["AUTHCLAW_ENV"]
     assert "KAFKA_SECURITY_PROTOCOL" in audit_environment

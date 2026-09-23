@@ -1,9 +1,11 @@
 """Keep merged migration history and runtime schema gates compatible."""
 
+import json
 from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+import pytest
 
 
 def test_bootstrap_creates_roles_before_worker_schema(monkeypatch):
@@ -53,7 +55,8 @@ def test_audit_origin_reader_migration_follows_platform_history(monkeypatch):
     config = Config(str(backend / "alembic.ini"))
     config.set_main_option("script_location", str(backend / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["052"]
+    assert scripts.get_heads() == ["053"]
+    assert scripts.get_revision("053").down_revision == "052"
     assert scripts.get_revision("052").down_revision == "051"
     assert scripts.get_revision("051").down_revision == "050"
     assert scripts.get_revision("050").down_revision == "049"
@@ -75,22 +78,59 @@ def test_audit_origin_reader_migration_follows_platform_history(monkeypatch):
     assert "FROM PUBLIC" in function
 
 
+def test_platform_invite_resend_migration_qualifies_counter(monkeypatch):
+    backend = Path(__file__).resolve().parents[1]
+    config = Config(str(backend / "alembic.ini"))
+    config.set_main_option("script_location", str(backend / "alembic"))
+    migration = ScriptDirectory.from_config(config).get_revision("053").module
+    statements = []
+    monkeypatch.setattr(migration.op, "execute", statements.append)
+    migration.upgrade()
+    assert "resend_count = COALESCE(v_invite.resend_count, 0)" in statements[0]
+    with pytest.raises(RuntimeError, match="restores broken invitation retries"):
+        migration.downgrade()
+
+
+def test_deployment_revision_defaults_match_database_head():
+    root = Path(__file__).resolve().parents[2]
+    ci = json.loads((root / "infra/terraform/ci.tfvars.json").read_text())
+    example = (root / "infra/terraform/terraform.tfvars.example").read_text()
+    assert ci["authclaw_env"] == "ci"
+    assert ci["expected_db_revision"] == "053"
+    assert "clickhouse_password" not in ci
+    assert set(ci["quota_alert_sns_topic_arns"]) == {"primary", "secondary"}
+    assert all(ci["quota_alert_sns_topic_arns"].values())
+    assert ci["audit_consumer_environment"] == {
+        "CLICKHOUSE_SECURE": "true",
+        "KAFKA_SECURITY_PROTOCOL": "SASL_SSL",
+    }
+    assert set(ci["audit_consumer_secret_arns"]) == {
+        "AUDIT_POSTGRES_URL",
+        "KAFKA_SASL_USERNAME",
+        "KAFKA_SASL_PASSWORD",
+    }
+    assert set(ci["secondary_audit_consumer_secret_arns"]) == set(
+        ci["audit_consumer_secret_arns"]
+    )
+    assert 'expected_db_revision = "053"' in example
+
+
 def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch):
     import pytest
 
     from app.core.startup_checks import compatible_database_revisions
 
     monkeypatch.delenv("AUTHCLAW_EXPECTED_DB_REVISION", raising=False)
-    assert compatible_database_revisions() == ("052",)
+    assert compatible_database_revisions() == ("053",)
 
-    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "052")
-    assert compatible_database_revisions() == ("052",)
+    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "053")
+    assert compatible_database_revisions() == ("053",)
 
-    for supported in ("051", "051,052", "052,051"):
+    for supported in ("052", "052,053", "053,052"):
         monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", supported)
         assert compatible_database_revisions() == tuple(supported.split(","))
 
-    for invalid in ("052,052", "050", "050,051", "051,051", "049", "049,050", "050,050", "048,048", "47", "046,047", "046,047,048", "048,head"):
+    for invalid in ("053,053", "051", "051,052", "052,052", "050", "050,051", "049", "049,050", "050,050", "048,048", "47", "046,047", "046,047,048", "048,head"):
         monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", invalid)
         with pytest.raises(RuntimeError):
             compatible_database_revisions()

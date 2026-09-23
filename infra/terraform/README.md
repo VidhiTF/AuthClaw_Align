@@ -119,35 +119,20 @@ terraform test
 - Test RDS replica promotion regularly; Terraform creates the standby path, but operations prove the RTO.
 - Avoid committing real `*.tfvars` files; only `*.tfvars.example` is tracked.
 
-## Finding-status migration 047
+## Invitation-resend migration 053
 
-Revision 047 rejects non-canonical values already present in `public.findings`; it
-does not silently rewrite them. Before the maintenance window, run this read-only
-preflight with a maintenance identity and obtain an explicit disposition for every
-returned status:
+Revision 053 keeps the existing invitation function contract and qualifies its
+resend counter reference. Use this coupled rollout so an old process is never
+restarted against an unexpected schema head:
 
-```sql
-SELECT status, count(*)
-FROM public.findings
-WHERE status NOT IN (
-  'OPEN', 'ACKNOWLEDGED', 'IN_PROGRESS', 'AWAITING_APPROVAL',
-  'RESOLVED', 'FALSE_POSITIVE', 'ACCEPTED_RISK'
-)
-GROUP BY status
-ORDER BY status;
-```
-
-Use this coupled rollout so an old process is never restarted against an
-unexpected schema head:
-
-1. Build and deploy the compatibility backend and gateway with
-   `expected_db_revision = "046,047"`; confirm both services are healthy on 046.
-2. Apply migration 047 in the same controlled maintenance window and confirm both
-   services remain healthy on 047.
-3. Set `expected_db_revision = "047"` and perform a rolling restart so the
+1. Deploy the compatibility backend and gateway with
+   `expected_db_revision = "052,053"`; confirm both services are healthy on 052.
+2. Apply migration 053 through the ownership-prepared migration task and exercise
+   the invitation resend path before proceeding.
+3. Set `expected_db_revision = "053"` and perform a rolling restart so the
    temporary compatibility allowance is removed.
 
-Do not leave `046,047` configured after the migration. Before 047 is applied, the
-safe rollback is the previous image and revision 046. After writes have occurred
-under the new constraint, prefer a forward fix; downgrading removes the database
-constraint and requires a separately approved data-integrity decision.
+Do not leave `052,053` configured after the migration. Before 053 is applied, the
+safe rollback is the previous image and revision 052. Keep migration 053 after an
+application rollback because its function correction is backward compatible and
+its downgrade intentionally refuses to restore the ambiguous expression.
