@@ -45,7 +45,9 @@ def test_revalidation_binds_same_canonical_actor_and_tenant(kind, mismatch):
     db = MagicMock()
     db.execute.return_value.first.return_value = None if mismatch == "revoked" else SimpleNamespace(
         tenant_id=uuid4() if mismatch == "tenant" else tenant_id,
-        user_id=uuid4() if mismatch == "user" else user_id)
+        user_id=uuid4() if mismatch == "user" else user_id,
+        tenant_status="active",
+    )
     if mismatch == "none":
         revalidate_tenant_credential(request, db)
         db.rollback.assert_not_called()

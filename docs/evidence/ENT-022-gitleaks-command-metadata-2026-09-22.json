@@ -1,36 +1,39 @@
 {
-  "subject": "PR #58 proposed final tree",
-  "generated_at_utc": "2026-09-22T13:14:11Z",
+  "subject": "PR #58 at 372b746 plus tenant_status test fixture and ENT-022 evidence",
+  "generated_at_utc": "2026-09-23T08:19:16Z",
   "tool": {
     "name": "gitleaks",
     "version": "8.24.3",
-    "container_digest": "sha256:e1b35e12a8c6fa8901f060459cfb6b2fc4c484d3afbe3b029733a3bbfab07055",
     "configuration": ".gitleaks.toml",
     "redaction": true
   },
   "binding": {
-    "method": "sha256 of sorted Git index mode/blob/path records excluding docs/evidence/ENT-022-*",
-    "scope_sha256": "252b321d1fcb15964bf024dff7757fc1c33cdf94acb39913118390e1fd8ccd50",
-    "exclusion_reason": "Evidence files are excluded to avoid a self-referential digest; they are scanned independently."
+    "method": "SHA-256 of sorted UTF-8 '<Git mode> <Git blob> <path>\\n' records from the proposed tracked tree, excluding docs/evidence/ENT-022-*",
+    "scope_sha256": "2714f57394709edf19b4cfd8a61ad0ef810edfe3ee3b341c7aa074f3ebd41096",
+    "fixture_blob": "ba518001792b9e6c56ad5fe56fc06e8fdb516a1a",
+    "exclusion_reason": "Evidence files are excluded to avoid a self-referential digest and scanned independently."
   },
   "scans": [
     {
       "name": "full proposed tree",
-      "command": "gitleaks dir --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/full-tree.json /scan",
+      "input": "git archive HEAD plus explicit fixture and ENT-022 evidence files",
+      "command": "gitleaks dir --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/proposed-full-tree.json /scan",
       "report": "ENT-022-gitleaks-full-tree-2026-09-22.json",
       "exit_code": 0,
       "findings": 0
     },
     {
       "name": "PR range patch",
-      "command": "git diff --binary align/master -- | gitleaks stdin --no-banner --redact --config=.gitleaks.toml --report-format=json --report-path=pr-range.json",
+      "input": "git diff --binary align/master HEAD plus git diff --binary HEAD for the explicit fixture and ENT-022 evidence files",
+      "command": "gitleaks stdin --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/proposed-pr-range.json",
       "report": "ENT-022-gitleaks-pr-range-2026-09-22.json",
       "exit_code": 0,
       "findings": 0
     },
     {
-      "name": "committed ENT-022 evidence",
-      "command": "gitleaks dir --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/evidence-files.json /scan/docs/evidence",
+      "name": "ENT-022 evidence directory",
+      "input": "proposed tree docs/evidence",
+      "command": "gitleaks dir --no-banner --redact --config=/scan/.gitleaks.toml --report-format=json --report-path=/reports/proposed-evidence.json /scan/docs/evidence",
       "report": "ENT-022-gitleaks-evidence-files-2026-09-22.json",
       "exit_code": 0,
       "findings": 0

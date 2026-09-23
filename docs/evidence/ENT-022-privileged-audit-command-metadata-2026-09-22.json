@@ -1,64 +1,79 @@
 {
-  "subject": "PR #58 privileged MFA and execution audit evidence",
-  "generated_at_utc": "2026-09-22T13:14:11Z",
+  "subject": "PR #58 at 372b746 plus tenant_status test fixture and ENT-022 evidence",
+  "generated_at_utc": "2026-09-23T08:17:43Z",
   "binding": {
-    "method": "sha256 of sorted Git index mode/blob/path records excluding docs/evidence/ENT-022-*",
-    "scope_sha256": "252b321d1fcb15964bf024dff7757fc1c33cdf94acb39913118390e1fd8ccd50"
+    "method": "SHA-256 of sorted UTF-8 '<Git mode> <Git blob> <path>\\n' records from the proposed tracked tree, excluding docs/evidence/ENT-022-*",
+    "scope_sha256": "2714f57394709edf19b4cfd8a61ad0ef810edfe3ee3b341c7aa074f3ebd41096",
+    "fixture_blob": "ba518001792b9e6c56ad5fe56fc06e8fdb516a1a"
   },
   "environment": {
-    "os": "Linux container",
-    "database": "disposable authclaw_pr58_test",
-    "postgresql": "16.10",
-    "redis": "7.4.7",
+    "host": "Windows",
+    "database": "tests: disposable authclaw_test and test-created *_test databases; test-role setup: disposable authclaw_test_anchor",
+    "postgresql": "17",
+    "redis": "7.4.11",
     "production_data_used": false
   },
   "commands": [
     {
-      "name": "agent exact CI security selection",
-      "command": "python -m pytest --noconftest -p no:cacheprovider <exact agent CI test list> -q",
-      "result": "265 passed, 174 subtests passed"
-    },
-    {
       "name": "backend MFA abuse and replay selection",
       "command": "python -m pytest -p no:cacheprovider -q tests/test_auth_baseline.py tests/test_mfa_replay.py tests/test_ent022_mfa_security.py tests/test_mfa_credential_purpose.py tests/test_authorization_matrix.py",
-      "result": "168 passed"
+      "source": "working tree with fixture-only change",
+      "result": "168 passed, 93 warnings",
+      "exit_code": 0
     },
     {
-      "name": "backend-to-agent real TOTP and signed execution",
-      "command": "python -m pytest -p no:cacheprovider tests/test_agent_mfa_assertion_postgres.py -q",
-      "result": "1 passed"
+      "name": "PostgreSQL isolation, T10, MFA recovery and auditor OTP",
+      "command": "python -m pytest -p no:cacheprovider -q tests/test_tenant_isolation.py tests/test_t10_postgres.py tests/test_mfa_recovery_postgres.py tests/test_audit_metrics.py tests/test_review_otp_postgres.py",
+      "source": "working tree with fixture-only change",
+      "result": "58 passed, 1 skipped",
+      "exit_code": 0
     },
     {
-      "name": "PostgreSQL auditor OTP concurrency",
-      "command": "python -m pytest -p no:cacheprovider -q tests/test_review_otp_postgres.py",
-      "result": "2 passed"
-    },
-    {
-      "name": "PostgreSQL migration, isolation, T10, and MFA recovery",
-      "command": "python -m pytest -p no:cacheprovider -q tests/test_tenant_isolation.py tests/test_t10_postgres.py tests/test_mfa_recovery_postgres.py tests/test_audit_metrics.py",
-      "result": "55 passed, 1 skipped; remaining skip is the opt-in synthetic T10 measurement"
-    },
-    {
-      "name": "PostgreSQL gateway authorization, concurrency, and audit",
+      "name": "gateway approval authorization and audit",
       "command": "python -m pytest -p no:cacheprovider -q tests/test_phase10.py",
-      "result": "10 passed"
+      "source": "clean HEAD archive; unaffected by fixture edit",
+      "result": "10 passed",
+      "exit_code": 0
     },
     {
-      "name": "console role-bound control-plane signing",
-      "command": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test-name-pattern=privileged-agent-or-v3-signer tests/agent-client-contract.test.mts",
-      "result": "4 passed"
+      "name": "agent control-plane, execution authorization and privileged policy",
+      "command": "python -m pytest --noconftest -p no:cacheprovider -q smoke_tests/test_control_plane_auth.py smoke_tests/test_agent_execution_authorization.py smoke_tests/test_privileged_policy_invariants.py",
+      "source": "clean HEAD archive; unaffected by fixture edit",
+      "result": "60 passed, 57 subtests passed",
+      "exit_code": 0
+    },
+    {
+      "name": "agent signed approval, replay, RLS and audit PostgreSQL",
+      "command": "python -m pytest --noconftest -p no:cacheprovider -q smoke_tests/test_control_plane_mfa_postgres.py",
+      "source": "clean HEAD archive; unaffected by fixture edit",
+      "result": "9 passed",
+      "exit_code": 0
+    },
+    {
+      "name": "real backend TOTP to signed agent approval/execution",
+      "command": "python -m pytest -p no:cacheprovider -q tests/test_agent_mfa_assertion_postgres.py",
+      "source": "clean HEAD archive; unaffected by fixture edit",
+      "result": "1 passed",
+      "exit_code": 0
+    },
+    {
+      "name": "agent terminal outcomes and immutable audit metadata",
+      "command": "python -m pytest --noconftest -p no:cacheprovider -q smoke_tests/test_agent_execution_authorization.py -k test_execution_terminal_state_and_audit_match_provider_outcome",
+      "source": "working tree; no agent source edits",
+      "result": "1 passed, 4 subtests passed",
+      "exit_code": 0
     }
   ],
   "artifacts": [
     {
       "path": "ENT-022-privileged-audit-raw-2026-09-22.json",
-      "sha256": "7066b1ccd2d1fb1dc12094b74e30a9aa52d1d6b92fa30072c6500b01b4a9d118",
-      "description": "Exact generated test audit outputs, containing only disposable test identities and no factor material."
+      "sha256": "793ae8b31fc09c8b82dd2841c0e9dbad2e88f2196335232063d85e4bb3323085",
+      "description": "Generated disposable test audit outputs with no factor material."
     },
     {
       "path": "ENT-022-privileged-audit-redacted-2026-09-22.json",
       "sha256": "3bcc36dcc70264ffb29857b9376bfd1013b5540f933ed2cc238004f8f5ffc6b7",
-      "description": "Mechanically redacted view masking identifiers, request IDs, timestamps, and integrity-chain values while preserving actions and outcomes."
+      "description": "Key-based redaction of identifiers, request IDs, timestamps and integrity values; semantic view unchanged by the fresh random identifiers."
     }
   ]
 }
