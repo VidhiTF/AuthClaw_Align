@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     API_TITLE: str = "AuthClaw API"
     API_VERSION: str = "0.1.0"
     DEBUG: bool = False
+    AUTHCLAW_ENV: str = ""
     
     # Database
     DATABASE_URL: str = "postgresql://authclaw:authclaw@localhost:5432/authclaw"
@@ -29,6 +30,19 @@ class Settings(BaseSettings):
     @classmethod
     def select_installed_postgres_driver(cls, value: str) -> str:
         return value.replace("postgresql://", "postgresql+psycopg://", 1) if value.startswith("postgresql://") else value
+
+    @model_validator(mode="after")
+    def restrict_debug_to_local_environments(self):
+        if self.DEBUG and self.AUTHCLAW_ENV.strip().lower() not in {
+            "local",
+            "development",
+            "dev",
+            "test",
+        }:
+            raise ValueError(
+                "DEBUG requires an explicit local, development, dev, or test AUTHCLAW_ENV"
+            )
+        return self
     
     # CORS
     ALLOWED_ORIGINS: List[str] = [

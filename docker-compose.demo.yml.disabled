@@ -90,7 +90,7 @@ services:
       PRESIDIO_URL: http://presidio:3000
       CLICKHOUSE_URL: ""
       KAFKA_BROKERS: ""
-      API_DEBUG: "false"
+      DEBUG: "false"
       AWS_ENABLED: ${AWS_ENABLED:-false}
       BEDROCK_ENABLED: ${BEDROCK_ENABLED:-false}
       AWS_SECRETS_MANAGER_ENABLED: ${AWS_SECRETS_MANAGER_ENABLED:-false}
