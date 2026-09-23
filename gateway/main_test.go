@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -276,6 +277,191 @@ func TestAuditDrainDeadlinePreventsQueuedEmitAfterSpill(t *testing.T) {
 	}
 	if count := strings.Count(string(data), targetID); count != 1 {
 		t.Fatalf("queued event recovery count=%d, want 1", count)
+	}
+}
+
+func TestAuditDrainFailedSpillRemainsRecoverable(t *testing.T) {
+	lifecycleClients(t)
+	t.Setenv("AUDIT_FAIL_CLOSED", "false")
+	t.Setenv("AUDIT_OUTBOX_PATH", t.TempDir())
+	oldEmitter := auditEventEmitter
+	entered, release := make(chan struct{}), make(chan struct{})
+	releaseAudit := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(func() {
+		auditEventEmitter = oldEmitter
+		releaseAudit()
+	})
+	auditEventEmitter = func(ctx context.Context, event *AuditEvent) error {
+		close(entered)
+		<-release
+		_, err := recoverAuditEvent(ctx, event, errors.New("retry"))
+		return err
+	}
+	EmitAuditEventAsync(context.Background(), &AuditEvent{ID: "spill-retry", TenantID: "tenant"})
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := drainAuditEvents(ctx); err == nil {
+		t.Fatal("failed spill reported success")
+	}
+
+	outbox := filepath.Join(t.TempDir(), "audit.ndjson")
+	t.Setenv("AUDIT_OUTBOX_PATH", outbox)
+	releaseAudit()
+	drained, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := drainAuditEvents(drained); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(outbox)
+	if err != nil || strings.Count(string(data), "spill-retry") != 1 {
+		t.Fatalf("retry recovery missing or duplicated: err=%v data=%s", err, data)
+	}
+}
+
+func TestAuditDrainPartialSpillRollsBackBeforeRetry(t *testing.T) {
+	lifecycleClients(t)
+	t.Setenv("AUDIT_FAIL_CLOSED", "false")
+	outbox := filepath.Join(t.TempDir(), "audit.ndjson")
+	t.Setenv("AUDIT_OUTBOX_PATH", outbox)
+	oldEmitter, oldWrite := auditEventEmitter, auditOutboxWrite
+	t.Cleanup(func() {
+		auditEventEmitter, auditOutboxWrite = oldEmitter, oldWrite
+	})
+	entered := make(chan struct{})
+	auditEventEmitter = func(ctx context.Context, _ *AuditEvent) error {
+		close(entered)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	var writes atomic.Int32
+	auditOutboxWrite = func(file *os.File, payload []byte) (int, error) {
+		if writes.Add(1) == 1 {
+			written, err := file.Write(payload[:len(payload)/2])
+			if err != nil {
+				return written, err
+			}
+			return written, errors.New("forced partial write")
+		}
+		return file.Write(payload)
+	}
+
+	EmitAuditEventAsync(context.Background(), &AuditEvent{ID: "partial-spill", TenantID: "tenant"})
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := drainAuditEvents(ctx); err == nil {
+		t.Fatal("partial spill reported success")
+	}
+	drained, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := drainAuditEvents(drained); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(outbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope auditOutboxEnvelope
+	if strings.Count(string(data), "\n") != 1 {
+		t.Fatalf("partial spill left an invalid record count: %s", data)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &envelope); err != nil || envelope.Event == nil || envelope.Event.ID != "partial-spill" {
+		t.Fatalf("partial spill was not replaced by one valid recovery record: %s", data)
+	}
+	if writes.Load() < 2 {
+		t.Fatalf("outbox writes=%d, want partial attempt and retry", writes.Load())
+	}
+}
+
+func TestAuditDrainCloseFailureAfterSyncDoesNotRetry(t *testing.T) {
+	lifecycleClients(t)
+	t.Setenv("AUDIT_FAIL_CLOSED", "false")
+	outbox := filepath.Join(t.TempDir(), "audit.ndjson")
+	t.Setenv("AUDIT_OUTBOX_PATH", outbox)
+	oldEmitter, oldWrite, oldClose := auditEventEmitter, auditOutboxWrite, auditOutboxClose
+	t.Cleanup(func() {
+		auditEventEmitter, auditOutboxWrite, auditOutboxClose = oldEmitter, oldWrite, oldClose
+	})
+	entered := make(chan struct{})
+	auditEventEmitter = func(ctx context.Context, _ *AuditEvent) error {
+		close(entered)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	var writes atomic.Int32
+	auditOutboxWrite = func(file *os.File, payload []byte) (int, error) {
+		writes.Add(1)
+		return file.Write(payload)
+	}
+	auditOutboxClose = func(file *os.File) error {
+		if err := file.Close(); err != nil {
+			return err
+		}
+		return errors.New("forced close error")
+	}
+
+	EmitAuditEventAsync(context.Background(), &AuditEvent{ID: "close-after-sync", TenantID: "tenant"})
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := drainAuditEvents(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("drain error=%v, want context cancellation", err)
+	}
+	drained, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := drainAuditEvents(drained); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(outbox)
+	if err != nil || writes.Load() != 1 || strings.Count(string(data), "close-after-sync") != 1 {
+		t.Fatalf("durable record retried after close error: err=%v writes=%d data=%s", err, writes.Load(), data)
+	}
+}
+
+func TestAuditDrainRollbackFailureIsNotRetried(t *testing.T) {
+	lifecycleClients(t)
+	t.Setenv("AUDIT_FAIL_CLOSED", "false")
+	t.Setenv("AUDIT_OUTBOX_PATH", filepath.Join(t.TempDir(), "audit.ndjson"))
+	oldEmitter, oldWrite, oldTruncate := auditEventEmitter, auditOutboxWrite, auditOutboxTruncate
+	t.Cleanup(func() {
+		auditEventEmitter, auditOutboxWrite, auditOutboxTruncate = oldEmitter, oldWrite, oldTruncate
+	})
+	entered, release := make(chan struct{}), make(chan struct{})
+	auditEventEmitter = func(ctx context.Context, event *AuditEvent) error {
+		close(entered)
+		<-release
+		_, err := recoverAuditEvent(ctx, event, errors.New("worker fallback"))
+		return err
+	}
+	var writes atomic.Int32
+	auditOutboxWrite = func(file *os.File, payload []byte) (int, error) {
+		writes.Add(1)
+		written, err := file.Write(payload[:len(payload)/2])
+		if err != nil {
+			return written, err
+		}
+		return written, errors.New("forced partial write")
+	}
+	auditOutboxTruncate = func(*os.File, int64) error { return errors.New("forced rollback failure") }
+
+	EmitAuditEventAsync(context.Background(), &AuditEvent{ID: "indeterminate-spill", TenantID: "tenant"})
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := drainAuditEvents(ctx)
+	var indeterminate *auditOutboxIndeterminateError
+	if !errors.As(err, &indeterminate) {
+		t.Fatalf("drain error=%v, want indeterminate outbox error", err)
+	}
+	close(release)
+	drained, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := drainAuditEvents(drained); err != nil {
+		t.Fatal(err)
+	}
+	if writes.Load() != 1 {
+		t.Fatalf("indeterminate outbox write retried %d times, want 1", writes.Load())
 	}
 }
 

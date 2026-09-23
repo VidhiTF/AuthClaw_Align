@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -56,7 +57,12 @@ var (
 	auditOutboxMu              sync.Mutex
 )
 
-var auditEventEmitter = EmitAuditEvent
+var (
+	auditEventEmitter   = EmitAuditEvent
+	auditOutboxWrite    = func(file *os.File, payload []byte) (int, error) { return file.Write(payload) }
+	auditOutboxClose    = func(file *os.File) error { return file.Close() }
+	auditOutboxTruncate = func(file *os.File, size int64) error { return file.Truncate(size) }
+)
 
 type auditOutboxEnvelope struct {
 	FailedAt    time.Time   `json:"failed_at"`
@@ -68,6 +74,11 @@ type auditPersistenceError struct {
 	cause             error
 	recoveryAvailable bool
 }
+
+type auditOutboxIndeterminateError struct{ cause error }
+
+func (e *auditOutboxIndeterminateError) Error() string { return e.cause.Error() }
+func (e *auditOutboxIndeterminateError) Unwrap() error { return e.cause }
 
 func (e *auditPersistenceError) Error() string { return e.cause.Error() }
 func (e *auditPersistenceError) Unwrap() error { return e.cause }
@@ -107,23 +118,47 @@ func writeAuditOutboxBatch(events []*AuditEvent, reason error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(payload); err != nil {
+	offset, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
 		_ = file.Close()
 		return err
+	}
+	written, err := auditOutboxWrite(file, payload)
+	if err == nil && written != len(payload) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return rollbackAuditOutboxWrite(file, offset, err)
 	}
 	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
+		return rollbackAuditOutboxWrite(file, offset, err)
 	}
-	if err := file.Close(); err != nil {
-		return err
+	if err := auditOutboxClose(file); err != nil {
+		log.Printf("[AUDIT] durable outbox close failed: %v", err)
 	}
 	auditOutboxWrites.Add(uint64(len(events)))
 	return nil
+}
+
+func rollbackAuditOutboxWrite(file *os.File, size int64, cause error) error {
+	var rollbackErr error
+	if err := auditOutboxTruncate(file, size); err != nil {
+		rollbackErr = fmt.Errorf("rollback partial audit outbox write: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("sync audit outbox rollback: %w", err))
+	}
+	if err := file.Close(); err != nil {
+		cause = errors.Join(cause, err)
+	}
+	if rollbackErr != nil {
+		return &auditOutboxIndeterminateError{cause: errors.Join(cause, rollbackErr)}
+	}
+	return cause
 }
 
 // EmitAuditEvent appends in Postgres, then publishes committed outbox rows.
@@ -229,10 +264,21 @@ const auditAsyncBacklogLimit = 64
 
 var auditAsyncSlots = make(chan struct{}, 4)
 
+type auditRecoveryState uint8
+
+const (
+	auditRecoveryPending auditRecoveryState = iota
+	auditRecoveryClaimed
+	auditRecoveryDurable
+	auditRecoveryIndeterminate
+)
+
 type pendingAuditEvent struct {
-	recovery  *AuditEvent
-	recovered bool
-	cancel    context.CancelFunc
+	recovery      *AuditEvent
+	recoveryState auditRecoveryState
+	recoveryErr   error
+	spillDone     chan struct{}
+	cancel        context.CancelFunc
 }
 
 type pendingAuditContextKey struct{}
@@ -271,16 +317,53 @@ func recoverAuditEvent(ctx context.Context, event *AuditEvent, cause error) (boo
 		err := writeAuditOutbox(event, cause)
 		return err == nil, err
 	}
-	auditAsync.Lock()
-	defer auditAsync.Unlock()
-	if task.recovered {
-		return true, nil
+	return recoverPendingAuditEvent(task, event, cause)
+}
+
+func recoverPendingAuditEvent(task *pendingAuditEvent, event *AuditEvent, cause error) (bool, error) {
+	for {
+		auditAsync.Lock()
+		switch task.recoveryState {
+		case auditRecoveryDurable:
+			auditAsync.Unlock()
+			return true, nil
+		case auditRecoveryIndeterminate:
+			err := task.recoveryErr
+			auditAsync.Unlock()
+			return false, err
+		case auditRecoveryClaimed:
+			done := task.spillDone
+			auditAsync.Unlock()
+			<-done
+		default:
+			err := writeAuditOutbox(event, cause)
+			if err == nil {
+				task.recoveryState = auditRecoveryDurable
+			} else {
+				var indeterminate *auditOutboxIndeterminateError
+				if errors.As(err, &indeterminate) {
+					task.recoveryState, task.recoveryErr = auditRecoveryIndeterminate, err
+				}
+			}
+			auditAsync.Unlock()
+			return err == nil, err
+		}
 	}
-	if err := writeAuditOutbox(event, cause); err != nil {
-		return false, err
+}
+
+func auditRecoveryFinalized(task *pendingAuditEvent) bool {
+	for {
+		auditAsync.Lock()
+		state, done := task.recoveryState, task.spillDone
+		auditAsync.Unlock()
+		if state == auditRecoveryDurable || state == auditRecoveryIndeterminate {
+			return true
+		}
+		if state != auditRecoveryClaimed {
+			return false
+		}
+		<-done
 	}
-	task.recovered = true
-	return true, nil
 }
 
 func auditOperationContext(parent context.Context) context.Context {
@@ -304,13 +387,16 @@ func drainAuditEvents(ctx context.Context) error {
 	case <-ctx.Done():
 		err := fmt.Errorf("audit drain: %w", ctx.Err())
 		auditAsync.Lock()
+		tasks := make([]*pendingAuditEvent, 0, len(auditAsync.active))
 		spill := make([]*AuditEvent, 0, len(auditAsync.active))
 		cancels := make([]context.CancelFunc, 0, len(auditAsync.active))
 		for task := range auditAsync.active {
-			if task.recovered {
+			if task.recoveryState != auditRecoveryPending {
 				continue
 			}
-			task.recovered = true
+			task.recoveryState = auditRecoveryClaimed
+			task.spillDone = make(chan struct{})
+			tasks = append(tasks, task)
 			spill = append(spill, task.recovery)
 			cancels = append(cancels, task.cancel)
 		}
@@ -318,10 +404,35 @@ func drainAuditEvents(ctx context.Context) error {
 		for _, cancel := range cancels {
 			cancel()
 		}
-		if len(spill) > 0 {
-			if spillErr := writeAuditOutboxBatch(spill, err); spillErr != nil {
+		if len(tasks) > 0 {
+			spillErr := writeAuditOutboxBatch(spill, err)
+			auditAsync.Lock()
+			for _, task := range tasks {
+				var indeterminate *auditOutboxIndeterminateError
+				if spillErr == nil {
+					task.recoveryState = auditRecoveryDurable
+				} else if errors.As(spillErr, &indeterminate) {
+					task.recoveryState = auditRecoveryIndeterminate
+					task.recoveryErr = spillErr
+				} else {
+					task.recoveryState = auditRecoveryPending
+				}
+				close(task.spillDone)
+				task.spillDone = nil
+			}
+			auditAsync.Unlock()
+			if spillErr != nil {
 				auditOutboxFailures.Add(1)
 				err = errors.Join(err, spillErr)
+				var indeterminate *auditOutboxIndeterminateError
+				if !errors.As(spillErr, &indeterminate) {
+					for _, task := range tasks {
+						if _, retryErr := recoverPendingAuditEvent(task, task.recovery, spillErr); retryErr != nil {
+							auditOutboxFailures.Add(1)
+							err = errors.Join(err, retryErr)
+						}
+					}
+				}
 			}
 		}
 		return err
@@ -376,6 +487,10 @@ func EmitAuditEventAsync(ctx context.Context, event *AuditEvent) {
 		select {
 		case auditAsyncSlots <- struct{}{}:
 		case <-ctx.Done():
+			if _, err := recoverAuditEvent(ctx, task.recovery, ctx.Err()); err != nil {
+				auditOutboxFailures.Add(1)
+				log.Printf("[AUDIT] canceled async recovery failed: %v", err)
+			}
 			finishPendingAudit(task)
 			return
 		}
@@ -383,10 +498,15 @@ func EmitAuditEventAsync(ctx context.Context, event *AuditEvent) {
 			<-auditAsyncSlots
 			finishPendingAudit(task)
 		}()
-		auditAsync.Lock()
-		recovered := task.recovered
-		auditAsync.Unlock()
-		if recovered {
+		if auditRecoveryFinalized(task) {
+			return
+		}
+		if cause := ctx.Err(); cause != nil {
+			_, err := recoverPendingAuditEvent(task, task.recovery, cause)
+			if err != nil {
+				auditOutboxFailures.Add(1)
+				log.Printf("[AUDIT] canceled async recovery failed: %v", err)
+			}
 			return
 		}
 		if err := auditEventEmitter(ctx, event); err != nil {

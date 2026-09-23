@@ -38,8 +38,14 @@ claim coordinates failure fallback, so a timed-out task creates exactly one loca
 recovery record. End-to-end delivery remains at-least-once, with the existing
 idempotency key preventing a duplicate canonical append. Audit-producer mode uses
 the same signal handling and drains HTTP before closing its stream.
+Shutdown spill state becomes durable only after the complete batch is written and
+synced. A failed or short append is truncated back to its original offset and
+synced before individual retry. If that rollback cannot be confirmed, recovery is
+marked indeterminate and returned as a hard shutdown error without a blind append
+that could duplicate or further corrupt the record. A close error after successful
+sync is logged as cleanup failure and does not retry already-durable data.
 
-## Fresh local evidence (2026-09-22)
+## Fresh local evidence (2026-09-23)
 
 - T01 activation verifier exited 0: PR 52, merge
   `1e40bdb5c8fd6b4e28c827035ab7d06645530ccb`, effective
@@ -49,7 +55,7 @@ the same signal handling and drains HTTP before closing its stream.
   exited 0: **29 passed**. Final `py_compile` of both changed production modules
   and both orchestrator test modules also exited 0.
 - Real HTTP/1.1 benchmark: 12 documents with 50 ms analyzer delay, sequential
-  **0.635 s**, four workers **0.193 s**, **3.28x** speedup. Test asserts equal
+  **0.640 s**, four workers **0.170 s**, **3.76x** speedup. Test asserts equal
   results, caller-thread ordered persistence, bounded in-flight requests, and
   exactly one reused TCP connection per slot. This measures a local controlled
   workload, not production S3/Presidio capacity.
@@ -77,6 +83,12 @@ the same signal handling and drains HTTP before closing its stream.
   lifecycle set passed 50 Windows runs and 20 Linux race-detector runs; the
   updated CI gateway selection passed in Linux against the local Redis service.
   `go vet ./...` and `go build ./...` also exited 0.
+- Failure-injection regressions now cover total spill failure, partial append with
+  successful rollback/retry, post-sync close failure, and rollback failure. All
+  audit-drain tests passed 50 Windows runs; the lifecycle set passed 50 Windows
+  runs and 20 Linux race-detector runs. The exact updated gateway CI selection
+  passed in Linux Docker against the running Redis service. `go vet ./...` and
+  `go build ./...` also exited 0 after the final state-machine change.
 
 ## Risk, growth and rollback
 
@@ -84,10 +96,10 @@ The new production lines coordinate work that the existing sequential loop and
 HTTP-only drain could not handle; existing scanner, Requests, audit emitter and
 resource clients are reused. Most added lines are regression tests, including a
 real local HTTP benchmark; deleting those would remove acceptance evidence.
-Material positive net line growth is 881 non-prose lines (288 production, 593 tests),
+Material positive net line growth is 1,187 non-prose lines (408 production, 779 tests),
 so owner exception review is required.
 Unrelated working-tree edits are excluded from the T14 scope.
-Production diff: 431 additions / 143 deletions across ten files (Git numstat,
+Production diff: 557 additions / 149 deletions across ten files (Git numstat,
 excluding the pre-existing two-line DB revision replacement). Changed production
 files range from 124 to 1,076 physical lines, below the 10,000 code-line per-file
 cap even counting blanks/comments. Tokei is unavailable locally; the canonical
