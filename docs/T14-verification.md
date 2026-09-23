@@ -31,10 +31,13 @@ Fail-open audit execution keeps at most four dependency operations active and a
 bounded backlog of 64 immutable recovery copies. Further events are synced
 directly to the durable local outbox. If the drain deadline expires, all remaining
 active and queued copies are batch-written and synced to
-the durable local outbox before dependencies close. Recovery is at-least-once: a task
-that finishes concurrently with its timeout spill can be replayed, and the
-existing idempotency key prevents a duplicate canonical append. Audit-producer
-mode uses the same signal handling and drains HTTP before closing its stream.
+the durable local outbox before dependencies close. Timeout spill atomically
+claims and cancels each task; queued workers re-check that claim before emission,
+and the persistence and built-in transport paths honor cancellation. The same
+claim coordinates failure fallback, so a timed-out task creates exactly one local
+recovery record. End-to-end delivery remains at-least-once, with the existing
+idempotency key preventing a duplicate canonical append. Audit-producer mode uses
+the same signal handling and drains HTTP before closing its stream.
 
 ## Fresh local evidence (2026-09-22)
 
@@ -68,6 +71,12 @@ mode uses the same signal handling and drains HTTP before closing its stream.
   `go test -race -run 'Test(AuditDrainDeadline|ShutdownGateway|AuditProducerSignal)' -count=20 ./...`
   passed after replacing a context-timeout `WaitGroup` waiter exposed by the
   first race run. This is engineering evidence, not CODEOWNERS approval.
+- The follow-up shutdown-race regression first failed because the queued event
+  emitted after dependency closure. After task cancellation/re-check and
+  context-aware DB/transport changes, it passed 50 focused Windows runs. The
+  lifecycle set passed 50 Windows runs and 20 Linux race-detector runs; the
+  updated CI gateway selection passed in Linux against the local Redis service.
+  `go vet ./...` and `go build ./...` also exited 0.
 
 ## Risk, growth and rollback
 
@@ -75,10 +84,10 @@ The new production lines coordinate work that the existing sequential loop and
 HTTP-only drain could not handle; existing scanner, Requests, audit emitter and
 resource clients are reused. Most added lines are regression tests, including a
 real local HTTP benchmark; deleting those would remove acceptance evidence.
-Material positive net line growth is 728 non-prose lines (218 production, 510 tests),
+Material positive net line growth is 881 non-prose lines (288 production, 593 tests),
 so owner exception review is required.
 Unrelated working-tree edits are excluded from the T14 scope.
-Production diff: 348 additions / 130 deletions across seven files (Git numstat,
+Production diff: 431 additions / 143 deletions across ten files (Git numstat,
 excluding the pre-existing two-line DB revision replacement). Changed production
 files range from 124 to 1,076 physical lines, below the 10,000 code-line per-file
 cap even counting blanks/comments. Tokei is unavailable locally; the canonical

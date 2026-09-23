@@ -485,7 +485,7 @@ jobs:
           QUOTA_REDIS_TEST: "1"
         run: >-
           go test ./... -count=1
-          -run '^(TestQuota|TestProviderQuota|TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestDatabaseConfig|TestInitDBRejectsUnsafeSharedDatabaseURL|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
+          -run '^(TestQuota|TestProviderQuota|TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestDatabaseConfig|TestInitDBRejectsUnsafeSharedDatabaseURL|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestAuditDrainDeadline|TestShutdownGateway|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
       - name: Verify quota alert rules
         run: >-
           docker run --rm --entrypoint /bin/promtool

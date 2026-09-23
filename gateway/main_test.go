@@ -223,6 +223,78 @@ func TestAuditDrainDeadlineDurablySpillsActiveQueuedAndOverflowEvents(t *testing
 	}
 }
 
+func TestAuditDrainDeadlinePreventsQueuedEmitAfterSpill(t *testing.T) {
+	lifecycleClients(t)
+	t.Setenv("AUDIT_FAIL_CLOSED", "false")
+	outbox := filepath.Join(t.TempDir(), "audit.ndjson")
+	t.Setenv("AUDIT_OUTBOX_PATH", outbox)
+	oldEmitter := auditEventEmitter
+	t.Cleanup(func() { auditEventEmitter = oldEmitter })
+	entered := make(chan struct{}, cap(auditAsyncSlots))
+	release, dependenciesClosed := make(chan struct{}), make(chan struct{})
+	afterClose := make(chan string, 1)
+	auditEventEmitter = func(_ context.Context, event *AuditEvent) error {
+		select {
+		case <-dependenciesClosed:
+			afterClose <- event.ID
+			return writeAuditOutbox(event, errors.New("dependencies closed"))
+		default:
+			entered <- struct{}{}
+			<-release
+			return nil
+		}
+	}
+
+	for i := 0; i < cap(auditAsyncSlots); i++ {
+		EmitAuditEventAsync(context.Background(), &AuditEvent{ID: fmt.Sprintf("blocker-%d", i), TenantID: "tenant"})
+	}
+	for range cap(auditAsyncSlots) {
+		<-entered
+	}
+	targetID := "queued-after-spill"
+	EmitAuditEventAsync(context.Background(), &AuditEvent{ID: targetID, TenantID: "tenant"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := drainAuditEvents(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("drain error=%v, want context cancellation", err)
+	}
+	close(dependenciesClosed)
+	close(release)
+	drained, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := drainAuditEvents(drained); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-afterClose:
+		t.Fatalf("event %s emitted after dependencies closed", id)
+	default:
+	}
+	data, err := os.ReadFile(outbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(data), targetID); count != 1 {
+		t.Fatalf("queued event recovery count=%d, want 1", count)
+	}
+}
+
+func TestAuditEvent_OperationContextOnlyRetainsLifecycleCancellation(t *testing.T) {
+	request, cancelRequest := context.WithCancel(context.Background())
+	detached := auditOperationContext(request)
+	cancelRequest()
+	if detached.Err() != nil {
+		t.Fatal("ordinary request cancellation reached audit persistence")
+	}
+
+	tracked, cancelTask := context.WithCancel(context.WithValue(context.Background(), pendingAuditContextKey{}, &pendingAuditEvent{}))
+	operation := auditOperationContext(tracked)
+	cancelTask()
+	if !errors.Is(operation.Err(), context.Canceled) {
+		t.Fatalf("tracked lifecycle cancellation not preserved: %v", operation.Err())
+	}
+}
+
 func TestShutdownGatewayAfterListenFailure(t *testing.T) {
 	lifecycleClients(t)
 	server := &http.Server{Addr: "invalid:port"}

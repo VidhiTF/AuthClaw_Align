@@ -62,7 +62,7 @@ func newAuditProducerClient() (*auditProducerClient, error) {
 
 func (c *auditProducerClient) Enabled() bool { return true }
 
-func (c *auditProducerClient) publish(tenantID string, payload []byte) error {
+func (c *auditProducerClient) publish(ctx context.Context, tenantID string, payload []byte) error {
 	if strings.TrimSpace(tenantID) == "" || len(tenantID) > 128 {
 		return fmt.Errorf("audit producer requires a tenant_id of at most 128 characters")
 	}
@@ -70,7 +70,7 @@ func (c *auditProducerClient) publish(tenantID string, payload []byte) error {
 		return fmt.Errorf("audit producer payload exceeds %d-byte limit", sqsMaxMessageBytes)
 	}
 	timestamp := strconv.FormatInt(c.now().Unix(), 10)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, c.url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -95,11 +95,15 @@ func (c *auditProducerClient) PublishEvent(event *AuditEvent) error {
 	if err != nil {
 		return err
 	}
-	return c.publish(event.TenantID, payload)
+	return c.publish(context.Background(), event.TenantID, payload)
 }
 
 func (c *auditProducerClient) PublishOutboxPayload(tenantID string, payload []byte) error {
-	return c.publish(tenantID, payload)
+	return c.publishOutboxPayloadContext(context.Background(), tenantID, payload)
+}
+
+func (c *auditProducerClient) publishOutboxPayloadContext(ctx context.Context, tenantID string, payload []byte) error {
+	return c.publish(ctx, tenantID, payload)
 }
 
 func (c *auditProducerClient) PublishDLQ(_ []byte, reason, tenantID, _ string) {

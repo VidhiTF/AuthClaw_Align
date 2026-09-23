@@ -111,6 +111,10 @@ func (s *sqsFIFOAuditStream) PublishEvent(event *AuditEvent) error {
 }
 
 func (s *sqsFIFOAuditStream) PublishOutboxPayload(tenantID string, payload []byte) error {
+	return s.publishOutboxPayloadContext(context.Background(), tenantID, payload)
+}
+
+func (s *sqsFIFOAuditStream) publishOutboxPayloadContext(parent context.Context, tenantID string, payload []byte) error {
 	var identity struct {
 		ID            string `json:"id"`
 		RecordID      string `json:"record_id"`
@@ -126,7 +130,7 @@ func (s *sqsFIFOAuditStream) PublishOutboxPayload(tenantID string, payload []byt
 	if recordID == "" {
 		recordID = identity.ID
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	return s.send(ctx, tenantID, recordID, payload)
 }

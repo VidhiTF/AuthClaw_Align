@@ -118,6 +118,10 @@ func (k *kafkaAuditStream) PublishEvent(event *AuditEvent) error {
 }
 
 func (k *kafkaAuditStream) PublishOutboxPayload(tenantID string, payload []byte) error {
+	return k.publishOutboxPayloadContext(context.Background(), tenantID, payload)
+}
+
+func (k *kafkaAuditStream) publishOutboxPayloadContext(parent context.Context, tenantID string, payload []byte) error {
 	if kafkaWriter == nil {
 		return nil
 	}
@@ -128,7 +132,7 @@ func (k *kafkaAuditStream) PublishOutboxPayload(tenantID string, payload []byte)
 	if err := json.Unmarshal(payload, &identity); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	err := kafkaWriter.WriteMessages(ctx, kafka.Message{
 		Key:   []byte(tenantID),

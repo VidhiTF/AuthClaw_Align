@@ -134,9 +134,8 @@ func EmitAuditEvent(ctx context.Context, event *AuditEvent) error {
 			auditIdempotencyCollisions.Add(1)
 		}
 		log.Printf("[AUDIT] Postgres metadata persistence failed: %v", err)
-		outboxAvailable := true
-		if outboxErr := writeAuditOutbox(event, err); outboxErr != nil {
-			outboxAvailable = false
+		outboxAvailable, outboxErr := recoverAuditEvent(ctx, event, err)
+		if outboxErr != nil {
 			auditOutboxFailures.Add(1)
 			log.Printf("[AUDIT] Durable outbox write failed: %v", outboxErr)
 		}
@@ -231,9 +230,12 @@ const auditAsyncBacklogLimit = 64
 var auditAsyncSlots = make(chan struct{}, 4)
 
 type pendingAuditEvent struct {
-	recovery *AuditEvent
-	spilled  bool
+	recovery  *AuditEvent
+	recovered bool
+	cancel    context.CancelFunc
 }
+
+type pendingAuditContextKey struct{}
 
 var auditAsync struct {
 	sync.Mutex
@@ -258,6 +260,34 @@ func finishPendingAudit(task *pendingAuditEvent) {
 		close(auditAsync.drained)
 	}
 	auditAsync.Unlock()
+	if task != nil {
+		task.cancel()
+	}
+}
+
+func recoverAuditEvent(ctx context.Context, event *AuditEvent, cause error) (bool, error) {
+	task, _ := ctx.Value(pendingAuditContextKey{}).(*pendingAuditEvent)
+	if task == nil {
+		err := writeAuditOutbox(event, cause)
+		return err == nil, err
+	}
+	auditAsync.Lock()
+	defer auditAsync.Unlock()
+	if task.recovered {
+		return true, nil
+	}
+	if err := writeAuditOutbox(event, cause); err != nil {
+		return false, err
+	}
+	task.recovered = true
+	return true, nil
+}
+
+func auditOperationContext(parent context.Context) context.Context {
+	if _, tracked := parent.Value(pendingAuditContextKey{}).(*pendingAuditEvent); tracked {
+		return parent
+	}
+	return context.WithoutCancel(parent)
 }
 
 func drainAuditEvents(ctx context.Context) error {
@@ -275,14 +305,19 @@ func drainAuditEvents(ctx context.Context) error {
 		err := fmt.Errorf("audit drain: %w", ctx.Err())
 		auditAsync.Lock()
 		spill := make([]*AuditEvent, 0, len(auditAsync.active))
+		cancels := make([]context.CancelFunc, 0, len(auditAsync.active))
 		for task := range auditAsync.active {
-			if task.spilled {
+			if task.recovered {
 				continue
 			}
-			task.spilled = true
+			task.recovered = true
 			spill = append(spill, task.recovery)
+			cancels = append(cancels, task.cancel)
 		}
 		auditAsync.Unlock()
+		for _, cancel := range cancels {
+			cancel()
+		}
 		if len(spill) > 0 {
 			if spillErr := writeAuditOutboxBatch(spill, err); spillErr != nil {
 				auditOutboxFailures.Add(1)
@@ -328,7 +363,9 @@ func EmitAuditEventAsync(ctx context.Context, event *AuditEvent) {
 	recovery := *event
 	recovery.FrameworksAffected = append([]string(nil), event.FrameworksAffected...)
 	recovery.ExecutionTrace = append([]string(nil), event.ExecutionTrace...)
-	task := &pendingAuditEvent{recovery: &recovery}
+	ctx, cancel := context.WithCancel(ctx)
+	task := &pendingAuditEvent{recovery: &recovery, cancel: cancel}
+	ctx = context.WithValue(ctx, pendingAuditContextKey{}, task)
 	if auditAsync.active == nil {
 		auditAsync.active = make(map[*pendingAuditEvent]struct{})
 	}
@@ -336,11 +373,22 @@ func EmitAuditEventAsync(ctx context.Context, event *AuditEvent) {
 	startPendingAudit()
 	auditAsync.Unlock()
 	go func() {
-		auditAsyncSlots <- struct{}{}
+		select {
+		case auditAsyncSlots <- struct{}{}:
+		case <-ctx.Done():
+			finishPendingAudit(task)
+			return
+		}
 		defer func() {
 			<-auditAsyncSlots
 			finishPendingAudit(task)
 		}()
+		auditAsync.Lock()
+		recovered := task.recovered
+		auditAsync.Unlock()
+		if recovered {
+			return
+		}
 		if err := auditEventEmitter(ctx, event); err != nil {
 			log.Printf("[AUDIT] async emit failed: %v", err)
 		}
@@ -374,7 +422,7 @@ func persistAuditMetadata(parent context.Context, event *AuditEvent) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
+	ctx, cancel := context.WithTimeout(auditOperationContext(parent), 10*time.Second)
 	defer cancel()
 
 	err := RunInTenantTx(ctx, event.TenantID, func(tx *sql.Tx) error {
@@ -445,7 +493,7 @@ func publishPendingAuditOutbox(parent context.Context, tenantID string, limit in
 	if !AuditTransportEnabled() || DB == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
+	ctx, cancel := context.WithTimeout(auditOperationContext(parent), 15*time.Second)
 	defer cancel()
 	return RunInTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
 		var backlog int64
@@ -488,7 +536,7 @@ func publishPendingAuditOutbox(parent context.Context, tenantID string, limit in
 			return err
 		}
 		for _, item := range events {
-			if err := PublishAuditOutboxPayload(tenantID, item.payload); err != nil {
+			if err := publishAuditOutboxPayloadContext(ctx, tenantID, item.payload); err != nil {
 				_, _ = tx.ExecContext(ctx, `
 					UPDATE audit_outbox
 					SET publish_attempts = publish_attempts + 1, last_error = $2
