@@ -355,7 +355,9 @@ func TestAuditEvent_RecoveryQueueDoesNotDropTenants(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first tenant recovery did not start")
 	}
-	scheduleAuditRecovery(context.Background(), "tenant-b")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	scheduleAuditRecovery(canceled, "tenant-b")
 	if err := writeAuditOutbox(&AuditEvent{ID: "queued-a-rerun", TenantID: "tenant-a"}, errors.New("restart")); err != nil {
 		t.Fatal(err)
 	}

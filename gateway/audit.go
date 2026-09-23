@@ -534,8 +534,12 @@ func scheduleAuditRecovery(ctx context.Context, tenantID string) {
 	auditRecoveryQueue.Unlock()
 	select {
 	case auditRecoveryAdmissions <- struct{}{}:
-	case <-ctx.Done():
-		return
+	default:
+		select {
+		case auditRecoveryAdmissions <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 	}
 	auditAsync.Lock()
 	if auditAsync.closing {
