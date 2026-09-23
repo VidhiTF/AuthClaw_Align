@@ -423,7 +423,7 @@ def _approval_request(identity):
 
 
 def _assert_revocation_wins_post_lock_race(
-    postgres, monkeypatch, *, remediation: bool
+    postgres, monkeypatch, *, remediation: bool, suspend_tenant: bool = False
 ):
     harness, _, _ = postgres
     requester = harness.create_identity(
@@ -515,14 +515,20 @@ def _assert_revocation_wins_post_lock_race(
 
         future = executor.submit(approve)
         assert lock_requested.wait(timeout=10), "approval never reached the locked user row"
-        assert blocker.execute(
-            text("SELECT authn.revoke_session(:credential_hash)"),
-            {"credential_hash": approver.session_hash},
-        ).scalar_one()
+        if suspend_tenant:
+            blocker.execute(
+                text("UPDATE tenants SET status='suspended' WHERE id=:tenant_id"),
+                {"tenant_id": approver.tenant_id},
+            )
+        else:
+            assert blocker.execute(
+                text("SELECT authn.revoke_session(:credential_hash)"),
+                {"credential_hash": approver.session_hash},
+            ).scalar_one()
         transaction.commit()
         with pytest.raises(HTTPException) as rejected:
             future.result(timeout=15)
-        assert rejected.value.status_code == 401
+        assert rejected.value.status_code == (403 if suspend_tenant else 401)
     finally:
         if transaction.is_active:
             transaction.rollback()
@@ -551,6 +557,14 @@ def test_remediation_approval_cannot_resume_after_blocked_session_is_revoked(
     postgres, monkeypatch
 ):
     _assert_revocation_wins_post_lock_race(postgres, monkeypatch, remediation=True)
+
+
+def test_gateway_approval_cannot_commit_after_tenant_is_suspended_during_lock_wait(
+    postgres, monkeypatch
+):
+    _assert_revocation_wins_post_lock_race(
+        postgres, monkeypatch, remediation=False, suspend_tenant=True
+    )
 
 
 def pending_assessment(harness, requester):

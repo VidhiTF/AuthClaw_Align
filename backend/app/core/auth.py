@@ -167,12 +167,24 @@ def _normalize_role(role: str | None) -> str:
     return str(role).lower()
 
 
+def _canonical_request_path(request: Request) -> str:
+    path = getattr(getattr(request, "url", None), "path", "")
+    return path[4:] if path.startswith("/api/v1/") else path
+
+
+def _is_tenant_lifecycle_path(request: Request) -> bool:
+    return _canonical_request_path(request) in {
+        "/v1/tenants/current",
+        "/v1/tenants/current/status",
+    }
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Middleware to validate API keys and inject tenant_id and scopes"""
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        canonical_path = path[4:] if path.startswith("/api/v1/") else path
+        canonical_path = _canonical_request_path(request)
 
         # Bypass authentication for public routes
         public_paths = {
@@ -266,11 +278,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     content={"detail": "Unauthorized: User is inactive or not found"},
                 )
-            tenant_lifecycle_path = canonical_path in {
-                "/v1/tenants/current",
-                "/v1/tenants/current/status",
-            }
-            if result.tenant_status != "active" and not tenant_lifecycle_path:
+            if result.tenant_status != "active" and not _is_tenant_lifecycle_path(request):
                 return JSONResponse(
                     status_code=status.HTTP_403_FORBIDDEN,
                     content={"detail": "Forbidden: Tenant is not active"},
@@ -354,13 +362,25 @@ def revalidate_tenant_credential(request: Request, db: Session):
         else "authn.bind_api_key_context"
     )
     bound = db.execute(
-        text(f"SELECT tenant_id, user_id, role, scopes FROM {resolver}(:credential_hash)"),
+        text(
+            f"SELECT tenant_id, user_id, role, scopes, tenant_status "
+            f"FROM {resolver}(:credential_hash)"
+        ),
         {"credential_hash": credential_hash},
     ).first()
     if (not bound or str(bound.tenant_id) != str(expected_tenant)
             or str(bound.user_id) != str(getattr(request.state, "user_id", None))):
         db.rollback()
         raise HTTPException(status_code=401, detail="Authentication context expired")
+    if (
+        str(bound.tenant_status).lower() != "active"
+        and not _is_tenant_lifecycle_path(request)
+    ):
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Tenant is not active",
+        )
     # Retain only the already-validated request credential for same-request
     # transactions that must be re-bound after a commit (for example, audit
     # appends).  This is cleared with the request-scoped SQLAlchemy session.
