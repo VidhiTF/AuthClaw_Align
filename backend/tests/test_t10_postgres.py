@@ -152,7 +152,6 @@ def postgres():
                 {"approval": duplicate_pending, "workflow": linkage_workflow},
             )
         command("-m", "alembic", "upgrade", "054")
-        command("scripts/bootstrap_database_security.py", "finalize-backend")
         command("-m", "alembic", "upgrade", "head")
         command("scripts/bootstrap_database_security.py", "finalize-backend")
         with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="055"), app.connect() as connection:
