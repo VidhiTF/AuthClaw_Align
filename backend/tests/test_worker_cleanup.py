@@ -1,4 +1,9 @@
 import asyncio
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+import pytest
+from fastapi.testclient import TestClient
 
 from app.services import worker_cleanup
 
@@ -26,6 +31,131 @@ def test_loop_recovers_after_failure_and_stops(monkeypatch):
 
     asyncio.run(exercise())
     assert len(calls) >= 2
+
+
+def test_backend_lifespan_preserves_startup_order_health_and_shutdown(monkeypatch, caplog):
+    import main
+    from app.core import worker_tokens
+
+    events = []
+
+    @contextmanager
+    def connect():
+        events.append("connect")
+        yield object()
+        events.append("disconnect")
+
+    async def start(app, engine):
+        events.append("start")
+
+    async def shutdown(app):
+        events.append("shutdown")
+
+    monkeypatch.setattr(main, "engine", SimpleNamespace(connect=connect))
+    monkeypatch.setattr(main, "validate_database_security", lambda _: events.append("validate"))
+    monkeypatch.setattr(worker_tokens, "active_version", lambda: events.append("version") or "v1")
+    monkeypatch.setattr(worker_tokens, "key_for", lambda _: events.append("key"))
+    monkeypatch.setattr(worker_cleanup, "start", start)
+    monkeypatch.setattr(worker_cleanup, "shutdown", shutdown)
+    monkeypatch.setenv("WORKER_TOKEN_ISSUANCE_PAUSED", "false")
+
+    with caplog.at_level("INFO", logger="uvicorn.error"):
+        with TestClient(main.app) as client:
+            assert events == ["connect", "validate", "disconnect", "version", "key", "start"]
+            response = client.get("/health")
+            assert response.status_code == 200
+            assert response.json() == {"status": "healthy", "service": "authclaw-backend"}
+            assert client.get("/metrics").status_code == 401
+            assert client.get("/openapi.json").status_code == 200
+            assert client.get("/docs").status_code == 200
+
+    assert events[-1] == "shutdown"
+    assert events.count("start") == events.count("shutdown") == 1
+    assert "event=startup" in caplog.text
+    assert "event=shutdown" in caplog.text
+
+
+@pytest.mark.parametrize("failure", ["database", "token", "cleanup"])
+def test_backend_lifespan_rejects_failed_startup(monkeypatch, failure):
+    import main
+    from app.core import worker_tokens
+
+    events = []
+
+    @contextmanager
+    def connect():
+        yield object()
+
+    def validate(_):
+        events.append("validate")
+        if failure == "database":
+            raise RuntimeError("database validation failed")
+
+    async def start(app, engine):
+        events.append("start")
+        if failure == "cleanup":
+            raise RuntimeError("cleanup validation failed")
+
+    async def shutdown(app):
+        events.append("shutdown")
+
+    def key_for(_):
+        events.append("key")
+        if failure == "token":
+            raise RuntimeError("worker key missing")
+
+    monkeypatch.setattr(main, "engine", SimpleNamespace(connect=connect))
+    monkeypatch.setattr(main, "validate_database_security", validate)
+    monkeypatch.setattr(worker_tokens, "active_version", lambda: "v1")
+    monkeypatch.setattr(worker_tokens, "key_for", key_for)
+    monkeypatch.setattr(worker_cleanup, "start", start)
+    monkeypatch.setattr(worker_cleanup, "shutdown", shutdown)
+    monkeypatch.setenv("WORKER_TOKEN_ISSUANCE_PAUSED", "false")
+
+    with pytest.raises(RuntimeError):
+        with TestClient(main.app):
+            pass
+    assert events == {
+        "database": ["validate"],
+        "token": ["validate", "key"],
+        "cleanup": ["validate", "key", "start"],
+    }[failure]
+
+
+def test_enabled_cleanup_worker_stops_and_disposes_its_engine(monkeypatch):
+    events = []
+    app = SimpleNamespace(state=SimpleNamespace())
+    cleanup_engine = SimpleNamespace(dispose=lambda: events.append("dispose"))
+    monkeypatch.setenv("WORKER_CLEANUP_ENABLED", "true")
+    monkeypatch.setattr(worker_cleanup, "create_engine", lambda *args, **kwargs: cleanup_engine)
+    monkeypatch.setattr(worker_cleanup, "validate", lambda _: events.append("validate"))
+
+    async def run(engine, stop):
+        events.append("run")
+        await stop.wait()
+        events.append("stopped")
+
+    monkeypatch.setattr(worker_cleanup, "run", run)
+
+    async def exercise():
+        await worker_cleanup.start(app, SimpleNamespace(url="test://"))
+        await asyncio.sleep(0)
+        await worker_cleanup.shutdown(app)
+
+    asyncio.run(exercise())
+    assert events == ["validate", "run", "stopped", "dispose"]
+
+
+def test_disabled_cleanup_worker_does_not_create_engine(monkeypatch):
+    monkeypatch.setenv("WORKER_CLEANUP_ENABLED", "false")
+    monkeypatch.setattr(worker_cleanup, "create_engine", lambda *args, **kwargs: pytest.fail("unexpected engine"))
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    async def exercise():
+        await worker_cleanup.start(app, SimpleNamespace(url="test://"))
+        await worker_cleanup.shutdown(app)
+
+    asyncio.run(exercise())
 
 
 def test_success_is_not_returned_when_commit_fails():

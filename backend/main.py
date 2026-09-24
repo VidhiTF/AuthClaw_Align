@@ -1,4 +1,5 @@
 """AuthClaw Backend - FastAPI Application"""
+from contextlib import asynccontextmanager
 import logging
 import os
 from dotenv import load_dotenv
@@ -25,12 +26,34 @@ validate_production_environment()
 validate_abuse_control_config()
 validate_bff_client_ip_config()
 logger = logging.getLogger("authclaw.backend")
+lifecycle_logger = logging.getLogger("uvicorn.error")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Validate startup before serving and stop maintenance on shutdown."""
+    with engine.connect() as connection:
+        validate_database_security(connection)
+    from app.core.worker_tokens import active_version, key_for
+    from app.services import worker_cleanup
+
+    if os.getenv("WORKER_TOKEN_ISSUANCE_PAUSED", "true").lower() == "false":
+        key_for(active_version())
+    await worker_cleanup.start(app, engine)
+    lifecycle_logger.info("backend_lifecycle event=startup")
+    try:
+        yield
+    finally:
+        await worker_cleanup.shutdown(app)
+        lifecycle_logger.info("backend_lifecycle event=shutdown")
+
 
 # Initialize FastAPI app
 app = FastAPI(
     title="AuthClaw API",
     description="AI Governance & Compliance Platform Control Plane",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
@@ -169,24 +192,3 @@ def health_check():
         "status": "healthy",
         "service": "authclaw-backend",
     }
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize app only after database security invariants pass."""
-    with engine.connect() as connection:
-        validate_database_security(connection)
-    from app.core.worker_tokens import active_version, key_for
-    from app.services import worker_cleanup
-    if os.getenv("WORKER_TOKEN_ISSUANCE_PAUSED", "true").lower() == "false":
-        key_for(active_version())
-    await worker_cleanup.start(app, engine)
-    print("AuthClaw Backend Starting Up...")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown"""
-    from app.services import worker_cleanup
-    await worker_cleanup.shutdown(app)
-    print("AuthClaw Backend Shutting Down...")
