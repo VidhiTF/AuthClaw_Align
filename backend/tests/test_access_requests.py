@@ -474,7 +474,7 @@ def test_invitation_resend_does_not_reload_after_tenant_context_ends(monkeypatch
     db = MagicMock()
     db.execute.return_value.one.return_value = SimpleNamespace(outcome="valid")
     db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = SimpleNamespace(
-        id=payload.signup_id, tenant_id=uuid4(), email="owner@example.com", tenant_name="Test",
+        id=payload.signup_id, tenant_id=uuid4(), email="owner@example.com", tenant_name="Test", status="pending",
     )
     monkeypatch.setattr(onboarding, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(onboarding, "_enforce_onboarding_rate_limit", lambda *_: None)
