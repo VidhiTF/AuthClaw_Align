@@ -210,13 +210,13 @@ variable "authclaw_env" {
 }
 
 variable "expected_db_revision" {
-  description = "Allowed Alembic head: use 048,049 only during the controlled 049 rollout, then tighten to 049."
+  description = "Allowed Alembic head: use 049,050 only during the controlled 050 rollout, then tighten to 050."
   type        = string
-  default     = "049"
+  default     = "050"
 
   validation {
-    condition     = contains(["048", "049", "048,049"], var.expected_db_revision)
-    error_message = "expected_db_revision must be 048, 049, or the temporary 048,049 rollout bridge."
+    condition     = contains(["049", "050", "049,050"], var.expected_db_revision)
+    error_message = "expected_db_revision must be 049, 050, or the temporary 049,050 rollout bridge."
   }
 }
 

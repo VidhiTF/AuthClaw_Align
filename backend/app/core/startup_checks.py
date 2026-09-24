@@ -102,11 +102,17 @@ def _is_secure_sidecar_url(value: str | None) -> bool:
 
 
 def validate_production_environment() -> None:
+    from app.services.email_service import EmailDeliveryError, validate_smtp_configuration
+
     environment = os.getenv("AUTHCLAW_ENV", "local").strip().lower()
     if environment not in _VALID_ENVIRONMENTS:
         raise RuntimeError(
             f"AUTHCLAW_ENV {environment!r} is unsupported; configure an explicit local, test, staging, or production environment"
         )
+    try:
+        validate_smtp_configuration()
+    except EmailDeliveryError as exc:
+        raise RuntimeError(str(exc)) from exc
     production = is_production()
     shared_environment = is_shared_environment()
     require_service_tls = _truthy(
