@@ -522,13 +522,78 @@ var auditRecoveryQueue struct {
 }
 
 const auditRecoveryQueueLimit = 64
+const auditRecoveryScanInterval = 30 * time.Second
 
 var auditRecoveryAdmissions = make(chan struct{}, auditRecoveryQueueLimit)
+var auditRecoveryScanOffset atomic.Uint64
+
+func scheduleAuditRecoveryBacklog(ctx context.Context) {
+	files, err := auditRecoveryFiles()
+	if err != nil {
+		auditRecoveryScanFailures.Add(1)
+		log.Printf("[AUDIT] recovery scan failed: %v", err)
+		return
+	}
+	seen := make(map[string]struct{})
+	tenants := make([]string, 0, len(files))
+	for _, path := range files {
+		envelopes, err := readAuditRecovery(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err == nil && (len(envelopes) == 0 || envelopes[0].Event.TenantID == "") {
+			err = fmt.Errorf("recovery file has no tenant")
+		}
+		if err != nil {
+			auditRecoveryScanFailures.Add(1)
+			log.Printf("[AUDIT] recovery discovery failed path=%s err=%v", path, err)
+			continue
+		}
+		tenantID := envelopes[0].Event.TenantID
+		if _, ok := seen[tenantID]; !ok {
+			seen[tenantID] = struct{}{}
+			tenants = append(tenants, tenantID)
+		}
+	}
+	limit := min(len(tenants), cap(auditRecoveryAdmissions))
+	if limit == 0 {
+		return
+	}
+	start := int((auditRecoveryScanOffset.Add(uint64(limit)) - uint64(limit)) % uint64(len(tenants)))
+	for index := range limit {
+		if ctx.Err() != nil {
+			return
+		}
+		scheduleAuditRecoveryIfIdle(ctx, tenants[(start+index)%len(tenants)])
+	}
+}
+
+func runAuditRecoveryScanner(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		scheduleAuditRecoveryBacklog(ctx)
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
+		}
+	}
+}
 
 func scheduleAuditRecovery(ctx context.Context, tenantID string) {
+	scheduleAuditRecoveryTask(ctx, tenantID, true)
+}
+
+func scheduleAuditRecoveryIfIdle(ctx context.Context, tenantID string) {
+	scheduleAuditRecoveryTask(ctx, tenantID, false)
+}
+
+func scheduleAuditRecoveryTask(ctx context.Context, tenantID string, reschedule bool) {
 	auditRecoveryQueue.Lock()
 	if _, pending := auditRecoveryQueue.pending[tenantID]; pending {
-		auditRecoveryQueue.dirty[tenantID] = true
+		if reschedule {
+			auditRecoveryQueue.dirty[tenantID] = true
+		}
 		auditRecoveryQueue.Unlock()
 		return
 	}
@@ -546,7 +611,9 @@ func scheduleAuditRecovery(ctx context.Context, tenantID string) {
 	}
 	auditRecoveryQueue.Lock()
 	if _, pending := auditRecoveryQueue.pending[tenantID]; pending {
-		auditRecoveryQueue.dirty[tenantID] = true
+		if reschedule {
+			auditRecoveryQueue.dirty[tenantID] = true
+		}
 		auditRecoveryQueue.Unlock()
 		auditAsync.Unlock()
 		<-auditRecoveryAdmissions

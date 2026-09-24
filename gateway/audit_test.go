@@ -453,6 +453,64 @@ func TestAuditEvent_RecoveryQueueBoundsDistinctTenants(t *testing.T) {
 	}
 }
 
+func TestAuditEvent_AutonomousRecoveryDoesNotStarveIdleTenant(t *testing.T) {
+	t.Setenv("AUDIT_OUTBOX_PATH", filepath.Join(t.TempDir(), "audit.ndjson"))
+	for _, event := range []*AuditEvent{{ID: "idle-a", TenantID: "tenant-a"}, {ID: "idle-b", TenantID: "tenant-b"}} {
+		if err := writeAuditOutbox(event, errors.New("restart")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldPersist, oldPublish, oldAdmissions := auditRecoveryPersist, auditRecoveryPublish, auditRecoveryAdmissions
+	auditRecoveryAdmissions = make(chan struct{}, 1)
+	var mu sync.Mutex
+	failedTenant := ""
+	recovered := make(chan string, 1)
+	auditRecoveryPersist = func(_ context.Context, event *AuditEvent) error {
+		mu.Lock()
+		if failedTenant == "" {
+			failedTenant = event.TenantID
+		}
+		failed := event.TenantID == failedTenant
+		mu.Unlock()
+		if failed {
+			time.Sleep(30 * time.Millisecond)
+			return errors.New("database unavailable for tenant")
+		}
+		recovered <- event.TenantID
+		return nil
+	}
+	auditRecoveryPublish = func(context.Context, string, int) error { return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	scannerDone := make(chan struct{})
+	go func() {
+		runAuditRecoveryScanner(ctx, 10*time.Millisecond)
+		close(scannerDone)
+	}()
+	stopScanner := sync.OnceFunc(func() { cancel(); <-scannerDone })
+	t.Cleanup(func() {
+		stopScanner()
+		drained, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		_ = drainAuditEvents(drained)
+		auditRecoveryPersist, auditRecoveryPublish, auditRecoveryAdmissions = oldPersist, oldPublish, oldAdmissions
+		auditAsync.Lock()
+		auditAsync.closing = false
+		auditAsync.Unlock()
+	})
+
+	var recoveredTenant string
+	select {
+	case recoveredTenant = <-recovered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle tenant recovery was starved")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if recoveredTenant == failedTenant {
+		t.Fatalf("recovered tenant=%q, permanently failing tenant=%q", recoveredTenant, failedTenant)
+	}
+}
+
 func TestAuditEvent_RecoveryQueueSkipsPublishWithoutRecovery(t *testing.T) {
 	t.Setenv("AUDIT_OUTBOX_PATH", filepath.Join(t.TempDir(), "audit.ndjson"))
 	oldPublish := auditRecoveryPublish

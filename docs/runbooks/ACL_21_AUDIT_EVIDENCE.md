@@ -28,21 +28,19 @@ consumer lag above the tenant traffic SLO for 10 minutes.
    group; keep any custom `AUDIT_OUTBOX_PATH` on
    equivalently durable shared storage. The gateway writes immutable, atomic
    `*.ready` files, so gateway processes cannot overwrite one another. After
-   PostgreSQL returns, an authenticated request schedules a bounded background
-   replay for its tenant through the canonical idempotent append path. Recovery
+   PostgreSQL returns, gateway startup and a 30-second periodic scan schedule bounded
+   background replay through the canonical idempotent append path. Recovery
    runs one tenant at a time with a 64-tenant admission bound; saturated admission
    is skipped without blocking the request, leaves the recovery file intact, and is
-   retried by a later authenticated audit request. Each 100-record turn automatically
-   requeues remaining work. Partial progress is atomically checkpointed
+   retried by the next scan or authenticated audit request. Each 100-record turn
+   automatically requeues remaining work. Partial progress is atomically checkpointed
    so the next attempt starts at the first uncommitted record. On restart,
    complete stale temp files and a previously claimed legacy file are resumed; corrupt
    temp/ready files remain visible and raise the scan-failure alert. The former
    single NDJSON file is atomically claimed and deterministically split for the
-   same replay path. Never delete or edit recovery files manually. A tenant with
-   no new traffic needs an authenticated request to trigger replay; if backlog
-   age remains above five minutes, restore database/storage access and issue an
-   authenticated audited gateway request for that tenant, then verify both backlog gauges return
-   to zero.
+   same replay path. Never delete or edit recovery files manually. Idle tenants are
+   retried without traffic; if backlog age remains above five minutes, restore
+   database/storage access and verify both backlog gauges return to zero.
 4. ClickHouse outage: restore ClickHouse. The consumer must retry without
    committing failed offsets. If the mirror was lost, call the PostgreSQL to
    ClickHouse replay endpoint or `replay_postgres_to_clickhouse`.

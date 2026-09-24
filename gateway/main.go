@@ -198,6 +198,9 @@ func runGateway() (err error) {
 	if err := InitAuditTransport(); err != nil {
 		return fmt.Errorf("invalid audit transport configuration: %w", err)
 	}
+	recoveryCtx, stopRecovery := context.WithCancel(context.Background())
+	defer stopRecovery()
+	go runAuditRecoveryScanner(recoveryCtx, auditRecoveryScanInterval)
 
 	r := NewGatewayRouter(NewProxyServer())
 

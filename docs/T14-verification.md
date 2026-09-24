@@ -46,11 +46,12 @@ synced to a unique temporary file, then atomically renamed and directory-synced.
 Immutable per-tenant ready files prevent separate gateway processes from
 overwriting one another. ECS mounts an encrypted, backed-up EFS access point at
 `/var/lib/authclaw-gateway` and sets `AUDIT_OUTBOX_PATH` there, so task replacement
-does not discard recovery records. A successful authenticated request schedules
-recovery without waiting; one process-wide worker drains a deduplicated queue
-bounded to 64 tenants. Saturated admission skips additional scheduling instead
-of delaying the request; immutable recovery files remain durable and a later
-audit schedules another attempt. The worker publishes only after restoring a
+does not discard recovery records. Gateway startup, a 30-second periodic scan,
+and successful authenticated requests schedule recovery without waiting; one
+process-wide worker drains a deduplicated queue bounded to 64 tenants. Saturated
+admission skips additional scheduling instead of delaying the request; immutable
+recovery files remain durable and a later scan or audit schedules another attempt.
+The worker publishes only after restoring a
 recovery record to the canonical outbox. It replays at most 100 records per fair
 queue turn through the existing canonical idempotent append and automatically
 requeues a remaining suffix. A partial file is atomically checkpointed to its
@@ -126,6 +127,9 @@ and covered by installed critical alert rules.
   and 10 Linux race-detector runs. The broader lifecycle set passed 10 runs, the
   exact gateway CI selection passed with Redis, and Terraform format, validation,
   CI-equivalent plan assertion, and all 20 Terraform tests passed.
+- Autonomous startup and 30-second recovery scans retry idle tenants fairly through
+  the existing bounded queue. The saturation regression passed 20 runs, including
+  recovery behind a permanently failing tenant; the Linux race set passed 3 runs.
 
 ## Risk, growth and rollback
 
