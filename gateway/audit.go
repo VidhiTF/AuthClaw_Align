@@ -787,15 +787,23 @@ func recoverPendingAuditEvent(task *pendingAuditEvent, event *AuditEvent, cause 
 			auditAsync.Unlock()
 			return false, err
 		default:
+			task.recoveryState = auditRecoveryClaimed
+			task.spillDone = make(chan struct{})
+			auditAsync.Unlock()
 			err := writeAuditOutbox(event, cause)
+			auditAsync.Lock()
 			if err == nil {
 				task.recoveryState = auditRecoveryDurable
 			} else {
 				var indeterminate *auditOutboxIndeterminateError
 				if errors.As(err, &indeterminate) {
 					task.recoveryState, task.recoveryErr = auditRecoveryIndeterminate, err
+				} else {
+					task.recoveryState = auditRecoveryPending
 				}
 			}
+			close(task.spillDone)
+			task.spillDone = nil
 			auditAsync.Unlock()
 			return err == nil, err
 		}

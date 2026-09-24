@@ -30,8 +30,9 @@ consumer lag above the tenant traffic SLO for 10 minutes.
    `*.ready` files, so gateway processes cannot overwrite one another. After
    PostgreSQL returns, an authenticated request schedules a bounded background
    replay for its tenant through the canonical idempotent append path. Recovery
-   runs one tenant at a time with a 64-tenant admission bound; saturation applies
-   request backpressure until a slot is free. Each 100-record turn automatically
+   runs one tenant at a time with a 64-tenant admission bound; saturated admission
+   is skipped without blocking the request, leaves the recovery file intact, and is
+   retried by a later authenticated audit request. Each 100-record turn automatically
    requeues remaining work. Partial progress is atomically checkpointed
    so the next attempt starts at the first uncommitted record. On restart,
    complete stale temp files and a previously claimed legacy file are resumed; corrupt

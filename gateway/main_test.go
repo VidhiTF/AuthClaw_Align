@@ -224,6 +224,51 @@ func TestAuditDrainDeadlineDurablySpillsActiveQueuedAndOverflowEvents(t *testing
 	}
 }
 
+func TestAuditDrainDeadlineDoesNotWaitForRecoveryStorage(t *testing.T) {
+	lifecycleClients(t)
+	t.Setenv("AUDIT_FAIL_CLOSED", "false")
+	t.Setenv("AUDIT_OUTBOX_PATH", filepath.Join(t.TempDir(), "audit.ndjson"))
+	oldEmitter, oldWrite := auditEventEmitter, auditOutboxWrite
+	entered, release := make(chan struct{}), make(chan struct{})
+	releaseWrite := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(func() {
+		auditEventEmitter, auditOutboxWrite = oldEmitter, oldWrite
+		releaseWrite()
+	})
+	auditEventEmitter = func(ctx context.Context, event *AuditEvent) error {
+		_, err := recoverAuditEvent(ctx, event, errors.New("forced recovery"))
+		return err
+	}
+	auditOutboxWrite = func(file *os.File, payload []byte) (int, error) {
+		close(entered)
+		<-release
+		return file.Write(payload)
+	}
+
+	EmitAuditEventAsync(context.Background(), &AuditEvent{ID: "blocked-recovery", TenantID: "tenant"})
+	<-entered
+	deadline, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- drainAuditEvents(deadline) }()
+	select {
+	case err := <-done:
+		releaseWrite()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("drain error=%v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		releaseWrite()
+		<-done
+		t.Fatal("drain deadline waited for recovery storage")
+	}
+	drained, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	if err := drainAuditEvents(drained); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAuditDrainDeadlinePreventsQueuedEmitAfterSpill(t *testing.T) {
 	lifecycleClients(t)
 	t.Setenv("AUDIT_FAIL_CLOSED", "false")
