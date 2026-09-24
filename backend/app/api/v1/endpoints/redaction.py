@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from uuid import UUID
@@ -12,6 +13,7 @@ from app.core.crypto import decrypt_secret
 from app.services.privacy_lifecycle import purge_expired_redaction_mappings
 
 router = APIRouter()
+logger = logging.getLogger("api.redaction")
 
 
 @router.get("/metrics", dependencies=[require_scopes(["read"])])
@@ -62,8 +64,8 @@ def get_tokenization_map(
     for t in tokens:
         try:
             decrypted = decrypt_secret(t.original_value)
-        except Exception as dec_err:
-            print(f"[WARN] Failed to decrypt token value for mapping ID {t.id}: {dec_err}")
+        except Exception as exc:
+            logger.warning("redaction_decrypt failed error_type=%s", type(exc).__name__)
             decrypted = "[Decryption Failed]"
 
         response.append(
