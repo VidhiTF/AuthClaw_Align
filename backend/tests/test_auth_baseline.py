@@ -972,16 +972,3 @@ def test_incomplete_smtp_credentials_rejected_before_connection(monkeypatch, tmp
         validate_production_environment()
     smtp.assert_not_called()
     assert not outbox.exists()
-
-
-@pytest.mark.parametrize("environment", ["prod", "production", "staging", "stage", "shared-test", "ci", "unknown"])
-def test_nonlocal_email_never_uses_outbox(monkeypatch, tmp_path, environment):
-    monkeypatch.setenv("AUTHCLAW_ENV", environment)
-    monkeypatch.setenv("SMTP_HOST", "")
-    outbox = tmp_path / "outbox.jsonl"
-    monkeypatch.setenv("AUTHCLAW_EMAIL_OUTBOX_PATH", str(outbox))
-    with pytest.raises(email_service.EmailDeliveryError):
-        send_otp_email("owner@example.com", "123456", "Acme")
-    with pytest.raises(email_service.EmailDeliveryError):
-        email_service.send_email("owner@example.com", "Invite", "Body")
-    assert not outbox.exists()

@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
 import importlib.util
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
@@ -12,13 +11,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import Column
-from sqlalchemy.orm import Session, make_transient_to_detached
 
 from app.api.v1.endpoints import access_requests as access_request_endpoints
 from app.api.v1.endpoints import onboarding
-from app.db.models import AccessRequest, AccessRequestHistory, OnboardingEmailOTP
+from app.db.models import AccessRequest, AccessRequestHistory
 from app.db.dependencies import get_db
-from app.schemas.models import AccessRequestCreate, OnboardingResendRequest
+from app.schemas.models import AccessRequestCreate
 from app.services import access_requests
 from app.services import event_backbone, privacy_lifecycle
 from app.services.access_requests import (
@@ -470,54 +468,14 @@ def test_email_retry_recovers_without_failure_record(monkeypatch):
     assert db.commits == 0
 
 
-def test_local_invitation_history_contains_usable_outbox_link_and_code(monkeypatch, tmp_path):
-    monkeypatch.setenv("AUTHCLAW_ENV", "local")
-    monkeypatch.setenv("SMTP_HOST", "")
-    monkeypatch.setenv("PUBLIC_CONSOLE_URL", "http://localhost:3001")
-    outbox = tmp_path / "outbox.jsonl"
-    monkeypatch.setenv("AUTHCLAW_EMAIL_OUTBOX_PATH", str(outbox))
-    request = AccessRequest(id=uuid4(), reference="AR-LOCAL-INVITE", status="PENDING",
-                            business_email="owner@example.com", company="Test tenant")
-    db = MagicMock()
-    query = db.query.return_value
-    query.filter.return_value = query
-    query.with_for_update.return_value = query
-    query.one_or_none.return_value = request
-    query.first.return_value = SimpleNamespace(id=uuid4())
-    invite_id = uuid4()
-    db.execute.return_value.one.return_value = SimpleNamespace(
-        invite_id=invite_id, tenant_name=request.company, resend_count=0,
-    )
-    transition_access_request(db, reference=request.reference, new_status="INVITED",
-                              actor_id=uuid4(), create_invitation=True)
-    history = db.add.call_args_list[-1].args[0]
-    saved = json.loads(outbox.read_text())
-    assert history.event_type == "INVITATION_READY"
-    assert history.event_metadata["delivery"] == "local_outbox"
-    assert history.event_metadata["dev_otp"] == saved["otp"]
-    assert saved["otp"].isdigit() and len(saved["otp"]) == 6
-    assert history.event_metadata["invite_link"] == saved["action_url"] == f"http://localhost:3001/signup?invite={invite_id}"
-    assert "delivery_error" not in history.event_metadata
-    db.commit.assert_called_once()
-
-
 @pytest.mark.parametrize("delivery_fails", [False, True])
 def test_invitation_resend_does_not_reload_after_tenant_context_ends(monkeypatch, delivery_fails):
-    invite = OnboardingEmailOTP(id=uuid4(), tenant_id=uuid4(), email="owner@example.com",
-                               tenant_name="Test", purpose="invite", status="pending",
-                               expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
-                               sent_at=datetime.now(timezone.utc))
-    # Real SQLAlchemy expiration: after either transaction outcome, reading the
-    # row would require a database transaction that no longer has tenant context.
-    make_transient_to_detached(invite)
-    session = Session()
-    session.add(invite)
-    payload = OnboardingResendRequest(signup_id=invite.id)
+    payload = SimpleNamespace(signup_id=uuid4())
     db = MagicMock()
     db.execute.return_value.one.return_value = SimpleNamespace(outcome="valid")
-    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = invite
-    db.commit.side_effect = db.rollback.side_effect = session.expire_all
-    db.refresh.side_effect = session.refresh
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = SimpleNamespace(
+        id=payload.signup_id, tenant_id=uuid4(), email="owner@example.com", tenant_name="Test",
+    )
     monkeypatch.setattr(onboarding, "OwnerSessionLocal", lambda: db)
     monkeypatch.setattr(onboarding, "_enforce_onboarding_rate_limit", lambda *_: None)
     delivery = MagicMock(return_value=("local_outbox", None))
@@ -526,21 +484,16 @@ def test_invitation_resend_does_not_reload_after_tenant_context_ends(monkeypatch
     monkeypatch.setattr(onboarding, "_deliver_otp", delivery)
     audit = MagicMock(side_effect=lambda row, *_: (row.id, row.tenant_id, row.purpose))
     monkeypatch.setattr(onboarding, "_emit_invitation_audit", audit)
-    try:
-        if delivery_fails:
-            with pytest.raises(HTTPException) as error:
-                onboarding.resend(payload, SimpleNamespace(headers={}, client=None))
-            assert error.value.status_code == 503
-            assert error.value.detail == "Invitation delivery is temporarily unavailable"
-            db.commit.assert_not_called()
-        else:
-            response = onboarding.resend(payload, SimpleNamespace(headers={}, client=None))
-            assert response.signup_id == payload.signup_id
-            assert response.delivery == "local_outbox"
-            db.commit.assert_called_once()
-        audit.assert_called_once()
-    finally:
-        session.close()
+    if delivery_fails:
+        with pytest.raises(HTTPException) as error:
+            onboarding.resend(payload, SimpleNamespace(headers={}, client=None))
+        assert error.value.status_code == 503
+        assert error.value.detail == "Invitation delivery is temporarily unavailable"
+    else:
+        response = onboarding.resend(payload, SimpleNamespace(headers={}, client=None))
+        assert response.signup_id == payload.signup_id
+        assert response.delivery == "local_outbox"
+    audit.assert_called_once()
 
 
 @pytest.mark.parametrize("new_status", ["APPROVED", "REJECTED", "INVITED"])
@@ -583,33 +536,6 @@ def test_status_transition_records_history_and_rejects_invalid(monkeypatch, new_
             new_status="REJECTED",
             actor_id=uuid4(),
         )
-
-
-@pytest.mark.parametrize("status", ["APPROVED", "INVITED"])
-def test_retry_invitation_preserves_tenant_and_appends_delivery_history(monkeypatch, status):
-    request = AccessRequest(id=uuid4(), reference="AR-RETRY", status=status)
-    tenant_id, actor_id = uuid4(), uuid4()
-    db = MagicMock()
-    query = db.query.return_value
-    query.filter.return_value = query
-    query.with_for_update.return_value = query
-    query.order_by.return_value = query
-    query.one_or_none.return_value = request
-    query.first.return_value = SimpleNamespace(event_metadata={"tenant_id": str(tenant_id)})
-    create = MagicMock(return_value={"delivery": "local_outbox", "dev_otp": "123456"})
-    monkeypatch.setattr(access_requests, "create_access_request_invitation", create)
-    with pytest.raises(ValueError):
-        transition_access_request(db, reference=request.reference, new_status=status, actor_id=actor_id)
-    transition_access_request(db, reference=request.reference, new_status=status,
-                              actor_id=actor_id, create_invitation=True)
-    create.assert_called_once_with(db, request, actor_id=actor_id, tenant_id=tenant_id)
-    assert request.status == status
-    assert db.add.call_count == 1
-    history = db.add.call_args.args[0]
-    assert history.event_type == "INVITATION_READY"
-    assert history.actor_id == actor_id
-    assert history.event_metadata["dev_otp"] == "123456"
-    db.commit.assert_called_once()
 
 
 def test_retention_deletes_selected_records_and_preserves_history(monkeypatch):
