@@ -200,7 +200,7 @@ jobs:
             tests/test_cloud_security.py tests/test_policy_chat_security.py tests/test_review_audit_security.py \
             tests/test_audit_export.py tests/test_trust_center.py \
             tests/test_worker_hmac.py tests/test_worker_cleanup.py tests/test_ephemeral_workers.py \
-            tests/test_migration_chain.py tests/test_migration_044.py tests/test_auth_session_binding_migration.py tests/test_platform_admin_seed.py \
+            tests/test_migration_chain.py tests/test_migration_044.py tests/test_auth_session_binding_migration.py tests/test_platform_admin_seed.py tests/test_model_utc_defaults.py \
             tests/test_acl19_continuous_evidence.py tests/test_acl25_abuse_privacy_retention.py \
             tests/test_compliance_scoring.py tests/test_migration_038.py tests/test_migration_040.py \
             tests/test_control_assessments.py tests/test_compliance_policy.py tests/test_t10_api_contract.py \
