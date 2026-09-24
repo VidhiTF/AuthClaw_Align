@@ -208,7 +208,7 @@ jobs:
             tests/test_s3_remediation_protocol.py tests/test_s3_remediation_recovery.py \
             tests/test_remediation_connector.py tests/test_connector_target_binding.py tests/test_remediation_failure_rollback.py \
             tests/test_workflow_response_contract.py tests/test_workflow_response_http.py \
-            tests/test_orchestrator.py tests/test_acl18_remediation_approval.py
+            tests/test_orchestrator.py tests/test_evidence_scan_lifecycle.py tests/test_acl18_remediation_approval.py
 
   backend-integration:
     name: Backend PostgreSQL Integration
@@ -485,13 +485,19 @@ jobs:
           QUOTA_REDIS_TEST: "1"
         run: >-
           go test ./... -count=1
-          -run '^(TestQuota|TestProviderQuota|TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestDatabaseConfig|TestInitDBRejectsUnsafeSharedDatabaseURL|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
+          -run '^(TestQuota|TestProviderQuota|TestACL17|TestClientIP|TestAtomicRateLimit|TestSecret|TestProviderSecret|TestRedactionBlindIndex|TestCryptographicRandomHelpers|TestCompatibleDatabaseRevisions|TestDatabaseConfig|TestInitDBRejectsUnsafeSharedDatabaseURL|TestHealthCheck|TestPayloadFidelityContract|TestStreamingPayloadFidelityContracts|TestProviderContractManifestDriftGate|TestValidatePolicyYAMLRejectsInvalidSRSFields|TestEmitAuditEvent_|TestAuditEvent_|TestAuditDrain|TestShutdownGateway|TestSQSFIFOAuditStream|TestAuditProducer|TestProviderPrefixesFailClosedBeforeEgress|TestRequiredAuditFailureIsObservableInFailOpenMode|TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery|TestAttemptAndOutcomeUseDistinctDeterministicKeys)'
       - name: Verify quota alert rules
         run: >-
           docker run --rm --entrypoint /bin/promtool
           -v "${{ github.workspace }}/infra/observability:/rules:ro" -w /rules
           prom/prometheus:v3.5.1@sha256:38c3b05c3bc744ff1b0b7b4eb82196026442845e62a1e2073795565da506d7a2
           test rules quota-alerts.test.yml
+      - name: Verify audit alert rules
+        run: >-
+          docker run --rm --entrypoint /bin/promtool
+          -v "${{ github.workspace }}/infra/observability:/rules:ro" -w /rules
+          prom/prometheus:v3.5.1@sha256:38c3b05c3bc744ff1b0b7b4eb82196026442845e62a1e2073795565da506d7a2
+          check rules acl21-alerts.yml
 
   console:
     name: Console Tests and Build

@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -61,7 +62,7 @@ func newAuditProducerClient() (*auditProducerClient, error) {
 
 func (c *auditProducerClient) Enabled() bool { return true }
 
-func (c *auditProducerClient) publish(tenantID string, payload []byte) error {
+func (c *auditProducerClient) publish(ctx context.Context, tenantID string, payload []byte) error {
 	if strings.TrimSpace(tenantID) == "" || len(tenantID) > 128 {
 		return fmt.Errorf("audit producer requires a tenant_id of at most 128 characters")
 	}
@@ -69,7 +70,7 @@ func (c *auditProducerClient) publish(tenantID string, payload []byte) error {
 		return fmt.Errorf("audit producer payload exceeds %d-byte limit", sqsMaxMessageBytes)
 	}
 	timestamp := strconv.FormatInt(c.now().Unix(), 10)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, c.url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -94,18 +95,22 @@ func (c *auditProducerClient) PublishEvent(event *AuditEvent) error {
 	if err != nil {
 		return err
 	}
-	return c.publish(event.TenantID, payload)
+	return c.publish(context.Background(), event.TenantID, payload)
 }
 
 func (c *auditProducerClient) PublishOutboxPayload(tenantID string, payload []byte) error {
-	return c.publish(tenantID, payload)
+	return c.publishOutboxPayloadContext(context.Background(), tenantID, payload)
+}
+
+func (c *auditProducerClient) publishOutboxPayloadContext(ctx context.Context, tenantID string, payload []byte) error {
+	return c.publish(ctx, tenantID, payload)
 }
 
 func (c *auditProducerClient) PublishDLQ(_ []byte, reason, tenantID, _ string) {
 	log.Printf("[DLQ] producer request retained for normal SQS redrive (tenant=%s reason=%s)", tenantID, reason)
 }
 
-func (c *auditProducerClient) Close() {}
+func (c *auditProducerClient) Close() { c.client.CloseIdleConnections() }
 
 func newAuditProducerHandler(stream *sqsFIFOAuditStream, secret []byte, now func() time.Time) http.Handler {
 	mux := http.NewServeMux()
@@ -145,6 +150,16 @@ func absDuration(value time.Duration) time.Duration {
 	return value
 }
 
+func runAuditProducerServer(server *http.Server, stream interface{ Close() }, signals <-chan os.Signal, serve func() error) (err error) {
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err = errors.Join(err, shutdownHTTPServer(ctx, server))
+		stream.Close()
+	}()
+	return serveUntilSignal(serve, signals, "AuthClaw audit producer")
+}
+
 func runAuditProducer() error {
 	secret, err := auditProducerSecret()
 	if err != nil {
@@ -162,5 +177,7 @@ func runAuditProducer() error {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
-	return server.ListenAndServe()
+	signals, stopSignals := terminationSignals()
+	defer stopSignals()
+	return runAuditProducerServer(server, stream, signals, server.ListenAndServe)
 }

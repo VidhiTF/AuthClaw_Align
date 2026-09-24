@@ -1,4 +1,4 @@
-"""Fail CI unless the Terraform plan wires quota metrics through alert delivery."""
+"""Fail CI unless the Terraform plan wires quota and audit metrics through alert delivery."""
 import json
 import sys
 from pathlib import Path
@@ -11,6 +11,7 @@ def main(path: str) -> int:
     required = {
         "aws_prometheus_workspace.quota": "aws_prometheus_workspace",
         "aws_prometheus_rule_group_namespace.quota": "aws_prometheus_rule_group_namespace",
+        "aws_prometheus_rule_group_namespace.audit": "aws_prometheus_rule_group_namespace",
         "aws_prometheus_alert_manager_definition.quota": "aws_prometheus_alert_manager_definition",
         "aws_iam_role.quota_alertmanager": "aws_iam_role",
         "aws_secretsmanager_secret.quota_metrics": "aws_secretsmanager_secret",
@@ -19,6 +20,10 @@ def main(path: str) -> int:
         "aws_iam_role_policy.quota_collector": "aws_iam_role_policy",
         "aws_iam_role_policy.quota_collector_execution": "aws_iam_role_policy",
         "aws_iam_role_policy.quota_alertmanager": "aws_iam_role_policy",
+        "aws_security_group.audit_recovery_client": "aws_security_group",
+        "aws_security_group.audit_recovery": "aws_security_group",
+        "aws_efs_file_system.audit_recovery": "aws_efs_file_system",
+        "aws_efs_access_point.audit_recovery": "aws_efs_access_point",
     }
     errors = [f"missing {address}" for address, kind in required.items()
               if address not in resources or resources[address]["type"] != kind]
@@ -26,8 +31,14 @@ def main(path: str) -> int:
     def references(address: str, expression: str) -> set:
         return set(resources.get(address, {}).get("expressions", {}).get(expression, {}).get("references", []))
 
+    def block_references(address: str, block: str, expression: str) -> set:
+        return {ref for item in resources.get(address, {}).get("expressions", {}).get(block, [])
+                for ref in item.get(expression, {}).get("references", [])}
+
     if "path.module" not in references("aws_prometheus_rule_group_namespace.quota", "data"):
         errors.append("quota rules are not loaded from the checked-in rule file")
+    if "path.module" not in references("aws_prometheus_rule_group_namespace.audit", "data"):
+        errors.append("audit rules are not loaded from the checked-in rule file")
     task_refs = references("aws_ecs_task_definition.quota_collector", "container_definitions")
     if "local.quota_collector_config" not in task_refs:
         errors.append("collector task does not use the quota scrape/remote-write configuration")
@@ -59,6 +70,22 @@ def main(path: str) -> int:
             'credentials = "$${env:AUTHCLAW_QUOTA_METRICS_SECRET}"' not in source or
             '{ name = "AUTHCLAW_QUOTA_METRICS_SECRET", valueFrom = aws_secretsmanager_secret.quota_metrics.arn }' not in source):
         errors.append("collector scrape is not authenticated against the internal quota metrics route")
+    module = Path(__file__).resolve().parents[1] / "infra" / "terraform" / "modules" / "regional_stack"
+    recovery_source = (module / "audit_recovery.tf").read_text(encoding="utf-8")
+    service_source = (module / "main.tf").read_text(encoding="utf-8")
+    if "security_groups = [aws_security_group.audit_recovery_client.id]" not in recovery_source:
+        errors.append("audit recovery NFS is not isolated to the gateway client security group")
+    gateway_groups = '[aws_security_group.app.id, aws_security_group.audit_recovery_client.id]'
+    if service_source.count(f'each.key == "gateway" ? {gateway_groups}') != 2:
+        errors.append("public and private gateway services do not exclusively receive the audit recovery client identity")
+    if 'stopTimeout            = contains(["gateway", "audit_producer"], each.key) ? 60 : 30' not in service_source:
+        errors.append("gateway shutdown window does not reserve time after the application drain deadline")
+    nfs_refs = references("aws_security_group.audit_recovery", "ingress")
+    if "aws_security_group.audit_recovery_client.id" not in nfs_refs or "aws_security_group.app.id" in nfs_refs:
+        errors.append("planned NFS ingress is not isolated from the shared application security group")
+    for service in ("aws_ecs_service.public", "aws_ecs_service.private"):
+        if "aws_security_group.audit_recovery_client.id" not in block_references(service, "network_configuration", "security_groups"):
+            errors.append(f"{service} cannot attach the gateway audit recovery client identity")
 
     if errors:
         print("Quota observability plan invalid: " + "; ".join(errors), file=sys.stderr)

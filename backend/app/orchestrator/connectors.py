@@ -101,7 +101,10 @@ class DocumentScanner:
 
         logger.info("Fetching document %s from S3 bucket %s", object_key, self.bucket)
         response = self.s3_client.get_object(Bucket=self.bucket, Key=object_key)
-        body = response["Body"].read()
+        try:
+            body = response["Body"].read()
+        finally:
+            response["Body"].close()
 
         ext = file_name.split(".")[-1].lower() if "." in file_name else ""
         

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -73,6 +74,15 @@ func AuditTransportEnabled() bool { return activeAuditStream.Enabled() }
 func PublishAuditEvent(event *AuditEvent) error { return activeAuditStream.PublishEvent(event) }
 
 func PublishAuditOutboxPayload(tenantID string, payload []byte) error {
+	return activeAuditStream.PublishOutboxPayload(tenantID, payload)
+}
+
+func publishAuditOutboxPayloadContext(ctx context.Context, tenantID string, payload []byte) error {
+	if stream, ok := activeAuditStream.(interface {
+		publishOutboxPayloadContext(context.Context, string, []byte) error
+	}); ok {
+		return stream.publishOutboxPayloadContext(ctx, tenantID, payload)
+	}
 	return activeAuditStream.PublishOutboxPayload(tenantID, payload)
 }
 

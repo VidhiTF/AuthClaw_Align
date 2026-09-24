@@ -277,25 +277,31 @@ func explicitKeywordOptionValues(raw, target string) ([]string, error) {
 
 // InitDB initializes the database connection
 func InitDB() {
+	if err := initDB(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func initDB() error {
 	cfg, err := databaseConfig(os.Getenv("DATABASE_URL"))
 	if err != nil {
-		log.Fatalf("Invalid database configuration: %v", err)
+		return fmt.Errorf("Invalid database configuration: %w", err)
 	}
 	connector, err := pq.NewConnectorConfig(cfg)
 	if err != nil {
-		log.Fatalf("Failed to open database: %v", err)
+		return fmt.Errorf("Failed to open database: %w", err)
 	}
 	DB = sql.OpenDB(connector)
 
 	if err = DB.Ping(); err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		return fmt.Errorf("Failed to connect to database: %w", err)
 	}
 
 	if !skipDatabaseSecurityValidationForTests {
 		err = ValidateDatabaseSecurity()
 	}
 	if err != nil {
-		log.Fatalf("Refusing startup: %v", err)
+		return fmt.Errorf("Refusing startup: %w", err)
 	}
 
 	maxOpenConns := envInt("GATEWAY_DB_MAX_OPEN_CONNS", 25)
@@ -306,4 +312,5 @@ func InitDB() {
 	DB.SetConnMaxLifetime(time.Duration(connMaxLifetimeSeconds) * time.Second)
 
 	log.Printf("Database connection established successfully. pool_max_open=%d pool_max_idle=%d conn_max_lifetime_seconds=%d", maxOpenConns, maxIdleConns, connMaxLifetimeSeconds)
+	return nil
 }

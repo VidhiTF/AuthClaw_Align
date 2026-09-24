@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -121,24 +122,54 @@ func TestAuditAuthenticatedContextPostgres(t *testing.T) {
 			t.Fatalf("credential leakage check: count=%d error=%v", leaked, err)
 		}
 	})
+	recovered := &AuditEvent{ID: randomTestUUID(t), TenantID: tenant, Timestamp: time.Now().Add(-time.Minute).UTC(), Action: "allow", RequestID: "audit-restart-recovery"}
+	for range 2 {
+		if err = writeAuditOutbox(recovered, errors.New("simulated shutdown")); err != nil {
+			t.Fatal(err)
+		}
+	}
 	event := &AuditEvent{ID: randomTestUUID(t), TenantID: tenant, Timestamp: time.Now().UTC(), Action: "redact", RequestID: "audit-context-regression"}
 	if err = EmitAuditEvent(ctx, event); err != nil {
 		t.Fatalf("authenticated append after request cancellation: %v", err)
 	}
-	if len(writer.messages) != 1 {
-		t.Fatalf("expected committed event publication, got %d", len(writer.messages))
+	drainCtx, stopDrain := context.WithTimeout(context.Background(), 5*time.Second)
+	if err = drainAuditEvents(drainCtx); err != nil {
+		stopDrain()
+		t.Fatal(err)
+	}
+	stopDrain()
+	auditAsync.Lock()
+	auditAsync.closing = false
+	auditAsync.Unlock()
+	if len(writer.messages) != 2 {
+		t.Fatalf("expected live and recovered event publication, got %d", len(writer.messages))
+	}
+	if files, listErr := auditRecoveryFiles(); listErr != nil || len(files) != 0 {
+		t.Fatalf("restart recovery was not consumed: files=%v err=%v", files, listErr)
 	}
 	if strings.Contains(string(writer.messages[0].Value), hash) {
 		t.Fatal("credential leaked to transport")
 	}
 	var count int
-	if err = owner.QueryRow("SELECT count(*) FROM audit_outbox WHERE tenant_id=$1 AND published_at IS NOT NULL", tenant).Scan(&count); err != nil || count != 1 {
+	if err = owner.QueryRow("SELECT count(*) FROM audit_outbox WHERE tenant_id=$1 AND published_at IS NOT NULL", tenant).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("published outbox count %d: %v", count, err)
+	}
+	if err = owner.QueryRow("SELECT count(*) FROM audit_log_metadata WHERE tenant_id=$1 AND request_id=$2", tenant, recovered.RequestID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("recovered event count %d: %v", count, err)
 	}
 	if err = EmitAuditEvent(ctx, event); err != nil {
 		t.Fatal(err)
 	}
-	if len(writer.messages) != 1 {
+	drainCtx, stopDrain = context.WithTimeout(context.Background(), 5*time.Second)
+	if err = drainAuditEvents(drainCtx); err != nil {
+		stopDrain()
+		t.Fatal(err)
+	}
+	stopDrain()
+	auditAsync.Lock()
+	auditAsync.closing = false
+	auditAsync.Unlock()
+	if len(writer.messages) != 2 {
 		t.Fatal("duplicate append was republished")
 	}
 	for _, badCtx := range []context.Context{context.Background(), context.WithValue(ctx, APIKeyHashContextKey, "invalid")} {

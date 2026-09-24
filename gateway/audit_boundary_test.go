@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -213,9 +212,9 @@ func TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery(t *testing.T)
 	if AuditMetricsSnapshot()["authclaw_gateway_audit_post_response_failures_total"] != before+1 {
 		t.Fatal("post-response audit failure metric was not incremented")
 	}
-	data, err := os.ReadFile(outbox)
-	if err != nil || !strings.Contains(string(data), "req-stream") {
-		t.Fatalf("missing correlated recovery artifact: data=%q err=%v", data, err)
+	data := readAuditRecoveryData(t)
+	if !strings.Contains(string(data), "req-stream") {
+		t.Fatalf("missing correlated recovery artifact: data=%q", data)
 	}
 }
 

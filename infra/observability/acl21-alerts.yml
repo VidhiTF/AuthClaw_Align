@@ -28,6 +28,33 @@ groups:
           summary: Transactional audit outbox publication is stalled
           runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
 
+      - alert: AuditLocalRecoveryStalled
+        expr: authclaw_gateway_audit_recovery_backlog > 0 and authclaw_gateway_audit_recovery_oldest_age_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Local audit recovery records have not replayed to PostgreSQL
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditLocalReplayFailures
+        expr: increase(authclaw_gateway_audit_replay_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Local audit recovery replay is failing
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
+      - alert: AuditLocalRecoveryScanFailures
+        expr: increase(authclaw_gateway_audit_recovery_scan_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Local audit recovery storage cannot be scanned
+          runbook: docs/runbooks/ACL_21_AUDIT_EVIDENCE.md
+
       - alert: AuditConsumerSequenceGap
         expr: increase(audit_consumer_sequence_gaps_total[5m]) > 0
         for: 2m
