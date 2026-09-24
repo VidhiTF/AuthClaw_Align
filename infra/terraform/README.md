@@ -141,13 +141,13 @@ Use this coupled rollout so an old process is never restarted against an
 unexpected schema head:
 
 1. Build and deploy the compatibility backend and gateway with
-   `expected_db_revision = "046,047"`; confirm both services are healthy on 046.
-2. Apply migration 047 in the same controlled maintenance window and confirm both
-   services remain healthy on 047.
-3. Set `expected_db_revision = "047"` and perform a rolling restart so the
+   `expected_db_revision = "054,055"`; confirm both services are healthy on 054.
+2. Apply migration 055 in the same controlled maintenance window and confirm both
+   services remain healthy on 055.
+3. Set `expected_db_revision = "055"` and perform a rolling restart so the
    temporary compatibility allowance is removed.
 
-Do not leave `046,047` configured after the migration. Before 047 is applied, the
+Do not leave `054,055` configured after the migration. Before 055 is applied, the
 safe rollback is the previous image and revision 046. After writes have occurred
 under the new constraint, prefer a forward fix; downgrading removes the database
 constraint and requires a separately approved data-integrity decision.

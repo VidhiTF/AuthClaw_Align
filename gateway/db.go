@@ -18,12 +18,12 @@ var DB *sql.DB
 var skipDatabaseSecurityValidationForTests bool
 
 var databaseRevisionPattern = regexp.MustCompile(`^[0-9]{3}$`)
-var rolloutDatabaseRevisions = map[string]struct{}{"054": {}}
+var rolloutDatabaseRevisions = map[string]struct{}{"054": {}, "055": {}}
 
 func compatibleDatabaseRevisions() ([]string, error) {
 	raw := os.Getenv("AUTHCLAW_EXPECTED_DB_REVISION")
 	if raw == "" {
-		raw = "054"
+		raw = "055"
 	}
 	parts := strings.Split(raw, ",")
 	revisions := make([]string, 0, len(parts))

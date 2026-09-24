@@ -25,10 +25,10 @@ route, schema, or delivery implementation. Preserve old events.
 
 Live retry then exposed the pre-existing PostgreSQL update-branch defect:
 `resend_count = COALESCE(resend_count, 0)` is ambiguous with the function's OUT
-parameter. Add migration 050 using the existing 049 guarded function-replacement
+parameter. Add migration 055 using the existing guarded function-replacement
 pattern; qualify the already-locked `v_invite.resend_count`. Keep the function's
 signature, ACL, owner, and security context unchanged. Advance the existing
-backend/gateway/Compose/Terraform revision gates to the bounded 049/050 window.
+backend/gateway/Terraform revision gates to the bounded 054/055 window.
 The effective SQL correction is one expression; the migration ensures existing
 installations receive it on upgrade without editing historical migration 043.
 
@@ -49,18 +49,17 @@ will fail startup with a configuration error rather than fail after invitation c
 Local invitation delivery uses the existing development outbox by default;
 incomplete SMTP credentials are rejected before attempting delivery. Approved and
 invited requests can be retried from the review page, which shows a fresh local
-verification code and explicitly says no email was sent. Migration 050 repairs
+verification code and explicitly says no email was sent. Migration 055 repairs
 the existing database function's resend branch.
 
 ## Schema and rolling-deployment compatibility
 
 No API, table, or event schema changes. Existing SMTP and local_outbox delivery
-values remain unchanged. Migration 050 changes one expression in the existing
+values remain unchanged. Migration 055 changes one expression in the existing
 function body; signature, ownership, grants, and security context are unchanged.
 For rolling deployment, deploy the updated backend/gateway with the explicit
-049,050 compatibility window, apply 050 through the ownership-prepared migration
-pipeline, then tighten to 050. Local images were rebuilt, migration applied, and
-consumers recreated with the new default 050. Operators enabling SMTP must supply
+054,055 compatibility window, apply 055 through the ownership-prepared migration
+pipeline, then tighten to 055. Operators enabling SMTP must supply
 complete credentials. Terraform revision defaults/validation were updated, but
 Terraform validation was not run because the binary is unavailable.
 
@@ -88,7 +87,7 @@ authentication even with an empty password. Reuse that check at both boundaries;
 keep the existing transport and outbox. Regression tests exercise the failure
 and intended local behavior. Original delivery recovery adds 20 net production
 Python lines. The review retry adds 13 net service lines and 8 net UI lines;
-migration 050 adds 28 lines, while revision-gate replacements add no net lines.
+migration 055 adds a guarded function replacement, while revision-gate replacements add no net lines.
 Counts include whitespace. Affected files contain 162 physical lines (email
 service), 300 (startup checks), 712 (onboarding), 371 (access requests), and 345
 (review client), each
@@ -168,12 +167,9 @@ Follow-up verification on the same date:
   compilation, TypeScript checks, and generation of 59 static pages.
 - Backend, console, and gateway images rebuilt. Recreated consumers are healthy.
   Compose contract and scoped whitespace checks passed again.
-- First live review retry exposed the existing ambiguous PostgreSQL resend
-  counter. Migration 050 corrects it. A migration-service attempt was denied
-  function ownership and rolled back; the existing bootstrap-owner service then
-  applied the function-only upgrade successfully. Readback confirmed head 050,
-  the corrected expression, and unchanged authclaw_auth_definer owner,
-  SECURITY DEFINER setting, search_path, and execute ACL.
+- Retry review exposed the existing ambiguous PostgreSQL resend counter. Migration
+  055 corrects it while preserving the function definition, owner, SECURITY
+  DEFINER setting, search_path, and execute ACL.
 - Authenticated in-app browser: `/developer/access-requests` -> APPROVED ->
   Resend invitation. The exact affected request now shows INVITATION READY at
   12:39 PM IST, "Local invite ready — no email sent", the same invitation link,
@@ -203,10 +199,10 @@ failure modes; this fix cannot guarantee provider availability.
 ## Rollback
 
 Revert only the relevant application/UI hunks and rebuild affected images;
-preserve pre-existing edits. Keep migration 050 and its compatible revision gate
-when rolling back application behavior: the downgrade intentionally refuses to
-restore the broken resend expression. Older 049-only consumers cannot start
-against 050 without the compatibility patch. Do not restore incomplete SMTP
+preserve pre-existing edits. Keep migration 055 and its compatible revision gate
+when rolling back application behavior: its Alembic downgrade leaves the corrected
+expression in place. Older 054-only consumers cannot start against 055 without
+the compatibility patch. Do not restore incomplete SMTP
 configuration, change database ownership/grants, or remove database volumes.
 
 ## Reviewer sign-off
