@@ -1786,7 +1786,7 @@ resource "aws_ecs_task_definition" "service" {
       secrets                = local.service_secrets[each.key]
       readonlyRootFilesystem = true
       privileged             = false
-      stopTimeout            = 30
+      stopTimeout            = contains(["gateway", "audit_producer"], each.key) ? 60 : 30
       mountPoints = concat(
         [for index, path in local.service_writable_paths[each.key] : {
           sourceVolume  = "writable-${index}"

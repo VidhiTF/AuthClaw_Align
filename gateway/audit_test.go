@@ -424,25 +424,25 @@ func TestAuditEvent_RecoveryQueueBoundsDistinctTenants(t *testing.T) {
 		}
 	}
 	overflowDone := make(chan error, 1)
-	go func() {
-		overflowDone <- queue(auditRecoveryQueueLimit)
-	}()
-	select {
-	case <-overflowDone:
-		t.Fatal("recovery scheduler exceeded its tenant bound")
-	case <-time.After(50 * time.Millisecond):
-	}
-	close(release)
+	go func() { overflowDone <- queue(auditRecoveryQueueLimit) }()
 	select {
 	case err := <-overflowDone:
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("backpressured tenant was not admitted")
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("saturated recovery scheduler blocked the caller")
 	}
+	close(release)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if err := drainAuditEvents(ctx); err != nil {
+		t.Fatal(err)
+	}
+	auditAsync.Lock()
+	auditAsync.closing = false
+	auditAsync.Unlock()
+	scheduleAuditRecovery(context.Background(), fmt.Sprintf("tenant-%03d", auditRecoveryQueueLimit))
 	if err := drainAuditEvents(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +453,26 @@ func TestAuditEvent_RecoveryQueueBoundsDistinctTenants(t *testing.T) {
 	}
 }
 
-func TestAuditEvent_IndeterminateDirectorySyncReportsRecoveryAvailable(t *testing.T) {
+func TestAuditEvent_RecoveryQueueSkipsPublishWithoutRecovery(t *testing.T) {
+	t.Setenv("AUDIT_OUTBOX_PATH", filepath.Join(t.TempDir(), "audit.ndjson"))
+	oldPublish := auditRecoveryPublish
+	called := false
+	auditRecoveryPublish = func(context.Context, string, int) error { called = true; return nil }
+	t.Cleanup(func() {
+		auditRecoveryPublish = oldPublish
+		auditAsync.Lock()
+		auditAsync.closing = false
+		auditAsync.Unlock()
+	})
+	scheduleAuditRecovery(context.Background(), "tenant")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := drainAuditEvents(ctx); err != nil || called {
+		t.Fatalf("drain=%v published_without_recovery=%t", err, called)
+	}
+}
+
+func TestAuditEvent_IndeterminateDirectorySyncReportsRecoveryUnavailable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.ndjson")
 	t.Setenv("AUDIT_OUTBOX_PATH", path)
 	oldSyncDir := auditOutboxSyncDir
@@ -461,12 +480,35 @@ func TestAuditEvent_IndeterminateDirectorySyncReportsRecoveryAvailable(t *testin
 	t.Cleanup(func() { auditOutboxSyncDir = oldSyncDir })
 	available, err := recoverAuditEvent(context.Background(), &AuditEvent{ID: "synced", TenantID: "tenant"}, errors.New("database unavailable"))
 	var indeterminate *auditOutboxIndeterminateError
-	if !available || !errors.As(err, &indeterminate) {
-		t.Fatalf("available=%t err=%v, want indeterminate durable recovery", available, err)
+	if available || !errors.As(err, &indeterminate) {
+		t.Fatalf("available=%t err=%v, want indeterminate unavailable recovery", available, err)
 	}
 	files, globErr := filepath.Glob(path + ".*.ready")
 	if globErr != nil || len(files) != 1 {
 		t.Fatalf("ready files=%v err=%v", files, globErr)
+	}
+}
+
+func TestAuditEvent_PostResponseRetriesIndeterminateRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.ndjson")
+	t.Setenv("AUDIT_OUTBOX_PATH", path)
+	t.Setenv("AUDIT_FAIL_CLOSED", "true")
+	oldDB, oldEmitter, oldSyncDir := DB, auditEventEmitter, auditOutboxSyncDir
+	DB, auditEventEmitter = nil, EmitAuditEvent
+	syncs := 0
+	auditOutboxSyncDir = func(string) error {
+		syncs++
+		if syncs == 1 {
+			return errors.New("forced directory sync failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { DB, auditEventEmitter, auditOutboxSyncDir = oldDB, oldEmitter, oldSyncDir })
+
+	emitPostResponseOutcome(context.Background(), "/test", &AuditEvent{ID: "event", TenantID: "tenant", RequestID: "request"})
+	files, err := filepath.Glob(path + ".*.ready")
+	if err != nil || syncs != 2 || len(files) != 2 {
+		t.Fatalf("syncs=%d recovery files=%v err=%v, want fallback retry", syncs, files, err)
 	}
 }
 

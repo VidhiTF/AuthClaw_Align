@@ -78,6 +78,8 @@ def main(path: str) -> int:
     gateway_groups = '[aws_security_group.app.id, aws_security_group.audit_recovery_client.id]'
     if service_source.count(f'each.key == "gateway" ? {gateway_groups}') != 2:
         errors.append("public and private gateway services do not exclusively receive the audit recovery client identity")
+    if 'stopTimeout            = contains(["gateway", "audit_producer"], each.key) ? 60 : 30' not in service_source:
+        errors.append("gateway shutdown window does not reserve time after the application drain deadline")
     nfs_refs = references("aws_security_group.audit_recovery", "ingress")
     if "aws_security_group.audit_recovery_client.id" not in nfs_refs or "aws_security_group.app.id" in nfs_refs:
         errors.append("planned NFS ingress is not isolated from the shared application security group")

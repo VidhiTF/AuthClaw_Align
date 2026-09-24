@@ -26,6 +26,9 @@ event schema, new dependency, or migration is introduced.
 Gateway SIGINT/SIGTERM and startup/listener failures run cleanup. HTTP requests
 drain before tracked background audits and shared resources close. The 30-second
 deadline bounds HTTP/audit draining; synchronous DB/Kafka close can extend it.
+ECS grants gateway and audit-producer containers 60 seconds before forced
+termination, reserving 30 seconds after the application deadline for durable
+audit spill and resource cleanup.
 HTTP deadline expiry force-closes connections and cancels request contexts.
 Fail-open audit execution keeps at most four dependency operations active and a
 bounded backlog of 64 immutable recovery copies. Further events are synced
@@ -43,21 +46,23 @@ synced to a unique temporary file, then atomically renamed and directory-synced.
 Immutable per-tenant ready files prevent separate gateway processes from
 overwriting one another. ECS mounts an encrypted, backed-up EFS access point at
 `/var/lib/authclaw-gateway` and sets `AUDIT_OUTBOX_PATH` there, so task replacement
-does not discard recovery records. A successful authenticated request schedules,
-but normally does not wait for a five-second recovery task; one process-wide worker
-drains a deduplicated queue bounded to 64 tenants. Admission backpressures only a
-65th distinct tenant until space is available, keeping background state bounded
-without abandoning its durable recovery. It replays at most 100 records per fair
+does not discard recovery records. A successful authenticated request schedules
+recovery without waiting; one process-wide worker drains a deduplicated queue
+bounded to 64 tenants. Saturated admission skips additional scheduling instead
+of delaying the request; immutable recovery files remain durable and a later
+audit schedules another attempt. The worker publishes only after restoring a
+recovery record to the canonical outbox. It replays at most 100 records per fair
 queue turn through the existing canonical idempotent append and automatically
 requeues a remaining suffix. A partial file is atomically checkpointed to its
-uncommitted suffix, so retries do not repeatedly scan an already committed prefix. Stale complete temporary files
+uncommitted suffix, so retries do not repeatedly scan an already committed prefix.
+Stale complete temporary files
 are promoted after restart; incomplete files remain visible as corrupt recovery
 backlog. Upgrade recovery atomically claims and deterministically splits the former
 multi-tenant NDJSON file. Backlog age/count, replay failures, and scan failures are
 exposed on the authenticated metrics endpoint, scraped by the existing collector,
 and covered by installed critical alert rules.
 
-## Fresh local evidence (2026-09-23)
+## Fresh local evidence (2026-09-23/24)
 
 - T01 activation verifier exited 0: PR 52, merge
   `1e40bdb5c8fd6b4e28c827035ab7d06645530ccb`, effective
@@ -114,6 +119,13 @@ and covered by installed critical alert rules.
   gateway CI test selection passed with disposable Redis, followed by clean
   `go vet ./...` and `go build ./...`. Terraform validation, the strengthened
   speculative-plan assertion, and all 20 Terraform tests also passed.
+- Final review fixes classify an indeterminate directory sync as unavailable so
+  post-response fallback retries, keep saturated recovery admission off request
+  latency, skip transport publication when no record was restored, and reserve a
+  60-second ECS stop window. The four focused regressions passed 50 Windows runs
+  and 10 Linux race-detector runs. The broader lifecycle set passed 10 runs, the
+  exact gateway CI selection passed with Redis, and Terraform format, validation,
+  CI-equivalent plan assertion, and all 20 Terraform tests passed.
 
 ## Risk, growth and rollback
 

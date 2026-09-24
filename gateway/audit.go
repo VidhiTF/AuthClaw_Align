@@ -64,6 +64,7 @@ var (
 var (
 	auditEventEmitter    = EmitAuditEvent
 	auditRecoveryPersist = persistAuditMetadata
+	auditRecoveryPublish = publishPendingAuditOutbox
 	auditOutboxWrite     = func(file *os.File, payload []byte) (int, error) { return file.Write(payload) }
 	auditOutboxSyncDir   = syncAuditDirectory
 )
@@ -447,12 +448,12 @@ func checkpointAuditRecovery(path string, envelopes []auditOutboxEnvelope) error
 	return auditOutboxSyncDir(filepath.Dir(path))
 }
 
-func replayAuditRecovery(ctx context.Context, tenantID string, persist func(context.Context, *AuditEvent) error) bool {
+func replayAuditRecovery(ctx context.Context, tenantID string, persist func(context.Context, *AuditEvent) error) (bool, bool) {
 	files, err := auditRecoveryFiles()
 	if err != nil {
 		auditRecoveryReplayFailures.Add(1)
 		log.Printf("[AUDIT] recovery scan failed: %v", err)
-		return false
+		return false, false
 	}
 	replayed := 0
 	tenantMarker := fmt.Sprintf(".%x.", sha256.Sum256([]byte(tenantID)))
@@ -462,7 +463,7 @@ func replayAuditRecovery(ctx context.Context, tenantID string, persist func(cont
 			continue
 		}
 		if ctx.Err() != nil {
-			return false
+			return false, replayed > 0
 		}
 		envelopes, err := readAuditRecovery(path)
 		if err != nil {
@@ -500,10 +501,10 @@ func replayAuditRecovery(ctx context.Context, tenantID string, persist func(cont
 			continue
 		}
 		if replayed >= auditRecoveryReplayLimit {
-			return true
+			return true, true
 		}
 	}
-	return false
+	return false, replayed > 0
 }
 
 type auditRecoveryRequest struct {
@@ -535,11 +536,7 @@ func scheduleAuditRecovery(ctx context.Context, tenantID string) {
 	select {
 	case auditRecoveryAdmissions <- struct{}{}:
 	default:
-		select {
-		case auditRecoveryAdmissions <- struct{}{}:
-		case <-ctx.Done():
-			return
-		}
+		return
 	}
 	auditAsync.Lock()
 	if auditAsync.closing {
@@ -591,9 +588,9 @@ func runAuditRecoveryQueue() {
 		auditRecoveryQueue.Unlock()
 
 		ctx, stop := context.WithTimeout(request.ctx, 5*time.Second)
-		more := replayAuditRecovery(ctx, request.tenantID, auditRecoveryPersist)
-		if ctx.Err() == nil {
-			if err := publishPendingAuditOutbox(ctx, request.tenantID, auditRecoveryReplayLimit); err != nil {
+		more, restored := replayAuditRecovery(ctx, request.tenantID, auditRecoveryPersist)
+		if restored && ctx.Err() == nil {
+			if err := auditRecoveryPublish(ctx, request.tenantID, auditRecoveryReplayLimit); err != nil {
 				log.Printf("[AUDIT] recovery transport publish failed tenant=%s err=%v", request.tenantID, err)
 			}
 		}
@@ -769,8 +766,7 @@ func recoverAuditEvent(ctx context.Context, event *AuditEvent, cause error) (boo
 	task, _ := ctx.Value(pendingAuditContextKey{}).(*pendingAuditEvent)
 	if task == nil {
 		err := writeAuditOutbox(event, cause)
-		var indeterminate *auditOutboxIndeterminateError
-		return err == nil || errors.As(err, &indeterminate), err
+		return err == nil, err
 	}
 	return recoverPendingAuditEvent(task, event, cause)
 }
