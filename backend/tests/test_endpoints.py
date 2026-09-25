@@ -81,6 +81,24 @@ def client(db_session: Session) -> TestClient:
     app.dependency_overrides.clear()
 
 
+def test_tenant_timestamp_postgres_round_trip(db_session: Session):
+    with db_session.begin_nested() as savepoint:
+        db_session.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        tenant = Tenant(name=f"T12 UTC {uuid4()}")
+        db_session.add(tenant)
+        db_session.flush()
+        db_session.refresh(tenant)
+        assert tenant.created_at.utcoffset() == timedelta(0)
+        assert tenant.updated_at.utcoffset() == timedelta(0)
+
+        tenant.status = "suspended"
+        db_session.flush()
+        db_session.refresh(tenant)
+        assert tenant.status == "suspended"
+        assert tenant.updated_at.utcoffset() == timedelta(0)
+        savepoint.rollback()
+
+
 def test_public_health(client: TestClient):
     """Test public health check doesn't require auth"""
     response = client.get("/health")
