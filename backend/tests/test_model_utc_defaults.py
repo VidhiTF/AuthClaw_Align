@@ -1,6 +1,7 @@
 """ORM timestamp defaults must produce aware UTC values."""
 
 from datetime import timedelta
+from inspect import unwrap
 
 from sqlalchemy import DateTime, create_engine
 from sqlalchemy.orm import Session
@@ -20,7 +21,7 @@ def test_timestamp_defaults_and_updates_are_aware_utc():
                 if generated is None or not generated.is_callable:
                     continue
                 checked += 1
-                value = generated.arg(None)
+                value = unwrap(generated.arg)()
                 assert value.utcoffset() == timedelta(0), f"{table.name}.{column.name} {kind}"
     assert checked >= 67
 
