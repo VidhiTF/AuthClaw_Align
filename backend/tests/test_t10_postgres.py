@@ -152,10 +152,9 @@ def postgres():
                 {"approval": duplicate_pending, "workflow": linkage_workflow},
             )
         command("-m", "alembic", "upgrade", "054")
-        command("scripts/bootstrap_database_security.py", "finalize-backend")
         command("-m", "alembic", "upgrade", "head")
         command("scripts/bootstrap_database_security.py", "finalize-backend")
-        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="054"), app.connect() as connection:
+        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="055"), app.connect() as connection:
             validate_database_security(connection)
             compliance_scores.require_snapshot_schema(connection)
         harness = IsolationHarness(owner, app, sessionmaker(bind=app, expire_on_commit=False))
@@ -878,7 +877,7 @@ def test_downgrade_refuses_retained_versioned_history_and_keeps_rls(postgres):
     result = command("-m", "alembic", "downgrade", "049", succeeds=False)
     assert "downgrade refused" in result.stderr
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "054"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "055"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='compliance_score_snapshots'")).scalar_one()
 
 
@@ -1251,5 +1250,5 @@ def test_durable_mfa_state_prevents_schema_downgrade(real_mfa, postgres):
     result = command("-m", "alembic", "downgrade", "050", succeeds=False)
     assert "mfa" in result.stderr.lower() and "downgrade" in result.stderr.lower()
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "054"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "055"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='users'")).scalar_one()

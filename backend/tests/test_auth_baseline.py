@@ -20,6 +20,8 @@ from app.core.passwords import hash_password, verify_password
 from app.db.models import User
 from app.schemas.models import APIKeyCreate, APIKeyRevoke, APIKeyRotate
 from app.services import oidc_sso
+from app.services import email_service
+from app.core.startup_checks import validate_production_environment
 from app.services.email_service import send_otp_email
 from app.api.v1.endpoints import auth as auth_endpoints
 from app.api.v1.endpoints import users as user_endpoints
@@ -948,3 +950,25 @@ def test_local_email_outbox_replaces_demo_otp(monkeypatch, tmp_path):
     saved = outbox.read_text()
     assert "owner@example.com" in saved
     assert "123456" in saved
+
+
+@pytest.mark.parametrize("environment", ["local", "development", "prod", "production", "staging", "shared-test"])
+@pytest.mark.parametrize("user,password", [("apikey", ""), ("", "test-password")])
+def test_incomplete_smtp_credentials_rejected_before_connection(monkeypatch, tmp_path, environment, user, password):
+    monkeypatch.setenv("AUTHCLAW_ENV", environment)
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.invalid")
+    monkeypatch.setenv("SMTP_USER", user)
+    monkeypatch.setenv("SMTP_PASSWORD", password)
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("AUTHCLAW_EMAIL_OUTBOX_PATH", str(outbox))
+    smtp = MagicMock()
+    monkeypatch.setattr(email_service.smtplib, "SMTP", smtp)
+
+    for send in (lambda: email_service.send_email("owner@example.com", "Invite", "Body"),
+                 lambda: send_otp_email("owner@example.com", "123456", "Acme")):
+        with pytest.raises(email_service.EmailDeliveryError, match="SMTP_USER.*SMTP_PASSWORD"):
+            send()
+    with pytest.raises(RuntimeError, match="SMTP_USER.*SMTP_PASSWORD"):
+        validate_production_environment()
+    smtp.assert_not_called()
+    assert not outbox.exists()
