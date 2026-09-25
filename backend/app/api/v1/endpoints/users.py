@@ -8,7 +8,7 @@ import qrcode
 import io
 import base64
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 from app.db.models import APIKey, OnboardingEmailOTP, Tenant, User
 from app.schemas.models import UserCreate, UserInviteRequest, UserInviteResponse, UserResponse
@@ -77,6 +77,10 @@ class AccessReviewExport(BaseModel):
     integrity_sha256: str
     signing: dict[str, str]
     signature: str
+
+    @field_serializer("generated_at")
+    def serialize_generated_at(self, value: datetime) -> str:
+        return value.isoformat()
 
 
 @router.get("", response_model=list[UserResponse], dependencies=[require_roles(["owner", "admin"])])

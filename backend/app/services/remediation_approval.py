@@ -146,8 +146,8 @@ def evaluate_approval(
         return ApprovalDecision(False, "REPLAYED", "Approval has already been consumed")
     if approval.status != "APPROVED":
         return ApprovalDecision(False, "UNAPPROVED", f"Approval status is {approval.status}")
-    if not actor_id or str(approval.approver_id) != str(actor_id):
-        return ApprovalDecision(False, "USER_MISMATCH", "Approval is bound to another user")
+    if not actor_id or str(approval.approver_id) == str(actor_id):
+        return ApprovalDecision(False, "USER_MISMATCH", "The approver cannot execute their own approval")
 
     expected_payload = build_action_payload(workflow_id, current_plan)
     stored_payload = approval.action_payload or {}

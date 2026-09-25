@@ -471,7 +471,7 @@ def approve_gateway_approval(
     user = db.query(User).filter(
         User.id == user_id,
         User.tenant_id == uuid.UUID(tenant_id),
-    ).with_for_update().first()
+    ).first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
@@ -650,7 +650,7 @@ def approve_workflow(
     user = db.query(User).filter(
         User.id == user_id,
         User.tenant_id == uuid.UUID(tenant_id),
-    ).with_for_update().first()
+    ).first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
 
@@ -696,25 +696,8 @@ def approve_workflow(
     db.add(audit)
     db.commit()
 
-    # Resume workflow execution
-    try:
-        result = runner.resume(workflow_id, tenant_id, actor_id=str(user_id))
-        remediation_state = str(result.get("remediation_state") or "")
-        if remediation_state in {"SUCCEEDED", "FAILED", "PARTIAL_FAILED", "ROLLBACK_FAILED"}:
-            failed = remediation_state != "SUCCEEDED"
-            create_notification(
-                db,
-                tenant_id=uuid.UUID(tenant_id),
-                type="remediation_failed" if failed else "remediation_completed",
-                severity="critical" if failed else "info",
-                title="Remediation failed" if failed else "Remediation completed",
-                body=f"{workflow_id} finished with remediation state {remediation_state}.",
-                link="/agent",
-            )
-    except Exception as exc:
-        logger.error("Failed to approve/resume workflow: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
-    return _workflow_response(result)
+    # Execution is a separate operator/admin action through /resume.
+    return _workflow_response(runner.get_status(workflow_id, tenant_id))
 
 
 @router.post("/{workflow_id}/reject", response_model=WorkflowResponseVariant)

@@ -983,6 +983,8 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     # 1. Setup Tenant C and Admin/User
     tenant_id = uuid4()
     user_id = uuid4()
+    approver_id, executor_id = uuid4(), uuid4()
+    approver_key_raw, executor_key_raw = "approver_key_tenant_c", "executor_key_tenant_c"
     api_key_raw = "system_admin_key_tenant_c"
     api_key_hash = hash_key(api_key_raw)
 
@@ -995,6 +997,11 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
     user = User(id=user_id, tenant_id=tenant_id, email="admin@tenantC.com", role="admin", is_active=True)
     db_session.add(user)
+    import pyotp
+    db_session.add(User(id=approver_id, tenant_id=tenant_id, email="approver@tenantC.com",
+        role="approver", is_active=True))
+    db_session.add(User(id=executor_id, tenant_id=tenant_id, email="operator@tenantC.com",
+        role="operator", is_active=True))
     db_session.commit()
 
     api_key = APIKey(
@@ -1007,10 +1014,20 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         created_by=user_id
     )
     db_session.add(api_key)
+    db_session.add(APIKey(id=uuid4(), tenant_id=tenant_id, key_hash=hash_key(approver_key_raw),
+        name="Approver Key C", scopes=["read", "write"], is_active=True, created_by=approver_id))
+    db_session.add(APIKey(id=uuid4(), tenant_id=tenant_id, key_hash=hash_key(executor_key_raw),
+        name="Executor Key C", scopes=["read", "write"], is_active=True, created_by=executor_id))
     db_session.commit()
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
     headers = {"Authorization": f"Bearer {api_key_raw}"}
+    approver_headers = {"Authorization": f"Bearer {approver_key_raw}"}
+    executor_headers = {"Authorization": f"Bearer {executor_key_raw}"}
+
+    mfa_setup = client.post("/v1/users/me/mfa/setup", headers=approver_headers)
+    assert mfa_setup.status_code == 200, mfa_setup.json()
+    approver_secret = mfa_setup.json()["mfa_secret"]
 
     # 2. Create compliance workflow (scan executes to completion)
     from unittest.mock import patch, MagicMock
@@ -1072,12 +1089,13 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     assert db_app.approver_id is None
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
-    mfa_setup = client.post("/v1/workflows/mfa/setup", headers=headers)
-    assert mfa_setup.status_code == status.HTTP_200_OK
-    backup_code = mfa_setup.json()["backup_codes"][0]
+    assert client.post(f"/v1/workflows/{workflow_id}/approve", headers=headers).status_code == 403
 
-    # 3. Approve workflow
-    with patch("app.orchestrator.connectors.DocumentScanner.execute_remediation") as mock_execute:
+    # 3. A distinct approver records the decision; only an operator executes it.
+    from app.core.auth import verify_mfa_code
+    with patch("app.api.v1.endpoints.workflows.verify_mfa_challenge",
+               side_effect=lambda _redis, user, code, **_kwargs: verify_mfa_code(user, code)), \
+         patch("app.orchestrator.connectors.DocumentScanner.execute_remediation") as mock_execute:
         mock_execute.return_value = {
             "connector": "aws_s3",
             "control": "test-doc.txt",
@@ -1089,16 +1107,21 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         }
         response_approve = client.post(
             f"/v1/workflows/{workflow_id}/approve",
-            headers=headers,
-            json={"totp_code": backup_code},
+            headers=approver_headers,
+            json={"totp_code": pyotp.TOTP(approver_secret).now()},
         )
-    assert response_approve.status_code == status.HTTP_200_OK
+        assert response_approve.status_code == status.HTTP_200_OK, response_approve.json()
+        assert mock_execute.call_count == 0
+        assert client.post(f"/v1/workflows/{workflow_id}/resume", headers=approver_headers).status_code == 403
+        response_resume = client.post(f"/v1/workflows/{workflow_id}/resume", headers=executor_headers)
+    assert response_resume.status_code == status.HTTP_200_OK, response_resume.json()
     wf_approved_data = response_approve.json()
 
     # Expected outcomes
-    assert wf_approved_data["current_state"] == "COMPLETE"
-    assert wf_approved_data["execution_status"] == "COMPLETED"
+    assert wf_approved_data["current_state"] == "AWAITING_APPROVAL"
+    assert wf_approved_data["execution_status"] == "PAUSED"
     assert wf_approved_data["approval_status"] == "APPROVED"
+    assert response_resume.json()["execution_status"] == "COMPLETED"
 
     # Verify db states
     db_session.rollback()
@@ -1115,7 +1138,7 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     ).first()
     assert db_app_final.status == "CONSUMED"
     assert db_app_final.approved_at is not None
-    assert db_app_final.approver_id == user_id
+    assert db_app_final.approver_id == approver_id
     assert db_app_final.consumed_at is not None
-    assert db_app_final.consumed_by_id == user_id
+    assert db_app_final.consumed_by_id == executor_id
     db_session.execute(text("SET app.current_tenant_id = ''"))

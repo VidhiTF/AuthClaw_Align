@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 import uuid
 
 from app.services.remediation_approval import (
@@ -13,6 +14,7 @@ from app.services.remediation_approval import (
 
 TENANT_ID = str(uuid.uuid4())
 APPROVER_ID = str(uuid.uuid4())
+EXECUTOR_ID = str(uuid.uuid4())
 WORKFLOW_ID = str(uuid.uuid4())
 NOW = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
 
@@ -54,7 +56,7 @@ def _evaluate(approval, **overrides):
     values = {
         "approval": approval,
         "tenant_id": TENANT_ID,
-        "actor_id": APPROVER_ID,
+        "actor_id": EXECUTOR_ID,
         "workflow_id": WORKFLOW_ID,
         "current_plan": _plan(),
         "now": NOW,
@@ -111,12 +113,23 @@ def test_expired_replayed_altered_and_unapproved_actions_are_rejected():
 
 def test_approval_is_bound_to_tenant_user_and_workflow():
     wrong_tenant = _evaluate(_approval(), tenant_id=str(uuid.uuid4()))
-    wrong_user = _evaluate(_approval(), actor_id=str(uuid.uuid4()))
+    wrong_user = _evaluate(_approval(), actor_id=APPROVER_ID)
     wrong_workflow = _evaluate(_approval(), workflow_id=str(uuid.uuid4()))
 
     assert wrong_tenant.status == "TENANT_MISMATCH"
     assert wrong_user.status == "USER_MISMATCH"
     assert wrong_workflow.status == "ACTION_MISMATCH"
+
+
+def test_rejected_approval_closes_workflow_without_rewriting_decision():
+    from app.orchestrator.runner import _check_approval_in_db
+
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+        SimpleNamespace(status="REJECTED", action_id=WORKFLOW_ID))
+    assert _check_approval_in_db(db, str(uuid.uuid4()), TENANT_ID, APPROVER_ID,
+        WORKFLOW_ID, _plan()) == "REJECTED"
+    db.commit.assert_not_called()
 
 
 def test_altered_approval_persists_terminal_safe_workflow_state():

@@ -215,13 +215,19 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
             VALUES (:id, :tenant, 'ent026-subject', :requester, 'ACCESS',
                     'PENDING', false, '{}'::json, now(), now())"""),
             {"id": uuid4(), "tenant": tenant_id, "requester": administrator.user_id})
+        s3_document_id = uuid4()
+        conn.execute(text("""INSERT INTO public.aws_s3_documents
+            (id, tenant_id, bucket_name, object_key, file_name, synced_at)
+            VALUES (:id, :tenant, 'ent026-bucket', 'tenant/doc.txt', 'doc.txt', now())"""),
+            {"id": s3_document_id, "tenant": tenant_id})
 
         expected_policies = {
             "api_keys": {"tenant_isolation", "tenant_admin_api_keys_write", "tenant_access_review_api_keys_read"},
-            "users": {"tenant_user_read", "tenant_user_insert", "tenant_user_update", "tenant_user_delete"},
+            "users": {"tenant_user_read", "tenant_user_insert", "tenant_user_update", "tenant_user_self_mfa", "tenant_user_delete"},
             "policies": {"tenant_policy_read", "tenant_policy_write", "tenant_policy_update", "tenant_policy_delete"},
             "gateway_configs": {"tenant_gateway_read", "tenant_gateway_write", "tenant_gateway_update", "tenant_gateway_delete"},
             "provider_credentials": {"tenant_provider_read", "tenant_provider_write", "tenant_provider_update", "tenant_provider_delete"},
+            "aws_s3_documents": {"tenant_s3_document_read", "tenant_s3_document_write", "tenant_s3_document_update"},
             "pending_approvals": {"tenant_approval_read", "tenant_approval_create", "tenant_approval_resolve", "tenant_approval_expire"},
             "data_subject_requests": {"data_subject_requests_read", "data_subject_requests_create", "data_subject_requests_update"},
             "audit_log_metadata": {"tenant_audit_read", "tenant_audit_append"},
@@ -241,6 +247,7 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
         "api_keys": {"tenant_administrator", "auditor"},
         "pending_approvals": set(identities),
         "data_subject_requests": {"tenant_administrator", "auditor", "approver", "operator"},
+        "aws_s3_documents": {"tenant_administrator"},
     }
     for role, identity in identities.items():
         with isolation.session_for(identity) as db:
@@ -251,6 +258,32 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
                 expected = (2 if table == "pending_approvals" else 1) if role in allowed_roles else 0
                 assert count == expected, (role, table, count, expected)
 
+    for role in ("developer", "approver"):
+        with isolation.session_for(identities[role]) as db:
+            assert db.execute(text("""UPDATE public.aws_s3_documents
+                SET file_name = 'tampered.txt' WHERE id = :id RETURNING id"""),
+                {"id": s3_document_id}).first() is None
+            with pytest.raises(DBAPIError):
+                db.execute(text("""INSERT INTO public.aws_s3_documents
+                    (id, tenant_id, bucket_name, object_key, file_name, synced_at)
+                    VALUES (:id, :tenant, 'ent026-bucket', :key, 'new.txt', now())"""),
+                    {"id": uuid4(), "tenant": tenant_id, "key": f"tenant/{role}.txt"})
+            db.rollback()
+    with isolation.session_for(identities["approver"]) as db:
+        with pytest.raises(DBAPIError):
+            db.execute(text("UPDATE public.users SET role = 'tenant_administrator' WHERE id = :id"),
+                {"id": identities["approver"].user_id})
+        db.rollback()
+    with isolation.session_for(administrator) as db:
+        assert db.execute(text("""UPDATE public.aws_s3_documents SET file_name = 'updated.txt'
+            WHERE id = :id RETURNING id"""), {"id": s3_document_id}).scalar_one() == s3_document_id
+        new_id = uuid4()
+        assert db.execute(text("""INSERT INTO public.aws_s3_documents
+            (id, tenant_id, bucket_name, object_key, file_name, synced_at)
+            VALUES (:id, :tenant, 'ent026-bucket', 'tenant/new.txt', 'new.txt', now())
+            RETURNING id"""), {"id": new_id, "tenant": tenant_id}).scalar_one() == new_id
+        db.commit()
+
     update_approval = text("""UPDATE public.pending_approvals
         SET status = 'APPROVED', approver_id = :actor, approved_at = now()
         WHERE id = :id RETURNING id""")
@@ -258,6 +291,13 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
         with isolation.session_for(identities[role]) as db:
             assert db.execute(update_approval,
                 {"actor": identities[role].user_id, "id": approval_id}).first() is None
+    with isolation.session_for(identities["approver"]) as db:
+        with pytest.raises(DBAPIError):
+            db.execute(text("""UPDATE public.pending_approvals
+                SET status = 'CONSUMED', approver_id = :actor, consumed_by_id = :actor
+                WHERE id = :id"""),
+                {"actor": identities["approver"].user_id, "id": approval_id})
+        db.rollback()
     with isolation.session_for(identities["approver"]) as db:
         assert db.execute(update_approval,
             {"actor": identities["approver"].user_id, "id": self_approval_id}).first() is None
@@ -268,6 +308,21 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
         assert dict(tuple(row) for row in conn.execute(
             text("SELECT id, status FROM public.pending_approvals"))) == {
             approval_id: "APPROVED", self_approval_id: "PENDING"}
+
+    consume_approval = text("""UPDATE public.pending_approvals
+        SET status = 'CONSUMED', consumed_by_id = :actor, consumed_at = now()
+        WHERE id = :id RETURNING id""")
+    for role in ("viewer", "developer", "auditor", "approver"):
+        with isolation.session_for(identities[role]) as db:
+            assert db.execute(consume_approval,
+                {"actor": identities[role].user_id, "id": approval_id}).first() is None
+    with isolation.session_for(identities["operator"]) as db:
+        assert db.execute(consume_approval,
+            {"actor": identities["operator"].user_id, "id": approval_id}).scalar_one() == approval_id
+        db.commit()
+    with isolation.owner_engine.connect() as conn:
+        assert conn.execute(text("SELECT status FROM public.pending_approvals WHERE id = :id"),
+            {"id": approval_id}).scalar_one() == "CONSUMED"
 
 
 def test_writer_privileges_cannot_bypass_restricted_audit_verifier(

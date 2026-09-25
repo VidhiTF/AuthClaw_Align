@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_tenant_db, require_scopes
+from app.core.auth import get_tenant_db, require_permission, require_scopes
 from app.db.models import AWSUsageLimits, AWSS3Document
 from app.services import ephemeral_workers
 
@@ -157,7 +157,7 @@ def get_aws_status(request: Request) -> AWSStatusResponse:
 @router.post(
     "/s3/sync",
     response_model=S3SyncResponse,
-    dependencies=[require_scopes(["write"])],
+    dependencies=[require_permission("tenant.connectors.manage"), require_scopes(["write"])],
 )
 def sync_s3_documents(
     request: Request,
@@ -301,7 +301,7 @@ def sync_s3_documents(
 @router.get(
     "/s3/documents",
     response_model=List[S3DocumentResponse],
-    dependencies=[require_scopes(["read"])],
+    dependencies=[require_permission("tenant.connectors.read"), require_scopes(["read"])],
 )
 def list_s3_documents(
     request: Request,

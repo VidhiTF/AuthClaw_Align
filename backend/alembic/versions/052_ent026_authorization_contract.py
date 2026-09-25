@@ -81,7 +81,7 @@ def upgrade() -> None:
                 END IF;
             ELSIF NEW.status = 'ALTERED' THEN
                 NULL;
-            ELSIF OLD.status = 'PENDING' AND NEW.status IN ('APPROVED','CONSUMED','REJECTED') THEN
+            ELSIF OLD.status = 'PENDING' AND NEW.status IN ('APPROVED','REJECTED') THEN
                 IF NOT authn.authorize_action('tenant.high_risk.approve')
                    OR OLD.requester_id IS NULL
                    OR OLD.requester_id = authn.current_user_id()
@@ -92,8 +92,9 @@ def upgrade() -> None:
             ELSIF OLD.status = 'APPROVED' AND NEW.status = 'CONSUMED' THEN
                 IF NOT authn.authorize_action('tenant.workflow.resume')
                    OR OLD.requester_id IS NULL
-                   OR OLD.requester_id = authn.current_user_id()
-                   OR OLD.approver_id IS NULL THEN
+                   OR OLD.approver_id IS NULL
+                   OR OLD.approver_id = authn.current_user_id()
+                   OR NEW.consumed_by_id IS DISTINCT FROM authn.current_user_id() THEN
                     RAISE EXCEPTION 'approval consumption is not authorized';
                 END IF;
             ELSE
@@ -234,6 +235,31 @@ def upgrade() -> None:
                    AND authn.authorize_action('tenant.users.manage'))
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND authn.authorize_action('tenant.users.manage'));
+        CREATE OR REPLACE FUNCTION authn.enforce_self_mfa_update()
+        RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog, authn, public
+        AS $$
+        BEGIN
+            IF OLD.id = authn.current_user_id()
+               AND authn.current_role() <> 'tenant_administrator'
+               AND (to_jsonb(NEW) - 'mfa_enabled' - 'mfa_secret' - 'mfa_backup_codes' - 'mfa_last_totp_step' - 'updated_at')
+                   IS DISTINCT FROM
+                   (to_jsonb(OLD) - 'mfa_enabled' - 'mfa_secret' - 'mfa_backup_codes' - 'mfa_last_totp_step' - 'updated_at') THEN
+                RAISE EXCEPTION 'self-service update may only change MFA fields';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS users_self_mfa_guard ON public.users;
+        CREATE TRIGGER users_self_mfa_guard BEFORE UPDATE ON public.users
+            FOR EACH ROW EXECUTE FUNCTION authn.enforce_self_mfa_update();
+        CREATE POLICY tenant_user_self_mfa ON public.users FOR UPDATE
+            USING (tenant_id = authn.current_tenant_id()
+                   AND id = authn.current_user_id()
+                   AND authn.authorize_action('tenant.users.read'))
+            WITH CHECK (tenant_id = authn.current_tenant_id()
+                        AND id = authn.current_user_id()
+                        AND authn.authorize_action('tenant.users.read'));
         CREATE POLICY tenant_user_delete ON public.users FOR DELETE
             USING (tenant_id = authn.current_tenant_id()
                    AND authn.authorize_action('tenant.users.manage'));
@@ -289,6 +315,20 @@ def upgrade() -> None:
             USING (tenant_id = authn.current_tenant_id()
                    AND authn.authorize_action('tenant.credentials.manage'));
 
+        DROP POLICY IF EXISTS aws_s3_docs_isolation ON public.aws_s3_documents;
+        DROP POLICY IF EXISTS tenant_isolation ON public.aws_s3_documents;
+        CREATE POLICY tenant_s3_document_read ON public.aws_s3_documents FOR SELECT
+            USING (tenant_id = authn.current_tenant_id()
+                   AND authn.authorize_action('tenant.connectors.read'));
+        CREATE POLICY tenant_s3_document_write ON public.aws_s3_documents FOR INSERT
+            WITH CHECK (tenant_id = authn.current_tenant_id()
+                        AND authn.authorize_action('tenant.connectors.manage'));
+        CREATE POLICY tenant_s3_document_update ON public.aws_s3_documents FOR UPDATE
+            USING (tenant_id = authn.current_tenant_id()
+                   AND authn.authorize_action('tenant.connectors.manage'))
+            WITH CHECK (tenant_id = authn.current_tenant_id()
+                        AND authn.authorize_action('tenant.connectors.manage'));
+
         DROP POLICY IF EXISTS pending_approvals_tenant_isolation ON public.pending_approvals;
         DROP POLICY IF EXISTS tenant_isolation ON public.pending_approvals;
         CREATE POLICY tenant_approval_read ON public.pending_approvals FOR SELECT
@@ -299,14 +339,22 @@ def upgrade() -> None:
                         AND authn.current_role() IN ('developer','operator','tenant_administrator'));
         CREATE POLICY tenant_approval_resolve ON public.pending_approvals FOR UPDATE
             USING (tenant_id = authn.current_tenant_id()
-                   AND authn.authorize_action('tenant.high_risk.approve')
-                   AND requester_id <> authn.current_user_id())
+                   AND ((status = 'PENDING'
+                         AND authn.authorize_action('tenant.high_risk.approve')
+                         AND requester_id <> authn.current_user_id())
+                        OR (status = 'APPROVED'
+                            AND authn.authorize_action('tenant.workflow.resume')
+                            AND approver_id <> authn.current_user_id())))
             WITH CHECK (tenant_id = authn.current_tenant_id()
-                        AND authn.authorize_action('tenant.high_risk.approve')
-                        AND requester_id <> authn.current_user_id());
+                        AND ((status IN ('APPROVED','REJECTED','ALTERED')
+                              AND authn.authorize_action('tenant.high_risk.approve')
+                              AND requester_id <> authn.current_user_id())
+                             OR (status = 'CONSUMED'
+                                 AND authn.authorize_action('tenant.workflow.resume')
+                                 AND approver_id <> authn.current_user_id())));
         CREATE POLICY tenant_approval_expire ON public.pending_approvals FOR UPDATE
             USING (tenant_id = authn.current_tenant_id()
-                   AND status = 'PENDING'
+                   AND status IN ('PENDING','APPROVED')
                    AND expires_at < now()
                    AND authn.authorize_action('tenant.approvals.expire'))
             WITH CHECK (tenant_id = authn.current_tenant_id()

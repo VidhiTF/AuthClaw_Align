@@ -300,6 +300,10 @@ def _check_approval_in_db(
     if not approval:
         return "EXPIRED"
 
+    # A rejected decision is terminal; no second approval-row UPDATE is needed.
+    if approval.status == "REJECTED" and approval.action_id == workflow_id:
+        return "REJECTED"
+
     now = datetime.now(tz=timezone.utc)
     plan = (approval.action_payload or {}).get("plan") or []
     destructive = any(bool(item.get("destructive")) for item in plan if isinstance(item, dict))

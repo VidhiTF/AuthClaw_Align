@@ -1,9 +1,15 @@
 import pytest
+import base64
+import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
 
 from app.core.authorization import (
     Role,
@@ -14,6 +20,8 @@ from app.core.authorization import (
 from app.services.access_review import build_access_review_export
 from app.api.v1.endpoints.users import router as users_router
 from app.api.v1.endpoints.audit import router as audit_router
+from app.api.v1.endpoints.aws import router as aws_router
+from app.core.auth import get_tenant_db
 from scripts import bootstrap_database_security
 
 
@@ -106,6 +114,56 @@ def test_access_review_route_requires_auditor_or_tenant_administrator():
     check("tenant_administrator")
     with pytest.raises(Exception):
         check("viewer")
+
+
+def test_access_review_http_response_preserves_signed_payload():
+    from app.api.v1.endpoints import users as users_endpoints
+
+    user = SimpleNamespace(
+        id=uuid4(), email="review@example.invalid", is_active=True, role="auditor",
+        platform_role="NONE", mfa_enabled=False, last_login=None,
+    )
+    db = MagicMock()
+    users_query, keys_query = MagicMock(), MagicMock()
+    users_query.filter.return_value.order_by.return_value.all.return_value = [user]
+    keys_query.filter.return_value.all.return_value = []
+    db.query.side_effect = [users_query, keys_query]
+    tenant_id = uuid4()
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def test_principal(request: Request, call_next):
+        request.state.user_role = "auditor"
+        request.state.scopes = ["read"]
+        request.state.tenant_id = tenant_id
+        return await call_next(request)
+
+    app.include_router(users_endpoints.router, prefix="/v1/users")
+    app.dependency_overrides[get_tenant_db] = lambda: db
+    with TestClient(app) as client:
+        response = client.get("/v1/users/access-review")
+    assert response.status_code == 200
+    export = response.json()
+    canonical = json.dumps({key: value for key, value in export.items()
+        if key not in {"integrity_sha256", "signing", "signature"}},
+        sort_keys=True, separators=(",", ":")).encode()
+    assert hashlib.sha256(canonical).hexdigest() == export["integrity_sha256"]
+    public_key = Ed25519PublicKey.from_public_bytes(
+        base64.b64decode(export["signing"]["public_key"]))
+    public_key.verify(base64.b64decode(export["signature"]), canonical)
+
+
+def test_s3_sync_requires_connector_permission_for_every_tenant_role():
+    route = next(route for route in aws_router.routes if route.path == "/s3/sync")
+    for role in ("viewer", "developer", "operator", "auditor", "approver", "tenant_administrator"):
+        request = SimpleNamespace(state=SimpleNamespace(user_role=role, scopes=["read", "write"]))
+        if role == "tenant_administrator":
+            for dependency in route.dependencies:
+                dependency.dependency(request)
+        else:
+            with pytest.raises(Exception):
+                for dependency in route.dependencies:
+                    dependency.dependency(request)
 
 
 def test_audit_reads_require_audit_permission_not_only_read_scope():
