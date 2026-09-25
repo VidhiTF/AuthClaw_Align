@@ -239,6 +239,14 @@ export default function AccessRequestsClient() {
                       {request.source_page} · created {formatDateTime(request.created_at)} · updated {formatDateTime(request.updated_at)}
                     </p>
                   </div>
+                  {(request.status === "APPROVED" || request.status === "INVITED") && (
+                    <button type="button" onClick={() => void transition(request, request.status)}
+                      disabled={busyReference === request.reference}
+                      className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-[#6D28D9] bg-[#6D28D9] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+                      <RefreshCw className={`h-4 w-4 ${busyReference === request.reference ? "animate-spin" : ""}`} />
+                      {busyReference === request.reference ? "Resending..." : "Resend invitation"}
+                    </button>
+                  )}
                   {request.status === "PENDING" && (
                     <div className="flex shrink-0 flex-wrap gap-2">
                       {(["REJECTED", "APPROVED", "INVITED"] as const).map((decision) => {
@@ -293,7 +301,7 @@ export default function AccessRequestsClient() {
                                     : "border-emerald-200 bg-emerald-50 text-emerald-800"
                                 }`}>
                                   {delivery === "failed" && <MailWarning className="h-3.5 w-3.5" />}
-                                  Delivery {delivery}
+                                  {delivery === "local_outbox" ? "Local invite ready — no email sent" : `Delivery ${delivery}`}
                                 </span>
                               )}
                             </div>

@@ -354,19 +354,11 @@ def resend(payload: OnboardingResendRequest, request: Request):
             "Too many verification code resends from this network today.",
         )
 
+        invitation_audit = _invitation_audit_snapshot(signup_row)
         delivery, dev_otp = _deliver_otp(signup_row.email, otp, signup_row.tenant_name)
         signup_row.last_delivery = delivery
         signup_row.delivery_error = None
-        db.commit()
-        db.refresh(signup_row)
-        _emit_invitation_audit(
-            signup_row,
-            "InviteDeliverySucceeded",
-            "delivery_succeeded",
-            request_id,
-            200,
-        )
-        return OnboardingResendResponse(
+        response = OnboardingResendResponse(
             signup_id=signup_row.id,
             email=signup_row.email,
             expires_at=signup_row.expires_at,
@@ -374,11 +366,20 @@ def resend(payload: OnboardingResendRequest, request: Request):
             next_resend_at=_next_resend_at(signup_row.sent_at),
             dev_otp=dev_otp,
         )
+        db.commit()
+        _emit_invitation_audit(
+            invitation_audit,
+            "InviteDeliverySucceeded",
+            "delivery_succeeded",
+            request_id,
+            200,
+        )
+        return response
     except EmailDeliveryError as exc:
         db.rollback()
-        if "signup_row" in locals() and signup_row:
+        if "invitation_audit" in locals():
             _emit_invitation_audit(
-                signup_row,
+                invitation_audit,
                 "InviteDeliveryFailed",
                 "delivery_failed",
                 request_id,

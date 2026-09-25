@@ -468,6 +468,35 @@ def test_email_retry_recovers_without_failure_record(monkeypatch):
     assert db.commits == 0
 
 
+@pytest.mark.parametrize("delivery_fails", [False, True])
+def test_invitation_resend_does_not_reload_after_tenant_context_ends(monkeypatch, delivery_fails):
+    payload = SimpleNamespace(signup_id=uuid4())
+    db = MagicMock()
+    db.execute.return_value.one.return_value = SimpleNamespace(outcome="valid")
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = SimpleNamespace(
+        id=payload.signup_id, tenant_id=uuid4(), email="owner@example.com", tenant_name="Test", purpose="invite",
+        status="pending", expires_at=datetime.now(timezone.utc) + timedelta(minutes=15), sent_at=datetime.now(timezone.utc),
+    )
+    monkeypatch.setattr(onboarding, "OwnerSessionLocal", lambda: db)
+    monkeypatch.setattr(onboarding, "_enforce_onboarding_rate_limit", lambda *_: None)
+    delivery = MagicMock(return_value=("local_outbox", None))
+    if delivery_fails:
+        delivery.side_effect = EmailDeliveryError("private provider detail")
+    monkeypatch.setattr(onboarding, "_deliver_otp", delivery)
+    audit = MagicMock(side_effect=lambda row, *_: (row.id, row.tenant_id, row.purpose))
+    monkeypatch.setattr(onboarding, "_emit_invitation_audit", audit)
+    if delivery_fails:
+        with pytest.raises(HTTPException) as error:
+            onboarding.resend(payload, SimpleNamespace(headers={}, client=None))
+        assert error.value.status_code == 503
+        assert error.value.detail == "Invitation delivery is temporarily unavailable"
+    else:
+        response = onboarding.resend(payload, SimpleNamespace(headers={}, client=None))
+        assert response.signup_id == payload.signup_id
+        assert response.delivery == "local_outbox"
+    audit.assert_called_once()
+
+
 @pytest.mark.parametrize("new_status", ["APPROVED", "REJECTED", "INVITED"])
 def test_status_transition_records_history_and_rejects_invalid(monkeypatch, new_status):
     request = AccessRequest(
