@@ -153,9 +153,10 @@ def create_access_request_invitation(
     request: AccessRequest,
     *,
     actor_id,
+    tenant_id: uuid.UUID | None = None,
 ) -> dict:
     email = request.business_email.strip().lower()
-    tenant = db.query(Tenant).filter(Tenant.name == request.company).first()
+    tenant = Tenant(id=tenant_id) if tenant_id else db.query(Tenant).filter(Tenant.name == request.company).first()
     tenant_was_created = False
     if not tenant:
         tenant, tenant_was_created = _create_platform_tenant(db, request)
@@ -318,25 +319,37 @@ def transition_access_request(
     if request is None:
         raise LookupError("Access request not found")
     old_status = request.status
-    if new_status not in ALLOWED_TRANSITIONS.get(old_status, set()):
+    retry = create_invitation and old_status == new_status and old_status in {"APPROVED", "INVITED"}
+    if not retry and new_status not in ALLOWED_TRANSITIONS.get(old_status, set()):
         raise ValueError("Invalid access request transition")
+    tenant_id = None
+    if retry:
+        previous = db.query(AccessRequestHistory).filter(
+            AccessRequestHistory.access_request_id == request.id,
+            AccessRequestHistory.event_type.in_({"INVITATION_READY", "INVITATION_DELIVERY_FAILED"}),
+        ).order_by(AccessRequestHistory.created_at.desc()).first()
+        if not previous or not previous.event_metadata.get("tenant_id"):
+            raise ValueError("No invitation available to resend")
+        tenant_id = uuid.UUID(previous.event_metadata["tenant_id"])
 
     request.status = new_status
     request.updated_at = datetime.now(timezone.utc)
-    db.add(
-        _history(
-            request,
-            new_status,
-            actor_id=actor_id,
-            old_status=old_status,
-            new_status=new_status,
+    if not retry:
+        db.add(
+            _history(
+                request,
+                new_status,
+                actor_id=actor_id,
+                old_status=old_status,
+                new_status=new_status,
+            )
         )
-    )
     if create_invitation and new_status in {"APPROVED", "INVITED"}:
         metadata = create_access_request_invitation(
             db,
             request,
             actor_id=actor_id,
+            tenant_id=tenant_id,
         )
         db.add(
             _history(

@@ -68,14 +68,24 @@ class GatewayProvider(BaseProvider):
 
     def generate(self, prompt: str, system_instruction: str = None, history: List[Dict[str, Any]] = None, **kwargs) -> str:
         path, payload = self._request(prompt, system_instruction, history, kwargs)
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "X-Provider": self.provider_name,
+        }
+        idempotency_key = kwargs.get("idempotency_key")
+        request_id = kwargs.get("request_id")
+        for name, value in (("Idempotency-Key", idempotency_key), ("X-Request-ID", request_id)):
+            if value is None:
+                continue
+            value = str(value)
+            if not value or len(value) > 255 or any(char in value for char in "\r\n"):
+                raise ValueError(f"Invalid {name} value")
+            headers[name] = value
         response = requests.post(
             f"{self.api_url}{path}",
             json=payload,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "X-Provider": self.provider_name,
-            },
+            headers=headers,
             timeout=self.timeout,
         )
         if response.status_code == 429:

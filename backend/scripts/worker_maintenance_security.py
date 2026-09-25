@@ -26,6 +26,12 @@ def prepare(conn, migrator):
     conn.execute(
         text(f"GRANT USAGE, CREATE ON SCHEMA worker_maintenance TO {quote(migrator)}")
     )
+    # A later migration may need to evolve the cleanup function before the
+    # NOLOGIN worker owner is restored by finalize().
+    if conn.execute(text("SELECT to_regprocedure('worker_maintenance.expire_tokens(integer)')")).scalar():
+        conn.execute(text(
+            f"ALTER FUNCTION worker_maintenance.expire_tokens(integer) OWNER TO {quote(migrator)}"
+        ))
 
 
 def finalize(conn, migrator, runtime):

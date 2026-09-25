@@ -35,8 +35,8 @@ class GraphMetadataContractTests(unittest.TestCase):
         inventoried = set().union(*GRAPH_STATE_CONTRACT.values())
         self.assertEqual(set(), inventoried - declared)
         for required in {
-            "username", "approval_reason", "policy_versions", "audit_record_id",
-            "original_request_id", "provider_status", "provider_error",
+            "username", "requester_id", "approval_reason", "policy_versions", "audit_record_id",
+            "original_request_id", "provider_status", "provider_error", "idempotency_key",
         }:
             self.assertIn(required, declared)
             self.assertIn(required, inventoried)
@@ -86,6 +86,7 @@ class GraphMetadataContractTests(unittest.TestCase):
         result = workflow.compile().invoke({
             "message": "hello",
             "username": "signed-user@example.com",
+            "requester_id": "oidc|signed-user",
             "tenant_id": 42,
             "original_request_id": "req-original",
         })
@@ -108,10 +109,14 @@ class GraphMetadataContractTests(unittest.TestCase):
         sensitive = graph.invoke({
             "message": "sensitive", "risk_level": "HIGH",
             "security_policy_action": "require_approval",
+            "tenant_id": 42, "request_id": "request-sensitive",
+            "requester_id": "oidc|requester",
         })
         policy = graph.invoke({
             "message": "policy", "risk_level": "HIGH",
             "policy_decision": "REQUIRE_APPROVAL",
+            "tenant_id": 42, "request_id": "request-policy",
+            "requester_id": "oidc|requester",
         })
         self.assertEqual("sensitive_data", sensitive["approval_reason"])
         self.assertEqual("policy_violation", policy["approval_reason"])
@@ -139,6 +144,40 @@ class GraphMetadataContractTests(unittest.TestCase):
             result["provider_error"],
         )
         self.assertNotIn("sk-never-expose", serialized)
+
+    def test_approved_execution_identity_reaches_provider(self):
+        llm = load_node("llm", {
+            "memory": types.SimpleNamespace(get_history=lambda *_: []),
+            "providers": types.SimpleNamespace(get_provider=lambda: None),
+            "redaction": types.SimpleNamespace(stream_redact_sensitive_tokens=lambda stream, **_: stream),
+            "verify_audit": types.SimpleNamespace(log_agent_event=lambda **_: None),
+        })
+        calls = []
+        order = []
+
+        class Provider:
+            def generate(self, prompt, **kwargs):
+                order.append("provider")
+                calls.append((prompt, kwargs))
+                return "ok"
+
+        def pre_effect_check():
+            order.append("fence")
+
+        result = one_node_graph(llm).invoke({
+            "message": "execute", "allowed": True,
+            "provider_client": Provider(),
+            "request_id": "approval-exec-operation-17",
+            "idempotency_key": "operation-17",
+            "pre_effect_check": pre_effect_check,
+        })
+
+        self.assertEqual(result["provider_status"], "ok")
+        self.assertEqual(order, ["fence", "provider"])
+        self.assertEqual(calls[0][1], {
+            "idempotency_key": "operation-17",
+            "request_id": "approval-exec-operation-17",
+        })
 
 
 if __name__ == "__main__":

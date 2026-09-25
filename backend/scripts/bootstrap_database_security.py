@@ -31,6 +31,7 @@ AGENT_AUTH_DEFINER_ROLE = os.getenv(
     "AGENT_AUTH_DEFINER_ROLE", "authclaw_agent_auth_definer"
 )
 AUTHN_RUNTIME_FUNCTIONS = {
+    "complete_onboarding_invite",
     "bind_api_key_context",
     "bind_platform_session_context",
     "bind_session_context",
@@ -512,6 +513,21 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
             f"TO {definer}"
         )
     )
+    # Audit append executes with a NOLOGIN definer so non-auditor tenant roles
+    # can append without gaining direct SELECT over the immutable audit chain.
+    conn.execute(text(
+        f"GRANT INSERT ON public.audit_log_metadata, public.audit_outbox TO {definer}"
+    ))
+    conn.execute(text(
+        f"GRANT USAGE ON SEQUENCE public.audit_outbox_id_seq TO {definer}"
+    ))
+    append_signature = (
+        "public.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,"
+        "uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)"
+    )
+    conn.execute(text(f"ALTER FUNCTION {append_signature} OWNER TO {definer}"))
+    conn.execute(text(f"REVOKE ALL ON FUNCTION {append_signature} FROM PUBLIC"))
+    conn.execute(text(f"GRANT EXECUTE ON FUNCTION {append_signature} TO {runtime}"))
     conn.execute(text(f"GRANT INSERT ON public.tenants TO {definer}"))
     conn.execute(
         text(
@@ -525,7 +541,8 @@ def secure_authentication_boundary(conn, backend_runtime: Role) -> None:
         text(
             f"GRANT INSERT, UPDATE ON public.onboarding_email_otps TO {definer}; "
             f"GRANT INSERT ON public.tenants TO {definer}; "
-            f"GRANT UPDATE ON public.users "
+            f"GRANT INSERT, UPDATE ON public.users TO {definer}; "
+            f"GRANT INSERT ON public.api_keys, public.onboarding_status "
             f"TO {definer}"
         )
     )

@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -155,6 +156,14 @@ SEVERITY_PENALTY = {"CRITICAL": 30, "HIGH": 22, "MEDIUM": 12, "LOW": 6}
 
 class ComplianceEvidenceEngine:
     corpus_version = "2026.07"
+    missing_control_treatment = "Missing controls are unknown and contribute zero to the full weighted denominator; frameworks without evidence have no score."
+
+    @contextmanager
+    def transaction(self, tenant_id: int):
+        with engine.begin() as conn:
+            conn.execute(text("SET LOCAL lock_timeout = '5s'"))
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('authclaw.compliance:' || CAST(:tenant_id AS text), 0))"), {"tenant_id": tenant_id})
+            yield conn
     calculation_version = "agent-diagnostic-v2"
 
     @classmethod
@@ -231,11 +240,13 @@ class ComplianceEvidenceEngine:
             controls = [item for item in controls if item["framework"].lower() == framework.lower()]
         return controls
 
-    def map_evidence(self, tenant_id: int) -> int:
-        self.ensure_catalog()
-        rows = self._collect_source_events(tenant_id)
+    def map_evidence(self, tenant_id: int, connection=None) -> int:
+        if connection is None:
+            with self.transaction(tenant_id) as conn:
+                return self.map_evidence(tenant_id, conn)
+        rows = self._collect_source_events(tenant_id, connection)
         mapped = 0
-        with engine.connect() as conn:
+        with nullcontext(connection) as conn:
             conn.execute(text("DELETE FROM compliance_control_evidence WHERE tenant_id = :tenant_id"), {"tenant_id": tenant_id})
             for event in rows:
                 for control in self._matching_controls(event):
@@ -265,13 +276,15 @@ class ComplianceEvidenceEngine:
                         },
                     )
                     mapped += 1
-            conn.commit()
         return mapped
 
-    def calculate_scores(self, tenant_id: int) -> Dict[str, Any]:
-        self.map_evidence(tenant_id)
-        controls = self.catalog()
-        with engine.connect() as conn:
+    def calculate_scores(self, tenant_id: int, connection=None) -> Dict[str, Any]:
+        if connection is None:
+            with self.transaction(tenant_id) as conn:
+                return self.calculate_scores(tenant_id, conn)
+        self.map_evidence(tenant_id, connection)
+        controls = [dict(item) for item in CONTROL_CATALOG]
+        with nullcontext(connection) as conn:
             evidence_rows = conn.execute(
                 text("""
                     SELECT framework, control_id, source_type, source_id, reason, impact, created_at, metadata
@@ -298,18 +311,26 @@ class ComplianceEvidenceEngine:
             items = evidence_by_control.get(control["control_id"], [])
             negative = [item for item in items if int(item.get("impact") or 0) < 0]
             positive = [item for item in items if int(item.get("impact") or 0) >= 0]
-            score = 100 if items else 0
-            score += sum(int(item.get("impact") or 0) for item in negative)
-            score = max(0, min(84, score))
-            status = "unassessed"
+            score = max(0, min(84, 100 + sum(int(item.get("impact") or 0) for item in negative))) if items else None
+            status = "unknown" if score is None else "unassessed"
             reason = self._score_reason(control, positive, negative, score)
             source_event = items[-1]["source_type"] if items else "catalog_baseline"
+            timestamps = []
+            for item in items:
+                try:
+                    observed = datetime.fromisoformat(json.loads(item.get("metadata") or "{}")["evidence_timestamp"])
+                    timestamps.append(observed.replace(tzinfo=observed.tzinfo or timezone.utc).astimezone(timezone.utc))
+                except (KeyError, TypeError, ValueError):
+                    timestamps = []  # Never substitute remapping time for missing source time.
+                    break
+            evidence_timestamp = max(timestamps).isoformat() if timestamps else None
             control_scores.append({
                 **self.diagnostic_metadata(),
                 "framework": control["framework"],
                 "control_id": control["control_id"],
                 "title": control["title"],
                 "score": score,
+                "evidence_timestamp": evidence_timestamp,
                 "status": status,
                 "evidence_count": len(items),
                 "negative_findings": len(negative),
@@ -318,23 +339,27 @@ class ComplianceEvidenceEngine:
                 "evidence": items,
                 "calculated_at": datetime.now(timezone.utc).isoformat(),
             })
-            self._persist_control_score(tenant_id, control, score, status, len(items), len(negative), reason, source_event, previous)
+            self._persist_control_score(tenant_id, control, score, status, len(items), len(negative), reason, source_event, previous, evidence_timestamp, connection)
 
         frameworks = {}
         for framework in sorted({item["framework"] for item in controls}):
             fw_controls = [item for item in control_scores if item["framework"] == framework]
             weighted_total = sum(self._control_weight(item["control_id"]) for item in fw_controls) or 1
-            weighted_score = sum(item["score"] * self._control_weight(item["control_id"]) for item in fw_controls) / weighted_total
-            frameworks[framework.lower()] = round(weighted_score)
+            weighted_score = sum((item["score"] or 0) * self._control_weight(item["control_id"]) for item in fw_controls) / weighted_total
+            frameworks[framework.lower()] = round(weighted_score) if any(item["evidence_count"] for item in fw_controls) else None
             frameworks[f"{framework.lower()}_controls"] = {
                 **self.diagnostic_metadata(),
                 "passed": 0,
                 "failed": 0,
                 "watch": 0,
-                "unassessed": len(fw_controls),
+                "unassessed": sum(1 for item in fw_controls if item["status"] == "unassessed"),
+                "unknown": sum(1 for item in fw_controls if item["status"] == "unknown"),
                 "items": fw_controls,
             }
         frameworks["corpus_version"] = self.corpus_version
+        observed_controls = [item for item in control_scores if item["evidence_count"]]
+        frameworks["evidence_timestamp"] = max((item["evidence_timestamp"] for item in observed_controls), default=None) if all(item["evidence_timestamp"] for item in observed_controls) else None
+        frameworks["missing_control_treatment"] = self.missing_control_treatment
         frameworks.update(self.diagnostic_metadata())
         return frameworks
 
@@ -390,15 +415,15 @@ class ComplianceEvidenceEngine:
             params["limit"] = max(1, min(int(limit), 500))
         with engine.connect() as conn:
             rows = conn.execute(text(sql), params).fetchall()
-        results = []
-        for row in rows:
-            item = dict(row._mapping)
-            metadata = item.get("metadata") or {}
+        changes = [dict(row._mapping) for row in rows]
+        for change in changes:
+            metadata = change.get("metadata") or {}
             metadata = metadata if isinstance(metadata, dict) else json.loads(metadata)
-            item.update(self.diagnostic_metadata())
-            item["calculation_version"] = metadata.get("calculation_version", "legacy-unknown")
-            results.append(item)
-        return results
+            change.update(self.diagnostic_metadata())
+            change["calculation_version"] = metadata.get("calculation_version", "legacy-unknown")
+            if change.get("source_event") == "catalog_baseline":
+                change["current_score"] = None  # Legacy no-evidence history used 0 or 100.
+        return changes
 
     def corpus_status(self) -> Dict[str, Any]:
         self.ensure_catalog()
@@ -416,11 +441,13 @@ class ComplianceEvidenceEngine:
         payload["production_vector_backend"] = os.getenv("AUTHCLAW_VECTOR_BACKEND", "postgres_json")
         return payload
 
-    def _persist_control_score(self, tenant_id: int, control: Dict[str, Any], score: int, status: str, evidence_count: int, negative_findings: int, reason: str, source_event: str, previous: Dict[tuple, int]) -> None:
+    def _persist_control_score(self, tenant_id: int, control: Dict[str, Any], score: Optional[int], status: str, evidence_count: int, negative_findings: int, reason: str, source_event: str, previous: Dict[tuple, Optional[int]], evidence_timestamp: str = None, connection=None) -> None:
         key = (control["framework"], control["control_id"])
         previous_score = previous.get(key)
-        metadata = {"title": control["title"], "corpus_version": self.corpus_version, **self.diagnostic_metadata()}
-        with engine.connect() as conn:
+        metadata = {**self.diagnostic_metadata(), "title": control["title"], "corpus_version": self.corpus_version,
+                    "evidence_timestamp": evidence_timestamp,
+                    "missing_control_treatment": self.missing_control_treatment, "status": status}
+        with nullcontext(connection) if connection is not None else engine.begin() as conn:
             conn.execute(
                 text("""
                     INSERT INTO compliance_control_scores (
@@ -454,7 +481,7 @@ class ComplianceEvidenceEngine:
                     "metadata": json.dumps(metadata),
                 },
             )
-            if previous_score is None or int(previous_score) != int(score):
+            if key not in previous or previous_score != score:
                 conn.execute(
                     text("""
                         INSERT INTO compliance_score_changes (
@@ -477,13 +504,12 @@ class ComplianceEvidenceEngine:
                         "metadata": json.dumps(metadata),
                     },
                 )
-            conn.commit()
 
-    def _collect_source_events(self, tenant_id: int) -> List[Dict[str, Any]]:
+    def _collect_source_events(self, tenant_id: int, connection=None) -> List[Dict[str, Any]]:
         events: List[Dict[str, Any]] = []
-        with engine.connect() as conn:
+        with nullcontext(connection) if connection is not None else engine.connect() as conn:
             evidence = conn.execute(
-                text("SELECT id, name, category, file_path, hash, control_id, framework FROM compliance_evidence WHERE tenant_id = :tenant_id"),
+                text("SELECT id, name, category, file_path, hash, control_id, framework, collected_at AS evidence_timestamp FROM compliance_evidence WHERE tenant_id = :tenant_id"),
                 {"tenant_id": tenant_id},
             ).fetchall()
             document_findings = conn.execute(
@@ -498,15 +524,15 @@ class ComplianceEvidenceEngine:
                 {"tenant_id": tenant_id},
             ).fetchall()
             approvals = conn.execute(
-                text("SELECT approval_id, status, reason, metadata, mfa_verified FROM gateway_approvals WHERE tenant_id = :tenant_id"),
+                text("SELECT approval_id, status, reason, metadata, mfa_verified, COALESCE(last_action_at, created_at)::text AS evidence_timestamp FROM gateway_approvals WHERE tenant_id = :tenant_id"),
                 {"tenant_id": tenant_id},
             ).fetchall()
             audit_rows = conn.execute(
-                text("SELECT id, risk_level, approval_status, policy_name, policy_type, matched_pattern, integrity_hash FROM audit_logs WHERE tenant_id = :tenant_id ORDER BY id DESC LIMIT 200"),
+                text("SELECT id, risk_level, approval_status, policy_name, policy_type, matched_pattern, integrity_hash, created_at::text AS evidence_timestamp FROM audit_logs WHERE tenant_id = :tenant_id ORDER BY id DESC LIMIT 200"),
                 {"tenant_id": tenant_id},
             ).fetchall()
             remediation = conn.execute(
-                text("SELECT id, provider, finding_type, severity, status, approval_status, evidence FROM remediation_findings WHERE tenant_id = :tenant_id"),
+                text("SELECT id, provider, finding_type, severity, status, approval_status, evidence, COALESCE(updated_at, created_at)::text AS evidence_timestamp FROM remediation_findings WHERE tenant_id = :tenant_id"),
                 {"tenant_id": tenant_id},
             ).fetchall()
 
@@ -514,6 +540,7 @@ class ComplianceEvidenceEngine:
             framework = row.framework or row.category
             events.append({
                 "source_type": "evidence",
+                "evidence_timestamp": row.evidence_timestamp,
                 "source_id": row.id,
                 "evidence_id": row.id,
                 "framework_hint": framework,
@@ -526,6 +553,7 @@ class ComplianceEvidenceEngine:
             risk = str(row.risk_level or "LOW").upper()
             events.append({
                 "source_type": "document_finding",
+                "evidence_timestamp": None,  # No collection timestamp on legacy finding rows.
                 "source_id": row.id,
                 "text": f"{row.finding_type} {row.matched_pattern} {row.recommendation} {row.impact} {row.location_evidence}",
                 "reason": f"Document finding {row.finding_type} with {risk} risk affects control scoring.",
@@ -534,6 +562,7 @@ class ComplianceEvidenceEngine:
         for row in approvals:
             events.append({
                 "source_type": "approval",
+                "evidence_timestamp": row.evidence_timestamp,
                 "source_id": row.approval_id,
                 "text": f"{row.status} {row.reason} {row.metadata}",
                 "reason": f"Approval {row.approval_id} lifecycle event recorded as {row.status}.",
@@ -543,6 +572,7 @@ class ComplianceEvidenceEngine:
             allowed_bonus = 4 if row.approval_status in {"approved", "executed", "N/A"} else 0
             events.append({
                 "source_type": "audit",
+                "evidence_timestamp": row.evidence_timestamp,
                 "source_id": row.id,
                 "text": f"{row.risk_level} {row.approval_status} {row.policy_name} {row.policy_type} {row.matched_pattern}",
                 "reason": f"Audit hash-chain record {row.id} contributes policy/audit evidence.",
@@ -553,6 +583,7 @@ class ComplianceEvidenceEngine:
             remediated = row.status == "remediated" or row.approval_status == "executed"
             events.append({
                 "source_type": "remediation",
+                "evidence_timestamp": row.evidence_timestamp,
                 "source_id": row.id,
                 "text": f"{row.provider} {row.finding_type} {row.severity} {row.status} {row.evidence}",
                 "reason": f"Remediation finding {row.finding_type} is {row.status}.",
@@ -587,7 +618,9 @@ class ComplianceEvidenceEngine:
                 return int(control["weight"])
         return 10
 
-    def _score_reason(self, control: Dict[str, Any], positive: List[Dict[str, Any]], negative: List[Dict[str, Any]], score: int) -> str:
+    def _score_reason(self, control: Dict[str, Any], positive: List[Dict[str, Any]], negative: List[Dict[str, Any]], score: Optional[int]) -> str:
+        if score is None:
+            return "No evidence mapped; score is unknown."
         return (
             f"{control['control_id']} diagnostic score {score} from {len(positive)} activity items "
             f"and {len(negative)} negative findings. Unassessed: activity does not qualify compliance evidence. "

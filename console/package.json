@@ -8,7 +8,7 @@
     "start": "next start -p 3001",
     "lint": "eslint",
     "test:claims": "node scripts/check-public-claims.mjs",
-    "test:unit": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/acl19-ui-contract.test.mts tests/acl25-risk-ui-contract.test.mts tests/agent-client-contract.test.mts tests/auth-error-sanitization.test.mts tests/bff-client-ip.test.mts tests/bff-routes.test.mts tests/cookie-boundary.test.mts tests/notification-mutation.test.mts tests/oidc-callback.test.mts tests/oidc-state.test.mts tests/policy-warn-contract.test.mts tests/runtime-config.test.mts tests/startup-validation.test.mts tests/trust-summary.test.mts tests/ui-format.test.mts",
+    "test:unit": "node --test --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tests/acl19-ui-contract.test.mts tests/acl25-risk-ui-contract.test.mts tests/agent-client-contract.test.mts tests/auth-error-sanitization.test.mts tests/bff-client-ip.test.mts tests/bff-routes.test.mts tests/cookie-boundary.test.mts tests/notification-mutation.test.mts tests/oidc-callback.test.mts tests/oidc-state.test.mts tests/policy-warn-contract.test.mts tests/runtime-config.test.mts tests/startup-validation.test.mts tests/trust-summary.test.mts tests/ui-format.test.mts tests/truthful-telemetry.test.mts",
     "postinstall": "node scripts/patch-next-picomatch.mjs"
   },
   "dependencies": {

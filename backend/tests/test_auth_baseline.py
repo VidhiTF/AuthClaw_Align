@@ -13,13 +13,15 @@ from fastapi import HTTPException, Request
 from sqlalchemy import JSON, create_engine
 from sqlalchemy.orm import Session
 
-from app.core.auth import hash_key, verify_mfa_code
+from app.core.auth import hash_key, verify_mfa_code, verify_mfa_code_result
 from app.core import oidc
 from app.core.crypto import decrypt_secret
 from app.core.passwords import hash_password, verify_password
 from app.db.models import User
-from app.schemas.models import APIKeyCreate, APIKeyRotate
+from app.schemas.models import APIKeyCreate, APIKeyRevoke, APIKeyRotate
 from app.services import oidc_sso
+from app.services import email_service
+from app.core.startup_checks import validate_production_environment
 from app.services.email_service import send_otp_email
 from app.api.v1.endpoints import auth as auth_endpoints
 from app.api.v1.endpoints import users as user_endpoints
@@ -55,20 +57,24 @@ def test_internal_exception_detail_is_sanitized():
 
 @pytest.fixture
 def persisted_mfa_identity(monkeypatch):
+    # SQLite tests exercise factor behavior; PostgreSQL tests cover authn/RLS.
+    monkeypatch.setattr(user_endpoints, "revalidate_tenant_credential", lambda *_: None)
     monkeypatch.setattr(user_endpoints, "_get_redis", lambda: None)
-    column = User.__table__.c.mfa_backup_codes
-    monkeypatch.setattr(column, "type", column.type.with_variant(JSON(), "sqlite"))
+    for name in ("mfa_backup_codes", "mfa_pending_backup_codes"):
+        column = User.__table__.c[name]
+        monkeypatch.setattr(column, "type", column.type.with_variant(JSON(), "sqlite"))
     engine = create_engine("sqlite://")
     User.__table__.create(engine)
     with Session(engine, autoflush=False) as db:
         secret = pyotp.random_base32()
         user = User(id=uuid4(), tenant_id=uuid4(), email="owner@example.com",
-                    role="owner", is_active=True, mfa_enabled=True,
+                    role="viewer", is_active=True, mfa_enabled=True,
                     mfa_secret=secret, mfa_backup_codes=["backup01"])
         db.add(user)
         db.commit()
         monkeypatch.setattr(db, "commit", MagicMock(wraps=db.commit))
         request = MagicMock()
+        request.state.credential_kind = "session"
         request.state.user_id, request.state.tenant_id = user.id, user.tenant_id
         yield db, user, request, secret
     engine.dispose()
@@ -80,6 +86,7 @@ def test_mfa_disable_requires_current_code(monkeypatch, persisted_mfa_identity):
         "verify_mfa_challenge",
         lambda _client, user, code, **_kwargs: verify_mfa_code(user, code),
     )
+    monkeypatch.setattr(user_endpoints, "_commit_mfa_audit", lambda db, *_args, **_kwargs: db.commit())
     db, user, request, secret = persisted_mfa_identity
 
     with pytest.raises(HTTPException, match="Invalid MFA token"):
@@ -104,6 +111,7 @@ def test_mfa_replacement_requires_current_factor_and_protects_credentials(monkey
         "verify_mfa_challenge",
         lambda _client, user, code, **_kwargs: verify_mfa_code(user, code),
     )
+    monkeypatch.setattr(user_endpoints, "_commit_mfa_audit", lambda db, *_args, **_kwargs: db.commit())
     db, user, request, secret = persisted_mfa_identity
 
     with pytest.raises(HTTPException, match="Current MFA token"):
@@ -115,15 +123,58 @@ def test_mfa_replacement_requires_current_factor_and_protects_credentials(monkey
         user_endpoints.MFASetupRequest(code=pyotp.TOTP(secret).now()),
         db,
     )
-    assert decrypt_secret(user.mfa_secret) == response.mfa_secret
-    assert all(len(code) == 64 for code in user.mfa_backup_codes)
-    assert not set(response.backup_codes).intersection(user.mfa_backup_codes)
+    assert decrypt_secret(user.mfa_secret) == secret
+    assert decrypt_secret(user.mfa_pending_secret) == response.mfa_secret
+    assert all(len(code) == 64 for code in user.mfa_pending_backup_codes)
+    assert not set(response.backup_codes).intersection(user.mfa_pending_backup_codes)
+    assert response.mfa_enabled is True
+    assert response.enrollment_pending is True
     db.commit.assert_called_once()
+
+
+def test_totp_counter_is_consumed_once(persisted_mfa_identity):
+    db, user, _request, secret = persisted_mfa_identity
+    code = pyotp.TOTP(secret).now()
+
+    first = verify_mfa_code_result(user, code)
+    db.commit()
+    second = verify_mfa_code_result(user, code)
+
+    assert first.verified is True
+    assert first.method == "totp"
+    assert second.verified is False
+    assert second.reason == "replay"
+
+
+def test_privileged_user_cannot_self_disable_mfa(monkeypatch):
+    monkeypatch.setattr(user_endpoints, "revalidate_tenant_credential", lambda *_: None)
+    user = MagicMock(
+        id="00000000-0000-4000-8000-000000000001",
+        tenant_id="00000000-0000-4000-8000-000000000002",
+        email="owner@example.com",
+        role="owner",
+        mfa_enabled=True,
+        mfa_secret=pyotp.random_base32(),
+    )
+    request = MagicMock()
+    request.state.credential_kind = "session"
+    request.state.user_id = user.id
+    request.state.tenant_id = user.tenant_id
+    db = MagicMock()
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = user
+
+    with pytest.raises(HTTPException, match="separate owner") as exc:
+        user_endpoints.disable_my_mfa(
+            user_endpoints.MFADisableRequest(code="123456"), request, db
+        )
+
+    assert exc.value.status_code == 403
+    assert user.mfa_enabled is True
 
 
 def test_api_key_create_rejects_unknown_scope():
     try:
-        APIKeyCreate(name="bad", scopes=["read", "root"])
+        APIKeyCreate(name="bad", scopes=["read", "root"], mfa_code="654321")
     except ValueError as exc:
         assert "Unsupported API key scopes" in str(exc)
     else:
@@ -132,23 +183,33 @@ def test_api_key_create_rejects_unknown_scope():
 
 def test_tenant_api_key_schemas_reject_platform_scope():
     with pytest.raises(ValueError, match="Unsupported API key scopes"):
-        APIKeyCreate(name="platform", scopes=["platform.admin"])
+        APIKeyCreate(name="platform", scopes=["platform.admin"], mfa_code="654321")
     with pytest.raises(ValueError, match="Unsupported API key scopes"):
-        APIKeyRotate(scopes=["platform.admin"])
+        APIKeyRotate(scopes=["platform.admin"], mfa_code="654321")
 
 
 def test_api_key_create_normalizes_scopes_and_expiry():
-    key = APIKeyCreate(name="ci", scopes=["write", "read", "read"], expires_in_days=30)
+    key = APIKeyCreate(
+        name="ci", scopes=["write", "read", "read"], expires_in_days=30,
+        mfa_code="654321",
+    )
 
     assert key.scopes == ["read", "write"]
     assert key.expires_in_days == 30
+    assert "654321" not in repr(key)
 
 
 def test_api_key_rotate_inherits_scopes_when_omitted():
-    rotation = APIKeyRotate()
+    rotation = APIKeyRotate(mfa_code="654321")
 
     assert rotation.scopes is None
     assert rotation.expires_in_days == 90
+
+
+def test_api_key_revoke_factor_is_secret():
+    revocation = APIKeyRevoke(mfa_code="654321")
+
+    assert "654321" not in repr(revocation)
 
 
 def test_api_key_hash_uses_keyed_digest(monkeypatch):
@@ -922,3 +983,25 @@ def test_local_email_outbox_replaces_demo_otp(monkeypatch, tmp_path):
     saved = outbox.read_text()
     assert "owner@example.com" in saved
     assert "123456" in saved
+
+
+@pytest.mark.parametrize("environment", ["local", "development", "prod", "production", "staging", "shared-test"])
+@pytest.mark.parametrize("user,password", [("apikey", ""), ("", "test-password")])
+def test_incomplete_smtp_credentials_rejected_before_connection(monkeypatch, tmp_path, environment, user, password):
+    monkeypatch.setenv("AUTHCLAW_ENV", environment)
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.invalid")
+    monkeypatch.setenv("SMTP_USER", user)
+    monkeypatch.setenv("SMTP_PASSWORD", password)
+    outbox = tmp_path / "outbox.jsonl"
+    monkeypatch.setenv("AUTHCLAW_EMAIL_OUTBOX_PATH", str(outbox))
+    smtp = MagicMock()
+    monkeypatch.setattr(email_service.smtplib, "SMTP", smtp)
+
+    for send in (lambda: email_service.send_email("owner@example.com", "Invite", "Body"),
+                 lambda: send_otp_email("owner@example.com", "123456", "Acme")):
+        with pytest.raises(email_service.EmailDeliveryError, match="SMTP_USER.*SMTP_PASSWORD"):
+            send()
+    with pytest.raises(RuntimeError, match="SMTP_USER.*SMTP_PASSWORD"):
+        validate_production_environment()
+    smtp.assert_not_called()
+    assert not outbox.exists()

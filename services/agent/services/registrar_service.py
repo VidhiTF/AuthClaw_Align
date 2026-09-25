@@ -18,6 +18,8 @@ class RegistrarService:
         model: str,
         duration_ms: int,
         decision: Optional[str],
+        tokens_in: Optional[int] = None,
+        tokens_out: Optional[int] = None,
     ) -> None:
         record_gateway_request(
             risk_level=risk_level,
@@ -31,6 +33,8 @@ class RegistrarService:
             latency=duration_ms,
             decision=decision,
             duration_ms=duration_ms,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
         )
         log_agent_event(
             tenant_id=tenant_id,

@@ -24,6 +24,7 @@ from app.api.v1.endpoints.users import router as users_router
 from app.db.models import APIKey, Tenant, User
 from app.schemas.models import (
     APIKeyCreate,
+    APIKeyRevoke,
     APIKeyRotate,
     TenantStatusUpdate,
     UserCreate,
@@ -196,7 +197,7 @@ def test_platform_admin_requires_role_scope_and_active_identity():
 
 def test_platform_scope_is_separate_and_tenant_roles_are_unchanged():
     with pytest.raises(ValueError):
-        APIKeyCreate(name="platform", scopes=["platform.admin"])
+        APIKeyCreate(name="platform", scopes=["platform.admin"], mfa_code="654321")
     for role in ("owner", "admin", "developer", "operator", "viewer"):
         assert (
             UserCreate(
@@ -232,7 +233,9 @@ def test_tenant_admin_can_manage_tenant_api_keys_but_not_platform_scope():
         APIKeyCreate(name="platform", scopes=["platform.admin"])
 
 
-def test_tenant_owner_cannot_rotate_or_revoke_platform_key():
+def test_tenant_owner_cannot_rotate_or_revoke_platform_key(monkeypatch):
+    monkeypatch.setattr(apikey_endpoints, "revalidate_tenant_credential", lambda *_: None)
+    monkeypatch.setattr(apikey_endpoints, "_verify_api_key_mfa", lambda *_args, **_kwargs: None)
     tenant_id = uuid4()
     key = APIKey(
         id=uuid4(),
@@ -250,19 +253,22 @@ def test_tenant_owner_cannot_rotate_or_revoke_platform_key():
     db = MagicMock()
     query = db.query.return_value
     query.filter.return_value = query
+    query.with_for_update.return_value = query
     query.first.return_value = key
 
     with pytest.raises(HTTPException) as rotate_error:
         apikey_endpoints.rotate_api_key(
             key.id,
             request,
-            APIKeyRotate(),
+            APIKeyRotate(mfa_code="654321"),
             db,
         )
     assert rotate_error.value.status_code == 403
 
     with pytest.raises(HTTPException) as revoke_error:
-        apikey_endpoints.revoke_api_key(key.id, request, db)
+        apikey_endpoints.revoke_api_key(
+            key.id, request, APIKeyRevoke(mfa_code="654321"), db
+        )
     assert revoke_error.value.status_code == 403
     db.commit.assert_not_called()
 

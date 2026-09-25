@@ -64,6 +64,7 @@ def api(monkeypatch):
             yield db
 
     app.dependency_overrides[get_tenant_db] = database
+    app.dependency_overrides[compliance_scores.get_tenant_score_db] = database
     app.include_router(compliance_scores.router, prefix="/v1/compliance-scores")
     mfa = MagicMock(return_value=(True, datetime.now(timezone.utc)))
     monkeypatch.setitem(sys.modules, "app.api.v1.endpoints.workflows", SimpleNamespace(_verify_mfa_if_enabled=mfa))
@@ -82,6 +83,44 @@ def propose(api):
     response = api.client.post("/v1/compliance-scores/assessments", json=api.proposal)
     assert response.status_code == 201, response.text
     return response.json()
+
+
+@pytest.mark.parametrize("path", ["", "/SOC2"])
+def test_compliance_reads_never_persist_and_posts_require_write(api, monkeypatch, path):
+    calls = []
+    api.client.app.dependency_overrides[compliance_scores.require_snapshot_schema] = lambda: None
+
+    def calculate(*args, **kwargs):
+        calls.append(kwargs.get("persist", False))
+        raise HTTPException(418, "calculation boundary")
+
+    monkeypatch.setattr(compliance_scores.compliance_scoring, "score_all_frameworks", calculate)
+    monkeypatch.setattr(compliance_scores.compliance_scoring, "score_framework", calculate)
+    api.identity["scopes"] = ["read"]
+    url = "/v1/compliance-scores" + path
+    for query in ("", "?persist_snapshot=true", "?persist_snapshot=false"):
+        assert api.client.get(url + query).status_code == 418
+        assert calls[-1] is False
+    before = len(calls)
+    assert api.client.post(url).status_code == 403
+    assert len(calls) == before
+    api.identity["scopes"] = ["read", "write"]
+    assert api.client.post(url).status_code == 418
+    if not path:
+        assert calls[-1] is True
+
+
+@pytest.mark.parametrize("nullable", [None, "NO", "YES"])
+def test_snapshot_writes_require_expanded_schema(nullable):
+    db = MagicMock()
+    db.execute.return_value.scalar.return_value = nullable
+    if nullable == "YES":
+        compliance_scores.require_snapshot_schema(db)
+    else:
+        with pytest.raises(HTTPException) as failure:
+            compliance_scores.require_snapshot_schema(db)
+        assert failure.value.status_code == 503
+    db.commit.assert_not_called()
 
 
 def review_payload(proposal, **changes):

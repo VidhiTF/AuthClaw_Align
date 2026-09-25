@@ -1,0 +1,10 @@
+{
+  "source_test": "backend/tests/test_t10_postgres.py::test_consumed_recovery_rechecks_revocation_after_step_up_commit",
+  "database": "disposable PostgreSQL 17 *_test",
+  "observed": {
+    "approval_status": "CONSUMED",
+    "audit_action": "RESUME_MFA_VERIFIED",
+    "audit_mfa_verified": true,
+    "effects_after_revocation": 0
+  }
+}

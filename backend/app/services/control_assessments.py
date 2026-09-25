@@ -350,7 +350,7 @@ def assess_framework(db: Session, tenant_id: str, framework: str, as_of: datetim
                 reasons.add(reason)
             else:
                 candidates.append((proposal, audit.details["evidence_id"], reason))
-        selected, qualified, expiries, reviewed_dispositions = [], 0, [], set()
+        selected, qualified, expiries, observations, reviewed_dispositions = [], 0, [], [], set()
         if framework != "SOC2":
             reasons.add("unsupported_requirement")
         if settings.COMPLIANCE_ENVIRONMENT == "unconfigured":
@@ -371,11 +371,13 @@ def assess_framework(db: Session, tenant_id: str, framework: str, as_of: datetim
                 reasons.add(source_reason)
             elif expiry <= as_of:
                 reasons.add("stale_assessment")
-            elif proposal.outcomes[requirement] != "pass":
-                reasons.add("failed_assessment")
             else:
-                qualified += 1
-                reviewed_dispositions.update(str(key) for key in proposal.finding_dispositions)
+                observations.append(proposal.observed_at)
+                if proposal.outcomes[requirement] != "pass":
+                    reasons.add("unknown_assessment" if proposal.outcomes[requirement] == "unknown" else "failed_assessment")
+                else:
+                    qualified += 1
+                    reviewed_dispositions.update(str(key) for key in proposal.finding_dispositions)
         # Invalid history is diagnostic only when a valid current decision exists;
         # it cannot overrule the independently verified effective observation.
         if qualified == len(required) and framework == "SOC2" and settings.COMPLIANCE_ENVIRONMENT != "unconfigured":
@@ -388,5 +390,6 @@ def assess_framework(db: Session, tenant_id: str, framework: str, as_of: datetim
             "as_of": as_of.isoformat(), "valid_until": min(expiries).isoformat() if expiries else None,
             "gaps": [f"{control_id}: {reason.replace('_', ' ')}" for reason in sorted(reasons)],
             "evidence_ids": sorted(set(selected)),
+            "evidence_timestamp": min(observations).isoformat() if len(observations) == len(required) else None,
         }
     return decisions

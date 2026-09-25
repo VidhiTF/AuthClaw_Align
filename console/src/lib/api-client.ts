@@ -1,4 +1,4 @@
-import { controlPlaneHeaders } from "./control-plane-auth";
+import { bodySha256, controlPlaneHeaders } from "./control-plane-auth";
 import { cookies } from "next/headers";
 import { sessionCookieName } from "@/lib/cookie-options";
 import { NextResponse } from "next/server";
@@ -138,10 +138,54 @@ export async function agentFetch(path: string, options: AgentRequestOptions = {}
     throw new BackendRequestError("Unsupported signed request", 400);
   }
   const headers = new Headers(options.headers);
+  let requestBody = (options.body ?? "") as string;
+  let mfaAssertion: {
+    verified_at: number;
+    operation: string;
+    body_sha256: string;
+    assertion_id: string;
+    role: string;
+  } | undefined;
+  if (method === "POST" && /^\/(?:approve|execute)\/[A-Za-z0-9._:-]+$/.test(url.pathname)) {
+    let privilegedBody: Record<string, unknown>;
+    try {
+      privilegedBody = JSON.parse(requestBody || "{}");
+    } catch {
+      throw new BackendRequestError("Invalid privileged agent request", 400);
+    }
+    const code = privilegedBody.mfa_code;
+    if (typeof code !== "string" || code.length < 6 || code.length > 64) {
+      throw new BackendRequestError("MFA code is required", 401);
+    }
+    delete privilegedBody.mfa_code;
+    requestBody = JSON.stringify(privilegedBody);
+    const assertionResponse = await fetchBackend(`${BACKEND_URL}/v1/auth/mfa/agent-assertion`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${context.session.apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code,
+        method,
+        path: url.pathname,
+        body_sha256: bodySha256(requestBody),
+      }),
+      cache: "no-store",
+    });
+    if (!assertionResponse.ok) {
+      const body = await assertionResponse.json().catch(() => ({}));
+      throw new BackendRequestError(apiErrorMessage(body, "MFA verification failed"), assertionResponse.status);
+    }
+    mfaAssertion = await assertionResponse.json();
+    if (!mfaAssertion || !["owner", "admin"].includes(mfaAssertion.role)) {
+      throw new BackendRequestError("Invalid MFA assertion role", 403);
+    }
+    principal.role = mfaAssertion.role;
+  }
   if (options.forwardGatewayKey) headers.set("X-API-Key", principal.apiKey);
-  if (options.body !== undefined) headers.set("Content-Type", "application/json");
+  if (requestBody !== "") headers.set("Content-Type", "application/json");
   try {
-    for (const [name, value] of Object.entries(controlPlaneHeaders(url, method, options.body ?? "", headers.get("Content-Type") || "", principal))) {
+    for (const [name, value] of Object.entries(controlPlaneHeaders(
+      url, method, requestBody, headers.get("Content-Type") || "", principal, mfaAssertion,
+    ))) {
       headers.set(name, value);
     }
   } catch {
@@ -150,6 +194,7 @@ export async function agentFetch(path: string, options: AgentRequestOptions = {}
 
   const fetchOptions = { ...options };
   delete fetchOptions.forwardGatewayKey;
+  fetchOptions.body = requestBody || undefined;
 
   const response = await fetch(url.toString(), {
     ...fetchOptions,

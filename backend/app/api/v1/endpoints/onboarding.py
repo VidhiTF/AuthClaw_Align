@@ -358,19 +358,11 @@ def resend(payload: OnboardingResendRequest, request: Request):
             "Too many verification code resends from this network today.",
         )
 
+        invitation_audit = _invitation_audit_snapshot(signup_row)
         delivery, dev_otp = _deliver_otp(signup_row.email, otp, signup_row.tenant_name)
         signup_row.last_delivery = delivery
         signup_row.delivery_error = None
-        db.commit()
-        db.refresh(signup_row)
-        _emit_invitation_audit(
-            signup_row,
-            "InviteDeliverySucceeded",
-            "delivery_succeeded",
-            request_id,
-            200,
-        )
-        return OnboardingResendResponse(
+        response = OnboardingResendResponse(
             signup_id=signup_row.id,
             email=signup_row.email,
             expires_at=signup_row.expires_at,
@@ -378,11 +370,20 @@ def resend(payload: OnboardingResendRequest, request: Request):
             next_resend_at=_next_resend_at(signup_row.sent_at),
             dev_otp=dev_otp,
         )
+        db.commit()
+        _emit_invitation_audit(
+            invitation_audit,
+            "InviteDeliverySucceeded",
+            "delivery_succeeded",
+            request_id,
+            200,
+        )
+        return response
     except EmailDeliveryError as exc:
         db.rollback()
-        if "signup_row" in locals() and signup_row:
+        if "invitation_audit" in locals():
             _emit_invitation_audit(
-                signup_row,
+                invitation_audit,
                 "InviteDeliveryFailed",
                 "delivery_failed",
                 request_id,
@@ -585,85 +586,31 @@ def verify(payload: OnboardingVerifyRequest, request: Request):
                 )
                 raise _invalid_invitation()
 
-            invited_role = signup_row.invited_role or "viewer"
-            user = db.query(User).filter(
-                User.tenant_id == tenant.id,
-                User.email == signup_row.email,
-                User.is_active == False,
-            ).first()
-            if user:
-                user.role = invited_role
-                user.is_active = True
-                user.mfa_enabled = False
-                user.password_hash = hash_password(payload.password)
-            else:
-                user = User(
-                    tenant_id=tenant.id,
-                    email=signup_row.email,
-                    password_hash=hash_password(payload.password),
-                    role=invited_role,
-                    mfa_enabled=False,
-                    is_active=True,
-                )
-                db.add(user)
-            db.flush()
-
             raw_api_key = _generate_gateway_key()
-            scopes = _scopes_for_role(invited_role)
-            api_key = APIKey(
-                tenant_id=tenant.id,
-                key_hash=_api_key_hash(raw_api_key),
-                name=f"Console Access - {signup_row.email}",
-                description="Issued during AuthClaw Lite tenant invite verification",
-                scopes=scopes,
-                is_active=True,
-                expires_at=now + timedelta(days=90),
-                created_by=user.id,
-            )
-            db.add(api_key)
-            db.flush()
             session_token = _generate_session_token()
             invitation_audit = _invitation_audit_snapshot(signup_row)
-            tenant_id = tenant.id
-            tenant_name = tenant.name
-            user_id = user.id
-            user_email = user.email
-            user_role = user.role
-            db.execute(
-                text(
-                    """
-                    SELECT authn.create_session(
-                        :token_hash, :tenant_id, :user_id, 'onboarding',
-                        :expires_at, CAST(:metadata AS jsonb)
-                    )
-                    """
-                ),
-                {
-                    "token_hash": _api_key_hash(session_token),
-                    "tenant_id": str(tenant_id),
-                    "user_id": str(user_id),
-                    "expires_at": now + timedelta(hours=24),
-                    "metadata": json.dumps({"request_id": request_id}),
-                },
-            )
-            signup_row.status = "verified"
-            signup_row.verified_at = now
-            signup_row.api_key_id = api_key.id
+            completed = db.execute(text("""
+                SELECT * FROM authn.complete_onboarding_invite(
+                    :signup_id, :password_hash, :api_key_hash,
+                    :session_hash, :request_id)
+            """), {
+                "signup_id": str(signup_row.id),
+                "password_hash": hash_password(payload.password),
+                "api_key_hash": _api_key_hash(raw_api_key),
+                "session_hash": _api_key_hash(session_token),
+                "request_id": request_id,
+            }).one()
+            if completed.outcome != "completed":
+                raise _invalid_invitation()
+            tenant_id = completed.tenant_id
+            tenant_name = completed.tenant_name
+            user_id = completed.user_id
+            user_email = completed.email
+            user_role = completed.role
+            scopes = _scopes_for_role(user_role)
             status_row = db.query(OnboardingStatus).filter(OnboardingStatus.tenant_id == tenant_id).first()
-            if not status_row:
-                status_row = OnboardingStatus(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    signup_id=signup_row.id,
-                    email_verified=True,
-                    tenant_created=True,
-                    api_key_issued=True,
-                    route_created=True,
-                    policy_created=True,
-                    current_step="connect_provider",
-                )
-                db.add(status_row)
-                db.flush()
+            if status_row is None:
+                raise HTTPException(status_code=503, detail="Onboarding status is unavailable")
             checklist = _checklist(status_row)
             powershell, curl = _snippets(raw_api_key, gateway_url)
             db.commit()

@@ -25,7 +25,7 @@ from app.db.models import APIKey, AuditLogMetadata, EvidenceRecord, Policy, User
 from app.db.session import database_auth_context
 from app.api.v1.endpoints import evidence as evidence_endpoint
 from app.api.v1.endpoints import auth as auth_endpoint
-from app.services import evidence_service
+from app.services import evidence_service, event_backbone
 from tests.db_safety import destructive_test_urls
 
 _owner_engine = None
@@ -461,6 +461,7 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
     with isolation.session_for(identities["operator"]) as db:
         assert _check_approval_in_db(db, str(altered_approval_id), str(tenant_id),
             str(identities["operator"].user_id), str(altered_approval_id), []) == "EXPIRED"
+        db.commit()
     with isolation.owner_engine.connect() as conn:
         assert conn.execute(text("SELECT status FROM public.pending_approvals WHERE id = :id"),
             {"id": altered_approval_id}).scalar_one() == "ALTERED"
@@ -668,23 +669,59 @@ def test_request_credential_rebinds_audit_after_commit_without_contextvar(isolat
         )
 
 
+def test_operator_audit_append_preserves_chain_without_read_grant(isolation):
+    operator = isolation.create_identity("operator-audit-chain")
+    other = isolation.create_identity("other-audit-chain")
+    with isolation.owner_engine.begin() as conn:
+        conn.execute(text("UPDATE public.users SET role='operator' WHERE id=:id"),
+                     {"id": operator.user_id})
+        function = conn.execute(text("""SELECT p.prosecdef, r.rolname
+            FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner
+            WHERE p.oid='public.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)'::regprocedure""")).one()
+        assert function == (True, "authclaw_auth_definer")
+        assert not conn.execute(text("""SELECT has_function_privilege(
+            'authclaw_app',
+            'worker_maintenance.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)',
+            'EXECUTE')""")).scalar_one()
+    with isolation.session_for(operator) as db:
+        for index in (1, 2):
+            event = event_backbone.audit_event(
+                event_type="authentication", tenant_id=str(operator.tenant_id),
+                subject_id=str(operator.user_id), identity_action=f"operator:{index}",
+                action="operator:audit", reason="chain-regression", provider="test",
+                request_id=str(uuid4()), actor_id=str(operator.user_id))
+            assert event_backbone.publish_audit_event(None, str(operator.tenant_id), event, db=db) is None
+        assert db.execute(text("SELECT count(*) FROM public.audit_log_metadata WHERE tenant_id=:tenant"),
+                          {"tenant": operator.tenant_id}).scalar_one() == 0
+        forged = event_backbone.audit_event(
+            event_type="authentication", tenant_id=str(other.tenant_id),
+            subject_id=str(operator.user_id), identity_action="forged", action="operator:audit",
+            reason="cross-tenant", provider="test", request_id=str(uuid4()),
+            actor_id=str(operator.user_id))
+        assert event_backbone.publish_audit_event(None, str(other.tenant_id), forged, db=db) is not None
+    with isolation.owner_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM public.audit_log_metadata WHERE tenant_id=:tenant"),
+                            {"tenant": operator.tenant_id}).scalar_one() == 2
+
+
 def test_audit_context_migration_upgrades_existing_function(isolation, monkeypatch):
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
     migration = scripts.get_revision("049").module
     with isolation.owner_engine.begin() as conn:
-        conn.execute(text(scripts.get_revision("028").module.APPEND_FUNCTION))
-        monkeypatch.setattr(
-            migration.op, "execute", lambda statement: conn.execute(text(statement))
-        )
-        migration.upgrade()
-        definition = conn.execute(
-            text(
-                "SELECT pg_get_functiondef(oid) FROM pg_proc WHERE proname='append_audit_event_v2'"
+        signature = "'public.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)'::regprocedure"
+        original = conn.execute(text(f"SELECT pg_get_functiondef({signature})")).scalar_one()
+        try:
+            conn.execute(text(scripts.get_revision("028").module.APPEND_FUNCTION))
+            monkeypatch.setattr(
+                migration.op, "execute", lambda statement: conn.execute(text(statement))
             )
-        ).scalar_one()
-        assert "authn.current_tenant_id()" in definition
-        assert "app.current_tenant_id" not in definition
+            migration.upgrade()
+            definition = conn.execute(text(f"SELECT pg_get_functiondef({signature})")).scalar_one()
+            assert "authn.current_tenant_id()" in definition
+            assert "app.current_tenant_id" not in definition
+        finally:
+            conn.execute(text(original))
 
 
 def test_cross_tenant_user_insert_is_rejected(isolation: IsolationHarness):
@@ -849,6 +886,10 @@ def test_workflow_response_routes_respect_authenticated_postgres_boundary(isolat
         db.commit()
     request = Request({"type": "http", "headers": []})
     request.state.tenant_id, request.state.user_id = tenant_a.tenant_id, tenant_a.user_id
+    request.state.credential_kind = "session"
+    request.state.credential_hash = tenant_a.session_hash
+    request.state.scopes = ["admin"]
+    request.state.user_role = "admin"
     with isolation.session_for(tenant_a) as db:
         assert db.execute(text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")).scalar_one() is False
         assert db.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'compliance_workflows'::regclass")).scalar_one() is True

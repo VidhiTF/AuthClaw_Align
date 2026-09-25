@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,6 +24,46 @@ func requestWithAuditContext(method, path, body, requestID string) *http.Request
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	ctx := context.WithValue(req.Context(), RequestIDContextKey, requestID)
 	return req.WithContext(ctx)
+}
+
+func TestCallerCorrelationCannotChangeAuditOutcome(t *testing.T) {
+	t.Setenv("AUDIT_FAIL_CLOSED", "true")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[]}`)
+	}))
+	defer upstream.Close()
+	proxy := NewProxyServer()
+	proxy.OpenAIBaseURL = upstream.URL
+	for _, correlation := range []string{"ordinary-request", "connect-test-1720000000000"} {
+		t.Run(correlation, func(t *testing.T) {
+			req := authenticatedProxyContract(t, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+				strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)), ProviderOpenAI, "contract-key")
+			t.Setenv("GATEWAY_AUTH_CACHE_TTL_MS", "60000")
+			t.Setenv("GATEWAY_AUTH_LAST_USED_ENABLED", "false")
+			hash := HashKey("audit-outcome-key")
+			setCachedAPIKeyResolution(hash, cachedAPIKeyResolution{tenantID: req.Context().Value(TenantIDContextKey).(string), userID: "contract-user"})
+			t.Cleanup(func() { apiKeyResolutionCache.Delete(hash) })
+			req.Header.Set("Authorization", "Bearer audit-outcome-key")
+			req.Header.Set("X-Request-ID", correlation)
+			var actions []string
+			withAuditEmitter(t, func(ctx context.Context, event *AuditEvent) error {
+				actions = append(actions, event.Action)
+				if !strings.HasPrefix(event.RequestID, "gw2-") || ctx.Value(CorrelationIDContextKey) != correlation {
+					t.Fatal("server identity or caller correlation lost")
+				}
+				return nil
+			})
+			response := httptest.NewRecorder()
+			AuthMiddleware(proxy).ServeHTTP(response, req)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"choices":[]`) {
+				t.Fatalf("live request failed: %d %s", response.Code, response.Body.String())
+			}
+			if len(actions) < 2 || actions[0] != "provider_attempt" || actions[len(actions)-1] != "allow" {
+				t.Fatalf("caller correlation changed canonical outcomes: %v", actions)
+			}
+		})
+	}
 }
 
 func TestProviderPrefixesFailClosedBeforeEgress(t *testing.T) {
@@ -173,9 +212,9 @@ func TestStreamingOutcomeFailurePreservesResponseAndWritesRecovery(t *testing.T)
 	if AuditMetricsSnapshot()["authclaw_gateway_audit_post_response_failures_total"] != before+1 {
 		t.Fatal("post-response audit failure metric was not incremented")
 	}
-	data, err := os.ReadFile(outbox)
-	if err != nil || !strings.Contains(string(data), "req-stream") {
-		t.Fatalf("missing correlated recovery artifact: data=%q err=%v", data, err)
+	data := readAuditRecoveryData(t)
+	if !strings.Contains(string(data), "req-stream") {
+		t.Fatalf("missing correlated recovery artifact: data=%q", data)
 	}
 }
 

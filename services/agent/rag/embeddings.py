@@ -9,8 +9,6 @@ import logging
 
 logger = logging.getLogger("authclaw.rag.embeddings")
 
-_remote_embeddings_disabled = False
-
 def get_deterministic_fallback_embedding(text: str) -> list[float]:
     """
     Generates a deterministic 768-dimensional word-aware embedding vector.
@@ -51,12 +49,7 @@ def generate_embedding(text: str) -> list[float]:
     Tries the Gemini Embeddings API first if GOOGLE_API_KEY is configured.
     Falls back to a local, deterministic, word-overlap projection embedding if offline.
     """
-    global _remote_embeddings_disabled
-
     if os.getenv("AUTHCLAW_DISABLE_REMOTE_EMBEDDINGS", "").lower() in {"1", "true", "yes", "on"}:
-        return get_deterministic_fallback_embedding(text)
-
-    if _remote_embeddings_disabled:
         return get_deterministic_fallback_embedding(text)
 
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -90,18 +83,14 @@ def generate_embedding(text: str) -> list[float]:
                         return [float(x) for x in embedding[:768]]
             else:
                 logger.warning("Gemini embedding request failed: status=%s", res.status_code)
-                if res.status_code in {400, 401, 403, 404, 429}:
-                    _remote_embeddings_disabled = True
-                    logger.warning(
-                        "Remote embeddings disabled for this process after Gemini status %s. "
-                        "Using deterministic local embeddings until restart.",
-                        res.status_code,
-                    )
+            raise RuntimeError("Configured embedding provider did not return an embedding")
         except (QuotaExceeded, QuotaUnavailable):
+            raise
+        except RuntimeError:
             raise
         except Exception as e:
             logger.warning(f"Gemini embedding generation failed: {str(e)}")
-            _remote_embeddings_disabled = True
-            
+            raise RuntimeError("Configured embedding provider failed") from e
+
     # Local deterministic offline fallback
     return get_deterministic_fallback_embedding(text)

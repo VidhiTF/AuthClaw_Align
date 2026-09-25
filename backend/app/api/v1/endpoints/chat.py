@@ -166,7 +166,7 @@ def post_message(
         session_id=session_id,
         sender="user",
         text=message_text,
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)
     )
     db.add(user_msg)
     db.commit()
@@ -298,7 +298,7 @@ def post_message(
         sender="agent",
         text=response_text,
         results=results_payload,
-        timestamp=datetime.utcnow()
+        timestamp=datetime.now(timezone.utc)
     )
     db.add(agent_msg)
     db.commit()

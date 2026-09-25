@@ -20,6 +20,19 @@ Local endpoints:
 - Agent API: `http://localhost:8001`
 - Provider gateway: `http://localhost:8080`
 
+Local invitations use the development email outbox by default. After approving an
+access request with an invitation, its History shows the invitation link and
+verification code (`Delivery local_outbox`). No email is sent to the recipient's
+inbox. Failed attempts already recorded in History remain as historical evidence;
+new invitations use the corrected configuration after the backend restarts.
+
+For real email delivery, set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`,
+`SMTP_FROM`, and `SMTP_TLS` in `.env.full`, then recreate the backend with that same
+`--env-file`. Supply a verified sender and provider credentials. Compose's explicit
+SMTP environment entries override values from the service's optional `.env.local`.
+Incomplete SMTP authentication is rejected
+at startup; shared and production environments cannot use the local email outbox.
+
 Verify the running stack with:
 
 ```powershell

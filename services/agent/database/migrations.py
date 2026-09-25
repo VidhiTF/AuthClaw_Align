@@ -106,8 +106,14 @@ def run_startup_migrations():
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS provider VARCHAR(50);
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS model VARCHAR(50);
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS latency INTEGER;
+    ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS latency_recorded BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE gateway_requests ALTER COLUMN latency DROP DEFAULT;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS tokens_in INTEGER;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS tokens_out INTEGER;
+    -- Legacy counts may be synthetic; preserve them but never aggregate them as measured.
+    ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS token_usage_recorded BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE gateway_requests ALTER COLUMN tokens_in DROP DEFAULT;
+    ALTER TABLE gateway_requests ALTER COLUMN tokens_out DROP DEFAULT;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS decision VARCHAR(50);
     ALTER TABLE gateway_requests ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
@@ -246,6 +252,9 @@ def run_startup_migrations():
         email_verified BOOLEAN DEFAULT FALSE,
         mfa_enabled BOOLEAN DEFAULT TRUE,
         totp_secret VARCHAR(32),
+        mfa_last_totp_counter BIGINT,
+        mfa_failed_attempts INTEGER NOT NULL DEFAULT 0,
+        mfa_locked_until TIMESTAMP,
         status VARCHAR(20) DEFAULT 'active',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -257,6 +266,9 @@ def run_startup_migrations():
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN DEFAULT TRUE;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS totp_secret VARCHAR(32);
+    ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_last_totp_counter BIGINT;
+    ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_failed_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS mfa_locked_until TIMESTAMP;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
     ALTER TABLE tenant_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP;
@@ -470,6 +482,7 @@ def run_startup_migrations():
         correlation_id VARCHAR(100),
         tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
         status VARCHAR(50) NOT NULL,
+        requested_by VARCHAR(255),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         expires_at TIMESTAMP,
         approved_at TIMESTAMP,
@@ -495,7 +508,13 @@ def run_startup_migrations():
         execution_mfa_counter BIGINT,
         execution_token_hash VARCHAR(64),
         execution_token_used_at TIMESTAMP,
-        execution_expires_at TIMESTAMP
+        execution_expires_at TIMESTAMP,
+        execution_operation_id VARCHAR(100),
+        execution_provider_operation_id VARCHAR(255),
+        execution_outcome TEXT,
+        execution_reconcile_after TIMESTAMP,
+        execution_worker_id VARCHAR(255),
+        execution_fence_token VARCHAR(100)
     );
 
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS approval_id VARCHAR(100);
@@ -504,6 +523,7 @@ def run_startup_migrations():
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(100);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS status VARCHAR(50);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS requested_by VARCHAR(255);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP;
@@ -530,6 +550,12 @@ def run_startup_migrations():
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_token_hash VARCHAR(64);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_token_used_at TIMESTAMP;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_expires_at TIMESTAMP;
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_operation_id VARCHAR(100);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_provider_operation_id VARCHAR(255);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_outcome TEXT;
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_reconcile_after TIMESTAMP;
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_worker_id VARCHAR(255);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS execution_fence_token VARCHAR(100);
 
     CREATE TABLE IF NOT EXISTS approval_audit_events (
         id SERIAL PRIMARY KEY,
@@ -897,6 +923,14 @@ def run_startup_migrations():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         metadata TEXT
     );
+    ALTER TABLE compliance_score_changes ALTER COLUMN current_score DROP NOT NULL;
+    ALTER TABLE compliance_control_scores ALTER COLUMN score DROP NOT NULL;
+    -- DDL holds the table lock until this transaction restores FORCE RLS.
+    ALTER TABLE compliance_control_scores NO FORCE ROW LEVEL SECURITY;
+    UPDATE compliance_control_scores SET score = NULL, status = 'unknown',
+        reason = 'No evidence mapped; score is unknown.'
+        WHERE evidence_count = 0 AND score IS NOT NULL;
+    ALTER TABLE compliance_control_scores FORCE ROW LEVEL SECURITY;
 
     CREATE TABLE IF NOT EXISTS regulatory_corpus_versions (
         version_id VARCHAR(50) PRIMARY KEY,
@@ -941,15 +975,20 @@ def run_startup_migrations():
 
     CREATE TABLE IF NOT EXISTS event_consumer_checkpoints (
         id SERIAL PRIMARY KEY,
+        tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
         stream VARCHAR(50) NOT NULL,
         consumer_group VARCHAR(120) NOT NULL,
         pending_events INTEGER NOT NULL DEFAULT 0,
         dead_letter_count INTEGER NOT NULL DEFAULT 0,
         lag_seconds INTEGER NOT NULL DEFAULT 0,
         last_delivered_at TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(stream, consumer_group)
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    -- Unattributed legacy checkpoints remain NULL and inaccessible under RLS.
+    ALTER TABLE event_consumer_checkpoints ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;
+    ALTER TABLE event_consumer_checkpoints DROP CONSTRAINT IF EXISTS event_consumer_checkpoints_stream_consumer_group_key;
+    CREATE UNIQUE INDEX IF NOT EXISTS event_consumer_checkpoints_tenant_stream_group
+        ON event_consumer_checkpoints(tenant_id, stream, consumer_group);
 
     CREATE TABLE IF NOT EXISTS rate_limit_events (
         id SERIAL PRIMARY KEY,
@@ -1109,6 +1148,7 @@ def run_startup_migrations():
 
     CREATE TABLE IF NOT EXISTS compliance_score_history (
         id SERIAL PRIMARY KEY,
+        tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         framework VARCHAR(50) NOT NULL,
         score INTEGER NOT NULL,
@@ -1117,6 +1157,7 @@ def run_startup_migrations():
 
     CREATE TABLE IF NOT EXISTS compliance_drift_alerts (
         id SERIAL PRIMARY KEY,
+        tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         framework VARCHAR(50) NOT NULL,
         score_drop INTEGER NOT NULL,
@@ -1124,6 +1165,18 @@ def run_startup_migrations():
         current_score INTEGER NOT NULL,
         details TEXT NOT NULL
     );
+
+    -- Unattributed legacy rows remain preserved but inaccessible through tenant RLS.
+    ALTER TABLE compliance_score_history ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;
+    ALTER TABLE compliance_drift_alerts ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE;
+    CREATE INDEX IF NOT EXISTS idx_compliance_score_history_tenant_framework ON compliance_score_history(tenant_id, framework, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_compliance_drift_alerts_tenant_framework ON compliance_drift_alerts(tenant_id, framework, id DESC);
+
+    -- Missing telemetry is not a measured zero; preserve history and alert state.
+    ALTER TABLE compliance_score_history ALTER COLUMN score DROP NOT NULL;
+    ALTER TABLE compliance_drift_alerts ALTER COLUMN score_drop DROP NOT NULL;
+    ALTER TABLE compliance_drift_alerts ALTER COLUMN previous_score DROP NOT NULL;
+    ALTER TABLE compliance_drift_alerts ALTER COLUMN current_score DROP NOT NULL;
 
     ALTER TABLE document_findings ADD COLUMN IF NOT EXISTS impact VARCHAR(255);
     ALTER TABLE document_findings ADD COLUMN IF NOT EXISTS priority VARCHAR(10);
@@ -1192,6 +1245,9 @@ def run_startup_migrations():
     CREATE INDEX IF NOT EXISTS idx_tenant_credentials_provider ON tenant_credentials(tenant_id, provider);
     CREATE INDEX IF NOT EXISTS idx_agent_events_tenant_id ON agent_events(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_gateway_approvals_tenant_id ON gateway_approvals(tenant_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_gateway_approval_execution_operation
+        ON gateway_approvals(tenant_id, execution_operation_id)
+        WHERE execution_operation_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_approval_audit_events_tenant_id ON approval_audit_events(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_approval_audit_events_approval_id ON approval_audit_events(approval_id);
     CREATE INDEX IF NOT EXISTS idx_policies_tenant_id ON policies(tenant_id);
@@ -1303,6 +1359,10 @@ def run_startup_migrations():
     REVOKE ALL ON FUNCTION set_agent_context(text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION bind_agent_context(text, text, text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION agent_current_tenant_id() FROM PUBLIC;
+
+    -- Old writers omit tenant_id; only the authenticated transaction may supply it.
+    ALTER TABLE compliance_score_history ALTER COLUMN tenant_id SET DEFAULT agent.agent_current_tenant_id()::integer;
+    ALTER TABLE compliance_drift_alerts ALTER COLUMN tenant_id SET DEFAULT agent.agent_current_tenant_id()::integer;
 
     ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_audit_logs ON audit_logs;
@@ -1596,6 +1656,18 @@ def run_startup_migrations():
         USING (tenant_id::text = agent.agent_current_tenant_id())
         WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
+    ALTER TABLE compliance_score_history ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_compliance_score_history ON compliance_score_history;
+    CREATE POLICY tenant_isolation_compliance_score_history ON compliance_score_history
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
+
+    ALTER TABLE compliance_drift_alerts ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_compliance_drift_alerts ON compliance_drift_alerts;
+    CREATE POLICY tenant_isolation_compliance_drift_alerts ON compliance_drift_alerts
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
+
     ALTER TABLE compliance_score_changes ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_compliance_score_changes ON compliance_score_changes;
     CREATE POLICY tenant_isolation_compliance_score_changes ON compliance_score_changes
@@ -1605,6 +1677,12 @@ def run_startup_migrations():
     ALTER TABLE event_delivery_records ENABLE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_event_delivery_records ON event_delivery_records;
     CREATE POLICY tenant_isolation_event_delivery_records ON event_delivery_records
+        USING (tenant_id::text = agent.agent_current_tenant_id())
+        WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
+
+    ALTER TABLE event_consumer_checkpoints ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_event_consumer_checkpoints ON event_consumer_checkpoints;
+    CREATE POLICY tenant_isolation_event_consumer_checkpoints ON event_consumer_checkpoints
         USING (tenant_id::text = agent.agent_current_tenant_id())
         WITH CHECK (tenant_id::text = agent.agent_current_tenant_id());
 
@@ -1699,7 +1777,10 @@ def run_startup_migrations():
     ALTER TABLE compliance_control_evidence FORCE ROW LEVEL SECURITY;
     ALTER TABLE compliance_control_scores FORCE ROW LEVEL SECURITY;
     ALTER TABLE compliance_score_changes FORCE ROW LEVEL SECURITY;
+    ALTER TABLE compliance_score_history FORCE ROW LEVEL SECURITY;
+    ALTER TABLE compliance_drift_alerts FORCE ROW LEVEL SECURITY;
     ALTER TABLE event_delivery_records FORCE ROW LEVEL SECURITY;
+    ALTER TABLE event_consumer_checkpoints FORCE ROW LEVEL SECURITY;
     ALTER TABLE event_dead_letters FORCE ROW LEVEL SECURITY;
     ALTER TABLE rate_limit_events FORCE ROW LEVEL SECURITY;
     ALTER TABLE worker_throttle_events FORCE ROW LEVEL SECURITY;

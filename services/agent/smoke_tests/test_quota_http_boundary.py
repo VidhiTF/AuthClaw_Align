@@ -4,6 +4,7 @@ Only the selected production definitions are extracted; collaborators are suppli
 at their I/O seams. Full application startup and PostgreSQL/RLS remain separate.
 """
 import ast
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import os
@@ -18,11 +19,13 @@ import uuid
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from starlette.concurrency import run_in_threadpool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from services import quota_service as quota
 from services.document_monitor_status import monitor_metrics_snapshot
 from services.tenant_context import tenant_context, get_current_tenant_id
+from approval_store import ApprovalPersistenceError
 
 
 def boundary_namespace():
@@ -50,6 +53,11 @@ def boundary_namespace():
         "record_unavailable": quota.record_unavailable,
         "QuotaUnavailable": quota.QuotaUnavailable,
         "authenticate_control_plane": AsyncMock(return_value=None),
+        "revalidate_tenant_session_payload": lambda payload, request_id=None: payload,
+        "reconcile_due_approval_executions": Mock(return_value=0),
+        "ApprovalPersistenceError": ApprovalPersistenceError,
+        "run_in_threadpool": run_in_threadpool,
+        "datetime": datetime, "timezone": timezone,
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
     return namespace
@@ -162,10 +170,10 @@ class QuotaHTTPBoundaryTests(unittest.TestCase):
     def test_liveness_is_coarse_and_does_not_depend_on_database_or_redis(self):
         self.ns["admit"] = Mock(side_effect=RuntimeError("down"))
         self.ns["check_available"] = Mock(side_effect=RuntimeError("down"))
-        self.assertEqual(self.client.get("/health").json(), {"status": "healthy"})
+        self.assertEqual(self.client.get("/health").json(), {"status": "alive", "scope": "process_liveness"})
         response = self.client.get("/health?metrics=true")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "healthy"})
+        self.assertEqual(response.json(), {"status": "alive", "scope": "process_liveness"})
         self.ns["check_available"].assert_not_called()
 
     def test_quota_metrics_require_dedicated_service_secret(self):

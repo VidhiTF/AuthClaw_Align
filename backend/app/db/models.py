@@ -33,8 +33,8 @@ class AccessRequest(Base):
     notice_version = Column(String(50), nullable=False)
     source_page = Column(String(512), nullable=False)
     status = Column(String(50), nullable=False, default="PENDING")
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("idx_access_requests_reference", "reference", unique=True),
@@ -52,7 +52,7 @@ class AccessRequestHistory(Base):
     event_type = Column(String(50), nullable=False)
     old_status = Column(String(50), nullable=True)
     new_status = Column(String(50), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     event_metadata = Column("metadata", JSON, nullable=False, default=dict)
 
     __table_args__ = (
@@ -111,8 +111,8 @@ class DataSubjectRequest(Base):
     decision_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     decision_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         CheckConstraint(
@@ -137,8 +137,8 @@ class Tenant(Base):
     name = Column(String(255), nullable=False, unique=True)
     tier = Column(String(50), nullable=False, default="starter")  # starter, pro, enterprise
     status = Column(String(50), nullable=False, default="active")  # active, suspended
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
@@ -176,8 +176,8 @@ class PlatformAdmin(Base):
     role = Column(String(50), nullable=False, default="ADMIN")
     is_active = Column(Boolean, nullable=False, default=True)
     last_login = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class User(Base):
@@ -205,10 +205,15 @@ class User(Base):
     mfa_secret = Column(Text, nullable=True)  # Encrypted TOTP secret
     mfa_last_totp_step = Column(BigInteger, nullable=True)  # Last consumed step for this credential
     mfa_backup_codes = Column(ARRAY(String), nullable=True)  # Hashed one-time backup codes
+    mfa_pending_secret = Column(Text, nullable=True)
+    mfa_pending_last_totp_step = Column(BigInteger, nullable=True)
+    mfa_pending_backup_codes = Column(ARRAY(String), nullable=True)
+    mfa_pending_expires_at = Column(DateTime(timezone=True), nullable=True)
+    mfa_enrolled_at = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True)
     last_login = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     tenant = relationship("Tenant", back_populates="users")
@@ -239,7 +244,7 @@ class Notification(Base):
     body = Column(Text, nullable=False, default="")
     link = Column(String(512), nullable=True)
     read_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     tenant = relationship("Tenant", back_populates="notifications")
     user = relationship("User", back_populates="notifications")
@@ -270,9 +275,9 @@ class APIKey(Base):
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     rotated_at = Column(DateTime(timezone=True), nullable=True)
     rotated_from_id = Column(UUID(as_uuid=True), ForeignKey("api_keys.id"), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     tenant = relationship("Tenant", back_populates="api_keys")
@@ -294,9 +299,9 @@ class Policy(Base):
     policy_yaml = Column(Text, nullable=False)  # Full YAML policy content
     version = Column(Integer, nullable=False, default=1)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     tenant = relationship("Tenant", back_populates="policies")
@@ -320,8 +325,8 @@ class GatewayConfig(Base):
     redaction_strategy = Column(String(50), nullable=False, default="mask")  # mask, hash, synthetic
     redaction_token_retention_days = Column(Integer, nullable=False, default=90)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     tenant = relationship("Tenant", back_populates="gateways")
@@ -346,7 +351,7 @@ class ProviderCredential(Base):
     status = Column(String(50), nullable=False, default="active")
     last_verified_at = Column(DateTime(timezone=True), nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     rotated_at = Column(DateTime(timezone=True), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     revoked_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
@@ -390,8 +395,8 @@ class TenantOIDCConfig(Base):
     last_error = Column(Text, nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     updated_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     tenant = relationship("Tenant", back_populates="oidc_config")
 
@@ -415,8 +420,8 @@ class CloudConnector(Base):
     last_verified_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     revoked_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     metadata_json = Column(JSON, nullable=False, default=dict)
@@ -455,8 +460,8 @@ class OnboardingEmailOTP(Base):
     terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
     privacy_notice_version = Column(String(32), nullable=True)
     privacy_notice_acknowledged_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("idx_onboarding_otp_email", "email"),
@@ -481,8 +486,8 @@ class OnboardingStatus(Base):
     policy_created = Column(Boolean, nullable=False, default=False)
     snippet_viewed = Column(Boolean, nullable=False, default=False)
     current_step = Column(String(50), nullable=False, default="connect_provider")
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("idx_onboarding_status_tenant", "tenant_id"),
@@ -506,7 +511,7 @@ class RedactionToken(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     use_count = Column(Integer, nullable=False, default=0)
     purged_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     tenant = relationship("Tenant", back_populates="redaction_tokens")
@@ -542,8 +547,8 @@ class PendingApproval(Base):
     consumed_at = Column(DateTime(timezone=True), nullable=True)
     consumed_by_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     resolution_reason = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # Relationships
     approver = relationship("User", back_populates="approvals", foreign_keys=[approver_id])
@@ -553,6 +558,10 @@ class PendingApproval(Base):
         Index("idx_approval_status", "status"),
         Index("idx_approval_expires", "expires_at"),
         Index("idx_approval_tenant_action_hash", "tenant_id", "action_hash"),
+        UniqueConstraint(
+            "tenant_id", "action_type", "action_id",
+            name="uq_pending_approval_tenant_action",
+        ),
     )
 
 
@@ -570,7 +579,7 @@ class ApprovalAudit(Base):
     details = Column(JSON, nullable=True)
     mfa_verified = Column(Boolean, default=False)
     mfa_timestamp = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("idx_approval_audit_tenant", "tenant_id"),
@@ -605,7 +614,7 @@ class AuditLogMetadata(Base):
     execution_trace = Column(Text, nullable=False, default="[]")
     prior_hash = Column(String(64), nullable=True)
     integrity_hash = Column(String(64), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("idx_audit_metadata_tenant", "tenant_id"),
@@ -626,7 +635,7 @@ class AuditOutbox(Base):
     record_id = Column(UUID(as_uuid=True), ForeignKey("audit_log_metadata.record_id"), nullable=False, unique=True)
     tenant_sequence = Column(BigInteger, nullable=False)
     event_payload = Column(JSON, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     published_at = Column(DateTime(timezone=True), nullable=True)
     publish_attempts = Column(Integer, nullable=False, default=0)
     last_error = Column(Text, nullable=True)
@@ -657,8 +666,8 @@ class ComplianceWorkflow(Base):
     error_message = Column(Text, nullable=True)
     retry_count = Column(Integer, nullable=False, default=0)
     state_data = Column(JSON, nullable=True)  # Full LangGraph state snapshot for recovery
-    started_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
@@ -680,7 +689,7 @@ class ChatSession(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     title = Column(String(255), nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     tenant = relationship("Tenant", back_populates="chat_sessions")
@@ -700,7 +709,7 @@ class ChatMessage(Base):
     sender = Column(Enum("user", "agent", name="chat_sender"), nullable=False)
     text = Column(Text, nullable=False)
     results = Column(JSON, nullable=True)
-    timestamp = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    timestamp = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     session = relationship("ChatSession", back_populates="messages")
@@ -720,7 +729,7 @@ class RAGCorpusVersion(Base):
     checksum = Column(String(64), nullable=False)
     description = Column(Text, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
-    loaded_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    loaded_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     chunks = relationship("RAGCorpusChunk", back_populates="corpus_version", cascade="all, delete-orphan")
 
@@ -745,7 +754,7 @@ class RAGCorpusChunk(Base):
     chunk_text = Column(Text, nullable=False)
     keywords = Column(ARRAY(String), nullable=False, default=list)
     chunk_hash = Column(String(64), nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     corpus_version = relationship("RAGCorpusVersion", back_populates="chunks")
 
@@ -778,8 +787,8 @@ class AWSUsageLimits(Base):
     max_daily_tokens    = Column(Integer, nullable=False, default=50000)
     max_daily_cost_usd  = Column(Float, nullable=False, default=1.0)
 
-    last_reset  = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at  = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_reset  = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at  = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("idx_aws_usage_tenant", "tenant_id"),
@@ -804,7 +813,7 @@ class AWSS3Document(Base):
     content_type    = Column(String(255), nullable=True)
     last_modified   = Column(DateTime(timezone=True), nullable=True)
     etag            = Column(String(255), nullable=True)   # S3 ETag for change detection
-    synced_at       = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    synced_at       = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("idx_s3_docs_tenant", "tenant_id"),
@@ -832,7 +841,7 @@ class EphemeralWorkerToken(Base):
     hash_key_version = Column(String(16), nullable=True)
     status = Column(String(50), nullable=False, default="active")
     issued_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    issued_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    issued_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     expires_at = Column(DateTime(timezone=True), nullable=False)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
@@ -864,7 +873,7 @@ class EphemeralWorkerRun(Base):
     destructive = Column(Boolean, nullable=False, default=False)
     status = Column(String(50), nullable=False)
     reason = Column(Text, nullable=False)
-    started_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime(timezone=True), nullable=True)
     metadata_json = Column(JSON, nullable=False, default=dict)
 
@@ -922,7 +931,7 @@ class EvidenceRecord(Base):
     integrity_algorithm = Column(String(20), nullable=False, default="sha256")
     integrity_version = Column(Integer, nullable=False, default=1)
 
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     tenant = relationship("Tenant", back_populates="evidence_records")
@@ -959,7 +968,7 @@ class EvidenceLink(Base):
     # String ID of the linked entity (UUID or workflow_id string)
     linked_id = Column(String(255), nullable=False)
 
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
     evidence = relationship("EvidenceRecord", back_populates="links")
@@ -999,8 +1008,8 @@ class Finding(Base):
     remediation_summary = Column(Text, nullable=True)
     owner_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     resolved_at = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
@@ -1035,14 +1044,14 @@ class ComplianceScoreSnapshot(Base):
     snapshot_date = Column(String(10), nullable=False)
     calculation_version = Column(String(100), nullable=False, default="legacy_unversioned", server_default="legacy_unversioned")
     assessment_metadata = Column(JSON, nullable=False, default=dict, server_default="{}")
-    overall_score = Column(Float, nullable=False, default=0.0)
+    overall_score = Column(Float, nullable=True)
     readiness_level = Column(String(50), nullable=False, default="insufficient_evidence")
     control_scores = Column(JSON, nullable=False, default=dict)
     evidence_count = Column(Integer, nullable=False, default=0)
     audit_event_count = Column(Integer, nullable=False, default=0)
     open_findings = Column(Integer, nullable=False, default=0)
     critical_findings = Column(Integer, nullable=False, default=0)
-    generated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    generated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     tenant = relationship("Tenant", back_populates="compliance_score_snapshots")
 
@@ -1069,7 +1078,7 @@ class TrustCenterShare(Base):
     status = Column(String(50), nullable=False, default="active")
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     last_accessed_at = Column(DateTime(timezone=True), nullable=True)
     access_count = Column(Integer, nullable=False, default=0)
@@ -1093,7 +1102,7 @@ class TrustCenterAccessLog(Base):
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     share_id = Column(UUID(as_uuid=True), ForeignKey("trust_center_shares.id"), nullable=False)
     action = Column(String(100), nullable=False)
-    accessed_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    accessed_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     ip_address = Column(String(64), nullable=True)
     user_agent = Column(String(512), nullable=True)
 

@@ -53,7 +53,12 @@ def test_audit_origin_reader_migration_follows_platform_history(monkeypatch):
     config = Config(str(backend / "alembic.ini"))
     config.set_main_option("script_location", str(backend / "alembic"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["052"]
+    assert scripts.get_heads() == ["056"]
+    assert scripts.get_revision("056").down_revision == "055"
+    assert scripts.get_revision("055").down_revision == "054"
+    assert scripts.get_revision("054").down_revision == "053"
+    assert scripts.get_revision("053").down_revision == "052"
+    assert scripts.get_revision("052").down_revision == "051"
     assert scripts.get_revision("051").down_revision == "050"
     assert scripts.get_revision("050").down_revision == "049"
     assert scripts.get_revision("048").down_revision == "047"
@@ -73,6 +78,12 @@ def test_audit_origin_reader_migration_follows_platform_history(monkeypatch):
     assert "CREATE POLICY" not in function
     assert "FROM PUBLIC" in function
 
+    migration = scripts.get_revision("055").module
+    statements = []
+    monkeypatch.setattr(migration.op, "execute", statements.append)
+    migration.upgrade()
+    assert "COALESCE(v_invite.resend_count, 0) + 1" in statements[0]
+
 
 def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch):
     import pytest
@@ -80,15 +91,12 @@ def test_backend_database_revision_compatibility_is_tightly_bounded(monkeypatch)
     from app.core.startup_checks import compatible_database_revisions
 
     monkeypatch.delenv("AUTHCLAW_EXPECTED_DB_REVISION", raising=False)
-    assert compatible_database_revisions() == ("052",)
+    assert compatible_database_revisions() == ("056",)
 
-    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "051")
-    assert compatible_database_revisions() == ("051",)
+    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "055,056")
+    assert compatible_database_revisions() == ("055", "056")
 
-    monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", "052")
-    assert compatible_database_revisions() == ("052",)
-
-    for invalid in ("050", "050,051", "051,051", "049", "049,050", "050,050", "048,048", "47", "046,047", "046,047,048", "048,head"):
+    for invalid in ("054", "054,055", "056,056", "053", "053,054", "052", "052,053", "051", "051,052", "050", "050,051", "049", "049,050", "048,048", "47", "046,047", "046,047,048", "048,head"):
         monkeypatch.setenv("AUTHCLAW_EXPECTED_DB_REVISION", invalid)
         with pytest.raises(RuntimeError):
             compatible_database_revisions()

@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -17,6 +20,50 @@ import (
 )
 
 var buildTarget = "unknown"
+
+func shutdownHTTPServer(ctx context.Context, server *http.Server) error {
+	err := server.Shutdown(ctx)
+	if err != nil {
+		err = errors.Join(err, server.Close())
+	}
+	return err
+}
+
+func shutdownGateway(ctx context.Context, server *http.Server) error {
+	err := shutdownHTTPServer(ctx, server)
+	err = errors.Join(err, drainAuditEvents(ctx))
+	CloseAuditTransport()
+	presidioClientHTTP.CloseIdleConnections()
+	(&http.Client{Transport: providerProxyTransport}).CloseIdleConnections()
+	http.DefaultClient.CloseIdleConnections()
+	if DB != nil {
+		err = errors.Join(err, DB.Close())
+	}
+	if RedisClient != nil {
+		err = errors.Join(err, RedisClient.Close())
+	}
+	return err
+}
+
+func terminationSignals() (chan os.Signal, func()) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	return signals, func() { signal.Stop(signals) }
+}
+
+func serveUntilSignal(serve func() error, signals <-chan os.Signal, service string) error {
+	result := make(chan error, 1)
+	go func() { result <- serve() }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("%s server failed: %w", service, err)
+		}
+	case sig := <-signals:
+		log.Printf("Shutting down %s after %s", service, sig)
+	}
+	return nil
+}
 
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -40,6 +87,7 @@ func QuotaMetricsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "authclaw_quota_available %d\nauthclaw_quota_admitted_total %d\nauthclaw_quota_rejected_total %d\nauthclaw_quota_decisions_total %d\nauthclaw_quota_latency_seconds_sum %f\nauthclaw_quota_unavailable_total %d\nauthclaw_quota_ambiguous_total %d\n", quotaAvailable.Load(), quotaAdmitted.Load(), quotaRejected.Load(), quotaDecisions.Load(), float64(quotaLatencyMicros.Load())/1e6, rateLimitUnavailableTotal.Load(), rateLimitAmbiguousTotal.Load())
+	KafkaMetricsHandler(w, r)
 }
 
 func NewGatewayRouter(proxy http.Handler) http.Handler {
@@ -94,52 +142,65 @@ func newGatewayRouter(proxy http.Handler, auth, rateLimit gatewayMiddleware) htt
 }
 
 func main() {
+	if err := runGateway(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func runGateway() (err error) {
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
 		fmt.Printf("authclaw-gateway %s\n", buildTarget)
-		return
+		return nil
 	}
 
 	// Try to load .env.local from parent directory
 	_ = godotenv.Load("../.env.local")
 	if len(os.Args) == 2 && os.Args[1] == "--audit-producer" {
-		if err := runAuditProducer(); err != nil {
-			log.Fatalf("Audit producer failed: %v", err)
-		}
-		return
+		return runAuditProducer()
 	}
 
 	if err := ValidateEnvelopeKeyConfig(); err != nil {
-		log.Fatalf("Invalid secret management configuration: %v", err)
+		return fmt.Errorf("invalid secret management configuration: %w", err)
 	}
 	if err := ValidateServiceTLSConfig(); err != nil {
-		log.Fatalf("Invalid service TLS configuration: %v", err)
+		return fmt.Errorf("invalid service TLS configuration: %w", err)
 	}
 	if err := ValidateEnvironmentConfig(); err != nil {
-		log.Fatalf("Invalid environment configuration: %v", err)
+		return fmt.Errorf("invalid environment configuration: %w", err)
 	}
 	if err := ValidateGatewayRateLimitConfig(); err != nil {
-		log.Fatalf("Invalid rate limiter configuration: %v", err)
+		return fmt.Errorf("invalid rate limiter configuration: %w", err)
 	}
-	// Initialize the shared client before concurrent handlers can reach it.
-	InitRedis()
 	if err := ValidateAuthCacheConfig(); err != nil {
-		log.Fatalf("Invalid authentication cache configuration: %v", err)
+		return fmt.Errorf("invalid authentication cache configuration: %w", err)
 	}
 	if err := ValidateAuthSecretConfig(); err != nil {
-		log.Fatalf("Invalid authentication secret configuration: %v", err)
+		return fmt.Errorf("invalid authentication secret configuration: %w", err)
 	}
 	if _, err := newClientIPResolverFromEnv(); err != nil {
-		log.Fatalf("Invalid trusted proxy configuration: %v", err)
+		return fmt.Errorf("invalid trusted proxy configuration: %w", err)
 	}
+	server := &http.Server{}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err = errors.Join(err, shutdownGateway(ctx, server))
+	}()
+	// Initialize shared clients before concurrent handlers can reach them.
+	InitRedis()
 
 	// Initialize database
-	InitDB()
+	if err := initDB(); err != nil {
+		return err
+	}
 
 	// Kafka is the default audit transport; missing brokers retain the local fallback.
 	if err := InitAuditTransport(); err != nil {
-		log.Fatalf("Invalid audit transport configuration: %v", err)
+		return fmt.Errorf("invalid audit transport configuration: %w", err)
 	}
-	defer CloseAuditTransport()
+	recoveryCtx, stopRecovery := context.WithCancel(context.Background())
+	defer stopRecovery()
+	go runAuditRecoveryScanner(recoveryCtx, auditRecoveryScanInterval)
 
 	r := NewGatewayRouter(NewProxyServer())
 
@@ -148,7 +209,7 @@ func main() {
 		port = "8080"
 	}
 
-	server := &http.Server{
+	*server = http.Server{
 		Addr:              ":" + port,
 		Handler:           responseWriteTimeout(r, 30*time.Second),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -156,7 +217,7 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("Starting AuthClaw Gateway on port %s...", port)
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Failed to start gateway server: %v", err)
-	}
+	signals, stopSignals := terminationSignals()
+	defer stopSignals()
+	return serveUntilSignal(server.ListenAndServe, signals, "AuthClaw Gateway")
 }

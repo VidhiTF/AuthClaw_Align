@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Literal
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
 from app.core.authorization import validate_tenant_role
 
 PLATFORM_API_KEY_SCOPES = frozenset({"platform.admin"})
@@ -197,6 +197,7 @@ class APIKeyCreate(BaseModel):
     description: Optional[str] = None
     scopes: List[str] = Field(default=["read"], min_items=1)
     expires_in_days: int = Field(default=90, ge=1, le=365)
+    mfa_code: SecretStr = Field(min_length=6, max_length=64)
 
     @field_validator("scopes")
     @classmethod
@@ -218,6 +219,7 @@ class APIKeyRotate(BaseModel):
     description: Optional[str] = None
     scopes: Optional[List[str]] = None
     expires_in_days: int = Field(default=90, ge=1, le=365)
+    mfa_code: SecretStr = Field(min_length=6, max_length=64)
 
     @field_validator("scopes")
     @classmethod
@@ -225,6 +227,11 @@ class APIKeyRotate(BaseModel):
         if value is None:
             return value
         return APIKeyCreate.validate_scopes(value)
+
+
+class APIKeyRevoke(BaseModel):
+    """Schema for revoking an API key with a fresh interactive factor."""
+    mfa_code: SecretStr = Field(min_length=6, max_length=64)
 
 
 class APIKeyResponse(BaseModel):

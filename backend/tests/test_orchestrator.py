@@ -27,6 +27,12 @@ def _mock_document_scan(monkeypatch):
     class PresidioResponse:
         status_code = 200
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
         def json(self):
             return [{"entity_type": "EMAIL_ADDRESS"} for _ in range(20)]
 
@@ -63,7 +69,7 @@ def _mock_document_scan(monkeypatch):
             "details": "Restored S3 object",
         },
     )
-    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: PresidioResponse())
+    monkeypatch.setattr(requests.Session, "post", lambda *_args, **_kwargs: PresidioResponse())
 
 
 def _make_initial_state(
@@ -340,7 +346,7 @@ class TestRemediationRollback:
 
         workflow_runner.emit_audit_event(
             workflow_id="workflow-123",
-            tenant_id="tenant-123",
+            tenant_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             request_id="request-123",
             transition="REMEDIATION_ACTION_FAILED",
             action="remediation_action_failed",
@@ -355,7 +361,7 @@ class TestRemediationRollback:
 
         assert len(sent_events) == 1
         event = sent_events[0]["value"]
-        assert sent_events[0]["key"] == "tenant-123"
+        assert sent_events[0]["key"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         assert event["action"] == "workflow:remediation_action_failed"
         assert "workflow_id=workflow-123" in event["execution_trace"]
         assert "transition=REMEDIATION_ACTION_FAILED" in event["execution_trace"]
@@ -364,7 +370,7 @@ class TestRemediationRollback:
 
         workflow_runner.emit_audit_event(
             workflow_id="workflow-123",
-            tenant_id="tenant-123",
+            tenant_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             request_id="request-123",
             transition="REMEDIATION_ACTION_FAILED",
             action="remediation_action_failed",

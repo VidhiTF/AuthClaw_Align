@@ -4,7 +4,7 @@ import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import text
 
@@ -46,12 +46,13 @@ class BaseRemediationAdapter:
     def scan_read_only(self) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
-    def execute_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_plan(self, plan: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
         action = plan["proposed_action"]
         if action not in ALLOWLISTED_ACTIONS[self.provider]:
             raise RemediationRuntimeError(f"Action '{action}' is not allowlisted for {self.provider}.")
         return {
             "provider_request_id": f"mock-{self.provider}-{uuid.uuid4().hex[:12]}",
+            "idempotency_key": idempotency_key,
             "before": {"resource_id": plan["resource_id"], "status": "non_compliant"},
             "after": {"resource_id": plan["resource_id"], "status": "remediated", "action": action},
             "summary": f"{self.provider.upper()} remediation action {action} applied to {plan['resource_id']}.",
@@ -350,8 +351,11 @@ class RemediationRuntime:
         self._audit(tenant_id, "connector_tested", "Connector test succeeded.", connector_id=connector_id, metadata=lease)
         return {"connector": connector, "lease": lease}
 
-    def _create_worker(self, tenant_id: int, connector: Dict[str, Any], mode: str, lease_id: str, **kwargs) -> str:
-        worker_id = f"worker-{uuid.uuid4()}"
+    def _create_worker(
+        self, tenant_id: int, connector: Dict[str, Any], mode: str,
+        lease_id: str, *, worker_id: str = None, **kwargs,
+    ) -> str:
+        worker_id = worker_id or f"worker-{uuid.uuid4()}"
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
         with engine.connect() as conn:
             conn.execute(
@@ -515,7 +519,7 @@ class RemediationRuntime:
         self._audit(tenant_id, "plan_created", f"Remediation plan {plan['id']} created.", finding_id=finding_id, plan_id=plan["id"])
         return plan
 
-    def request_plan_approval(self, tenant_id: int, plan_id: int) -> Dict[str, Any]:
+    def request_plan_approval(self, tenant_id: int, plan_id: int, requested_by: str) -> Dict[str, Any]:
         with engine.connect() as conn:
             row = conn.execute(
                 text("SELECT * FROM remediation_plans WHERE id = :id AND tenant_id = :tenant_id"),
@@ -538,6 +542,7 @@ class RemediationRuntime:
             requester_id=f"system:remediation:{plan_id}",
             reason="remediation_execution",
             metadata=metadata,
+            requested_by=requested_by,
         )
         with engine.connect() as conn:
             conn.execute(
@@ -576,7 +581,13 @@ class RemediationRuntime:
         row["audit_events"] = [dict(event._mapping) for event in events]
         return row
 
-    def execute_approved_plan(self, approval_record: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_approved_plan(
+        self,
+        approval_record: Dict[str, Any],
+        *,
+        idempotency_key: str,
+        pre_effect_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
         tenant_id = int(approval_record["tenant_id"])
         WorkerThrottle("remediation").enforce(tenant_id)
         metadata = approval_record.get("metadata") or {}
@@ -592,17 +603,49 @@ class RemediationRuntime:
         if not plan:
             raise RemediationRuntimeError("Approved remediation plan not found.")
         connector = self.get_connector(tenant_id, int(plan["connector_id"]))
+        worker_id = f"worker-exec-{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()[:32]}"
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text(
+                    "SELECT status, evidence FROM remediation_worker_runs "
+                    "WHERE worker_id = :worker_id AND tenant_id = :tenant_id"
+                ),
+                {"worker_id": worker_id, "tenant_id": tenant_id},
+            ).fetchone()
+        if existing is not None:
+            if existing.status != "completed" or not existing.evidence:
+                raise RemediationRuntimeError(
+                    "Existing remediation execution requires reconciliation."
+                )
+            evidence = json.loads(existing.evidence)
+            return {
+                "worker_run_id": worker_id,
+                "provider": connector["provider"],
+                "connector_id": connector["id"],
+                "plan_id": plan_id,
+                "finding_id": plan["finding_id"],
+                "summary": evidence["summary"],
+                "evidence": evidence,
+                "audit_events": [{"event": "remediation_reconciled", "details": evidence["summary"]}],
+            }
+        if pre_effect_check is not None:
+            pre_effect_check()
         lease = self._lease_credentials(tenant_id, connector, "execution")
-        worker_id = self._create_worker(
+        self._create_worker(
             tenant_id,
             connector,
             "execution",
             lease["lease_id"],
+            worker_id=worker_id,
             finding_id=plan["finding_id"],
             plan_id=plan_id,
             approval_id=approval_record["approval_id"],
         )
-        evidence = self._adapter(connector).execute_plan(plan)
+        if pre_effect_check is not None:
+            pre_effect_check()
+        evidence = self._adapter(connector).execute_plan(
+            plan, idempotency_key=idempotency_key
+        )
         with engine.connect() as conn:
             conn.execute(
                 text("""
@@ -640,6 +683,8 @@ class RemediationRuntime:
                 {"finding_id": plan["finding_id"], "tenant_id": tenant_id},
             )
             conn.commit()
+        if pre_effect_check is not None:
+            pre_effect_check()
         self._audit(tenant_id, "remediation_executed", evidence["summary"], worker_id=worker_id, connector_id=connector["id"], finding_id=plan["finding_id"], plan_id=plan_id, approval_id=approval_record["approval_id"], metadata=evidence)
         return {
             "worker_run_id": worker_id,

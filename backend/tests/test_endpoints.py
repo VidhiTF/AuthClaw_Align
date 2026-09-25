@@ -9,6 +9,7 @@ import uuid
 from uuid import uuid4, UUID
 import os
 import base64
+import pyotp
 from datetime import datetime, timedelta, timezone
 from main import app
 
@@ -78,6 +79,24 @@ def client(db_session: Session) -> TestClient:
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+def test_tenant_timestamp_postgres_round_trip(db_session: Session):
+    with db_session.begin_nested() as savepoint:
+        db_session.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+        tenant = Tenant(name=f"T12 UTC {uuid4()}")
+        db_session.add(tenant)
+        db_session.flush()
+        db_session.refresh(tenant)
+        assert tenant.created_at.utcoffset() == timedelta(0)
+        assert tenant.updated_at.utcoffset() == timedelta(0)
+
+        tenant.status = "suspended"
+        db_session.flush()
+        db_session.refresh(tenant)
+        assert tenant.status == "suspended"
+        assert tenant.updated_at.utcoffset() == timedelta(0)
+        savepoint.rollback()
 
 
 def test_public_health(client: TestClient):
@@ -861,9 +880,10 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     # -------------------------------------------------------------------------
     # 4. Cross-Tenant GET Isolation Check
     # -------------------------------------------------------------------------
-    # Tenant B tries to retrieve Tenant A's config -> 404 Not Found (enforced by RLS)
+    # Tenant B's operator has no connector-management permission, so the API
+    # rejects the request before evaluating the cross-tenant row.
     response = client.get(f"/v1/gateways/{gw_id}/config", headers=headers_b)
-    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.status_code == status.HTTP_403_FORBIDDEN
 
     # Tenant A retrieves its own config -> 200 OK
     response = client.get(f"/v1/gateways/{gw_id}/config", headers=headers_admin)
@@ -965,10 +985,10 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     db_session.commit()
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
-    # Retrieve audit logs as Tenant B (isolated - returns empty list)
+    # Operators lack audit-read permission; authorization denies before row
+    # isolation is evaluated.
     response = client.get("/v1/audit-logs", headers=headers_b)
-    assert response.status_code == status.HTTP_200_OK
-    assert len(response.json()["records"]) == 0
+    assert response.status_code == status.HTTP_403_FORBIDDEN
 
     # Retrieve audit logs as Tenant A (returns Tenant A's logs)
     response = client.get("/v1/audit-logs", headers=headers_admin)
@@ -997,7 +1017,6 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
     user = User(id=user_id, tenant_id=tenant_id, email="admin@tenantC.com", role="admin", is_active=True)
     db_session.add(user)
-    import pyotp
     db_session.add(User(id=approver_id, tenant_id=tenant_id, email="approver@tenantC.com",
         role="approver", is_active=True))
     db_session.add(User(id=executor_id, tenant_id=tenant_id, email="operator@tenantC.com",
@@ -1014,27 +1033,25 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         created_by=user_id
     )
     db_session.add(api_key)
-    db_session.add(APIKey(id=uuid4(), tenant_id=tenant_id, key_hash=hash_key(approver_key_raw),
-        name="Approver Key C", scopes=["read", "write"], is_active=True, created_by=approver_id))
     db_session.add(APIKey(id=uuid4(), tenant_id=tenant_id, key_hash=hash_key(executor_key_raw),
         name="Executor Key C", scopes=["read", "write"], is_active=True, created_by=executor_id))
     db_session.commit()
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
     headers = {"Authorization": f"Bearer {api_key_raw}"}
-    approver_headers = {"Authorization": f"Bearer {approver_key_raw}"}
-    executor_headers = {"Authorization": f"Bearer {executor_key_raw}"}
-
-    mfa_setup = client.post("/v1/users/me/mfa/setup", headers=approver_headers)
-    assert mfa_setup.status_code == 200, mfa_setup.json()
-    approver_secret = mfa_setup.json()["mfa_secret"]
+    executor_session = "acl_session_" + uuid4().hex
+    db_session.execute(text("""SELECT authn.create_session(
+        :hash, :tenant, :user, 'workflow-test', now()+interval '10 minutes', '{}'::jsonb)"""),
+        {"hash": hash_key(executor_session), "tenant": tenant_id, "user": executor_id})
+    db_session.commit()
+    executor_headers = {"Authorization": f"Bearer {executor_session}"}
 
     # 2. Create compliance workflow (scan executes to completion)
     from unittest.mock import patch, MagicMock
     
     with patch("app.orchestrator.connectors.DocumentScanner.list_documents") as mock_list, \
          patch("app.orchestrator.connectors.DocumentScanner.fetch_and_extract_text") as mock_fetch, \
-         patch("requests.post") as mock_post:
+         patch("requests.Session.post") as mock_post:
          
         mock_list.return_value = [{"object_key": "test-doc.txt", "file_name": "test-doc.txt", "size": 1024}]
         mock_fetch.return_value = "My email is john@example.com"
@@ -1042,6 +1059,7 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = [{"entity_type": "EMAIL_ADDRESS"}]
+        mock_resp.__enter__.return_value = mock_resp
         mock_post.return_value = mock_resp
 
         response = client.post(
@@ -1090,6 +1108,33 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
     assert client.post(f"/v1/workflows/{workflow_id}/approve", headers=headers).status_code == 403
+    legacy_setup = client.post("/v1/workflows/mfa/setup", headers=headers)
+    assert legacy_setup.status_code == status.HTTP_410_GONE
+    session_token = "acl_session_" + uuid4().hex
+    db_session.execute(text("""SELECT authn.create_session(
+        :hash, :tenant, :user, 'mfa-test', now()+interval '10 minutes', '{}'::jsonb)"""),
+        {"hash": hash_key(session_token), "tenant": tenant_id, "user": approver_id})
+    db_session.commit()
+    mfa_headers = {"Authorization": f"Bearer {session_token}"}
+    approver_headers = mfa_headers
+    mfa_setup = client.post("/v1/users/me/mfa/setup", headers=mfa_headers)
+    assert mfa_setup.status_code == status.HTTP_200_OK
+    backup_code = mfa_setup.json()["backup_codes"][0]
+    mfa_confirm = client.post(
+        "/v1/users/me/mfa/confirm",
+        headers=mfa_headers,
+        json={"code": pyotp.TOTP(mfa_setup.json()["mfa_secret"]).now()},
+    )
+    assert mfa_confirm.status_code == status.HTTP_200_OK
+    executor_mfa_setup = client.post("/v1/users/me/mfa/setup", headers=executor_headers)
+    assert executor_mfa_setup.status_code == status.HTTP_200_OK
+    executor_backup_code = executor_mfa_setup.json()["backup_codes"][0]
+    executor_confirm = client.post(
+        "/v1/users/me/mfa/confirm",
+        headers=executor_headers,
+        json={"code": pyotp.TOTP(executor_mfa_setup.json()["mfa_secret"]).now()},
+    )
+    assert executor_confirm.status_code == status.HTTP_200_OK
 
     # 3. A distinct approver records the decision; only an operator executes it.
     from app.core.auth import verify_mfa_code
@@ -1107,13 +1152,15 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         }
         response_approve = client.post(
             f"/v1/workflows/{workflow_id}/approve",
-            headers=approver_headers,
-            json={"totp_code": pyotp.TOTP(approver_secret).now()},
+            headers=mfa_headers,
+            json={"totp_code": backup_code},
         )
         assert response_approve.status_code == status.HTTP_200_OK, response_approve.json()
         assert mock_execute.call_count == 0
         assert client.post(f"/v1/workflows/{workflow_id}/resume", headers=approver_headers).status_code == 403
-        response_resume = client.post(f"/v1/workflows/{workflow_id}/resume", headers=executor_headers)
+        response_resume = client.post(
+            f"/v1/workflows/{workflow_id}/resume", headers=executor_headers,
+            json={"totp_code": executor_backup_code})
     assert response_resume.status_code == status.HTTP_200_OK, response_resume.json()
     wf_approved_data = response_approve.json()
 
@@ -1125,6 +1172,7 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
 
     # Verify db states
     db_session.rollback()
+    db_session.expire_all()  # Session provisioning committed the owner's earlier snapshot.
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
     db_wf_final = db_session.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id

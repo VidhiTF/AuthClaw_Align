@@ -1,6 +1,7 @@
 """Protocol, tamper, rotation, ASGI body and real Redis replay regressions."""
 
 import ast
+from datetime import datetime, timezone
 import json
 import math
 import os
@@ -18,9 +19,11 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from services import control_plane_auth as auth
 from services.tenant_context import tenant_context
+from approval_store import ApprovalPersistenceError
 from services.quota_service import QuotaExceeded, QuotaUnavailable
 
 SECRET = "test-only-32-byte-signing-secret!!"
@@ -49,6 +52,31 @@ def signed(**changes):
     headers.update(changes)
     headers["x-authclaw-signature"] = auth.sign_control_plane_request(
         SECRET, headers, "POST", "/chat", "q=a+b", b'{"a":1}'
+    )
+    return headers
+
+
+def signed_mfa(path="/approve/approval-17", body=b"{}", **changes):
+    now = changes.pop("now", 2000000000)
+    headers = {
+        "x-authclaw-version": "3",
+        "x-authclaw-timestamp": str(now),
+        "x-authclaw-nonce": "b" * 32,
+        "x-authclaw-service": "console",
+        "x-authclaw-audience": "agent",
+        "x-authclaw-key-id": "v1",
+        "x-authclaw-tenant-id": "tenant",
+        "x-authclaw-user-id": "control-plane-user-17",
+        "x-authclaw-role": "owner",
+        "x-authclaw-mfa-verified-at": str(now),
+        "x-authclaw-mfa-operation": f"POST {path}",
+        "x-authclaw-mfa-body-sha256": __import__("hashlib").sha256(body).hexdigest(),
+        "x-authclaw-mfa-assertion-id": "c" * 32,
+        "content-type": "application/json",
+    }
+    headers.update(changes)
+    headers["x-authclaw-signature"] = auth.sign_control_plane_request(
+        SECRET, headers, "POST", path, body=body
     )
     return headers
 
@@ -86,6 +114,58 @@ class ControlPlaneAuthSmokeTests(unittest.TestCase):
         }.items():
             with self.subTest(name=name):
                 self.assertIsNone(self.verify(**{name: value}))
+
+    def test_v3_fresh_mfa_assertion_is_actor_action_and_body_bound(self):
+        path = "/approve/approval-17"
+        body = b'{"comment":"approved"}'
+        keyring = {"keys": {"v1": {**KEY, "endpoints": ["POST /approve/*"]}}}
+        headers = signed_mfa(path=path, body=body)
+        principal = auth.verify_control_plane_request(
+            headers,
+            "POST",
+            path,
+            keyring,
+            lambda *_: True,
+            body=body,
+            now=2000000000,
+        )
+        self.assertEqual(principal.user_id, "control-plane-user-17")
+        self.assertEqual(principal.mfa_operation, f"POST {path}")
+        self.assertEqual(principal.mfa_assertion_id, "c" * 32)
+
+        for name, value in (
+            ("x-authclaw-mfa-operation", "POST /approve/other"),
+            ("x-authclaw-mfa-body-sha256", "0" * 64),
+            ("x-authclaw-mfa-verified-at", "1999999900"),
+            ("x-authclaw-mfa-assertion-id", "d" * 32),
+        ):
+            with self.subTest(name=name):
+                tampered = {**headers, name: value}
+                self.assertIsNone(auth.verify_control_plane_request(
+                    tampered, "POST", path, keyring, lambda *_: True,
+                    body=body, now=2000000000,
+                ))
+
+        unsigned_mfa = signed(**{
+            "x-authclaw-mfa-verified-at": "2000000000",
+            "x-authclaw-mfa-operation": f"POST {path}",
+            "x-authclaw-mfa-body-sha256": __import__("hashlib").sha256(body).hexdigest(),
+            "x-authclaw-mfa-assertion-id": "e" * 32,
+        })
+        self.assertIsNone(auth.verify_control_plane_request(
+            unsigned_mfa, "POST", path, keyring, lambda *_: True,
+            body=body, now=2000000000,
+        ))
+
+    def test_mfa_assertion_is_single_use_at_middleware_boundary(self):
+        store = Mock()
+        store.set.side_effect = [True, False]
+        self.assertTrue(auth._consume_mfa_assertion(store, "a" * 32))
+        self.assertFalse(auth._consume_mfa_assertion(store, "a" * 32))
+        store.set.assert_called_with(
+            "authclaw:mfa-assertion:v1:" + "a" * 32,
+            "1", nx=True, ex=auth.NONCE_TTL_SECONDS,
+        )
         for name, value in {
             "tenant-id": "other",
             "user-id": "other",
@@ -114,7 +194,7 @@ class ControlPlaneAuthSmokeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 auth.canonical_query(query)
         self.assertIsNotNone(self.verify(query="q=a%20b"))
-        self.assertEqual(self.verify(signed(**{"x-authclaw-role": "Super Admin"})).role, "owner")
+        self.assertEqual(self.verify(signed(**{"x-authclaw-role": "Super Admin"})).role, "tenant_administrator")
         self.assertIsNone(self.verify(signed(**{"x-authclaw-role": "root"})))
         with self.assertRaises(ValueError):
             signed(**{"x-authclaw-user-id": "user\nforged"})
@@ -297,6 +377,11 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
             "QuotaExceeded": QuotaExceeded,
             "QuotaUnavailable": QuotaUnavailable,
             "decode_jwt": lambda _: None,
+            "reconcile_due_approval_executions": Mock(return_value=0),
+            "ApprovalPersistenceError": ApprovalPersistenceError,
+            "run_in_threadpool": run_in_threadpool,
+            "datetime": datetime,
+            "timezone": timezone,
         }
         # Preserve source declaration/decorator order, not a hand-built substitute stack.
         exec(
@@ -382,7 +467,7 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
                 {"AUTHCLAW_INTERNAL_SERVICE_SECRET": json.dumps({"keys": {"v1": forbidden}})},
             ):
                 for tenant in ("unknown", "disabled"):
-                    for role in ("viewer", "developer"):
+                    for role in ("viewer",):
                         headers.update({"x-authclaw-tenant-id": tenant, "x-authclaw-role": role})
                         for path, body in (
                             ("/policies/test", b""),

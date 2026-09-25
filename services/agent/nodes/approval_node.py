@@ -44,6 +44,7 @@ def approval_node(state: AuthState):
                 request_id=state.get("request_id"),
                 requester_id=state.get("requester_id") or state.get("username"),
                 reason=reason,
+                requested_by=state.get("requester_id"),
                 metadata={
                     "policy_decision": state.get("policy_decision"),
                     "security_policy_action": state.get("security_policy_action"),

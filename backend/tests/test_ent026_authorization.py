@@ -63,7 +63,7 @@ def test_sensitive_database_read_permissions_are_explicit():
 
 
 def test_ent026_replaces_table_specific_legacy_rls_policies():
-    migration = Path(__file__).parents[1] / "alembic" / "versions" / "052_ent026_authorization_contract.py"
+    migration = Path(__file__).parents[1] / "alembic" / "versions" / "056_ent026_authorization_contract.py"
     source = migration.read_text(encoding="utf-8")
     legacy_policies = {
         "api_keys": "api_keys_tenant_isolation",

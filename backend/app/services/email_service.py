@@ -28,7 +28,26 @@ def smtp_configured() -> bool:
     return bool(os.getenv("SMTP_HOST", "").strip())
 
 
+def _local_outbox_allowed() -> bool:
+    return os.getenv("AUTHCLAW_ENV", "local").strip().lower() in {
+        "local", "development", "dev", "test",
+    }
+
+
+def validate_smtp_configuration() -> None:
+    if not smtp_configured():
+        return
+    user = os.getenv("SMTP_USER", os.getenv("SMTP_USERNAME", "")).strip()
+    password = os.getenv("SMTP_PASSWORD", os.getenv("SMTP_PASS", "")).strip()
+    if bool(user) != bool(password):
+        raise EmailDeliveryError("SMTP_USER and SMTP_PASSWORD must both be configured or both be empty")
+    tls = os.getenv("SMTP_TLS", os.getenv("SMTP_STARTTLS", "true")).lower() == "true"
+    if not _local_outbox_allowed() and not tls:
+        raise EmailDeliveryError("Shared and production SMTP requires TLS")
+
+
 def _send_smtp_message(message: EmailMessage) -> None:
+    validate_smtp_configuration()
     smtp_host = os.getenv("SMTP_HOST", "").strip()
     smtp_port = int(os.getenv("SMTP_PORT", "587"))
     smtp_user = os.getenv("SMTP_USER", os.getenv("SMTP_USERNAME", "")).strip()
@@ -36,9 +55,6 @@ def _send_smtp_message(message: EmailMessage) -> None:
     smtp_tls = (
         os.getenv("SMTP_TLS", os.getenv("SMTP_STARTTLS", "true")).lower() == "true"
     )
-    if os.getenv("AUTHCLAW_ENV", "").lower() in {"production", "prod"} and not smtp_tls:
-        raise EmailDeliveryError("Production SMTP requires TLS")
-
     try:
         with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
             if smtp_tls:
@@ -54,7 +70,7 @@ def send_email(email: str, subject: str, body: str) -> EmailDeliveryResult:
     """Send a non-OTP email through the existing SMTP transport."""
     smtp_host = os.getenv("SMTP_HOST", "").strip()
     if not smtp_host:
-        if os.getenv("AUTHCLAW_ENV", "").lower() in {"production", "prod"}:
+        if not _local_outbox_allowed():
             raise EmailDeliveryError("Email delivery is not configured")
         return _write_local_email(email, subject, body)
 
@@ -79,7 +95,7 @@ def send_otp_email(
 ) -> EmailDeliveryResult:
     smtp_host = os.getenv("SMTP_HOST", "").strip()
     if not smtp_host:
-        if os.getenv("AUTHCLAW_ENV", "").lower() not in {"production", "prod"}:
+        if _local_outbox_allowed():
             return _write_local_outbox(
                 email, otp, tenant_name, purpose=purpose, action_url=action_url
             )

@@ -149,10 +149,16 @@ def test_graph_lifecycle_payloads_and_approval_binding(scanner, monkeypatch, fai
     class Analysis:
         status_code = 200
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
         def json(self):
             return [{"entity_type": "EMAIL_ADDRESS"}]
 
-    monkeypatch.setattr("requests.post", lambda *args, **kwargs: Analysis())
+    monkeypatch.setattr("requests.Session.post", lambda *args, **kwargs: Analysis())
     state = workflow(
         findings=[], remediation_plan=[], remediation_actions=[], execution_result={}, rollback_result={}
     )

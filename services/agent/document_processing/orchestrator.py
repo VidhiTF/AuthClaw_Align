@@ -4,6 +4,7 @@ import os
 import time
 import json
 import logging
+import uuid
 import requests
 from datetime import datetime, timezone
 from sqlalchemy import text
@@ -15,18 +16,29 @@ from document_processing.scanners import scan_text_for_sensitive_data
 from document_processing.chunker import split_text_into_chunks
 from document_processing.auditor import create_document_audit
 from approval_store import create_approval
+from services.tenant_context import validate_tenant_id
 
 logger = logging.getLogger("authclaw.document_processing.orchestrator")
 
-def run_document_scan_pipeline(doc_id: int, file_bytes: bytes, filename: str, source: str = "local", tenant_id: int = None) -> dict:
+def run_document_scan_pipeline(
+    doc_id: int,
+    file_bytes: bytes,
+    filename: str,
+    source: str = "local",
+    tenant_id: int = None,
+    request_id: str = None,
+    requested_by: str = None,
+) -> dict:
     """
     Executes the complete document security & compliance scanning pipeline.
     """
     start_time = time.perf_counter()
-    logger.info(f"Starting compliance scan for doc {doc_id}: {filename}")
+    validate_tenant_id(tenant_id)
+    logger.info("Starting compliance scan for doc %s", doc_id)
     
     # 1. Extract text and metadata
     text_content = extract_document_text(file_bytes, filename)
+    extraction = {"status": "healthy" if text_content.strip() else "unavailable" if file_bytes else "not_applicable"}
     meta = extract_file_metadata(file_bytes, filename, source_location=source)
     
     # Update document entry with basic details
@@ -46,44 +58,47 @@ def run_document_scan_pipeline(doc_id: int, file_bytes: bytes, filename: str, so
     # 2. Chunk text and save to RAG vector database (knowledge_chunks)
     chunks = split_text_into_chunks(text_content)
     from rag.vector_store import save_document_chunks
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text("""
-                    SELECT id
-                    FROM knowledge_documents
-                    WHERE name = :name AND (:tenant_id IS NULL OR tenant_id = :tenant_id)
-                """),
-                {"name": filename, "tenant_id": tenant_id}
-            ).fetchone()
-            if row:
-                k_doc_id = row[0]
-            else:
-                import os as _os
-                ext = _os.path.splitext(filename)[1].upper().replace(".", "") or "TXT"
-                res = conn.execute(
-                    text("""
-                    INSERT INTO knowledge_documents (tenant_id, name, type, size_bytes, status, last_indexed, chunks_count)
-                    VALUES (:tenant_id, :name, :type, :size_bytes, 'indexed', :last_indexed, :chunks_count)
-                    RETURNING id
-                    """),
-                    {
-                        "tenant_id": tenant_id,
-                        "name": filename,
-                        "type": ext,
-                        "size_bytes": len(file_bytes),
-                        "last_indexed": datetime.now(timezone.utc).date().isoformat(),
-                        "chunks_count": len(chunks)
-                    }
-                )
-                k_doc_id = res.fetchone()[0]
+    k_doc_id = None
+    indexing = {"status": "not_applicable"}
+    if extraction["status"] == "healthy":
+        indexing = {"status": "healthy"}
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(text("""SELECT id FROM knowledge_documents
+                    WHERE name = :name AND (:tenant_id IS NULL OR tenant_id = :tenant_id)"""),
+                    {"name": filename, "tenant_id": tenant_id}).fetchone()
+                if row:
+                    k_doc_id = row[0]
+                    conn.execute(text("UPDATE knowledge_documents SET status = 'indexing' WHERE id = :id AND tenant_id = :tenant_id"),
+                                 {"id": k_doc_id, "tenant_id": tenant_id})
+                else:
+                    res = conn.execute(text("""INSERT INTO knowledge_documents
+                        (tenant_id, name, type, size_bytes, status, last_indexed, chunks_count)
+                        VALUES (:tenant_id, :name, :type, :size_bytes, 'indexing', :last_indexed, :chunks_count)
+                        RETURNING id"""), {"tenant_id": tenant_id, "name": filename,
+                        "type": os.path.splitext(filename)[1].upper().replace(".", "") or "TXT",
+                        "size_bytes": len(file_bytes), "last_indexed": datetime.now(timezone.utc).date().isoformat(),
+                        "chunks_count": len(chunks)})
+                    k_doc_id = res.fetchone()[0]
                 conn.commit()
-                
-        save_document_chunks(k_doc_id, chunks, tenant_id=tenant_id)
-    except (QuotaExceeded, QuotaUnavailable):
-        raise
-    except Exception as ex:
-        logger.error(f"Failed to index chunks into RAG: {ex}")
+            save_document_chunks(k_doc_id, chunks, tenant_id=tenant_id)
+            with engine.connect() as conn:
+                conn.execute(text("UPDATE knowledge_documents SET status = 'indexed' WHERE id = :id AND tenant_id = :tenant_id"),
+                             {"id": k_doc_id, "tenant_id": tenant_id})
+                conn.commit()
+        except Exception as ex:
+            indexing = {"status": "unavailable"}
+            logger.error(f"Failed to index chunks into RAG: {ex}")
+            if k_doc_id is not None:
+                try:
+                    with engine.connect() as conn:
+                        conn.execute(text("UPDATE knowledge_documents SET status = 'unavailable' WHERE id = :id AND tenant_id = :tenant_id"),
+                                     {"id": k_doc_id, "tenant_id": tenant_id})
+                        conn.commit()
+                except Exception:
+                    logger.error("Failed to persist unavailable RAG index status")
+            if isinstance(ex, (QuotaExceeded, QuotaUnavailable)):
+                raise
         
     # 3. Scan for PII, Financial Data, and Secrets (Regex/Entropy scanner)
     findings = scan_text_for_sensitive_data(text_content)
@@ -145,6 +160,7 @@ def run_document_scan_pipeline(doc_id: int, file_bytes: bytes, filename: str, so
     model = "gemini-2.5-flash-lite"
     
     is_key_valid = api_key and api_key not in ("dummy", "dummy-api-key", "")
+    provider_review = {"status": "unavailable" if is_key_valid else "not_applicable"}
     
     if is_key_valid:
         try:
@@ -198,10 +214,13 @@ Do not include markdown packaging like ```json.
                 ai_data = json.loads(ai_text)
                 
                 # Merge AI review insights
-                gemini_summary = ai_data.get("summary", "")
+                gemini_summary = ai_data.get("summary")
                 ai_findings = ai_data.get("ai_findings", [])
+                if not isinstance(gemini_summary, str) or not gemini_summary.strip() or not isinstance(ai_findings, list):
+                    raise ValueError("Invalid Gemini document review response")
                 if ai_findings:
                     all_findings.extend(ai_findings)
+                provider_review = {"status": "healthy"}
             else:
                 logger.warning("Gemini document review failed: status=%s", res.status_code)
         except (QuotaExceeded, QuotaUnavailable):
@@ -264,14 +283,7 @@ Do not include markdown packaging like ```json.
         severity = "CRITICAL"
         risk_score = min(risk_score, 49)
         
-    # 7. Real-Time Alerting (trigger notification)
-    for f in all_findings:
-        if f.get("risk_level", "LOW").upper() in ("CRITICAL", "HIGH"):
-            try:
-                from document_processing.alerts import trigger_security_alert
-                trigger_security_alert(f, filename)
-            except Exception as alert_err:
-                logger.error(f"Failed to trigger real-time alert: {alert_err}")
+    alert_delivery = {"status": "not_applicable"}
 
     # 8. Human Approval Integration
     status = "completed"
@@ -282,12 +294,16 @@ Do not include markdown packaging like ```json.
             query=f"Document Compliance Override: {filename}",
             risk_level=severity,
             session_id=f"doc_{doc_id}",
-            requester_id=f"system:document:{doc_id}"
+            tenant_id=tenant_id,
+            request_id=request_id,
+            requested_by=requested_by,
+            reason="document_compliance_override",
+            metadata={"document_id": doc_id, "source": source},
         )
         create_document_audit(
             doc_id, 
             "approval_requested", 
-            "system", 
+            requested_by,
             f"Document flagged as {severity} risk (Score: {risk_score}). Verification requested in Approval Queue.",
             tenant_id=tenant_id
         )
@@ -296,8 +312,21 @@ Do not include markdown packaging like ```json.
         
     # 9. Save results to database
     duration_ms = int((time.perf_counter() - start_time) * 1000)
-    
+    scan_status = status
+    stage_health = extraction["status"], indexing["status"], provider_review["status"]
+    health = ("degraded" if "unavailable" in stage_health else
+              "healthy" if "healthy" in stage_health else
+              "not_applicable" if set(stage_health) == {"not_applicable"} else "unknown")
     with engine.connect() as conn:
+        # Commit the retryable alert and its scan together, before network I/O.
+        if any(f.get("risk_level", "LOW").upper() in ("CRITICAL", "HIGH") for f in all_findings):
+            from services.event_pipeline import EventPipeline
+            event_id = EventPipeline().record_event({
+                "event_type": "document_security_alert", "event_id": str(uuid.uuid4()),
+                "tenant_id": tenant_id, "document_id": doc_id,
+            }, stream="security_alert", connection=conn)
+            alert_delivery = {"status": "queued", "event_id": event_id}
+            status = "alert_delivery_pending"
         # Update documents table
         conn.execute(
             text("""
@@ -316,11 +345,10 @@ Do not include markdown packaging like ```json.
         )
         
         # Save scan run
-        scan_res = conn.execute(
+        conn.execute(
             text("""
-            INSERT INTO document_scans (tenant_id, document_id, timestamp, scan_duration_ms, raw_findings, status)
-            VALUES (:tenant_id, :doc_id, :timestamp, :duration, :findings_json, :status)
-            RETURNING id
+            INSERT INTO document_scans (tenant_id, document_id, timestamp, scan_duration_ms, raw_findings, status, outputs_json)
+            VALUES (:tenant_id, :doc_id, :timestamp, :duration, :findings_json, :status, :outputs)
             """),
             {
                 "tenant_id": tenant_id,
@@ -328,7 +356,11 @@ Do not include markdown packaging like ```json.
                 "timestamp": datetime.now(timezone.utc),
                 "duration": duration_ms,
                 "findings_json": json.dumps(all_findings),
-                "status": "completed"
+                "status": status,
+                "outputs": json.dumps({"alert_delivery": alert_delivery, "scan_status": scan_status,
+                                        "health": "degraded" if alert_delivery["status"] == "queued" else health, "scan_health": health,
+                                        "extraction": extraction, "indexing": indexing,
+                                        "provider_review": provider_review}),
             }
         )
         
@@ -354,14 +386,20 @@ Do not include markdown packaging like ```json.
             )
             
         conn.commit()
-        
+
+    if alert_delivery["status"] == "queued":
+        alert_delivery = EventPipeline().deliver_event(event_id)
+        status = scan_status if alert_delivery["status"] == "delivered" else "alert_delivery_failed"
+        if status == "alert_delivery_failed":
+            health = "degraded"
+
     create_document_audit(doc_id, "scan_completed", "system", f"Analysis completed in {duration_ms}ms. Risk Score: {risk_score} ({severity}). Findings Count: {len(all_findings)}", tenant_id=tenant_id)
-    logger.info(f"Completed scan pipeline for doc {doc_id}: {filename} ({severity} - {risk_score})")
+    logger.info("Completed scan for doc %s: %s", doc_id, status)
     
     # 10. Record Snapshot in Score History & Calculate Drift
     try:
         from document_processing.drift import record_compliance_snapshot
-        record_compliance_snapshot()
+        record_compliance_snapshot(tenant_id)
     except Exception as drift_err:
         logger.error(f"Failed to log compliance snapshot: {drift_err}")
 
@@ -371,6 +409,11 @@ Do not include markdown packaging like ```json.
         "risk_score": risk_score,
         "severity": severity,
         "status": status,
+        "health": health,
+        "extraction": extraction,
+        "indexing": indexing,
+        "provider_review": provider_review,
+        "alert_delivery": alert_delivery,
         "duration_ms": duration_ms,
         "findings": all_findings,
         "summary": gemini_summary

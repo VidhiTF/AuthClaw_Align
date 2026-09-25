@@ -65,7 +65,8 @@ def parse_xlsx(file_bytes: bytes) -> str:
     try:
         file_like = io.BytesIO(file_bytes)
         if not zipfile.is_zipfile(file_like):
-            return "Invalid Excel file format (not a valid zip)."
+            logger.error("Invalid Excel file format (not a valid zip)")
+            return ""
             
         with zipfile.ZipFile(file_like) as z:
             # 1. Load Shared Strings (if exist)
@@ -81,7 +82,8 @@ def parse_xlsx(file_bytes: bytes) -> str:
             # 2. Find and parse Sheet1 (or multiple sheets)
             sheet_files = [name for name in z.namelist() if name.startswith("xl/worksheets/sheet")]
             if not sheet_files:
-                return "No worksheets found in Excel file."
+                logger.error("No worksheets found in Excel file")
+                return ""
                 
             all_sheets_content = []
             ns = {'ns': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}

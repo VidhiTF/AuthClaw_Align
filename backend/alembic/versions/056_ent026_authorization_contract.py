@@ -5,8 +5,8 @@ import os
 from alembic import op
 
 
-revision = "052"
-down_revision = "051"
+revision = "056"
+down_revision = "055"
 branch_labels = None
 depends_on = None
 
@@ -335,9 +335,13 @@ def upgrade() -> None:
         BEGIN
             IF OLD.id = authn.current_user_id()
                AND authn.current_role() <> 'tenant_administrator'
-               AND (to_jsonb(NEW) - 'mfa_enabled' - 'mfa_secret' - 'mfa_backup_codes' - 'mfa_last_totp_step' - 'updated_at')
+               AND (to_jsonb(NEW) - 'mfa_enabled' - 'mfa_secret' - 'mfa_backup_codes' - 'mfa_last_totp_step'
+                    - 'mfa_pending_secret' - 'mfa_pending_last_totp_step' - 'mfa_pending_backup_codes'
+                    - 'mfa_pending_expires_at' - 'mfa_enrolled_at' - 'updated_at')
                    IS DISTINCT FROM
-                   (to_jsonb(OLD) - 'mfa_enabled' - 'mfa_secret' - 'mfa_backup_codes' - 'mfa_last_totp_step' - 'updated_at') THEN
+                   (to_jsonb(OLD) - 'mfa_enabled' - 'mfa_secret' - 'mfa_backup_codes' - 'mfa_last_totp_step'
+                    - 'mfa_pending_secret' - 'mfa_pending_last_totp_step' - 'mfa_pending_backup_codes'
+                    - 'mfa_pending_expires_at' - 'mfa_enrolled_at' - 'updated_at') THEN
                 RAISE EXCEPTION 'self-service update may only change MFA fields';
             END IF;
             RETURN NEW;
@@ -441,6 +445,10 @@ def upgrade() -> None:
                          AND requester_id <> authn.current_user_id())
                         OR (status = 'APPROVED'
                             AND authn.authorize_action('tenant.workflow.resume')
+                            AND approver_id <> authn.current_user_id())
+                        OR (status = 'CONSUMED'
+                            AND authn.authorize_action('tenant.workflow.resume')
+                            AND consumed_by_id = authn.current_user_id()
                             AND approver_id <> authn.current_user_id())))
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND ((status IN ('APPROVED','REJECTED','ALTERED')
@@ -493,6 +501,100 @@ def upgrade() -> None:
         """
     )
     app_role = _app_role()
+    # The OTP verifier is the only entry point that can bind an invitation
+    # context. Complete that invitation in one definer transaction so the
+    # unauthenticated runtime never gains general user/key write privileges.
+    op.execute("""
+        CREATE OR REPLACE FUNCTION authn.complete_onboarding_invite(
+            p_signup_id uuid, p_password_hash text, p_api_key_hash text,
+            p_session_hash text, p_request_id text
+        ) RETURNS TABLE (outcome text, user_id uuid, tenant_id uuid,
+                         tenant_name text, email text, role text, api_key_id uuid)
+        LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog, authn, public
+        AS $invite$
+        DECLARE
+            v_invite public.onboarding_email_otps%ROWTYPE;
+            v_user public.users%ROWTYPE;
+            v_role public.users.role%TYPE;
+            v_key uuid := public.gen_random_uuid();
+        BEGIN
+            SELECT * INTO v_invite FROM public.onboarding_email_otps o
+             WHERE o.id = p_signup_id FOR UPDATE;
+            IF NOT FOUND OR v_invite.purpose <> 'invite'
+               OR v_invite.status <> 'pending' OR v_invite.expires_at <= now()
+               OR v_invite.tenant_id IS NULL
+               OR authn.current_tenant_id() IS DISTINCT FROM v_invite.tenant_id
+               OR authn.current_user_id() IS DISTINCT FROM v_invite.id
+               OR authn.current_role() IS NOT NULL
+               OR NOT EXISTS (SELECT 1 FROM public.tenants t
+                              WHERE t.id = v_invite.tenant_id AND t.status = 'active')
+               OR length(p_api_key_hash) <> 64 OR length(p_session_hash) <> 64
+               OR p_password_hash IS NULL OR length(p_password_hash) < 20 THEN
+                RETURN QUERY SELECT 'invalid'::text, NULL::uuid, NULL::uuid,
+                    NULL::text, NULL::text, NULL::text, NULL::uuid;
+                RETURN;
+            END IF;
+            v_role := coalesce(v_invite.invited_role, 'viewer');
+            IF v_role::text NOT IN ('owner','admin','tenant_administrator',
+                                   'viewer','developer','operator','auditor','approver') THEN
+                RETURN QUERY SELECT 'invalid'::text, NULL::uuid, NULL::uuid,
+                    NULL::text, NULL::text, NULL::text, NULL::uuid;
+                RETURN;
+            END IF;
+            SELECT * INTO v_user FROM public.users u
+             WHERE u.tenant_id = v_invite.tenant_id
+               AND lower(u.email) = lower(v_invite.email) FOR UPDATE;
+            IF FOUND AND v_user.is_active THEN
+                RETURN QUERY SELECT 'invalid'::text, NULL::uuid, NULL::uuid,
+                    NULL::text, NULL::text, NULL::text, NULL::uuid;
+                RETURN;
+            END IF;
+            IF FOUND THEN
+                UPDATE public.users u SET role = v_role,
+                    password_hash = p_password_hash, is_active = true,
+                    mfa_enabled = false, updated_at = now()
+                 WHERE u.id = v_user.id RETURNING * INTO v_user;
+            ELSE
+                INSERT INTO public.users
+                    (id,tenant_id,email,password_hash,role,platform_role,
+                     mfa_enabled,is_active,created_at,updated_at)
+                VALUES (public.gen_random_uuid(),v_invite.tenant_id,
+                    v_invite.email,p_password_hash,v_role,'NONE',false,true,now(),now())
+                RETURNING * INTO v_user;
+            END IF;
+            INSERT INTO public.api_keys
+                (id,tenant_id,key_hash,name,description,scopes,is_active,
+                 expires_at,created_by,created_at,updated_at)
+            VALUES (v_key,v_invite.tenant_id,p_api_key_hash,
+                'Console Access - ' || v_invite.email,
+                'Issued during AuthClaw Lite tenant invite verification',
+                CASE WHEN v_role::text IN ('owner','admin','tenant_administrator')
+                     THEN ARRAY['admin','read','write']::varchar[]
+                     WHEN v_role::text IN ('developer','operator','approver')
+                     THEN ARRAY['read','write']::varchar[]
+                     ELSE ARRAY['read']::varchar[] END,
+                true,now() + interval '90 days',v_user.id,now(),now());
+            PERFORM authn.create_session(p_session_hash,v_invite.tenant_id,
+                v_user.id,'onboarding',now() + interval '24 hours',
+                jsonb_build_object('request_id',p_request_id));
+            UPDATE public.onboarding_email_otps o
+               SET status = 'verified', verified_at = now(), api_key_id = v_key
+             WHERE o.id = v_invite.id;
+            INSERT INTO public.onboarding_status
+                (id,tenant_id,user_id,signup_id,email_verified,tenant_created,
+                 api_key_issued,provider_key_saved,route_created,policy_created,
+                 snippet_viewed,current_step,created_at,updated_at)
+            VALUES (public.gen_random_uuid(),v_invite.tenant_id,v_user.id,
+                v_invite.id,true,true,true,false,true,true,false,
+                'connect_provider',now(),now())
+            ON CONFLICT DO NOTHING;
+            RETURN QUERY SELECT 'completed'::text,v_user.id,v_invite.tenant_id,
+                (SELECT t.name::text FROM public.tenants t WHERE t.id=v_invite.tenant_id),
+                v_user.email::text,v_user.role::text,v_key;
+        END;
+        $invite$;
+    """)
     op.execute(f"GRANT USAGE ON SCHEMA authn TO {app_role}")
     op.execute(
         f"""
@@ -508,6 +610,41 @@ def upgrade() -> None:
         GRANT EXECUTE ON FUNCTION authn.enforce_pending_approval_transition() TO {app_role};
         """
     )
+    # The audit append function must see the whole tenant chain even when the
+    # caller cannot SELECT audit rows. Preserve the separately restricted worker
+    # maintenance entry point before making the public append a definer function.
+    op.execute("""
+        DO $audit$
+        DECLARE append_definition text; cleanup_definition text;
+        BEGIN
+            SELECT pg_get_functiondef(
+                'public.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)'::regprocedure
+            ) INTO append_definition;
+            IF append_definition IS NULL OR position(
+                'FUNCTION public.append_audit_event_v2(' IN append_definition) = 0 THEN
+                RAISE EXCEPTION 'audit append definition is unavailable';
+            END IF;
+            EXECUTE replace(append_definition,
+                'FUNCTION public.append_audit_event_v2(',
+                'FUNCTION worker_maintenance.append_audit_event_v2(');
+            SELECT pg_get_functiondef(
+                'worker_maintenance.expire_tokens(integer)'::regprocedure
+            ) INTO cleanup_definition;
+            IF cleanup_definition IS NULL OR position(
+                'public.append_audit_event_v2(' IN cleanup_definition) = 0 THEN
+                RAISE EXCEPTION 'worker audit append call is unavailable';
+            END IF;
+            EXECUTE replace(cleanup_definition,
+                'public.append_audit_event_v2(',
+                'worker_maintenance.append_audit_event_v2(');
+        END $audit$;
+        ALTER FUNCTION public.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)
+            SECURITY DEFINER;
+        ALTER FUNCTION public.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)
+            SET search_path = pg_catalog, public, pg_temp;
+        REVOKE ALL ON FUNCTION worker_maintenance.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)
+            FROM PUBLIC;
+    """)
 
 
 def downgrade() -> None:

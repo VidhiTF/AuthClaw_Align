@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_tenant_db, get_tenant_score_db, require_permission, require_scopes
@@ -25,6 +26,7 @@ class EvidenceAssessmentResponse(BaseModel):
     as_of: str
     valid_until: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
+    evidence_timestamp: str | None = None
 
 
 class ActivityDiagnosticsResponse(BaseModel):
@@ -39,7 +41,8 @@ class ControlScoreResponse(BaseModel):
     name: str
     description: str
     weight: float
-    score: float
+    score: float | None
+    evidence_timestamp: str | None = None
     status: str
     evidence: list[str]
     activity_diagnostics: ActivityDiagnosticsResponse | None = None
@@ -56,13 +59,16 @@ class ControlScoreResponse(BaseModel):
 
 
 class FrameworkScoreResponse(BaseModel):
+    calculation_version: str
+    evidence_timestamp: str | None
+    missing_control_treatment: str
+    inputs_as_of: str
     framework: str
-    score: float
+    score: float | None
     readiness_level: str
     controls: list[ControlScoreResponse]
     metrics: dict[str, Any]
     generated_at: str
-    calculation_version: str = "legacy_unversioned"
 
 
 class TrustSummaryCountsResponse(BaseModel):
@@ -84,7 +90,7 @@ class TrustSummaryControlResponse(BaseModel):
     framework: str
     id: str
     name: str
-    score: float
+    score: float | None
     status: str
     evidence_assessment: TrustSummaryEvidenceAssessmentResponse | None = None
     gaps: list[str] = Field(default_factory=list)
@@ -100,12 +106,15 @@ class TrustSummaryResponse(BaseModel):
 
 
 class ComplianceScoreResponse(BaseModel):
-    overall_score: float
+    calculation_version: str
+    evidence_timestamp: str | None
+    missing_control_treatment: str
+    inputs_as_of: str
+    overall_score: float | None
     readiness_level: str
     frameworks: list[FrameworkScoreResponse]
     generated_at: str
     trust_summary: TrustSummaryResponse | None = None
-    calculation_version: str = "legacy_unversioned"
 
 
 class AssessmentReviewRequest(BaseModel):
@@ -207,16 +216,22 @@ def review_control_assessment(approval_id: UUID, payload: AssessmentReviewReques
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def require_snapshot_schema(db: Session = Depends(get_tenant_score_db)):
+    # 051 readers can run during expansion, but NULL snapshots require 052.
+    if db.execute(text("SELECT is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'compliance_score_snapshots' AND column_name = 'overall_score'")).scalar() != "YES":
+        raise HTTPException(status_code=503, detail="Snapshot persistence requires database migration 052")
+
+
+@router.post("", response_model=ComplianceScoreResponse, dependencies=[require_scopes(["write"]), Depends(require_snapshot_schema)])
 @router.get("", response_model=ComplianceScoreResponse, dependencies=[require_scopes(["read"])])
 def get_compliance_scores(
     request: Request,
-    persist_snapshot: bool = Query(default=True),
     db: Session = Depends(get_tenant_score_db),
 ):
     return compliance_scoring.score_all_frameworks(
         db,
         str(request.state.tenant_id),
-        persist=persist_snapshot,
+        persist=request.method == "POST",
         include_traceability=True,
     )
 
@@ -238,16 +253,16 @@ def get_compliance_score_history(
     }
 
 
+@router.post("/{framework}", response_model=FrameworkScoreResponse, dependencies=[require_scopes(["write"]), Depends(require_snapshot_schema)])
 @router.get("/{framework}", response_model=FrameworkScoreResponse, dependencies=[require_scopes(["read"])])
 def get_framework_score(
     framework: str,
     request: Request,
-    persist_snapshot: bool = Query(default=True),
     db: Session = Depends(get_tenant_score_db),
 ):
     try:
         score = compliance_scoring.score_framework(db, str(request.state.tenant_id), framework)
-        if persist_snapshot:
+        if request.method == "POST":
             compliance_scoring.upsert_score_snapshot(db, str(request.state.tenant_id), score)
         return score
     except ValueError as exc:

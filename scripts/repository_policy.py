@@ -161,7 +161,7 @@ def api(path, paginate=False, **fields):
         args += ["-f", f"{name}={value}"]
     if paginate:
         args += ["--paginate", "--slurp"]
-    result = json.loads(subprocess.check_output(args, text=True))
+    result = json.loads(subprocess.check_output(args, text=True, encoding="utf-8"))
     return [item for page in result for item in page] if paginate else result
 
 

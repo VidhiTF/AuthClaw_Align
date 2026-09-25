@@ -1,3 +1,4 @@
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -53,7 +54,11 @@ def test_simulation_route_returns_client_error_for_input_budget(prompts):
 def test_chat_uses_workflow_throttle_and_propagates_429(monkeypatch, message):
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
-        tier="starter", execution_status="COMPLETED", remediation_plan=[{"action": "redact"}],
+        title="Test",
+        tier="starter",
+        execution_status="COMPLETED",
+        remediation_plan=[{"action": "redact"}],
+        state_data={"requester_id": str(uuid4())},
     )
     request = SimpleNamespace(state=SimpleNamespace(tenant_id=uuid4(), user_id=uuid4()))
     calls = []
@@ -120,3 +125,6 @@ def test_chat_success_retains_results_and_history(chat_case, monkeypatch):
     assert response["results"] == payload and "Unable" not in response["text"]
     assert db.add.call_args.args[0].text == response["text"]
     assert db.add.call_args.args[0].results == payload
+    saved = [call.args[0] for call in db.add.call_args_list]
+    assert [message.sender for message in saved] == ["user", "agent"]
+    assert all(message.timestamp.utcoffset() == timedelta(0) for message in saved)
