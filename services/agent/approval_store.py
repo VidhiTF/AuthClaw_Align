@@ -166,7 +166,7 @@ def _persist_record(record: dict, connection=None) -> None:
                 text(
                     """
                     INSERT INTO gateway_approvals (
-                        approval_id, request_id, correlation_id, tenant_id, status,
+                        approval_id, request_id, requester_id, correlation_id, tenant_id, status,
                         requested_by,
                         created_at, expires_at, approved_at, rejected_at, executed_at,
                         requested_action, query, risk_level, audit_id, reason, comments,
@@ -177,7 +177,7 @@ def _persist_record(record: dict, connection=None) -> None:
                         execution_token_hash, execution_token_used_at, execution_expires_at
                     )
                     VALUES (
-                        :approval_id, :request_id, :correlation_id, :tenant_id, :status,
+                        :approval_id, :request_id, :requester_id, :correlation_id, :tenant_id, :status,
                         :requested_by,
                         :created_at, :expires_at, :approved_at, :rejected_at, :executed_at,
                         :requested_action, :query, :risk_level, :audit_id, :reason, :comments,
@@ -189,6 +189,7 @@ def _persist_record(record: dict, connection=None) -> None:
                     )
                     ON CONFLICT (approval_id) DO UPDATE SET
                         request_id = EXCLUDED.request_id,
+                        requester_id = EXCLUDED.requester_id,
                         correlation_id = EXCLUDED.correlation_id,
                         tenant_id = EXCLUDED.tenant_id,
                         status = EXCLUDED.status,
@@ -222,6 +223,7 @@ def _persist_record(record: dict, connection=None) -> None:
                 {
                     "approval_id": record.get("approval_id"),
                     "request_id": record.get("request_id"),
+                    "requester_id": record.get("requester_id"),
                     "correlation_id": record.get("correlation_id"),
                     "tenant_id": record.get("tenant_id"),
                     "status": record.get("status"),
@@ -281,6 +283,7 @@ def _row_to_record(row) -> PersistentApprovalRecord:
         {
             "approval_id": mapping.get("approval_id"),
             "request_id": mapping.get("request_id"),
+            "requester_id": mapping.get("requester_id"),
             "correlation_id": mapping.get("correlation_id"),
             "tenant_id": mapping.get("tenant_id"),
             "status": mapping.get("status"),
@@ -362,6 +365,7 @@ def create_approval(
     session_id: str = "",
     tenant_id: int = None,
     request_id: str = None,
+    requester_id: str = None,
     reason: str = None,
     metadata: dict = None,
     requested_by: str = None,
@@ -370,7 +374,9 @@ def create_approval(
     Creates a new approval record, stores it, and returns it.
     Emits an approval_created audit event.
     """
-    requester_id = str(requested_by or "").strip()
+    if requester_id and requested_by and str(requester_id).strip() != str(requested_by).strip():
+        raise ApprovalCreationError("Conflicting approval requester identities.")
+    requester_id = str(requested_by or requester_id or "").strip()
     request_context = str(request_id or "").strip()
     if not requester_id:
         raise ApprovalCreationError("Approval requester identity is required.")
@@ -391,6 +397,7 @@ def create_approval(
     record = PersistentApprovalRecord({
         "approval_id":       approval_id,
         "request_id":        request_id,
+        "requester_id":      requester_id,
         "correlation_id":    correlation_id,
         "tenant_id":         tenant_id,
         "status":            "pending",
@@ -961,7 +968,8 @@ def begin_approval_execution_atomic(
                     WHERE approval_id = :approval_id
                       AND tenant_id = :tenant_id
                       AND status = 'approved'
-                      AND approved_by = :actor
+                      AND approved_by IS NOT NULL
+                      AND approved_by <> :actor
                       AND execution_token_used_at IS NULL
                       AND expires_at > :transition_at
                       AND execution_expires_at > :transition_at

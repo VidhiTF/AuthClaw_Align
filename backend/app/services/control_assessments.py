@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.authorization import normalize_role
 from app.core.compliance_policy import calculation_version
 from app.core.evidence_integrity import (
     INTEGRITY_ALGORITHM, INTEGRITY_VERSION, compute_evidence_integrity_hash,
@@ -103,8 +104,8 @@ def _hash(tenant_id, requester_id, payload: dict) -> str:
 
 def _principal(db: Session, tenant_id: uuid.UUID, user_id: uuid.UUID) -> User:
     user = db.query(User).filter(User.id == user_id, User.tenant_id == tenant_id).populate_existing().with_for_update().first()
-    if not user or not user.is_active or user.role not in {"owner", "admin"}:
-        raise ValueError("An active tenant owner or administrator is required")
+    if not user or not user.is_active or normalize_role(user.role) != "tenant_administrator":
+        raise ValueError("An active tenant administrator is required")
     return user
 
 
@@ -112,11 +113,18 @@ def lock_review_principals(db: Session, tenant_id, requester_id, reviewer_id) ->
     tid, requester, reviewer = (uuid.UUID(str(value)) for value in (tenant_id, requester_id, reviewer_id))
     if requester == reviewer:
         raise ValueError("The requester cannot review their own assessment")
-    # Lock both actors before consuming MFA so cross-over reviews use one order.
-    users = db.query(User).filter(User.tenant_id == tid, User.id.in_((requester, reviewer))).order_by(
-        User.id).populate_existing().with_for_update().all()
-    if len(users) != 2 or any(not user.is_active or user.role not in {"owner", "admin"} for user in users):
-        raise ValueError("An active tenant owner or administrator is required")
+    # The approver can lock their own row, but RLS deliberately denies locking
+    # the administrator requester's row. The approval row is locked separately.
+    requester_user = db.query(User).filter(User.tenant_id == tid, User.id == requester).populate_existing().first()
+    reviewer_user = db.query(User).filter(User.tenant_id == tid, User.id == reviewer).populate_existing().with_for_update().first()
+    users = [user for user in (requester_user, reviewer_user) if user is not None]
+    if len(users) != 2 or any(
+        not user.is_active or normalize_role(user.role) != (
+            "approver" if user.id == reviewer else "tenant_administrator"
+        )
+        for user in users
+    ):
+        raise ValueError("An active tenant administrator requester and approver reviewer are required")
     return next(user for user in users if user.id == reviewer)
 
 

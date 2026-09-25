@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_tenant_db, get_tenant_score_db, require_roles, require_scopes
+from app.core.auth import get_tenant_db, get_tenant_score_db, require_permission, require_scopes
 from app.db.models import PendingApproval, User
 from app.services import compliance_scoring, control_assessments
 
@@ -154,13 +154,13 @@ def _assessment_actor(db: Session, request: Request) -> User:
         raise HTTPException(status_code=403, detail="An authenticated tenant user session is required")
     user = db.query(User).filter(User.id == user_id, User.tenant_id == request.state.tenant_id,
                                  User.is_active == True).first()
-    if not user or user.role not in {"owner", "admin"}:
-        raise HTTPException(status_code=403, detail="Tenant owner or administrator required")
+    if not user:
+        raise HTTPException(status_code=403, detail="Authenticated tenant user required")
     return user
 
 
 @router.post("/assessments", response_model=AssessmentApprovalResponse, status_code=201,
-             dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
+             dependencies=[require_permission("tenant.users.manage"), require_scopes(["write"])])
 def propose_control_assessment(payload: control_assessments.AssessmentProposal, request: Request,
                                db: Session = Depends(get_tenant_db)):
     actor = _assessment_actor(db, request)
@@ -175,7 +175,7 @@ def propose_control_assessment(payload: control_assessments.AssessmentProposal, 
 
 
 @router.get("/assessments/{approval_id}", response_model=AssessmentApprovalResponse,
-            dependencies=[require_roles(["owner", "admin"]), require_scopes(["read"])])
+            dependencies=[require_permission("tenant.audit.read"), require_scopes(["read"])])
 def get_control_assessment(approval_id: UUID, request: Request, db: Session = Depends(get_tenant_db)):
     _assessment_actor(db, request)
     approval = db.query(PendingApproval).filter(PendingApproval.id == approval_id,
@@ -187,7 +187,7 @@ def get_control_assessment(approval_id: UUID, request: Request, db: Session = De
 
 
 @router.post("/assessments/{approval_id}/review", response_model=AssessmentDecisionResponse,
-             dependencies=[require_roles(["owner", "admin"]), require_scopes(["write"])])
+             dependencies=[require_permission("tenant.high_risk.approve"), require_scopes(["write"])])
 def review_control_assessment(approval_id: UUID, payload: AssessmentReviewRequest, request: Request,
                               db: Session = Depends(get_tenant_db)):
     from app.api.v1.endpoints.workflows import _verify_mfa_if_enabled

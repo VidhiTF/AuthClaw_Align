@@ -39,8 +39,7 @@ def api(monkeypatch):
     engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
     for model in (Tenant, User, PendingApproval, ComplianceWorkflow, ApprovalAudit, Policy, EvidenceRecord, Finding):
         model.__table__.create(engine)
-    tenant, user = uuid4(), uuid4()
-    reviewer_id = uuid4()
+    tenant, user, approver = uuid4(), uuid4(), uuid4()
     payload = workflow(
         findings=[{"control": "doc", "evidence": "Entities: EMAIL_ADDRESS", "entity_count": 1}],
         remediation_plan=_plan(),
@@ -52,11 +51,10 @@ def api(monkeypatch):
     payload["requester_id"] = str(user)
     with Session(engine) as db:
         db.add(Tenant(id=tenant, name="contract-test"))
-        db.add(
-            User(id=user, tenant_id=tenant, email="reviewer@example.invalid", role="admin", is_active=True)
-        )
-        db.add(User(id=reviewer_id, tenant_id=tenant, email="separate-reviewer@example.invalid",
-                    role="admin", is_active=True))
+        db.add_all([
+            User(id=user, tenant_id=tenant, email="requester@example.invalid", role="operator", is_active=True),
+            User(id=approver, tenant_id=tenant, email="approver@example.invalid", role="approver", is_active=True),
+        ])
         db.add(
             ComplianceWorkflow(
                 id=uuid4(),
@@ -75,8 +73,8 @@ def api(monkeypatch):
     identity = dict(
         tenant_id=tenant,
         user_id=user,
-        user_role="admin",
-        scopes=["admin"],
+        user_role="operator",
+        scopes=["read", "write"],
         credential_kind="session",
         credential_hash="workflow-response-session",
     )
@@ -102,7 +100,7 @@ def api(monkeypatch):
     monkeypatch.setattr(
         workflows,
         "revalidate_tenant_credential",
-        lambda *_args: SimpleNamespace(role="admin", scopes=["admin"]),
+        lambda *_args: SimpleNamespace(role=identity["user_role"], scopes=identity["scopes"]),
     )
     monkeypatch.setattr(
         workflows, "_verify_mfa_if_enabled", lambda *_args, **_kw: (True, datetime.now(timezone.utc))
@@ -110,8 +108,7 @@ def api(monkeypatch):
     monkeypatch.setattr(runner, "emit_audit_event", lambda *_args, **_kw: None)
     monkeypatch.setattr(runner, "workflow_advisory_lock", lambda *_args: nullcontext())
     with TestClient(app, raise_server_exceptions=False) as client:
-        yield SimpleNamespace(client=client, engine=engine, identity=identity, payload=payload,
-                              reviewer_id=reviewer_id)
+        yield SimpleNamespace(client=client, engine=engine, identity=identity, approver=approver, payload=payload)
     engine.dispose()
 
 
@@ -136,7 +133,7 @@ def test_route_contract_and_sanitized_post_commit_errors(
 ):
     if operation in {"approve", "reject"}:
         assert request_operation(api, prefix, "remediate").status_code == 200
-        api.identity["user_id"] = api.reviewer_id
+        api.identity.update(user_id=api.approver, user_role="approver", scopes=["read", "write"])
     payload = deepcopy(api.payload)
     if invalid:
         payload["findings"] = [{"entity_count": "private-marker"}]
@@ -156,7 +153,7 @@ def test_route_contract_and_sanitized_post_commit_errors(
     else:
         assert response.status_code == (201 if operation == "create" else 200), response.text
         result = response.json()[0] if operation == "list" else response.json()
-        if operation in {"create", "resume", "approve", "reject"}:
+        if operation in {"create", "resume"}:
             expected = payload
         else:
             with Session(api.engine) as db:
@@ -165,7 +162,7 @@ def test_route_contract_and_sanitized_post_commit_errors(
                 )
         for field in FIELDS:
             assert result[field] == expected[field]
-    if operation in {"create", "resume", "approve", "reject"}:
+    if operation in {"create", "resume"}:
         assert execution.call_count == 1  # Serialization must never retry execution.
     if operation in {"approve", "reject", "remediate"}:
         with Session(api.engine) as db:
@@ -241,6 +238,8 @@ def test_missing_scope_is_denied_before_execution(api, operation):
 @pytest.mark.parametrize("operation", ["list", "get", "resume", "approve", "reject", "remediate"])
 def test_other_tenant_cannot_read_or_change_workflow(api, operation):
     api.identity["tenant_id"] = uuid4()
+    if operation in {"approve", "reject"}:
+        api.identity.update(user_id=api.approver, user_role="approver", scopes=["read", "write"])
     response = request_operation(api, "/v1", operation)
     assert response.status_code == (200 if operation == "list" else 404), response.text
     if operation == "list":
@@ -252,7 +251,7 @@ def test_other_tenant_cannot_read_or_change_workflow(api, operation):
 
 def test_fresh_mfa_denial_still_precedes_approval(api, monkeypatch):
     assert request_operation(api, "/v1", "remediate").status_code == 200
-    api.identity["user_id"] = api.reviewer_id
+    api.identity.update(user_id=api.approver, user_role="approver", scopes=["read", "write"])
     monkeypatch.setattr(workflows, "_verify_mfa_if_enabled", lambda *_args, **_kw: (False, None))
     assert request_operation(api, "/v1", "approve").status_code == 403
     with Session(api.engine) as db:

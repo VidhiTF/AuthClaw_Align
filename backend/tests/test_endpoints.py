@@ -166,12 +166,28 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     ).decode("ascii"))
     metrics_before = event_backbone.metrics_snapshot()
     tenant_a_id, tenant_b_id = uuid4(), uuid4()
-    owner_a_id, viewer_a_id, owner_b_id = uuid4(), uuid4(), uuid4()
-    owner_a_key, viewer_a_key, owner_b_key = "dsr-owner-a", "dsr-viewer-a", "dsr-owner-b"
+    owner_a_id, viewer_a_id, approver_a_id, operator_a_id, verifier_a_id, owner_b_id = (
+        uuid4(), uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    )
+    owner_a_key, viewer_a_key = "dsr-owner-a", "dsr-viewer-a"
+    approver_a_key, operator_a_key, verifier_a_key = (
+        "dsr-approver-a", "dsr-operator-a", "dsr-verifier-a"
+    )
+    owner_b_key = "dsr-owner-b"
 
     for tenant_id, name, users in (
-        (tenant_a_id, "DSR Tenant A", [(owner_a_id, "owner-a@dsr.test", "owner"), (viewer_a_id, "viewer-a@dsr.test", "viewer")]),
-        (tenant_b_id, "DSR Tenant B", [(owner_b_id, "owner-b@dsr.test", "owner")]),
+        (
+            tenant_a_id,
+            "DSR Tenant A",
+            [
+                (owner_a_id, "owner-a@dsr.test", "tenant_administrator"),
+                (viewer_a_id, "viewer-a@dsr.test", "viewer"),
+                (approver_a_id, "approver-a@dsr.test", "approver"),
+                (operator_a_id, "operator-a@dsr.test", "operator"),
+                (verifier_a_id, "verifier-a@dsr.test", "tenant_administrator"),
+            ],
+        ),
+        (tenant_b_id, "DSR Tenant B", [(owner_b_id, "owner-b@dsr.test", "tenant_administrator")]),
     ):
         db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
         db_session.add(Tenant(id=tenant_id, name=name, tier="enterprise", status="active"))
@@ -183,6 +199,9 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     for tenant_id, user_id, key, scopes in (
         (tenant_a_id, owner_a_id, owner_a_key, ["admin", "read", "write"]),
         (tenant_a_id, viewer_a_id, viewer_a_key, ["read"]),
+        (tenant_a_id, approver_a_id, approver_a_key, ["read", "write"]),
+        (tenant_a_id, operator_a_id, operator_a_key, ["read", "write"]),
+        (tenant_a_id, verifier_a_id, verifier_a_key, ["read", "write"]),
         (tenant_b_id, owner_b_id, owner_b_key, ["admin", "read", "write"]),
     ):
         db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
@@ -215,6 +234,9 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         "scope": {"systems": ["console"]},
     }
     owner_a_headers = {"Authorization": f"Bearer {owner_a_key}"}
+    approver_a_headers = {"Authorization": f"Bearer {approver_a_key}"}
+    operator_a_headers = {"Authorization": f"Bearer {operator_a_key}"}
+    verifier_a_headers = {"Authorization": f"Bearer {verifier_a_key}"}
 
     denied = client.post(
         "/v1/data-subject-requests",
@@ -244,7 +266,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     verified = client.post(
         f"/v1/data-subject-requests/{request_id}/verify",
         json={"identity_verified": True},
-        headers=owner_a_headers,
+        headers=verifier_a_headers,
     )
     assert verified.status_code == status.HTTP_200_OK
     assert verified.json()["status"] == "VERIFIED"
@@ -253,16 +275,16 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     approved = client.post(
         f"/v1/data-subject-requests/{request_id}/approve",
         json={"decision_reason": "Identity and scope confirmed"},
-        headers=owner_a_headers,
+        headers=approver_a_headers,
     )
-    assert approved.status_code == status.HTTP_200_OK
+    assert approved.status_code == status.HTTP_200_OK, approved.json()
     assert approved.json()["status"] == "COMPLETED"
     assert approved.json()["completed_at"]
     assert published_tenants[publication_count:] == [(producer, str(tenant_a_id))]
 
     invalid_state = client.post(
         f"/v1/data-subject-requests/{request_id}/export",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert invalid_state.status_code == status.HTTP_409_CONFLICT
 
@@ -275,12 +297,12 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     client.post(
         f"/v1/data-subject-requests/{second_id}/verify",
         json={"identity_verified": True},
-        headers=owner_a_headers,
+        headers=verifier_a_headers,
     )
     rejected = client.post(
         f"/v1/data-subject-requests/{second_id}/reject",
         json={"decision_reason": "Identity confirmed; request rejected"},
-        headers=owner_a_headers,
+        headers=approver_a_headers,
     )
     assert rejected.status_code == status.HTTP_200_OK
     assert rejected.json()["status"] == "REJECTED"
@@ -295,12 +317,12 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         assert client.post(
             f"/v1/data-subject-requests/{export_request_id}/verify",
             json={"identity_verified": True},
-            headers=owner_a_headers,
+            headers=verifier_a_headers,
         ).status_code == status.HTTP_200_OK
         assert client.post(
             f"/v1/data-subject-requests/{export_request_id}/approve",
             json={"decision_reason": "Approved subject access export"},
-            headers=owner_a_headers,
+            headers=approver_a_headers,
         ).status_code == status.HTTP_200_OK
         return export_request_id
 
@@ -318,7 +340,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
 
     exported = client.post(
         f"/v1/data-subject-requests/{export_request_id}/export",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert exported.status_code == status.HTTP_200_OK
     artifact = exported.json()
@@ -340,14 +362,14 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
 
     completed = client.post(
         f"/v1/data-subject-requests/{export_request_id}/export",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert completed.status_code == status.HTTP_409_CONFLICT
 
     empty_request_id = approved_request("external-subject-with-no-records", "EXPORT")
     empty_export = client.post(
         f"/v1/data-subject-requests/{empty_request_id}/export",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert empty_export.status_code == status.HTTP_200_OK
     assert empty_export.json()["manifest"]["record_counts"] == {
@@ -383,7 +405,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     publication_count = len(published_tenants)
     deleted = client.post(
         f"/v1/data-subject-requests/{deletion_request_id}/delete",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert deleted.status_code == status.HTTP_200_OK
     deletion_result = deleted.json()
@@ -402,7 +424,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
 
     repeated = client.post(
         f"/v1/data-subject-requests/{deletion_request_id}/delete",
-        headers=owner_a_headers,
+        headers=operator_a_headers,
     )
     assert repeated.status_code == status.HTTP_200_OK
     assert repeated.json()["deleted_items"] == {}
@@ -463,7 +485,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
     with pytest.raises(RuntimeError, match="failure"):
         client.post(
             f"/v1/data-subject-requests/{rollback_request_id}/delete",
-            headers=owner_a_headers,
+            headers=operator_a_headers,
         )
     assert len(published_tenants) == publication_count
     db_session.expire_all()
@@ -858,9 +880,10 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     # -------------------------------------------------------------------------
     # 4. Cross-Tenant GET Isolation Check
     # -------------------------------------------------------------------------
-    # Tenant B tries to retrieve Tenant A's config -> 404 Not Found (enforced by RLS)
+    # Tenant B's operator has no connector-management permission, so the API
+    # rejects the request before evaluating the cross-tenant row.
     response = client.get(f"/v1/gateways/{gw_id}/config", headers=headers_b)
-    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.status_code == status.HTTP_403_FORBIDDEN
 
     # Tenant A retrieves its own config -> 200 OK
     response = client.get(f"/v1/gateways/{gw_id}/config", headers=headers_admin)
@@ -962,10 +985,10 @@ def test_tenant_creation_and_isolation(client: TestClient, db_session: Session):
     db_session.commit()
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
-    # Retrieve audit logs as Tenant B (isolated - returns empty list)
+    # Operators lack audit-read permission; authorization denies before row
+    # isolation is evaluated.
     response = client.get("/v1/audit-logs", headers=headers_b)
-    assert response.status_code == status.HTTP_200_OK
-    assert len(response.json()["records"]) == 0
+    assert response.status_code == status.HTTP_403_FORBIDDEN
 
     # Retrieve audit logs as Tenant A (returns Tenant A's logs)
     response = client.get("/v1/audit-logs", headers=headers_admin)
@@ -980,6 +1003,8 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     # 1. Setup Tenant C and Admin/User
     tenant_id = uuid4()
     user_id = uuid4()
+    approver_id, executor_id = uuid4(), uuid4()
+    approver_key_raw, executor_key_raw = "approver_key_tenant_c", "executor_key_tenant_c"
     api_key_raw = "system_admin_key_tenant_c"
     api_key_hash = hash_key(api_key_raw)
 
@@ -992,11 +1017,10 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
     user = User(id=user_id, tenant_id=tenant_id, email="admin@tenantC.com", role="admin", is_active=True)
     db_session.add(user)
-    approver_id = uuid4()
-    db_session.add(User(
-        id=approver_id, tenant_id=tenant_id, email="approver@tenantC.com",
-        role="admin", is_active=True,
-    ))
+    db_session.add(User(id=approver_id, tenant_id=tenant_id, email="approver@tenantC.com",
+        role="approver", is_active=True))
+    db_session.add(User(id=executor_id, tenant_id=tenant_id, email="operator@tenantC.com",
+        role="operator", is_active=True))
     db_session.commit()
 
     api_key = APIKey(
@@ -1009,17 +1033,18 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         created_by=user_id
     )
     db_session.add(api_key)
-    approver_api_key_raw = "separate_approver_key_tenant_c"
-    db_session.add(APIKey(
-        id=uuid4(), tenant_id=tenant_id, key_hash=hash_key(approver_api_key_raw),
-        name="Separate Approver Key C", scopes=["admin", "read", "write"],
-        is_active=True, created_by=approver_id,
-    ))
+    db_session.add(APIKey(id=uuid4(), tenant_id=tenant_id, key_hash=hash_key(executor_key_raw),
+        name="Executor Key C", scopes=["read", "write"], is_active=True, created_by=executor_id))
     db_session.commit()
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
     headers = {"Authorization": f"Bearer {api_key_raw}"}
-    approver_headers = {"Authorization": f"Bearer {approver_api_key_raw}"}
+    executor_session = "acl_session_" + uuid4().hex
+    db_session.execute(text("""SELECT authn.create_session(
+        :hash, :tenant, :user, 'workflow-test', now()+interval '10 minutes', '{}'::jsonb)"""),
+        {"hash": hash_key(executor_session), "tenant": tenant_id, "user": executor_id})
+    db_session.commit()
+    executor_headers = {"Authorization": f"Bearer {executor_session}"}
 
     # 2. Create compliance workflow (scan executes to completion)
     from unittest.mock import patch, MagicMock
@@ -1082,7 +1107,8 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     assert db_app.approver_id is None
     db_session.execute(text("SET app.current_tenant_id = ''"))
 
-    legacy_setup = client.post("/v1/workflows/mfa/setup", headers=approver_headers)
+    assert client.post(f"/v1/workflows/{workflow_id}/approve", headers=headers).status_code == 403
+    legacy_setup = client.post("/v1/workflows/mfa/setup", headers=headers)
     assert legacy_setup.status_code == status.HTTP_410_GONE
     session_token = "acl_session_" + uuid4().hex
     db_session.execute(text("""SELECT authn.create_session(
@@ -1090,6 +1116,7 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         {"hash": hash_key(session_token), "tenant": tenant_id, "user": approver_id})
     db_session.commit()
     mfa_headers = {"Authorization": f"Bearer {session_token}"}
+    approver_headers = mfa_headers
     mfa_setup = client.post("/v1/users/me/mfa/setup", headers=mfa_headers)
     assert mfa_setup.status_code == status.HTTP_200_OK
     backup_code = mfa_setup.json()["backup_codes"][0]
@@ -1099,9 +1126,21 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
         json={"code": pyotp.TOTP(mfa_setup.json()["mfa_secret"]).now()},
     )
     assert mfa_confirm.status_code == status.HTTP_200_OK
+    executor_mfa_setup = client.post("/v1/users/me/mfa/setup", headers=executor_headers)
+    assert executor_mfa_setup.status_code == status.HTTP_200_OK
+    executor_backup_code = executor_mfa_setup.json()["backup_codes"][0]
+    executor_confirm = client.post(
+        "/v1/users/me/mfa/confirm",
+        headers=executor_headers,
+        json={"code": pyotp.TOTP(executor_mfa_setup.json()["mfa_secret"]).now()},
+    )
+    assert executor_confirm.status_code == status.HTTP_200_OK
 
-    # 3. Approve workflow
-    with patch("app.orchestrator.connectors.DocumentScanner.execute_remediation") as mock_execute:
+    # 3. A distinct approver records the decision; only an operator executes it.
+    from app.core.auth import verify_mfa_code
+    with patch("app.api.v1.endpoints.workflows.verify_mfa_challenge",
+               side_effect=lambda _redis, user, code, **_kwargs: verify_mfa_code(user, code)), \
+         patch("app.orchestrator.connectors.DocumentScanner.execute_remediation") as mock_execute:
         mock_execute.return_value = {
             "connector": "aws_s3",
             "control": "test-doc.txt",
@@ -1116,13 +1155,20 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
             headers=mfa_headers,
             json={"totp_code": backup_code},
         )
-    assert response_approve.status_code == status.HTTP_200_OK
+        assert response_approve.status_code == status.HTTP_200_OK, response_approve.json()
+        assert mock_execute.call_count == 0
+        assert client.post(f"/v1/workflows/{workflow_id}/resume", headers=approver_headers).status_code == 403
+        response_resume = client.post(
+            f"/v1/workflows/{workflow_id}/resume", headers=executor_headers,
+            json={"totp_code": executor_backup_code})
+    assert response_resume.status_code == status.HTTP_200_OK, response_resume.json()
     wf_approved_data = response_approve.json()
 
     # Expected outcomes
-    assert wf_approved_data["current_state"] == "COMPLETE", wf_approved_data
-    assert wf_approved_data["execution_status"] == "COMPLETED"
+    assert wf_approved_data["current_state"] == "AWAITING_APPROVAL"
+    assert wf_approved_data["execution_status"] == "PAUSED"
     assert wf_approved_data["approval_status"] == "APPROVED"
+    assert response_resume.json()["execution_status"] == "COMPLETED"
 
     # Verify db states
     db_session.rollback()
@@ -1142,5 +1188,5 @@ def test_workflow_approval_integration(client: TestClient, db_session: Session):
     assert db_app_final.approved_at is not None
     assert db_app_final.approver_id == approver_id
     assert db_app_final.consumed_at is not None
-    assert db_app_final.consumed_by_id == approver_id
+    assert db_app_final.consumed_by_id == executor_id
     db_session.execute(text("SET app.current_tenant_id = ''"))

@@ -152,6 +152,8 @@ def _create_approval_in_db(
     workflow_id: str,
     plan: list,
     requester_id: str,
+    *,
+    commit: bool = True,
 ) -> str:
     """Create and link one remediation approval in the workflow transaction."""
     if not str(requester_id or "").strip():
@@ -187,7 +189,8 @@ def _create_approval_in_db(
         workflow.approval_status = existing.status
         workflow.state_data = state_data
         workflow.updated_at = datetime.now(tz=timezone.utc)
-        db.commit()
+        if commit:
+            db.commit()
         return str(existing.id)
 
     approval_id = str(uuid.uuid4())
@@ -223,7 +226,8 @@ def _create_approval_in_db(
     workflow.approval_id = approval.id
     workflow.state_data = state_data
     workflow.updated_at = datetime.now(tz=timezone.utc)
-    db.commit()
+    if commit:
+        db.commit()
 
     logger.info("Created approval %s for workflow %s", approval_id, workflow_id)
     return approval_id
@@ -348,6 +352,10 @@ def _check_approval_in_db(
     if not approval:
         return "EXPIRED"
 
+    # A rejected decision is terminal; no second approval-row UPDATE is needed.
+    if approval.status == "REJECTED" and approval.action_id == workflow_id:
+        return "REJECTED"
+
     now = datetime.now(tz=timezone.utc)
     plan = (approval.action_payload or {}).get("plan") or []
     destructive = any(bool(item.get("destructive")) for item in plan if isinstance(item, dict))
@@ -448,8 +456,8 @@ class ComplianceWorkflowRunner:
         initial_state: ComplianceState = {
             "workflow_id": workflow_id,
             "tenant_id": tenant_id,
-            "request_id": request_id or "",
             "requester_id": requester_id,
+            "request_id": request_id or "",
             "framework": framework,
             "current_state": WorkflowState.GATHER_EVIDENCE.value,
             "findings": [],
@@ -554,6 +562,10 @@ class ComplianceWorkflowRunner:
                 ).with_for_update().first()
                 if authorization_check:
                     authorization_check()
+                if approval is None:
+                    raise WorkflowResumeConflict(
+                        "Workflow approval is unavailable or actor is not authorized"
+                    )
                 if approval and approval.status in {"APPROVED", "CONSUMED"}:
                     if approval.action_type != "remediation" or approval.action_id != workflow_id:
                         reason = "Approval is bound to another workflow"
@@ -563,8 +575,8 @@ class ComplianceWorkflowRunner:
                         )
                         self.db.commit()
                         raise WorkflowResumeConflict(reason)
-                    if not approval.approver_id or str(approval.approver_id) != str(actor_id):
-                        reason = "Approved workflow may only be resumed by its recorded approver"
+                    if not approval.approver_id or str(approval.approver_id) == str(actor_id):
+                        reason = "Approval decision and workflow execution require distinct actors"
                         _record_approval_audit(
                             self.db, approval, actor_uuid,
                             "RESUME_AUTHORIZATION_REJECTED", reason,

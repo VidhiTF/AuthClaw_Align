@@ -24,14 +24,16 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
         self.assertEqual(rule.permission, "agent:execute")
         self.assertTrue(role_allowed("owner", "POST", self.path))
         self.assertTrue(role_allowed("Super Admin", "POST", self.path))
+        self.assertTrue(role_allowed("tenant_administrator", "GET", "/access-control/users"))
+        self.assertFalse(role_allowed("viewer", "GET", "/access-control/users"))
 
     def test_operations_use_least_privilege(self):
         expectations = {
             "owner": (True, True, True),
             "admin": (True, True, True),
-            "compliance_officer": (True, True, True),
-            "developer": (True, False, False),
-            "operator": (True, False, False),
+            "compliance_officer": (True, False, False),
+            "developer": (True, True, True),
+            "operator": (True, True, True),
             "viewer": (True, False, False),
             "auditor": (True, False, False),
         }
@@ -55,7 +57,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
         )
         self.assertEqual(identity.tenant_id, 42)
         self.assertEqual(identity.user_id, "user-17")
-        self.assertEqual(identity.role, "admin")
+        self.assertEqual(identity.role, "tenant_administrator")
 
     def test_missing_identity_and_denied_operation_fail_closed(self):
         with self.assertRaises(ValueError):
@@ -180,14 +182,16 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             headers={"X-API-Key": raw_key},
             state=SimpleNamespace(verified_service_principal=None),
         )
-        with patch.object(main, "resolve_tenant", return_value=42):
+        with patch.object(main, "resolve_api_key_principal", return_value={
+            "tenant_id": 42, "role": "tenant_administrator", "sub": expected,
+        }):
             self.assertEqual(main._tenant_id_from_request_headers(request), 42)
 
         principal = main.optional_user_from_request(request)
         self.assertEqual(principal["tenant_id"], 42)
-        self.assertEqual(principal["role"], "owner")
+        self.assertEqual(principal["role"], "tenant_administrator")
         self.assertEqual(main.approval_actor_from_payload(principal), expected)
-        self.assertEqual(request.state.quota_user_id, "service:tenant")
+        self.assertEqual(request.state.quota_user_id, expected)
         self.assertTrue(principal["sub"].startswith("api-key:"))
         self.assertNotIn(raw_key, principal["sub"])
 
@@ -740,7 +744,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
         ):
             approval_store.begin_approval_execution_atomic(
                 dict(shared),
-                actor="oidc|checker",
+                actor="oidc|executor",
                 transition_at=approval_store.datetime.now(approval_store.timezone.utc),
                 execution_token_hash="token-hash",
                 execution_operation_id="operation-17",
@@ -768,7 +772,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
                     "status": "executing",
                     "requested_by": "oidc|requester",
                     "approved_by": "oidc|checker",
-                    "executed_by": "oidc|checker",
+                    "executed_by": "oidc|executor",
                     "execution_token_hash": "token-hash",
                     "execution_token_used_at": "2026-01-01T00:05:00+00:00",
                     "created_at": "2026-01-01T00:00:00+00:00",
@@ -1130,7 +1134,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
                 patch("database.engine", Engine()),
                 patch.object(main, "get_approval", return_value=dict(base)),
                 patch.object(main, "_approval_authenticated_payload", return_value={
-                    "sub": "oidc|checker", "tenant_id": 42,
+                    "sub": "oidc|executor", "tenant_id": 42,
                 }),
                 patch.object(main, "parse_approval_action_payload", AsyncMock(return_value={
                     "_body_present": True, "mfa_code": "redacted",
@@ -1513,7 +1517,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
             patch("database.engine", Engine()),
             patch.object(main, "get_approval", return_value=record),
             patch.object(main, "_approval_authenticated_payload", return_value={
-                "sub": "oidc|checker", "tenant_id": 42,
+                "sub": "oidc|executor", "tenant_id": 42,
             }),
             patch.object(main, "parse_approval_action_payload", AsyncMock(return_value={
                 "_body_present": True, "mfa_code": "redacted",
@@ -1606,7 +1610,7 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
                 patch("database.engine", Engine()),
                 patch.object(main, "get_approval", return_value=dict(base)),
                 patch.object(main, "_approval_authenticated_payload", return_value={
-                    "sub": "oidc|checker", "tenant_id": 42,
+                    "sub": "oidc|executor", "tenant_id": 42,
                 }),
                 patch.object(main, "parse_approval_action_payload", AsyncMock(return_value={
                     "_body_present": True, "mfa_code": "redacted",
@@ -1866,7 +1870,10 @@ class AgentExecutionAuthorizationTests(unittest.TestCase):
                     self.subTest(account_state=account_state, stage=stage),
                     patch("database.engine", Engine()),
                     patch.object(main, "get_approval", return_value=record),
-                    patch.object(main, "_approval_authenticated_payload", return_value=identity),
+                    patch.object(main, "_approval_authenticated_payload", return_value=(
+                        identity if stage == "approval" else
+                        {**identity, "sub": "oidc|executor"}
+                    )),
                     patch.object(main, "parse_approval_action_payload", AsyncMock(return_value={
                         "_body_present": True, "mfa_code": "654321",
                     })),

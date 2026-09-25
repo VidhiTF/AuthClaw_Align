@@ -14,55 +14,69 @@ from types import SimpleNamespace
 import pyotp
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from app.api.v1.endpoints import auth
 from app.core.auth import set_mfa_credentials
 from app.db.models import AuditLogMetadata, AuditOutbox, User
 from app.db import session as database_session
-from tests.test_t10_postgres import postgres  # Reuse migrated, authenticated RLS harness.
+from tests.test_t10_postgres import postgres, reviewer  # Reuse migrated, authenticated RLS harness.
 
 
 def test_backend_totp_assertions_complete_signed_agent_actions(postgres, monkeypatch, tmp_path):
     harness, _, _ = postgres
     identity = harness.create_identity("ent022-agent-actor")
+    executor = reviewer(harness, identity, role="operator")
     other_tenant = harness.create_identity("ent022-other-tenant")
     secret = pyotp.random_base32()
+    executor_secret = pyotp.random_base32()
     monkeypatch.setattr(database_session, "SessionLocal", harness.testing_session_local)
+    with harness.owner_engine.begin() as conn:
+        conn.execute(text("UPDATE users SET role='approver' WHERE id=:id"), {"id": identity.user_id})
     with harness.session_for(identity) as db:
         user = db.get(User, identity.user_id)
         role = user.role
         set_mfa_credentials(user, secret, [])
         db.commit()
+    with harness.session_for(executor) as db:
+        set_mfa_credentials(db.get(User, executor.user_id), executor_secret, [])
+        db.commit()
 
-    request = SimpleNamespace(
-        state=SimpleNamespace(user_id=identity.user_id, tenant_id=identity.tenant_id,
-                              credential_kind="session", credential_hash=identity.session_hash),
-        headers={"x-request-id": "ent022-cross-service"},
-    )
-    bundle = {"actor": str(identity.user_id), "tenant": str(identity.tenant_id), "role": role}
+    bundle = {"actor": str(identity.user_id), "tenant": str(identity.tenant_id),
+              "role": role, "execute_actor": str(executor.user_id), "execute_role": "operator"}
     now = int(time.time())
     for stage, offset in (("approve", 0), ("execute", 30)):
+        stage_identity = identity if stage == "approve" else executor
+        stage_secret = secret if stage == "approve" else executor_secret
+        request = SimpleNamespace(
+            state=SimpleNamespace(user_id=stage_identity.user_id, tenant_id=identity.tenant_id,
+                                  credential_kind="session", credential_hash=stage_identity.session_hash),
+            headers={"x-request-id": "ent022-cross-service"},
+        )
         # Current and next-window OTPs exercise the real verifier without sleeps.
-        code = pyotp.TOTP(secret).at(now + offset)
+        code = pyotp.TOTP(stage_secret).at(now + offset)
         payload = auth.AgentMFAAssertionRequest(
             code=code, method="POST", path=f"/{stage}/approval-postgres-17",
             body_sha256=hashlib.sha256(b"{}").hexdigest(),
         )
-        with harness.session_for(identity) as db:
+        with harness.session_for(stage_identity) as db:
             bundle[stage] = auth.create_agent_mfa_assertion(payload, request, db).model_dump()
-        with harness.session_for(identity) as db:
+        with harness.session_for(stage_identity) as db:
             with pytest.raises(HTTPException) as replay:
                 auth.create_agent_mfa_assertion(payload, request, db)
             assert replay.value.status_code == 400
 
-    with harness.session_for(identity) as db:
+    with Session(harness.owner_engine) as db:
         user = db.get(User, identity.user_id)
         assert user.mfa_secret != secret
         events = [row.event_payload for row in db.query(AuditOutbox).all()
                   if row.event_payload.get("action") == "mfa:agent_assertion_issued"]
         assert len(events) == 2
-        assert all(event["actor_id"] == str(identity.user_id) for event in events)
+        assert {event["actor_id"] for event in events} == {
+            str(identity.user_id), str(executor.user_id)}
         assert secret not in json.dumps(events)
+        assert executor_secret not in json.dumps(events)
         assert code not in json.dumps(events)
         durable_bindings = [
             json.loads(row.execution_trace)[0]

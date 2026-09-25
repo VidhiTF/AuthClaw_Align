@@ -302,6 +302,7 @@ def run_startup_migrations():
         tenant_id INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
         name VARCHAR(100) NOT NULL,
         key_hash VARCHAR(64) NOT NULL UNIQUE,
+        role VARCHAR(50) NOT NULL DEFAULT 'viewer',
         key_prefix VARCHAR(16),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_used_at TIMESTAMP,
@@ -310,6 +311,7 @@ def run_startup_migrations():
     );
 
     ALTER TABLE tenant_api_keys ADD COLUMN IF NOT EXISTS key_prefix VARCHAR(16);
+    ALTER TABLE tenant_api_keys ADD COLUMN IF NOT EXISTS role VARCHAR(50) NOT NULL DEFAULT 'viewer';
     ALTER TABLE tenant_api_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
     ALTER TABLE tenant_api_keys ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMP;
 
@@ -476,6 +478,7 @@ def run_startup_migrations():
         id SERIAL PRIMARY KEY,
         approval_id VARCHAR(100) NOT NULL UNIQUE,
         request_id VARCHAR(100),
+        requester_id VARCHAR(255),
         correlation_id VARCHAR(100),
         tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL,
         status VARCHAR(50) NOT NULL,
@@ -516,6 +519,7 @@ def run_startup_migrations():
 
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS approval_id VARCHAR(100);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS request_id VARCHAR(100);
+    ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS requester_id VARCHAR(255);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(100);
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS tenant_id INTEGER REFERENCES tenants(id) ON DELETE SET NULL;
     ALTER TABLE gateway_approvals ADD COLUMN IF NOT EXISTS status VARCHAR(50);
@@ -1071,6 +1075,19 @@ def run_startup_migrations():
                 ADD CONSTRAINT uq_chat_sessions_tenant_session UNIQUE (tenant_id, session_id);
         END IF;
     END $$;
+
+    CREATE OR REPLACE FUNCTION resolve_api_key_principal(p_key_hash text)
+    RETURNS TABLE(tenant_id integer, role text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, agent AS $$
+    BEGIN
+        RETURN QUERY
+        UPDATE agent.tenant_api_keys k
+           SET last_used_at = NOW()
+         WHERE k.key_hash = p_key_hash AND k.revoked_at IS NULL
+           AND (k.expires_at IS NULL OR k.expires_at > NOW())
+        RETURNING k.tenant_id, k.role;
+    END $$;
     DO $$
     BEGIN
         IF NOT EXISTS (
@@ -1418,6 +1435,7 @@ def run_startup_migrations():
     $$;
 
     REVOKE ALL ON FUNCTION resolve_tenant_api_key(text) FROM PUBLIC;
+    REVOKE ALL ON FUNCTION resolve_api_key_principal(text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION resolve_tenant_domain(text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION upsert_control_plane_tenant(text, text) FROM PUBLIC;
     REVOKE ALL ON FUNCTION load_oidc_login_state(text) FROM PUBLIC;

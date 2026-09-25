@@ -19,11 +19,13 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from starlette.requests import Request
 
 from app.db.models import APIKey, AuditLogMetadata, EvidenceRecord, Policy, User
 from app.db.session import database_auth_context
 from app.api.v1.endpoints import evidence as evidence_endpoint
-from app.services import evidence_service
+from app.api.v1.endpoints import auth as auth_endpoint
+from app.services import evidence_service, event_backbone
 from tests.db_safety import destructive_test_urls
 
 _owner_engine = None
@@ -160,6 +162,331 @@ def test_missing_or_forged_context_reads_nothing(isolation: IsolationHarness):
         assert (
             db.query(User).filter(User.tenant_id == tenant_b.tenant_id).first() is None
         )
+
+
+@pytest.mark.parametrize("stored_role,invited", [
+    ("owner", False), ("admin", True), ("admin", False),
+])
+def test_oidc_callback_applies_current_viewer_mapping_on_fresh_schema(
+    isolation: IsolationHarness, monkeypatch, stored_role: str, invited: bool,
+):
+    identity = isolation.create_identity(f"oidc-{stored_role}-{invited}")
+    with isolation.owner_engine.begin() as conn:
+        conn.execute(text("UPDATE public.users SET role = :role WHERE id = :id"),
+            {"role": stored_role, "id": identity.user_id})
+        if invited:
+            conn.execute(text("""INSERT INTO public.onboarding_email_otps
+                (id, tenant_id, email, tenant_name, otp_hash, status, purpose,
+                 expires_at, created_at, updated_at)
+                VALUES (:id, :tenant, :email, 'OIDC tenant', 'test-hash', 'verified',
+                        'invite', now() + interval '1 day', now(), now())"""),
+                {"id": uuid4(), "tenant": identity.tenant_id, "email": identity.email})
+    tenant = SimpleNamespace(id=identity.tenant_id, name="OIDC tenant")
+    config = {"redirect_uri": "https://example.invalid/oidc/callback",
+              "email_claim": "email", "groups_claim": "groups",
+              "role_mapping": {"readers": "viewer"}}
+    token = "oidc-test-" + uuid4().hex
+    monkeypatch.setattr(auth_endpoint, "OwnerSessionLocal", isolation.testing_session_local)
+    monkeypatch.setattr(auth_endpoint, "_oidc_callback_config", lambda *_: (tenant, config))
+    monkeypatch.setattr(auth_endpoint.oidc_sso, "exchange_code", lambda *_: {"id_token": "test"})
+    monkeypatch.setattr(auth_endpoint.oidc_sso, "validate_id_token",
+        lambda *_: {"email": identity.email, "groups": ["readers"]})
+    monkeypatch.setattr(auth_endpoint, "_generate_session_token", lambda: token)
+    monkeypatch.setattr(auth_endpoint, "_emit_oidc_audit", lambda **_: None)
+    request = Request({"type": "http", "method": "POST", "path": "/v1/auth/oidc/callback",
+                       "headers": [], "client": ("127.0.0.1", 1234)})
+    response = auth_endpoint.oidc_callback(auth_endpoint.OIDCCallbackRequest(
+        code="test", state="test", nonce="test", tenant_name="OIDC tenant",
+        redirect_uri=config["redirect_uri"]), request)
+    assert response.role == "viewer"
+    assert response.scopes == ["read"]
+    with isolation.session_for(Identity(identity.tenant_id, identity.user_id,
+            auth_endpoint._api_key_hash(token), identity.email)) as db:
+        assert db.execute(text("SELECT authn.current_role() ")).scalar_one() == "viewer"
+    with isolation.owner_engine.connect() as conn:
+        assert conn.execute(text("SELECT role FROM public.users WHERE id = :id"),
+            {"id": identity.user_id}).scalar_one() == "viewer"
+
+
+def test_approval_insert_requires_pending_status_and_authenticated_requester(
+    isolation: IsolationHarness,
+):
+    identity = isolation.create_identity("approval-insert")
+    insert = text("""INSERT INTO public.pending_approvals
+        (id, tenant_id, action_id, action_type, action_description, action_payload,
+         status, requester_id, approver_id, expires_at, created_at, updated_at)
+        VALUES (:id, :tenant, :action, 'remediation', 'test', '{}'::json,
+                :status, :requester, :approver, now() + interval '30 minutes', now(), now())
+        RETURNING id""")
+    for status, requester, approver in (
+        ("APPROVED", identity.user_id, identity.user_id),
+        ("PENDING", uuid4(), None),
+        ("PENDING", identity.user_id, identity.user_id),
+    ):
+        with isolation.session_for(identity) as db:
+            with pytest.raises(DBAPIError):
+                db.execute(insert, {"id": uuid4(), "tenant": identity.tenant_id,
+                    "action": uuid4().hex, "status": status,
+                    "requester": requester, "approver": approver})
+            db.rollback()
+    with isolation.session_for(identity) as db:
+        row_id = uuid4()
+        assert db.execute(insert, {"id": row_id, "tenant": identity.tenant_id,
+            "action": uuid4().hex, "status": "PENDING",
+            "requester": identity.user_id, "approver": None}).scalar_one() == row_id
+        db.commit()
+
+
+def test_oidc_session_issuer_rejects_platform_or_legacy_role(
+    isolation: IsolationHarness,
+):
+    identity = isolation.create_identity("oidc-invalid-role")
+    for claimed_role in ("platform_administrator", "owner", "tenant_admin"):
+        with isolation.app_engine.connect() as conn:
+            with pytest.raises(DBAPIError):
+                conn.execute(text("""SELECT * FROM authn.issue_oidc_session(
+                    :tenant, :email, :role, :token, now() + interval '1 hour', '{}'::jsonb)"""),
+                    {"tenant": identity.tenant_id, "email": identity.email,
+                     "role": claimed_role, "token": uuid4().hex})
+            conn.rollback()
+
+
+def test_assessment_review_is_distinct_and_remediation_cannot_skip_approval(
+    isolation: IsolationHarness,
+):
+    from app.services.control_assessments import lock_review_principals
+
+    requester = isolation.create_identity("assessment-requester")
+    reviewer = Identity(requester.tenant_id, uuid4(), uuid4().hex + uuid4().hex,
+        f"assessment-reviewer-{uuid4().hex}@example.invalid")
+    assessment_id, remediation_id = uuid4(), uuid4()
+    with isolation.owner_engine.begin() as conn:
+        conn.execute(text("""INSERT INTO public.users
+            (id, tenant_id, email, role, platform_role, is_active, created_at, updated_at)
+            VALUES (:id, :tenant, :email, 'approver', 'NONE', true, now(), now())"""),
+            {"id": reviewer.user_id, "tenant": reviewer.tenant_id, "email": reviewer.email})
+        conn.execute(text("""SELECT authn.create_session(:hash, :tenant, :user_id,
+            'assessment-test', now() + interval '10 minutes', '{}'::jsonb)"""),
+            {"hash": reviewer.session_hash, "tenant": reviewer.tenant_id,
+             "user_id": reviewer.user_id})
+        for row_id, action_type in ((assessment_id, "control_assessment"),
+                                    (remediation_id, "remediation")):
+            conn.execute(text("""INSERT INTO public.pending_approvals
+                (id, tenant_id, action_id, action_type, action_description, action_payload,
+                 status, requester_id, expires_at, created_at, updated_at)
+                VALUES (:id, :tenant, :action, :kind, 'test', '{}'::json,
+                        'PENDING', :requester, now() + interval '30 minutes', now(), now())"""),
+                {"id": row_id, "tenant": requester.tenant_id, "action": str(row_id),
+                 "kind": action_type, "requester": requester.user_id})
+    with isolation.session_for(reviewer) as db:
+        assert lock_review_principals(db, requester.tenant_id, requester.user_id,
+            reviewer.user_id).id == reviewer.user_id
+        with pytest.raises(DBAPIError):
+            db.execute(text("""UPDATE public.pending_approvals SET status = 'CONSUMED',
+                approver_id = :actor, consumed_by_id = :actor,
+                approved_at = now(), consumed_at = now(),
+                mfa_verified = true, mfa_timestamp = now()
+                WHERE id = :id"""), {"actor": reviewer.user_id, "id": remediation_id})
+        db.rollback()
+    with isolation.session_for(reviewer) as db:
+        assert db.execute(text("""UPDATE public.pending_approvals SET status = 'CONSUMED',
+            approver_id = :actor, consumed_by_id = :actor,
+            approved_at = now(), consumed_at = now(),
+            mfa_verified = true, mfa_timestamp = now()
+            WHERE id = :id RETURNING id"""),
+            {"actor": reviewer.user_id, "id": assessment_id}).scalar_one() == assessment_id
+        db.commit()
+
+
+def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness):
+    """Exercise migrated policies through signed sessions and the restricted DB role."""
+    administrator = isolation.create_identity("ent026-administrator")
+    tenant_id = administrator.tenant_id
+    identities = {"tenant_administrator": administrator}
+    with isolation.owner_engine.begin() as conn:
+        for role in ("viewer", "developer", "operator", "auditor", "approver"):
+            identity = Identity(tenant_id, uuid4(), uuid4().hex + uuid4().hex,
+                f"ent026-{role}-{uuid4().hex}@example.invalid")
+            conn.execute(text("""INSERT INTO public.users
+                (id, tenant_id, email, role, platform_role, is_active, created_at, updated_at)
+                VALUES (:id, :tenant, :email, :role, 'NONE', true, now(), now())"""),
+                {"id": identity.user_id, "tenant": tenant_id, "email": identity.email, "role": role})
+            conn.execute(text("""SELECT authn.create_session(
+                :hash, :tenant, :user_id, 'ent026-rls-test',
+                now() + interval '10 minutes', '{}'::jsonb)"""),
+                {"hash": identity.session_hash, "tenant": tenant_id, "user_id": identity.user_id})
+            identities[role] = identity
+        approval_id, self_approval_id, altered_approval_id = uuid4(), uuid4(), uuid4()
+        conn.execute(text("""INSERT INTO public.policies
+            (id, tenant_id, name, policy_yaml, version, created_by, created_at, updated_at)
+            VALUES (:id, :tenant, 'ent026-test', 'rules: []', 1, :user_id, now(), now())"""),
+            {"id": uuid4(), "tenant": tenant_id, "user_id": administrator.user_id})
+        conn.execute(text("""INSERT INTO public.gateway_configs (id, tenant_id, name, provider,
+            endpoint, redaction_strategy, redaction_token_retention_days, created_at, updated_at)
+            VALUES (:id, :tenant, 'ent026-test', 'openai', 'https://example.invalid',
+                    'mask', 90, now(), now())"""),
+            {"id": uuid4(), "tenant": tenant_id})
+        conn.execute(text("""INSERT INTO public.provider_credentials (id, tenant_id, provider,
+            display_name, encrypted_secret, created_by, created_at)
+            VALUES (:id, :tenant, 'openai', 'ent026-test', 'encrypted-test-value', :user_id, now())"""),
+            {"id": uuid4(), "tenant": tenant_id, "user_id": administrator.user_id})
+        conn.execute(text("""INSERT INTO public.api_keys (id, tenant_id, key_hash, name, scopes,
+            expires_at, created_by, created_at, updated_at)
+            VALUES (:id, :tenant, :hash, 'ent026-test', ARRAY['read'],
+                    now() + interval '1 day', :user_id, now(), now())"""),
+            {"id": uuid4(), "tenant": tenant_id, "hash": uuid4().hex,
+             "user_id": administrator.user_id})
+        for row_id, requester_id in ((approval_id, administrator.user_id),
+                                     (self_approval_id, identities["approver"].user_id),
+                                     (altered_approval_id, administrator.user_id)):
+            conn.execute(text("""INSERT INTO public.pending_approvals
+                (id, tenant_id, action_id, action_type, action_description, action_payload,
+                 status, requester_id, expires_at, created_at, updated_at)
+                VALUES (:id, :tenant, :action_id, 'remediation', 'ent026-test', '{}'::json,
+                        'PENDING', :requester, now() + interval '30 minutes', now(), now())"""),
+                {"id": row_id, "tenant": tenant_id, "action_id": str(row_id),
+                 "requester": requester_id})
+        conn.execute(text("""INSERT INTO public.data_subject_requests
+            (id, tenant_id, subject_id, requester_id, request_type, status,
+             identity_verified, scope, created_at, updated_at)
+            VALUES (:id, :tenant, 'ent026-subject', :requester, 'ACCESS',
+                    'PENDING', false, '{}'::json, now(), now())"""),
+            {"id": uuid4(), "tenant": tenant_id, "requester": administrator.user_id})
+        s3_document_id = uuid4()
+        conn.execute(text("""INSERT INTO public.aws_s3_documents
+            (id, tenant_id, bucket_name, object_key, file_name, synced_at)
+            VALUES (:id, :tenant, 'ent026-bucket', 'tenant/doc.txt', 'doc.txt', now())"""),
+            {"id": s3_document_id, "tenant": tenant_id})
+
+        expected_policies = {
+            "api_keys": {"tenant_isolation", "tenant_admin_api_keys_write", "tenant_access_review_api_keys_read"},
+            "users": {"tenant_user_read", "tenant_user_insert", "tenant_user_update", "tenant_user_self_mfa", "tenant_user_delete"},
+            "policies": {"tenant_policy_read", "tenant_policy_write", "tenant_policy_update", "tenant_policy_delete"},
+            "gateway_configs": {"tenant_gateway_read", "tenant_gateway_write", "tenant_gateway_update", "tenant_gateway_delete"},
+            "provider_credentials": {"tenant_provider_read", "tenant_provider_write", "tenant_provider_update", "tenant_provider_delete"},
+            "aws_s3_documents": {"tenant_s3_document_read", "tenant_s3_document_write", "tenant_s3_document_update"},
+            "pending_approvals": {"tenant_approval_read", "tenant_approval_create", "tenant_approval_resolve", "tenant_approval_expire"},
+            "data_subject_requests": {"data_subject_requests_read", "data_subject_requests_create", "data_subject_requests_update"},
+            "audit_log_metadata": {"tenant_audit_read", "tenant_audit_append"},
+        }
+        rows = conn.execute(text("""SELECT p.tablename, p.policyname FROM pg_policies p
+            WHERE p.schemaname = 'public' AND p.tablename = ANY(:tables)
+              AND EXISTS (SELECT 1 FROM unnest(p.roles) AS policy_role(role_name)
+                  WHERE CASE WHEN role_name = 'public' THEN true ELSE
+                      pg_has_role(CAST(:app_role AS name), CAST(role_name AS name), 'member') END)"""),
+            {"tables": list(expected_policies), "app_role": isolation.app_engine.url.username}).all()
+        for table, names in expected_policies.items():
+            assert {row.policyname for row in rows if row.tablename == table} == names
+    read_tables = {
+        "policies": {"tenant_administrator"},
+        "gateway_configs": {"tenant_administrator"},
+        "provider_credentials": {"tenant_administrator"},
+        "api_keys": {"tenant_administrator", "auditor"},
+        "pending_approvals": set(identities),
+        "data_subject_requests": {"tenant_administrator", "auditor", "approver", "operator"},
+        "aws_s3_documents": {"tenant_administrator"},
+    }
+    for role, identity in identities.items():
+        with isolation.session_for(identity) as db:
+            assert db.execute(text("SELECT authn.current_role() ")).scalar_one() == role
+            for table, allowed_roles in read_tables.items():
+                count = db.execute(text(f"SELECT count(*) FROM public.{table} WHERE tenant_id = :tenant"),
+                    {"tenant": tenant_id}).scalar_one()
+                expected = (3 if table == "pending_approvals" else 1) if role in allowed_roles else 0
+                assert count == expected, (role, table, count, expected)
+
+    for role in ("developer", "approver"):
+        with isolation.session_for(identities[role]) as db:
+            assert db.execute(text("""UPDATE public.aws_s3_documents
+                SET file_name = 'tampered.txt' WHERE id = :id RETURNING id"""),
+                {"id": s3_document_id}).first() is None
+            with pytest.raises(DBAPIError):
+                db.execute(text("""INSERT INTO public.aws_s3_documents
+                    (id, tenant_id, bucket_name, object_key, file_name, synced_at)
+                    VALUES (:id, :tenant, 'ent026-bucket', :key, 'new.txt', now())"""),
+                    {"id": uuid4(), "tenant": tenant_id, "key": f"tenant/{role}.txt"})
+            db.rollback()
+    with isolation.session_for(identities["approver"]) as db:
+        with pytest.raises(DBAPIError):
+            db.execute(text("UPDATE public.users SET role = 'tenant_administrator' WHERE id = :id"),
+                {"id": identities["approver"].user_id})
+        db.rollback()
+    with isolation.session_for(administrator) as db:
+        assert db.execute(text("""UPDATE public.aws_s3_documents SET file_name = 'updated.txt'
+            WHERE id = :id RETURNING id"""), {"id": s3_document_id}).scalar_one() == s3_document_id
+        new_id = uuid4()
+        assert db.execute(text("""INSERT INTO public.aws_s3_documents
+            (id, tenant_id, bucket_name, object_key, file_name, synced_at)
+            VALUES (:id, :tenant, 'ent026-bucket', 'tenant/new.txt', 'new.txt', now())
+            RETURNING id"""), {"id": new_id, "tenant": tenant_id}).scalar_one() == new_id
+        db.commit()
+
+    update_approval = text("""UPDATE public.pending_approvals
+        SET status = 'APPROVED', approver_id = :actor, approved_at = now()
+        WHERE id = :id RETURNING id""")
+    for role in ("viewer", "developer", "operator", "auditor", "tenant_administrator"):
+        with isolation.session_for(identities[role]) as db:
+            assert db.execute(update_approval,
+                {"actor": identities[role].user_id, "id": approval_id}).first() is None
+    with isolation.session_for(identities["approver"]) as db:
+        with pytest.raises(DBAPIError):
+            db.execute(text("""UPDATE public.pending_approvals
+                SET status = 'CONSUMED', approver_id = :actor, consumed_by_id = :actor
+                WHERE id = :id"""),
+                {"actor": identities["approver"].user_id, "id": approval_id})
+        db.rollback()
+    with isolation.session_for(identities["approver"]) as db:
+        assert db.execute(update_approval,
+            {"actor": identities["approver"].user_id, "id": self_approval_id}).first() is None
+        with pytest.raises(DBAPIError):
+            db.execute(text("""UPDATE public.pending_approvals
+                SET status = 'APPROVED', approver_id = :actor, approved_at = now(),
+                    consumed_by_id = :actor, consumed_at = now()
+                WHERE id = :id"""),
+                {"actor": identities["approver"].user_id, "id": approval_id})
+        db.rollback()
+    with isolation.session_for(identities["approver"]) as db:
+        assert db.execute(update_approval,
+            {"actor": identities["approver"].user_id, "id": approval_id}).scalar_one() == approval_id
+        assert db.execute(update_approval,
+            {"actor": identities["approver"].user_id, "id": altered_approval_id}).scalar_one() == altered_approval_id
+        db.commit()
+    with isolation.owner_engine.connect() as conn:
+        assert dict(tuple(row) for row in conn.execute(
+            text("SELECT id, status FROM public.pending_approvals"))) == {
+            approval_id: "APPROVED", self_approval_id: "PENDING",
+            altered_approval_id: "APPROVED"}
+
+    from app.orchestrator.runner import _check_approval_in_db
+    with isolation.session_for(identities["operator"]) as db:
+        assert _check_approval_in_db(db, str(altered_approval_id), str(tenant_id),
+            str(identities["operator"].user_id), str(altered_approval_id), []) == "EXPIRED"
+        db.commit()
+    with isolation.owner_engine.connect() as conn:
+        assert conn.execute(text("SELECT status FROM public.pending_approvals WHERE id = :id"),
+            {"id": altered_approval_id}).scalar_one() == "ALTERED"
+
+    consume_approval = text("""UPDATE public.pending_approvals
+        SET status = 'CONSUMED', consumed_by_id = :actor, consumed_at = now()
+        WHERE id = :id RETURNING id""")
+    for role in ("viewer", "developer", "auditor", "approver"):
+        with isolation.session_for(identities[role]) as db:
+            assert db.execute(consume_approval,
+                {"actor": identities[role].user_id, "id": approval_id}).first() is None
+    with isolation.session_for(identities["operator"]) as db:
+        with pytest.raises(DBAPIError):
+            db.execute(text("""UPDATE public.pending_approvals
+                SET status = 'CONSUMED', consumed_by_id = :actor, consumed_at = now(),
+                    approver_id = :actor WHERE id = :id"""),
+                {"actor": identities["operator"].user_id, "id": approval_id})
+        db.rollback()
+    with isolation.session_for(identities["operator"]) as db:
+        assert db.execute(consume_approval,
+            {"actor": identities["operator"].user_id, "id": approval_id}).scalar_one() == approval_id
+        db.commit()
+    with isolation.owner_engine.connect() as conn:
+        assert conn.execute(text("SELECT status FROM public.pending_approvals WHERE id = :id"),
+            {"id": approval_id}).scalar_one() == "CONSUMED"
 
 
 def test_writer_privileges_cannot_bypass_restricted_audit_verifier(
@@ -342,23 +669,59 @@ def test_request_credential_rebinds_audit_after_commit_without_contextvar(isolat
         )
 
 
+def test_operator_audit_append_preserves_chain_without_read_grant(isolation):
+    operator = isolation.create_identity("operator-audit-chain")
+    other = isolation.create_identity("other-audit-chain")
+    with isolation.owner_engine.begin() as conn:
+        conn.execute(text("UPDATE public.users SET role='operator' WHERE id=:id"),
+                     {"id": operator.user_id})
+        function = conn.execute(text("""SELECT p.prosecdef, r.rolname
+            FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner
+            WHERE p.oid='public.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)'::regprocedure""")).one()
+        assert function == (True, "authclaw_auth_definer")
+        assert not conn.execute(text("""SELECT has_function_privilege(
+            'authclaw_app',
+            'worker_maintenance.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)',
+            'EXECUTE')""")).scalar_one()
+    with isolation.session_for(operator) as db:
+        for index in (1, 2):
+            event = event_backbone.audit_event(
+                event_type="authentication", tenant_id=str(operator.tenant_id),
+                subject_id=str(operator.user_id), identity_action=f"operator:{index}",
+                action="operator:audit", reason="chain-regression", provider="test",
+                request_id=str(uuid4()), actor_id=str(operator.user_id))
+            assert event_backbone.publish_audit_event(None, str(operator.tenant_id), event, db=db) is None
+        assert db.execute(text("SELECT count(*) FROM public.audit_log_metadata WHERE tenant_id=:tenant"),
+                          {"tenant": operator.tenant_id}).scalar_one() == 0
+        forged = event_backbone.audit_event(
+            event_type="authentication", tenant_id=str(other.tenant_id),
+            subject_id=str(operator.user_id), identity_action="forged", action="operator:audit",
+            reason="cross-tenant", provider="test", request_id=str(uuid4()),
+            actor_id=str(operator.user_id))
+        assert event_backbone.publish_audit_event(None, str(other.tenant_id), forged, db=db) is not None
+    with isolation.owner_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM public.audit_log_metadata WHERE tenant_id=:tenant"),
+                            {"tenant": operator.tenant_id}).scalar_one() == 2
+
+
 def test_audit_context_migration_upgrades_existing_function(isolation, monkeypatch):
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     scripts = ScriptDirectory.from_config(config)
     migration = scripts.get_revision("049").module
     with isolation.owner_engine.begin() as conn:
-        conn.execute(text(scripts.get_revision("028").module.APPEND_FUNCTION))
-        monkeypatch.setattr(
-            migration.op, "execute", lambda statement: conn.execute(text(statement))
-        )
-        migration.upgrade()
-        definition = conn.execute(
-            text(
-                "SELECT pg_get_functiondef(oid) FROM pg_proc WHERE proname='append_audit_event_v2'"
+        signature = "'public.append_audit_event_v2(uuid,uuid,text,timestamptz,uuid,text,text,text,uuid,text,text,text,integer,integer,integer,integer,text[],jsonb)'::regprocedure"
+        original = conn.execute(text(f"SELECT pg_get_functiondef({signature})")).scalar_one()
+        try:
+            conn.execute(text(scripts.get_revision("028").module.APPEND_FUNCTION))
+            monkeypatch.setattr(
+                migration.op, "execute", lambda statement: conn.execute(text(statement))
             )
-        ).scalar_one()
-        assert "authn.current_tenant_id()" in definition
-        assert "app.current_tenant_id" not in definition
+            migration.upgrade()
+            definition = conn.execute(text(f"SELECT pg_get_functiondef({signature})")).scalar_one()
+            assert "authn.current_tenant_id()" in definition
+            assert "app.current_tenant_id" not in definition
+        finally:
+            conn.execute(text(original))
 
 
 def test_cross_tenant_user_insert_is_rejected(isolation: IsolationHarness):

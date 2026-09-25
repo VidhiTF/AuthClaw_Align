@@ -71,6 +71,7 @@ from services.tenant_context import get_current_request_id, get_current_tenant_i
 from services.control_plane_auth import authenticate_control_plane
 from services.quota_service import admit, check_available, metrics_snapshot, record_unavailable, QuotaExceeded, QuotaUnavailable
 from services.document_monitor_status import monitor_metrics_snapshot, monitor_status
+from services.role_contract import ROLE_OWNER, ROLE_PLATFORM_ADMIN, normalize_role
 
 # Set up basic logging
 logging.basicConfig(level=logging.INFO)
@@ -478,6 +479,25 @@ def resolve_tenant(x_api_key: str, authorization: str = None) -> int:
         return tenant_id
 
 
+def resolve_api_key_principal(key: str) -> dict:
+    """Resolve tenant and role atomically; raw keys never become unscoped principals."""
+    from database import engine
+    if not key:
+        raise HTTPException(status_code=401, detail="Authentication credentials missing.")
+    key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT tenant_id, role FROM resolve_api_key_principal(:key_hash)"),
+            {"key_hash": key_hash},
+        ).first()
+    if not row or row.tenant_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired API key.")
+    role = normalize_role(row.role)
+    if not role or role == ROLE_PLATFORM_ADMIN:
+        raise HTTPException(status_code=403, detail="API key has no valid tenant role.")
+    return {"tenant_id": row.tenant_id, "role": role, "sub": f"api-key:{key_hash}"}
+
+
 def require_tenant_context() -> int:
     tenant_id = get_current_tenant_id()
     if tenant_id is None:
@@ -654,20 +674,11 @@ def _tenant_id_from_request_headers(request: Request) -> Optional[int]:
             x_api_key = token
 
     if x_api_key:
-        tenant_id = resolve_tenant(x_api_key=x_api_key, authorization=None)
-        key_hash = hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
-        service_subject = f"api-key:{key_hash}"
-        request.state.quota_key_id = key_hash
-        request.state.quota_user_id = "service:tenant"
-        # Tenant API keys are tenant-wide service credentials. Preserve their
-        # existing authorization while giving approval workflows a unique,
-        # immutable maker identity bound to the validated key record hash.
-        request.state.api_key_principal = {
-            "auth_source": "api_key",
-            "tenant_id": tenant_id,
-            "sub": service_subject,
-            "role": "owner",
-        }
+        principal = resolve_api_key_principal(x_api_key)
+        request.state.api_key_principal = principal
+        tenant_id = principal["tenant_id"]
+        request.state.quota_key_id = hashlib.sha256(x_api_key.encode("utf-8")).hexdigest()
+        request.state.quota_user_id = principal["sub"]
         return tenant_id
 
     return None
@@ -696,7 +707,15 @@ async def tenant_database_context_middleware(request: Request, call_next):
                     raise HTTPException(status_code=422, detail="operation must be one of: chat, rag, remediation_plan")
                 if not agent_operation_allowed(principal.role, operation):
                     raise HTTPException(status_code=403, detail="Role is not authorized for this agent operation.")
-        if protected:
+        platform_route = request.url.path.startswith("/platform/")
+        platform_payload = optional_user_from_request(request) if platform_route else {}
+        if platform_route and (
+            normalize_role(platform_payload.get("role")) != ROLE_PLATFORM_ADMIN
+            or platform_payload.get("tenant_id") is not None
+            or platform_payload.get("external_tenant_id") is not None
+        ):
+            raise HTTPException(status_code=403, detail="Tenantless platform administrator session required.")
+        if protected and not platform_route:
             tenant_id = await run_in_threadpool(_tenant_id_from_request_headers, request)
             if tenant_id is None:
                 raise HTTPException(status_code=401, detail="Authentication credentials missing.")
@@ -710,7 +729,7 @@ async def tenant_database_context_middleware(request: Request, call_next):
         return JSONResponse(status_code=503, content={"error": "authentication_unavailable"}, headers={"Retry-After": "1"})
     request.state.tenant_id = tenant_id
     with tenant_context(tenant_id, request_id=request_id, required=tenant_id is not None):
-        if protected:
+        if protected and not platform_route:
             try:
                 await run_in_threadpool(
                     reconcile_due_approval_executions,
@@ -776,6 +795,17 @@ def approval_identity_aliases(payload: dict) -> set[str]:
         if isinstance(value, str) and value.strip():
             aliases.add(value.strip().casefold())
     return aliases
+
+
+def ensure_distinct_approval_actor(record: dict, actor: str) -> None:
+    requester = (record.get("requester_id") or record.get("requested_by")
+                 or (record.get("metadata") or {}).get("requested_by"))
+    if not requester:
+        raise HTTPException(status_code=403, detail="Approval requester identity is missing")
+    if record.get("requester_id") and record.get("requested_by") and str(record["requester_id"]) != str(record["requested_by"]):
+        raise HTTPException(status_code=409, detail="Approval requester identity is inconsistent")
+    if str(requester) == str(actor):
+        raise HTTPException(status_code=403, detail="The requester cannot approve or reject their own high-risk action")
 
 def ensure_approval_tenant_access(record: dict, payload: dict) -> None:
     tenant_id = payload.get("tenant_id")
@@ -1096,13 +1126,13 @@ def _approval_is_expired(record: dict) -> bool:
     return datetime.now(timezone.utc) >= _utc_from_iso(expires_at)
 
 def require_platform_admin(payload: dict = Depends(get_current_user_from_authorization)) -> dict:
-    if payload.get("role") != "Platform Admin":
+    if normalize_role(payload.get("role")) != ROLE_PLATFORM_ADMIN or payload.get("tenant_id") is not None:
         raise HTTPException(status_code=403, detail="Platform admin access required.")
     return payload
 
 def require_tenant_access_admin(payload: dict = Depends(get_current_user_from_authorization)) -> dict:
     payload = revalidate_tenant_session_payload(payload)
-    if payload.get("role") not in {"Super Admin", "Security Admin"}:
+    if normalize_role(payload.get("role")) != ROLE_OWNER:
         raise HTTPException(status_code=403, detail="Tenant access administrator role required.")
     if not payload.get("tenant_id"):
         raise HTTPException(status_code=401, detail="Session token is missing tenant scope.")
@@ -1662,7 +1692,6 @@ async def approve_request(approval_id: str, request: Request):
     user_payload = _approval_authenticated_payload(request)
     ensure_approval_tenant_access(record, user_payload)
     approver = approval_actor_from_payload(user_payload)
-
     # Approval is a single-use pending-to-approved transition. The database
     # compare-and-swap below enforces this again for concurrent workers.
     if record["status"] != "pending":
@@ -1670,7 +1699,6 @@ async def approve_request(approval_id: str, request: Request):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Approval request is already resolved (status={record['status']})",
         )
-
     # Policy checks for MFA configuration
     policy = get_policy()
     approval_policy = policy.get("approval", {})
@@ -1678,10 +1706,14 @@ async def approve_request(approval_id: str, request: Request):
     require_separate_approver = approval_policy.get("require_separate_approver", True)
 
     requester = str(
-        record.get("requested_by")
+        record.get("requester_id")
+        or record.get("requested_by")
         or (record.get("metadata") or {}).get("requested_by")
         or ""
     ).strip()
+    if (record.get("requester_id") and record.get("requested_by")
+            and str(record["requester_id"]) != str(record["requested_by"])):
+        raise HTTPException(status_code=409, detail="Approval requester identity is inconsistent")
     if not requester:
         append_approval_audit(
             record,
@@ -1870,6 +1902,7 @@ async def reject_request(approval_id: str, request: Request):
     user_payload = optional_user_from_request(request)
     ensure_approval_tenant_access(record, user_payload)
     approver = approval_actor_from_payload(user_payload)
+    ensure_distinct_approval_actor(record, approver)
     payload = await parse_approval_action_payload(request)
     payload.pop("_body_present", None)
     comment = (payload.get("comment") or "").strip() or None
@@ -1964,14 +1997,14 @@ async def execute_request(approval_id: str, request: Request):
             content={"error": f"Request not approved. Status is '{record['status']}'."}
         )
 
-    if record.get("approved_by") and record.get("approved_by") != approver:
+    if not record.get("approved_by") or record.get("approved_by") == approver:
         append_approval_audit(
             record,
             action="transfer_rejected",
             actor=approver,
             metadata={"approved_by": record.get("approved_by")},
         )
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Approval execution is bound to the approving actor.")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Approval and execution require distinct actors.")
 
     now = datetime.now(timezone.utc)
     execution_window_expired = (
@@ -4217,15 +4250,8 @@ def create_user_role(role_req: UserRoleRequest, payload: dict = Depends(require_
     from sqlalchemy import text
     from verify_audit import create_audit_block
     tenant_id = payload["tenant_id"]
-    allowed_roles = {
-        "Super Admin",
-        "Security Admin",
-        "Compliance Officer",
-        "Developer",
-        "Auditor",
-        "Viewer",
-    }
-    if role_req.role not in allowed_roles:
+    allowed_roles = {ROLE_OWNER, ROLE_DEVELOPER, ROLE_OPERATOR, ROLE_AUDITOR, ROLE_APPROVER, ROLE_VIEWER}
+    if normalize_role(role_req.role) not in allowed_roles:
         raise HTTPException(status_code=400, detail="Unsupported tenant role.")
     normalized_email = role_req.username.strip().lower()
     if not is_valid_work_email(normalized_email):
@@ -4241,7 +4267,7 @@ def create_user_role(role_req: UserRoleRequest, payload: dict = Depends(require_
             {
                 "tenant_id": tenant_id,
                 "email": normalized_email,
-                "role": role_req.role,
+                "role": normalize_role(role_req.role),
                 "permissions": role_req.permissions,
             },
         ).fetchone()

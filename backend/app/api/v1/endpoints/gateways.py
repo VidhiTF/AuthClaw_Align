@@ -4,7 +4,7 @@ from uuid import UUID
 
 from app.db.models import GatewayConfig
 from app.schemas.models import GatewayConfigCreate, GatewayConfigResponse
-from app.core.auth import get_tenant_db, require_roles, require_scopes
+from app.core.auth import get_tenant_db, require_permission, require_roles, require_scopes
 
 router = APIRouter()
 
@@ -53,7 +53,7 @@ def register_gateway(
         )
 
 
-@router.get("/{id}/config", response_model=GatewayConfigResponse, dependencies=[require_scopes(["read"])])
+@router.get("/{id}/config", response_model=GatewayConfigResponse, dependencies=[require_permission("tenant.connectors.read"), require_scopes(["read"])])
 def get_gateway_config(
     id: UUID,
     request: Request,
@@ -70,7 +70,7 @@ def get_gateway_config(
     return gateway
 
 
-@router.get("", response_model=list[GatewayConfigResponse], dependencies=[require_scopes(["read"])])
+@router.get("", response_model=list[GatewayConfigResponse], dependencies=[require_permission("tenant.connectors.read"), require_scopes(["read"])])
 def list_gateways(
     request: Request,
     db: Session = Depends(get_tenant_db)

@@ -60,6 +60,9 @@ def test_chat_uses_workflow_throttle_and_propagates_429(monkeypatch, message):
         remediation_plan=[{"action": "redact"}],
         state_data={"requester_id": str(uuid4())},
     )
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+        db.query.return_value.filter.return_value.first.return_value
+    )
     request = SimpleNamespace(state=SimpleNamespace(tenant_id=uuid4(), user_id=uuid4()))
     calls = []
     monkeypatch.setattr(workflows, "check_worker_throttle", lambda tenant, job, **kwargs: (calls.append(job) or False, 30))

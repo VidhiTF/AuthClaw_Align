@@ -53,6 +53,8 @@ def boundary_namespace():
         "record_unavailable": quota.record_unavailable,
         "QuotaUnavailable": quota.QuotaUnavailable,
         "authenticate_control_plane": AsyncMock(return_value=None),
+        "resolve_api_key_principal": lambda key: {
+            "tenant_id": 7, "sub": "service:tenant", "role": "operator"},
         "revalidate_tenant_session_payload": lambda payload, request_id=None: payload,
         "reconcile_due_approval_executions": Mock(return_value=0),
         "ApprovalPersistenceError": ApprovalPersistenceError,
@@ -76,7 +78,8 @@ class QuotaHTTPBoundaryTests(unittest.TestCase):
         self.ns = boundary_namespace()
         self.plan_lookup = self.ns["_tenant_tier_limit"]
         self.ns["decode_jwt"] = lambda token: ({"tenant_id": 7, "user_id": "alice"} if token == "valid" else None)
-        self.ns["resolve_tenant"] = Mock(return_value=7)
+        self.ns["resolve_api_key_principal"] = Mock(return_value={
+            "tenant_id": 7, "sub": "service:tenant", "role": "operator"})
         self.ns["_tenant_tier_limit"] = Mock(return_value=100)
         self.ns["_rbac_enforcement_enabled"] = lambda: False
         self.ns["optional_user_from_request"] = lambda request: {}
@@ -131,7 +134,7 @@ class QuotaHTTPBoundaryTests(unittest.TestCase):
     def test_auth_failures_keep_status_and_do_not_execute(self):
         self.assertEqual(self.client.post("/chat").status_code, 401)
         for code in (401, 403):
-            self.ns["resolve_tenant"].side_effect = HTTPException(code, "denied")
+            self.ns["resolve_api_key_principal"].side_effect = HTTPException(code, "denied")
             self.assertEqual(self.client.post("/chat", headers={"X-API-Key": "invalid"}).status_code, code)
         self.assertEqual(self.calls, [])
 

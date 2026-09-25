@@ -30,6 +30,7 @@ from app.api.v1.endpoints.onboarding import (
     _scopes_for_role,
 )
 from app.core.passwords import hash_password, validate_password, verify_password
+from app.core.authorization import role_allows
 from app.core.crypto import get_session_key_ring
 from app.core.bff_client_ip import authenticate_bff_client_ip
 from app.core.auth import (get_tenant_db, hash_key as _api_key_hash, require_roles,
@@ -677,11 +678,13 @@ def create_agent_mfa_assertion(
             detail="MFA enrollment is required for privileged agent actions",
         )
     current_role = str(bound.role).strip().lower() if bound is not None else ""
-    if current_role not in {"owner", "admin"}:
+    is_approval = payload.path.startswith("/approve/")
+    required_permission = "tenant.high_risk.approve" if is_approval else "tenant.workflow.resume"
+    if not role_allows(current_role, required_permission):
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Active tenant owner or admin required for privileged agent actions",
+            detail="Current role cannot perform this agent action",
         )
     operation = f"{payload.method} {payload.path}"
     if not verify_mfa_challenge(
@@ -689,7 +692,7 @@ def create_agent_mfa_assertion(
         user,
         payload.code,
         tenant_id=str(request.state.tenant_id),
-        operation="agent_approval" if payload.path.startswith("/approve/") else "agent_execution",
+        operation="agent_approval" if is_approval else "agent_execution",
         request_id=request.headers.get("x-request-id", ""),
     ):
         db.rollback()

@@ -90,6 +90,7 @@ class DataSubjectRequest(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     subject_id = Column(String(255), nullable=False)
+    requester_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     request_type = Column(String(20), nullable=False)
     status = Column(
         Enum(
@@ -188,10 +189,13 @@ class User(Base):
     email = Column(String(255), nullable=False)
     password_hash = Column(String(255), nullable=True)
     role = Column(
-    Enum("owner", "admin", "developer", "operator", "viewer", name="user_role"),
+    Enum(
+        "owner", "admin", "tenant_administrator", "developer", "operator",
+        "auditor", "approver", "viewer", name="user_role"
+    ),
     nullable=False,
     default="viewer"
-    )  # owner, admin, developer, operator, viewer
+    )  # owner/admin are compatibility aliases for tenant_administrator
     platform_role = Column(
         Enum("NONE", "ADMIN", name="platform_role"),
         nullable=False,

@@ -154,7 +154,7 @@ def postgres():
         command("-m", "alembic", "upgrade", "054")
         command("-m", "alembic", "upgrade", "head")
         command("scripts/bootstrap_database_security.py", "finalize-backend")
-        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="055"), app.connect() as connection:
+        with patch.dict(os.environ, AUTHCLAW_EXPECTED_DB_REVISION="056"), app.connect() as connection:
             validate_database_security(connection)
             compliance_scores.require_snapshot_schema(connection)
         harness = IsolationHarness(owner, app, sessionmaker(bind=app, expire_on_commit=False))
@@ -242,8 +242,9 @@ def test_approval_linkage_upgrade_repairs_duplicates_orphans_and_reruns(postgres
         assert canonical_count == 1
 
     assert_reconciled()
-    command("-m", "alembic", "downgrade", "053")
-    command("-m", "alembic", "upgrade", "054")
+    # Revision 056 deliberately cannot be downgraded: reverting its RLS contract
+    # would silently reopen the legacy tenant-only policies.
+    command("-m", "alembic", "downgrade", "053", succeeds=False)
     assert_reconciled()
 
 
@@ -288,7 +289,7 @@ def test_two_sessions_cannot_transfer_or_race_approved_workflow_resume(postgres)
     harness, _, _ = postgres
     requester = harness.create_identity("resume-requester")
     approver = reviewer(harness, requester)
-    attacker = reviewer(harness, requester)
+    executor = reviewer(harness, requester, role="operator")
     workflow_id = str(uuid4())
     approval_id = uuid4()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
@@ -313,10 +314,8 @@ def test_two_sessions_cannot_transfer_or_race_approved_workflow_resume(postgres)
         db.add(PendingApproval(
             id=approval_id, tenant_id=requester.tenant_id, action_id=workflow_id,
             action_type="remediation", action_description="resume race",
-            action_payload=payload, action_hash=action_hash, status="APPROVED",
-            requester_id=requester.user_id, approver_id=approver.user_id,
-            approved_at=datetime.now(timezone.utc), mfa_verified=True,
-            mfa_timestamp=datetime.now(timezone.utc), expires_at=expires_at,
+            action_payload=payload, action_hash=action_hash, status="PENDING",
+            requester_id=requester.user_id, expires_at=expires_at,
         ))
         db.add(ComplianceWorkflow(
             tenant_id=requester.tenant_id, workflow_id=workflow_id,
@@ -327,10 +326,26 @@ def test_two_sessions_cannot_transfer_or_race_approved_workflow_resume(postgres)
         ))
         db.commit()
 
-    with harness.session_for(attacker) as db:
-        with pytest.raises(WorkflowResumeConflict, match="recorded approver"):
+    with harness.session_for(approver) as db:
+        approval = db.get(PendingApproval, approval_id)
+        approval.status = "APPROVED"
+        approval.approver_id = approver.user_id
+        approval.approved_at = datetime.now(timezone.utc)
+        approval.mfa_verified = True
+        approval.mfa_timestamp = datetime.now(timezone.utc)
+        db.commit()
+
+    with harness.session_for(approver) as db:
+        assert db.execute(text("SELECT authn.current_role()")).scalar_one() == "approver"
+        visible = db.get(PendingApproval, approval_id)
+        assert visible is not None and visible.status == "APPROVED"
+        assert visible.approver_id == approver.user_id
+        visible_workflow = db.query(ComplianceWorkflow).filter(
+            ComplianceWorkflow.workflow_id == workflow_id).first()
+        assert visible_workflow is not None and visible_workflow.approval_id == approval_id
+        with pytest.raises(WorkflowResumeConflict, match="approval is unavailable|distinct actors"):
             ComplianceWorkflowRunner(db).resume(
-                workflow_id, str(requester.tenant_id), str(attacker.user_id)
+                workflow_id, str(requester.tenant_id), str(approver.user_id)
             )
     with harness.session_for(requester) as db:
         approval = db.get(PendingApproval, approval_id)
@@ -361,23 +376,16 @@ def test_two_sessions_cannot_transfer_or_race_approved_workflow_resume(postgres)
                 return "BUSY", None
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        approver_future = pool.submit(resume_as, approver)
-        attacker_future = pool.submit(resume_as, attacker)
-        approver_result = approver_future.result(timeout=30)[0]
-        attacker_result = attacker_future.result(timeout=30)[0]
+        requester_future = pool.submit(resume_as, requester)
+        executor_future = pool.submit(resume_as, executor)
+        requester_result = requester_future.result(timeout=30)[0]
+        executor_result = executor_future.result(timeout=30)[0]
 
-    assert attacker_result in {"CONFLICT", "BUSY"}
-    assert approver_result in {"RESUMED", "BUSY"}
-    if approver_result == "BUSY":
-        with harness.session_for(approver) as db:
-            runner = ComplianceWorkflowRunner(db)
-            runner._drive_remediation_states = lambda state: state
-            runner.resume(workflow_id, str(requester.tenant_id), str(approver.user_id))
-
+    assert sorted([requester_result, executor_result]) in (["BUSY", "RESUMED"], ["CONFLICT", "RESUMED"])
     with harness.session_for(requester) as db:
         approval = db.get(PendingApproval, approval_id)
         assert approval.status == "CONSUMED"
-        assert approval.consumed_by_id == approver.user_id
+        assert approval.consumed_by_id in {requester.user_id, executor.user_id}
 
 
 def score(score_value, *, generated_at=None):
@@ -398,14 +406,15 @@ def test_real_get_does_not_write_snapshot_or_notification(postgres):
         assert db.query(ComplianceScoreSnapshot).count() == db.query(Notification).count() == 0
 
 
-def reviewer(harness, requester):
+def reviewer(harness, requester, *, role="approver"):
     identity = Identity(requester.tenant_id, uuid4(), uuid4().hex + uuid4().hex, f"reviewer-{uuid4().hex}@example.invalid")
     with harness.owner_engine.begin() as conn:
         conn.execute(text("UPDATE users SET mfa_enabled=true WHERE id=:id"), {"id": requester.user_id})
         conn.execute(text("""INSERT INTO users
             (id,tenant_id,email,role,platform_role,is_active,mfa_enabled,created_at,updated_at)
-            VALUES (:id,:tenant,:email,'admin','NONE',true,true,now(),now())"""),
-            {"id": identity.user_id, "tenant": identity.tenant_id, "email": identity.email})
+            VALUES (:id,:tenant,:email,:role,'NONE',true,true,now(),now())"""),
+            {"id": identity.user_id, "tenant": identity.tenant_id,
+             "email": identity.email, "role": role})
         conn.execute(text("""SELECT authn.create_session(:hash,:tenant,:user,'t10-test',
             now()+interval '10 minutes','{}'::jsonb)"""),
             {"hash": identity.session_hash, "tenant": identity.tenant_id, "user": identity.user_id})
@@ -592,6 +601,19 @@ def reviewed_assessment(harness, requester, approver=None):
         db.commit()
         assessment_id = assessment.id
     return proposal_id, source_id, assessment_id
+
+
+def test_invitation_completion_denies_unbound_runtime_call(postgres):
+    harness, _, _ = postgres
+    with harness.app_engine.begin() as conn:
+        outcome = conn.execute(text("""
+            SELECT outcome FROM authn.complete_onboarding_invite(
+                :signup_id, :password_hash, :api_key_hash, :session_hash, 'negative-test')
+        """), {
+            "signup_id": uuid4(), "password_hash": "x" * 60,
+            "api_key_hash": "a" * 64, "session_hash": "b" * 64,
+        }).scalar_one()
+        assert outcome == "invalid"
 
 
 def test_migration_preserves_legacy_rows_and_restricted_forced_rls(postgres):
@@ -854,19 +876,15 @@ def test_concurrent_first_framework_batches_are_one_revision(postgres, monkeypat
         assert {row.generated_at.isoformat() for row in rows} == {latest}
 
 
-def test_nullable_expansion_preserves_unknowns_and_old_numeric_writes_on_rollback(postgres):
-    harness, command, _ = postgres
+def test_nullable_expansion_preserves_unknowns_and_numeric_writes_at_current_head(postgres):
+    harness, _, _ = postgres
     tenant = harness.create_identity("ent019-null-rollback")
     with harness.session_for(tenant) as db:
         identifier = compliance_scoring.upsert_score_snapshot(db, str(tenant.tenant_id), score(None)).id
-    command("-m", "alembic", "downgrade", "051")
-    try:
-        with harness.owner_engine.begin() as conn:
-            assert conn.execute(text("SELECT overall_score FROM compliance_score_snapshots WHERE id=:id"), {"id": identifier}).scalar_one() is None
-            assert conn.execute(text("SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='compliance_score_snapshots' AND column_name='overall_score'")).scalar_one() == "YES"
-            conn.execute(text("UPDATE compliance_score_snapshots SET overall_score=50 WHERE id=:id"), {"id": identifier})
-    finally:
-        command("-m", "alembic", "upgrade", "head")
+    with harness.owner_engine.begin() as conn:
+        assert conn.execute(text("SELECT overall_score FROM compliance_score_snapshots WHERE id=:id"), {"id": identifier}).scalar_one() is None
+        assert conn.execute(text("SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='compliance_score_snapshots' AND column_name='overall_score'")).scalar_one() == "YES"
+        conn.execute(text("UPDATE compliance_score_snapshots SET overall_score=50 WHERE id=:id"), {"id": identifier})
 
 
 def test_downgrade_refuses_retained_versioned_history_and_keeps_rls(postgres):
@@ -875,9 +893,9 @@ def test_downgrade_refuses_retained_versioned_history_and_keeps_rls(postgres):
     with harness.session_for(tenant) as db:
         compliance_scoring.upsert_score_snapshot(db, str(tenant.tenant_id), score(50))
     result = command("-m", "alembic", "downgrade", "049", succeeds=False)
-    assert "downgrade refused" in result.stderr
+    assert "security-irreversible" in result.stderr
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "055"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "056"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='compliance_score_snapshots'")).scalar_one()
 
 
@@ -1099,6 +1117,7 @@ def test_consumed_recovery_rechecks_revocation_after_step_up_commit(postgres, mo
     harness, _, _ = postgres
     requester = harness.create_identity("recovery-effect-race")
     approver = reviewer(harness, requester)
+    executor = reviewer(harness, requester, role="operator")
     workflow_id, approval_id = str(uuid4()), uuid4()
     plan = [{"action": "redact", "destructive": True}]
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
@@ -1109,10 +1128,7 @@ def test_consumed_recovery_rechecks_revocation_after_step_up_commit(postgres, mo
             action_type="remediation", action_description="recovery race",
             action_payload=payload, action_hash=workflow_endpoints.compute_action_hash(
                 tenant_id=str(requester.tenant_id), action_payload=payload, expires_at=expires_at,
-            ), status="CONSUMED", requester_id=requester.user_id,
-            approver_id=approver.user_id, consumed_by_id=approver.user_id,
-            consumed_at=datetime.now(timezone.utc), mfa_verified=True,
-            mfa_timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
+            ), status="PENDING", requester_id=requester.user_id,
             expires_at=expires_at,
         ))
         db.add(ComplianceWorkflow(
@@ -1129,12 +1145,27 @@ def test_consumed_recovery_rechecks_revocation_after_step_up_commit(postgres, mo
         ))
         db.commit()
 
+    with harness.session_for(approver) as db:
+        approval = db.get(PendingApproval, approval_id)
+        approval.status = "APPROVED"
+        approval.approver_id = approver.user_id
+        approval.approved_at = datetime.now(timezone.utc)
+        approval.mfa_verified = True
+        approval.mfa_timestamp = datetime.now(timezone.utc) - timedelta(hours=1)
+        db.commit()
+    with harness.session_for(executor) as db:
+        approval = db.get(PendingApproval, approval_id)
+        approval.status = "CONSUMED"
+        approval.consumed_by_id = executor.user_id
+        approval.consumed_at = datetime.now(timezone.utc)
+        db.commit()
+
     effects, committed, proceed = [], Event(), Event()
     monkeypatch.setattr(connectors, "DocumentScanner", lambda: SimpleNamespace(
         rollback_remediation=lambda _plan: effects.append("rollback") or {"status": "success"},
     ))
     def recover():
-        with harness.session_for(approver) as db:
+        with harness.session_for(executor) as db:
             original_commit = db.commit
             def commit_after_step_up():
                 original_commit()
@@ -1143,19 +1174,19 @@ def test_consumed_recovery_rechecks_revocation_after_step_up_commit(postgres, mo
                     assert proceed.wait(10)
             db.commit = commit_after_step_up
             return ComplianceWorkflowRunner(db).resume(
-                workflow_id, str(requester.tenant_id), str(approver.user_id),
+                workflow_id, str(requester.tenant_id), str(executor.user_id),
                 authorization_check=lambda: workflow_endpoints._revalidate_privileged_workflow_actor(
-                    _approval_request(approver), db,
+                    _approval_request(executor), db,
                 ),
                 step_up_check=lambda: datetime.now(timezone.utc),
             )
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(recover)
-        assert committed.wait(10)
+        assert committed.wait(10), "recovery did not reach step-up commit"
         with harness.owner_engine.begin() as conn:
             conn.execute(text("UPDATE users SET role='viewer' WHERE id=:actor"),
-                {"actor": approver.user_id})
+                {"actor": executor.user_id})
         proceed.set()
         future.result(timeout=20)
 
@@ -1223,24 +1254,10 @@ def test_mfa_replay_state_is_tenant_scoped_and_reenrollment_preserves_consumptio
         assert db.get(User, state.approver.user_id).mfa_last_totp_step == consumed
 
 
-def test_cross_over_reviews_lock_principals_in_one_order_without_deadlock(real_mfa):
+def test_approver_cannot_create_cross_over_assessment(real_mfa):
     state = real_mfa
-    requester_secret = pyotp.random_base32()
-    with state.harness.session_for(state.requester) as db:
-        set_mfa_credentials(db.get(User, state.requester.user_id), requester_secret, [])
-        db.commit()
-    first = state.pending()
-    second = pending_assessment(state.harness, state.approver)
-    barrier = Barrier(2)
-    def decide(pending, code, actor):
-        barrier.wait(timeout=15)
-        return state.decide(pending, code, actor)["status"]
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(decide, first, pyotp.TOTP(state.secret).now(), state.approver),
-                   executor.submit(decide, second, pyotp.TOTP(requester_secret).now(), state.requester)]
-        assert [future.result(timeout=30) for future in futures] == ["CONSUMED", "CONSUMED"]
-    with state.harness.session_for(state.approver) as db:
-        assert db.query(ApprovalAudit).filter(ApprovalAudit.action == "ASSESSMENT_APPROVED").count() == 2
+    with pytest.raises(ValueError, match="tenant administrator"):
+        pending_assessment(state.harness, state.approver)
 
 
 def test_durable_mfa_state_prevents_schema_downgrade(real_mfa, postgres):
@@ -1248,7 +1265,7 @@ def test_durable_mfa_state_prevents_schema_downgrade(real_mfa, postgres):
     state.decide(state.pending(), pyotp.TOTP(state.secret).now())
     harness, command, _ = postgres
     result = command("-m", "alembic", "downgrade", "050", succeeds=False)
-    assert "mfa" in result.stderr.lower() and "downgrade" in result.stderr.lower()
+    assert "security-irreversible" in result.stderr
     with harness.owner_engine.connect() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "055"
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "056"
         assert conn.execute(text("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname='users'")).scalar_one()

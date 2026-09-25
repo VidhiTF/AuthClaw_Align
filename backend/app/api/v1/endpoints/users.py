@@ -8,7 +8,8 @@ import pyotp
 import qrcode
 import io
 import base64
-from pydantic import BaseModel, Field
+from typing import Any
+from pydantic import BaseModel, Field, field_serializer
 
 from app.db.models import APIKey, OnboardingEmailOTP, Tenant, User
 from app.schemas.models import UserCreate, UserInviteRequest, UserInviteResponse, UserResponse
@@ -32,6 +33,8 @@ from app.api.v1.endpoints.onboarding import (
 )
 from app.services.abuse_controls import verify_mfa_challenge
 from app.services.email_service import EmailDeliveryError
+from app.services.access_review import build_access_review_export
+from app.core.authorization import Role
 from app.services import event_backbone
 
 router = APIRouter()
@@ -70,6 +73,20 @@ class MFASetupRequest(BaseModel):
 
 class MFADisableRequest(BaseModel):
     code: str = Field(min_length=6, max_length=64)
+
+
+class AccessReviewExport(BaseModel):
+    format: str
+    tenant_id: UUID
+    generated_at: datetime
+    records: list[dict[str, Any]]
+    integrity_sha256: str
+    signing: dict[str, str]
+    signature: str
+
+    @field_serializer("generated_at")
+    def serialize_generated_at(self, value: datetime) -> str:
+        return value.isoformat()
 
 
 class MFAConfirmRequest(BaseModel):
@@ -122,6 +139,16 @@ def list_users(request: Request, db: Session = Depends(get_tenant_db)):
     """List all users for the tenant (isolated by tenant RLS)"""
     tenant_id = request.state.tenant_id
     return db.query(User).filter(User.tenant_id == tenant_id).all()
+
+
+@router.get(
+    "/access-review",
+    response_model=AccessReviewExport,
+    dependencies=[require_roles([Role.AUDITOR.value, Role.TENANT_ADMINISTRATOR.value]), require_scopes(["read"])],
+)
+def export_access_review(request: Request, db: Session = Depends(get_tenant_db)):
+    """Return the approved, tenant-scoped access-review snapshot."""
+    return build_access_review_export(db, str(request.state.tenant_id))
 
 
 @router.get("/me/security", response_model=MFASecurityResponse)

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import (
     get_current_tenant,
     get_tenant_db,
-    require_roles,
+    require_permission,
     require_scopes,
 )
 from app.schemas.models import (
@@ -20,8 +20,11 @@ from app.schemas.models import (
 from app.services.data_subject_requests import DataSubjectRequestService
 
 router = APIRouter()
-_READ = [require_roles(["owner", "admin"]), require_scopes(["read"])]
-_WRITE = [require_roles(["owner", "admin"]), require_scopes(["write"])]
+_READ = [require_permission("tenant.audit.read"), require_scopes(["read"])]
+_WRITE = [require_permission("tenant.privacy.request"), require_scopes(["write"])]
+_VERIFY = [require_permission("tenant.privacy.verify"), require_scopes(["write"])]
+_DECIDE = [require_permission("tenant.privacy.decide"), require_scopes(["write"])]
+_EXECUTE = [require_permission("tenant.privacy.execute"), require_scopes(["write"])]
 
 
 def _not_found() -> HTTPException:
@@ -80,7 +83,7 @@ def get_request(
 @router.post(
     "/{request_id}/verify",
     response_model=DataSubjectRequestResponse,
-    dependencies=_WRITE,
+    dependencies=_VERIFY,
 )
 def verify_request(
     request_id: UUID,
@@ -127,7 +130,7 @@ def _decision(
 @router.post(
     "/{request_id}/approve",
     response_model=DataSubjectRequestResponse,
-    dependencies=_WRITE,
+    dependencies=_DECIDE,
 )
 def approve_request(
     request_id: UUID,
@@ -144,7 +147,7 @@ def approve_request(
 @router.post(
     "/{request_id}/reject",
     response_model=DataSubjectRequestResponse,
-    dependencies=_WRITE,
+    dependencies=_DECIDE,
 )
 def reject_request(
     request_id: UUID,
@@ -158,7 +161,7 @@ def reject_request(
     )
 
 
-@router.post("/{request_id}/export", dependencies=_WRITE)
+@router.post("/{request_id}/export", dependencies=_EXECUTE)
 def export_request(
     request_id: UUID,
     request: Request,
@@ -178,7 +181,7 @@ def export_request(
         raise _conflict() from None
 
 
-@router.post("/{request_id}/delete", dependencies=_WRITE)
+@router.post("/{request_id}/delete", dependencies=_EXECUTE)
 def delete_request(
     request_id: UUID,
     request: Request,

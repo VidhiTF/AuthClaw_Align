@@ -226,17 +226,11 @@ def test_platform_guard_rejects_non_tenantless_platform_sessions(kind, tenant_id
     assert exc.value.status_code == 403
 
 
-def test_tenant_admin_cannot_create_platform_key():
+def test_tenant_admin_can_manage_tenant_api_keys_but_not_platform_scope():
     route = _route(apikeys_router, "", "POST")
-
-    with pytest.raises(HTTPException) as exc:
-        _check_dependencies(
-            route,
-            role="admin",
-            scopes=["admin"],
-        )
-
-    assert exc.value.status_code == 403
+    _check_dependencies(route, role="admin", scopes=["admin"])
+    with pytest.raises(ValueError):
+        APIKeyCreate(name="platform", scopes=["platform.admin"])
 
 
 def test_tenant_owner_cannot_rotate_or_revoke_platform_key(monkeypatch):
@@ -315,13 +309,9 @@ def test_tenant_owner_cannot_deactivate_platform_admin():
     db.commit.assert_not_called()
 
 
-def test_tenant_admin_cannot_delete_platform_admin():
+def test_tenant_admin_route_can_delete_only_non_platform_users():
     route = _route(users_router, "/{id}", "DELETE")
-
-    with pytest.raises(HTTPException) as exc:
-        _check_dependencies(route, role="admin", scopes=["admin"])
-
-    assert exc.value.status_code == 403
+    _check_dependencies(route, role="admin", scopes=["admin"])
 
 
 def _tenant_status_db(tenant, platform_identity):

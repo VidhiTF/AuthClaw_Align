@@ -277,7 +277,7 @@ def test_oidc_config_rejects_plaintext_endpoint(endpoint):
         oidc_sso.upsert_config(MagicMock(), "tenant-id", "user-id", payload)
 
 
-def test_oidc_group_role_mapping_uses_highest_privilege_group():
+def test_oidc_group_role_mapping_denies_ambiguous_groups():
     config = {
         "groups_claim": "groups",
         "default_role": "viewer",
@@ -287,9 +287,8 @@ def test_oidc_group_role_mapping_uses_highest_privilege_group():
         },
     }
 
-    role = oidc_sso.role_from_claims(config, {"groups": ["readers", "admins"]})
-
-    assert role == "admin"
+    with pytest.raises(PermissionError, match="missing or ambiguous"):
+        oidc_sso.role_from_claims(config, {"groups": ["readers", "admins"]})
 
 
 @pytest.mark.parametrize("auto_provision", [False, True])
@@ -315,7 +314,7 @@ def test_oidc_unknown_user_requires_tenant_invitation(auto_provision):
         )
 
 
-def test_oidc_existing_active_user_still_maps_to_tenant():
+def test_oidc_existing_active_user_without_group_mapping_is_denied():
     db = MagicMock()
     user = MagicMock(is_active=True, role="viewer")
     user_query = MagicMock()
@@ -331,15 +330,13 @@ def test_oidc_existing_active_user_still_maps_to_tenant():
         "role_mapping": {},
     }
 
-    mapped_user, role = oidc_sso.map_user(
-        db,
-        tenant,
-        config,
-        {"email": "existing@example.com"},
-    )
-
-    assert mapped_user is user
-    assert role == "viewer"
+    with pytest.raises(PermissionError, match="missing or ambiguous"):
+        oidc_sso.map_user(
+            db,
+            tenant,
+            config,
+            {"email": "existing@example.com"},
+        )
 
 
 def test_oidc_legacy_user_still_synchronizes_role_from_idp():
@@ -364,11 +361,11 @@ def test_oidc_legacy_user_still_synchronizes_role_from_idp():
     )
 
     assert mapped_user is user
-    assert role == "admin"
-    assert user.role == "admin"
+    assert role == "tenant_administrator"
+    assert user.role == "tenant_administrator"
 
 
-def test_oidc_invited_user_keeps_persisted_role_instead_of_idp_escalation():
+def test_oidc_invited_user_rechecks_current_group_mapping():
     db = MagicMock()
     user = MagicMock(is_active=True, role="viewer")
     user_query = MagicMock()
@@ -392,14 +389,37 @@ def test_oidc_invited_user_keeps_persisted_role_instead_of_idp_escalation():
     )
 
     assert mapped_user is user
-    assert role == "viewer"
-    assert user.role == "viewer"
+    assert role == "tenant_administrator"
+    assert user.role == "tenant_administrator"
     invite_filters = invite_query.filter.call_args.args
     assert invite_filters[0].right.value == tenant.id
     assert invite_filters[1].right.value == "invited@example.com"
 
 
-def test_oidc_legacy_owner_protection_is_unchanged():
+@pytest.mark.parametrize("groups", [[], ["admins", "readers"]])
+def test_oidc_invited_user_missing_or_ambiguous_current_groups_is_denied(groups):
+    db = MagicMock()
+    user = MagicMock(is_active=True, role="tenant_administrator")
+    user_query = MagicMock()
+    user_query.filter.return_value.first.return_value = user
+    invite_query = MagicMock()
+    invite_query.filter.return_value.first.return_value = MagicMock()
+    db.query.side_effect = [user_query, invite_query]
+
+    with pytest.raises(PermissionError, match="missing or ambiguous"):
+        oidc_sso.map_user(
+            db,
+            MagicMock(),
+            {
+                "email_claim": "email",
+                "groups_claim": "groups",
+                "role_mapping": {"admins": "admin", "readers": "viewer"},
+            },
+            {"email": "invited@example.com", "groups": groups},
+        )
+
+
+def test_oidc_legacy_owner_without_group_mapping_is_denied():
     db = MagicMock()
     user = MagicMock(is_active=True, role="owner")
     user_query = MagicMock()
@@ -408,20 +428,33 @@ def test_oidc_legacy_owner_protection_is_unchanged():
     invite_query.filter.return_value.first.return_value = None
     db.query.side_effect = [user_query, invite_query]
 
-    _, role = oidc_sso.map_user(
-        db,
-        MagicMock(),
-        {
-            "email_claim": "email",
-            "groups_claim": "groups",
-            "default_role": "viewer",
-            "role_mapping": {},
-        },
-        {"email": "owner@example.com"},
-    )
+    with pytest.raises(PermissionError, match="missing or ambiguous"):
+        oidc_sso.map_user(
+            db,
+            MagicMock(),
+            {
+                "email_claim": "email",
+                "groups_claim": "groups",
+                "default_role": "viewer",
+                "role_mapping": {},
+            },
+            {"email": "owner@example.com"},
+        )
 
-    assert role == "owner"
-    assert user.role == "owner"
+
+def test_oidc_legacy_owner_with_viewer_group_is_downgraded():
+    db = MagicMock()
+    user = MagicMock(is_active=True, role="owner")
+    db.query.return_value.filter.return_value.first.return_value = user
+    mapped_user, role = oidc_sso.map_user(
+        db, MagicMock(),
+        {"email_claim": "email", "groups_claim": "groups",
+         "role_mapping": {"readers": "viewer"}},
+        {"email": "owner@example.com", "groups": ["readers"]},
+    )
+    assert mapped_user is user
+    assert role == "viewer"
+    assert user.role == "viewer"
 
 
 def _identity_policy():
@@ -792,8 +825,8 @@ def test_oidc_success_emits_actor_and_tenant_audit(monkeypatch):
     ("role", "scopes"),
     [
         ("viewer", ["read"]),
-        ("developer", ["read"]),
-        ("operator", ["read"]),
+        ("developer", ["read", "write"]),
+        ("operator", ["read", "write"]),
         ("admin", ["admin", "read", "write"]),
         ("owner", ["admin", "read", "write"]),
     ],

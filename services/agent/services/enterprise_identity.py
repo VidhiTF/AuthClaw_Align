@@ -17,6 +17,16 @@ from sqlalchemy import text
 from database import engine
 from services.secret_manager import SecretManager
 from services.tenant_context import tenant_context
+from services.role_contract import (
+    TENANT_ROLES,
+    ROLE_PLATFORM_ADMIN,
+    ROLE_APPROVER,
+    ROLE_AUDITOR,
+    ROLE_DEVELOPER,
+    ROLE_OPERATOR,
+    ROLE_OWNER,
+    normalize_role,
+)
 
 
 SUPPORTED_PROVIDER_TYPES = {
@@ -589,20 +599,30 @@ def map_role(provider: OIDCProviderConfig, claims: Dict[str, Any], userinfo: Dic
         groups = [groups_value]
     else:
         groups = list(groups_value or [])
+    matches = []
     for group in groups:
-        mapped = provider.role_mapping.get(group)
-        if mapped:
-            return mapped
-    return provider.role_mapping.get("*", DEFAULT_ROLE)
+        mapped = provider.role_mapping.get(str(group))
+        if mapped is None:
+            continue
+        role = normalize_role(mapped)
+        if role not in TENANT_ROLES or role == ROLE_PLATFORM_ADMIN:
+            raise EnterpriseIdentityError("OIDC group mapping contains an invalid role.")
+        matches.append(role)
+    if len(matches) != 1:
+        raise EnterpriseIdentityError("OIDC group mapping is missing or ambiguous.")
+    return matches[0]
 
 
 def permissions_for_role(role: str) -> str:
-    if role in {"Super Admin", "Platform Admin"}:
+    role = normalize_role(role) or ""
+    if role == ROLE_PLATFORM_ADMIN:
         return "all_access"
-    if role == "Security Admin":
+    if role == ROLE_OWNER:
         return "read_write_gateway,manage_policies,manage_approvals"
-    if role == "Auditor":
+    if role in {ROLE_AUDITOR, ROLE_APPROVER}:
         return "audit_read"
+    if role in {ROLE_DEVELOPER, ROLE_OPERATOR}:
+        return "read_write_gateway"
     return DEFAULT_PERMISSIONS
 
 

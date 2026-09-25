@@ -15,7 +15,7 @@ from app.schemas.models import (
     PolicySimulationResponse,
     PolicyRollbackRequest,
 )
-from app.core.auth import get_tenant_db, require_roles, require_scopes
+from app.core.auth import get_tenant_db, require_permission, require_roles, require_scopes
 from app.services.policy_engine import PolicyValidationError, validate_policy_yaml as validate_policy_document, simulate_policy
 
 router = APIRouter()
@@ -187,7 +187,7 @@ def upload_policy(
         )
 
 
-@router.get("", response_model=list[PolicyResponse], dependencies=[require_scopes(["read"])])
+@router.get("", response_model=list[PolicyResponse], dependencies=[require_permission("tenant.policies.read"), require_scopes(["read"])])
 def list_policies(
     request: Request,
     db: Session = Depends(get_tenant_db)
@@ -197,7 +197,7 @@ def list_policies(
     return db.query(Policy).filter(Policy.tenant_id == tenant_id).order_by(Policy.version.desc()).all()
 
 
-@router.get("/active", response_model=PolicyDetailResponse, dependencies=[require_scopes(["read"])])
+@router.get("/active", response_model=PolicyDetailResponse, dependencies=[require_permission("tenant.policies.read"), require_scopes(["read"])])
 def get_active_policy(
     request: Request,
     db: Session = Depends(get_tenant_db)
@@ -266,7 +266,7 @@ def activate_policy(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to activate policy: {exc}")
 
 
-@router.get("/{policy_id}", response_model=PolicyDetailResponse, dependencies=[require_scopes(["read"])])
+@router.get("/{policy_id}", response_model=PolicyDetailResponse, dependencies=[require_permission("tenant.policies.read"), require_scopes(["read"])])
 def get_policy(
     request: Request,
     policy_id: UUID,

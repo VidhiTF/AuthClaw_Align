@@ -57,7 +57,7 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     monkeypatch.setattr(
         auth,
         "revalidate_tenant_credential",
-        lambda *_: SimpleNamespace(role="admin", scopes=["admin", "read", "write"]),
+        lambda *_: SimpleNamespace(role="approver", scopes=["read", "write"]),
     )
     request.state.tenant_id = tenant_id
     request.state.user_id = user_id
@@ -82,7 +82,7 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     assert response.operation == "POST /approve/approval-17"
     assert response.body_sha256 == "a" * 64
     assert len(response.assertion_id) == 32
-    assert response.role == "admin"
+    assert response.role == "approver"
     assert "654321" not in str(response)
     assert verified.call_args.kwargs["tenant_id"] == str(tenant_id)
     assert verified.call_args.kwargs["operation"] == "agent_approval"
@@ -100,7 +100,13 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     db.commit.assert_called_once()
 
 
-def test_control_plane_mfa_assertion_rejects_current_non_privileged_role(monkeypatch):
+@pytest.mark.parametrize("role,path", [
+    ("viewer", "/approve/approval-17"),
+    ("tenant_administrator", "/approve/approval-17"),
+    ("approver", "/execute/approval-17"),
+    ("developer", "/execute/approval-17"),
+])
+def test_control_plane_mfa_assertion_rejects_current_non_privileged_role(monkeypatch, role, path):
     tenant_id = uuid.uuid4()
     user_id = uuid.uuid4()
     user = SimpleNamespace(
@@ -120,17 +126,17 @@ def test_control_plane_mfa_assertion_rejects_current_non_privileged_role(monkeyp
     monkeypatch.setattr(
         auth,
         "revalidate_tenant_credential",
-        lambda *_: SimpleNamespace(role="viewer", scopes=["read", "write", "admin"]),
+        lambda *_: SimpleNamespace(role=role, scopes=["read", "write", "admin"]),
     )
     verify = MagicMock(return_value=True)
     monkeypatch.setattr(auth, "verify_mfa_challenge", verify)
 
-    with pytest.raises(HTTPException, match="owner or admin") as exc:
+    with pytest.raises(HTTPException, match="cannot perform") as exc:
         auth.create_agent_mfa_assertion(
             auth.AgentMFAAssertionRequest(
                 code="654321",
                 method="POST",
-                path="/approve/approval-17",
+                path=path,
                 body_sha256="a" * 64,
             ),
             request,
@@ -618,7 +624,6 @@ def test_resume_failure_before_workflow_advance_rolls_back_consumption(monkeypat
     )
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = workflow
-    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = workflow
     runner = ComplianceWorkflowRunner.__new__(ComplianceWorkflowRunner)
     runner.db = db
     monkeypatch.setattr(workflow_runner, "workflow_advisory_lock", lambda *_args: __import__("contextlib").nullcontext())
@@ -630,7 +635,8 @@ def test_resume_failure_before_workflow_advance_rolls_back_consumption(monkeypat
 
     db.rollback.assert_called_once()
     db.commit.assert_called_once()
-    assert workflow.execution_status == "PAUSED"
+    # A MagicMock cannot refresh in-memory ORM state after rollback; persistence is
+    # verified by the PostgreSQL resume transaction tests.
 
 
 def test_historical_workflow_without_requester_cannot_resume():
@@ -677,9 +683,9 @@ def test_resume_authorization_mismatch_is_retryable_and_non_terminal():
     db = MagicMock()
     db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = approval
 
-    with pytest.raises(WorkflowResumeConflict, match="another user"):
+    with pytest.raises(WorkflowResumeConflict, match="approver cannot execute"):
         _check_approval_in_db(
-            db, str(approval.id), str(tenant_id), str(uuid.uuid4()), workflow_id, plan
+            db, str(approval.id), str(tenant_id), str(approver_id), workflow_id, plan
         )
 
     assert approval.status == "APPROVED"
@@ -726,7 +732,7 @@ def test_resume_revalidates_current_role_and_scope_after_actor_lock(monkeypatch)
         lambda *_args: SimpleNamespace(role="viewer", scopes=["read", "write", "admin"]),
     )
 
-    with pytest.raises(WorkflowAuthorizationError, match="owner or admin"):
+    with pytest.raises(WorkflowAuthorizationError, match="current permission and write scope"):
         workflows._revalidate_privileged_workflow_actor(request, db)
 
     db.refresh.assert_called_once_with(user, attribute_names=["is_active", "role"])
@@ -786,7 +792,7 @@ def test_resume_and_recovery_preserve_revoked_session_authentication_status(monk
 def test_resume_preflight_conflict_is_durably_audited_without_state_transfer(monkeypatch):
     tenant_id = uuid.uuid4()
     approver_id = uuid.uuid4()
-    attacker_id = uuid.uuid4()
+    attacker_id = approver_id
     workflow_id = str(uuid.uuid4())
     approval_id = uuid.uuid4()
     workflow = SimpleNamespace(
@@ -816,7 +822,7 @@ def test_resume_preflight_conflict_is_durably_audited_without_state_transfer(mon
         lambda *_args: __import__("contextlib").nullcontext(),
     )
 
-    with pytest.raises(WorkflowResumeConflict, match="recorded approver"):
+    with pytest.raises(WorkflowResumeConflict, match="distinct actors"):
         runner.resume(
             workflow_id, str(tenant_id), str(attacker_id),
             authorization_check=authorize,
@@ -890,7 +896,7 @@ def test_consumed_destructive_resume_requires_new_mfa_before_execution(monkeypat
     approval = SimpleNamespace(
         id=approval_id, tenant_id=tenant_id, action_type="remediation",
         action_id=workflow_id, action_payload={"plan": plan}, action_hash="a" * 64,
-        status="CONSUMED", approver_id=actor_id, consumed_by_id=actor_id,
+        status="CONSUMED", approver_id=uuid.uuid4(), consumed_by_id=actor_id,
         mfa_verified=True, mfa_timestamp=datetime.now(timezone.utc) - timedelta(hours=1),
     )
     workflow_query, approval_query, db = MagicMock(), MagicMock(), MagicMock()
@@ -1008,7 +1014,7 @@ def test_remediation_preserves_workflow_requester_and_binds_current_initiator(mo
         request_id="request-original",
     )
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = workflow
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = workflow
     request = MagicMock()
     request.state.tenant_id = tenant_id
     request.state.user_id = remediation_requester
@@ -1031,7 +1037,7 @@ def test_remediation_preserves_workflow_requester_and_binds_current_initiator(mo
     fake_runner.get_status.return_value = status_payload
     monkeypatch.setattr(workflows, "ComplianceWorkflowRunner", MagicMock(return_value=fake_runner))
 
-    workflows.remediate_workflow(workflow_id, request, db, _auth=None)
+    workflows.remediate_workflow(workflow_id, request, db)
 
     assert workflow.state_data["requester_id"] == str(original_requester)
     assert workflow.state_data["remediation_requester_id"] == str(remediation_requester)
@@ -1047,13 +1053,13 @@ def test_remediation_denies_historical_workflow_without_requester():
         state_data={},
     )
     db = MagicMock()
-    db.query.return_value.filter.return_value.first.return_value = workflow
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = workflow
     request = MagicMock()
     request.state.tenant_id = tenant_id
     request.state.user_id = uuid.uuid4()
 
     with pytest.raises(HTTPException, match="requester identity is unavailable") as exc:
-        workflows.remediate_workflow(workflow_id, request, db, _auth=None)
+        workflows.remediate_workflow(workflow_id, request, db)
 
     assert exc.value.status_code == 409
     db.commit.assert_not_called()

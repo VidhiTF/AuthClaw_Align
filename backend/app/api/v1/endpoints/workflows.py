@@ -12,8 +12,9 @@ Provides REST endpoints for managing LangGraph compliance workflows:
 import logging
 import uuid
 from typing import Annotated, Literal, Optional
+import pyotp
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Discriminator, Field, Tag, TypeAdapter, ValidationError, field_validator
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.auth import (
     get_tenant_db,
+    require_permission,
     revalidate_tenant_credential,
     require_interactive_session,
     require_roles,
@@ -28,6 +30,7 @@ from app.core.auth import (
 )
 from app.api.v1.endpoints.onboarding import _get_redis
 from app.core.startup_checks import is_production
+from app.core.authorization import role_allows
 from app.db.models import PendingApproval, ComplianceWorkflow, User, ApprovalAudit, Tenant
 from app.orchestrator.runner import (
     ComplianceWorkflowRunner,
@@ -212,14 +215,17 @@ def _revalidate_privileged_workflow_actor(
     db: Session,
     user: User | None = None,
     *,
+    permission: str = "tenant.workflow.resume",
     http_error: bool = False,
 ) -> None:
     """Fail closed if the locked actor lost current workflow authority."""
-    if user is None:
-        user = db.query(User).filter(
-            User.id == request.state.user_id,
-            User.tenant_id == request.state.tenant_id,
-        ).with_for_update().first()
+    # Even when a caller already loaded the actor, acquire the row lock before
+    # re-binding the credential. Otherwise revocation can win during the later
+    # approval UPDATE while this function has only observed stale ORM state.
+    user = db.query(User).filter(
+        User.id == request.state.user_id,
+        User.tenant_id == request.state.tenant_id,
+    ).with_for_update().first()
     if user is not None:
         db.refresh(user, attribute_names=["is_active", "role"])
     try:
@@ -231,33 +237,31 @@ def _revalidate_privileged_workflow_actor(
         raise WorkflowAuthorizationError(
             str(exc.detail), status_code=exc.status_code
         ) from exc
-    current_role = str(user.role).lower() if user is not None else ""
-    bound_role = str(bound.role).lower() if bound is not None else ""
     current_scopes = set(bound.scopes or []) if bound is not None else set()
     if (
         user is None
         or not user.is_active
-        or current_role not in {"owner", "admin"}
-        or bound_role not in {"owner", "admin"}
-        or "admin" not in current_scopes
+        or not role_allows(user.role, permission)
+        or not role_allows(bound.role, permission)
+        or not ({"admin", "write"} & current_scopes)
     ):
         db.rollback()
         if http_error:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Active tenant owner or admin with admin scope required",
+                detail="Active tenant role with current permission and write scope required",
             )
         raise WorkflowAuthorizationError(
-            "Active tenant owner or admin with admin scope required"
+            "Active tenant role with current permission and write scope required"
         )
 
 
-@router.post("", response_model=WorkflowResponse, status_code=201)
+@router.post("", response_model=WorkflowResponse, status_code=201,
+             dependencies=[require_permission("tenant.workflow.create"), require_scopes(["write"])])
 def create_workflow(
     body: WorkflowCreateRequest,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["write"]),
 ):
     """Start a new compliance workflow."""
     tenant_id = str(request.state.tenant_id)
@@ -286,20 +290,13 @@ def create_workflow(
     return _workflow_response(result)
 
 
-@router.post(
-    "/{workflow_id}/resume",
-    response_model=WorkflowResponseVariant,
-    dependencies=[
-        Depends(require_interactive_session),
-        require_roles(["owner", "admin"]),
-    ],
-)
+@router.post("/{workflow_id}/resume", response_model=WorkflowResponseVariant,
+             dependencies=[Depends(require_interactive_session), require_permission("tenant.workflow.resume"), require_scopes(["write"])])
 def resume_workflow(
     workflow_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
     body: Optional[ApprovalRequest] = None,
-    _auth=require_scopes(["admin"]),
 ):
     """Resume a paused workflow (typically after approval)."""
     require_interactive_session(request)
@@ -626,7 +623,7 @@ def mfa_setup(
 def expire_stale_approvals(
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_permission("tenant.approvals.expire"),
 ):
     """Explicitly trigger expiration of all stale pending approvals."""
     tenant_id = str(request.state.tenant_id)
@@ -639,7 +636,8 @@ def expire_stale_approvals(
 def list_gateway_approvals(
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["read"]),
+    _auth=require_permission("tenant.approvals.read"),
+    _scope=require_scopes(["read"]),
 ):
     """List gateway HITL approvals for AuthClaw Lite."""
     tenant_id = str(request.state.tenant_id)
@@ -670,7 +668,7 @@ def count_pending_gateway_approvals(
     response_model=GatewayApprovalResponse,
     dependencies=[
         Depends(require_interactive_session),
-        require_roles(["owner", "admin"]),
+        require_permission("tenant.high_risk.approve"),
     ],
 )
 def approve_gateway_approval(
@@ -678,7 +676,7 @@ def approve_gateway_approval(
     request: Request,
     body: Optional[ApprovalRequest] = None,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_roles(["approver"]),
 ):
     """Approve a gateway HITL approval so the waiting request may continue (MFA challenged)."""
     require_interactive_session(request)
@@ -701,13 +699,14 @@ def approve_gateway_approval(
     user = db.query(User).filter(
         User.id == user_id,
         User.tenant_id == uuid.UUID(tenant_id),
-    ).with_for_update().first()
+    ).first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
     # Authentication happens before handler-level lock waits. Re-bind the exact
     # session/API key after all authorization rows are locked so revocation wins
     # the race before MFA consumption or the privileged state transition.
-    _revalidate_privileged_workflow_actor(request, db, user, http_error=True)
+    _revalidate_privileged_workflow_actor(
+        request, db, user, permission="tenant.high_risk.approve", http_error=True)
     mfa_verified, mfa_timestamp = _verify_mfa_if_enabled(
         user, request, body, required=True, operation="gateway_approval"
     )
@@ -762,14 +761,14 @@ def approve_gateway_approval(
     response_model=GatewayApprovalResponse,
     dependencies=[
         Depends(require_interactive_session),
-        require_roles(["owner", "admin"]),
+        require_permission("tenant.high_risk.approve"),
     ],
 )
 def reject_gateway_approval(
     approval_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_roles(["approver"]),
 ):
     """Reject a gateway HITL approval so the waiting request is blocked."""
     tenant_id = str(request.state.tenant_id)
@@ -785,8 +784,11 @@ def reject_gateway_approval(
         raise HTTPException(status_code=404, detail="Approval not found")
     if approval.status != "PENDING":
         raise HTTPException(status_code=400, detail=f"Approval already resolved: {approval.status}")
+    if approval.requester_id == user_id:
+        raise HTTPException(status_code=403, detail="Requester cannot reject their own action")
 
-    _revalidate_privileged_workflow_actor(request, db, http_error=True)
+    _revalidate_privileged_workflow_actor(
+        request, db, permission="tenant.high_risk.approve", http_error=True)
 
     decision_at = datetime.now(timezone.utc)
     transitioned = db.execute(
@@ -878,7 +880,7 @@ def get_workflow(
     response_model=WorkflowResponseVariant,
     dependencies=[
         Depends(require_interactive_session),
-        require_roles(["owner", "admin"]),
+        require_permission("tenant.high_risk.approve"),
     ],
 )
 def approve_workflow(
@@ -886,7 +888,7 @@ def approve_workflow(
     request: Request,
     body: Optional[ApprovalRequest] = None,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_roles(["approver"]),
 ):
     """Approve a workflow's remediation plan and resume execution (MFA challenged)."""
     require_interactive_session(request)
@@ -932,7 +934,7 @@ def approve_workflow(
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
         ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
     expected_payload = build_action_payload(workflow_id, (wf.remediation_plan if wf else []) or [])
     expected_hash = compute_action_hash(
         tenant_id=tenant_id,
@@ -954,14 +956,15 @@ def approve_workflow(
     user = db.query(User).filter(
         User.id == user_id,
         User.tenant_id == uuid.UUID(tenant_id),
-    ).with_for_update().first()
+    ).first()
     if not user:
         raise HTTPException(status_code=404, detail="Approver user record not found")
 
     # Close the authenticate/wait/revoke/commit race using the credential that
     # authenticated this request, after the approval and user locks are held.
     try:
-        _revalidate_privileged_workflow_actor(request, db, user)
+        _revalidate_privileged_workflow_actor(
+            request, db, user, permission="tenant.high_risk.approve")
     except WorkflowAuthorizationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
@@ -1030,35 +1033,8 @@ def approve_workflow(
     db.add(audit)
     db.commit()
 
-    # Resume workflow execution
-    try:
-        result = runner.resume(
-            workflow_id,
-            tenant_id,
-            actor_id=str(user_id),
-            authorization_check=lambda: _revalidate_privileged_workflow_actor(request, db),
-            step_up_check=(lambda: mfa_timestamp) if requires_fresh_mfa else None,
-        )
-        remediation_state = str(result.get("remediation_state") or "")
-        if remediation_state in {"SUCCEEDED", "FAILED", "PARTIAL_FAILED", "ROLLBACK_FAILED"}:
-            failed = remediation_state != "SUCCEEDED"
-            create_notification(
-                db,
-                tenant_id=uuid.UUID(tenant_id),
-                type="remediation_failed" if failed else "remediation_completed",
-                severity="critical" if failed else "info",
-                title="Remediation failed" if failed else "Remediation completed",
-                body=f"{workflow_id} finished with remediation state {remediation_state}.",
-                link="/agent",
-            )
-    except WorkflowAuthorizationError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc))
-    except (WorkflowResumeConflict, WorkflowBusyError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
-    except Exception as exc:
-        logger.error("Failed to approve/resume workflow: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
-    return _workflow_response(result)
+    # Execution is a separate operator/admin action through /resume.
+    return _workflow_response(runner.get_status(workflow_id, tenant_id))
 
 
 @router.post(
@@ -1066,14 +1042,14 @@ def approve_workflow(
     response_model=WorkflowResponseVariant,
     dependencies=[
         Depends(require_interactive_session),
-        require_roles(["owner", "admin"]),
+        require_permission("tenant.high_risk.approve"),
     ],
 )
 def reject_workflow(
     workflow_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["admin"]),
+    _auth=require_roles(["approver"]),
 ):
     """Reject a workflow's remediation plan."""
     require_interactive_session(request)
@@ -1111,9 +1087,11 @@ def reject_workflow(
             status_code=400,
             detail=f"Approval request is already resolved (status={approval.status})",
         )
+    _enforce_separate_approver(db, approval, tenant_id, user_id)
 
     try:
-        _revalidate_privileged_workflow_actor(request, db)
+        _revalidate_privileged_workflow_actor(
+            request, db, permission="tenant.high_risk.approve")
     except WorkflowAuthorizationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
@@ -1149,7 +1127,7 @@ def reject_workflow(
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
         ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
     if wf:
         wf.approval_status = "REJECTED"
 
@@ -1169,21 +1147,16 @@ def reject_workflow(
     db.add(audit)
     db.commit()
 
-    # Resume workflow (which wraps up since it's rejected)
-    try:
-        result = runner.resume(workflow_id, tenant_id, actor_id=str(user_id))
-    except Exception as exc:
-        logger.error("Failed to reject/resume workflow: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
-    return _workflow_response(result)
+    # The approver records a decision only; execution remains a separate actor action.
+    return _workflow_response(runner.get_status(workflow_id, tenant_id))
 
 
-@router.post("/{workflow_id}/remediate", response_model=WorkflowResponseVariant)
+@router.post("/{workflow_id}/remediate", response_model=WorkflowResponseVariant,
+             dependencies=[require_permission("tenant.workflow.remediate"), require_scopes(["write"])])
 def remediate_workflow(
     workflow_id: str,
     request: Request,
     db: Session = Depends(get_tenant_db),
-    _auth=require_scopes(["write"]),
 ):
     """Transition a completed scan into remediation mode and generate approval request."""
     tenant_id = str(request.state.tenant_id)
@@ -1192,7 +1165,7 @@ def remediate_workflow(
     wf = db.query(ComplianceWorkflow).filter(
         ComplianceWorkflow.workflow_id == workflow_id,
         ComplianceWorkflow.tenant_id == uuid.UUID(tenant_id),
-    ).first()
+    ).with_for_update().first()
 
     if not wf:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -1240,6 +1213,7 @@ def remediate_workflow(
         workflow_id,
         wf.remediation_plan,
         requester_id=remediation_requester_id,
+        commit=False,
     )
 
     # Transition workflow to PAUSED/AWAITING_APPROVAL

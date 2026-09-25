@@ -18,9 +18,13 @@ from app.api.v1.endpoints.onboarding import _scopes_for_role
 from app.core.auth import hash_key
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.db.models import APIKey, OnboardingEmailOTP, Tenant, TenantOIDCConfig, User
+from app.core.authorization import (
+    TENANT_ROLES,
+    group_role_mapping,
+    normalize_role,
+)
 
-VALID_ROLES = ("owner", "admin", "developer", "operator", "viewer")
-ROLE_RANK = {role: index for index, role in enumerate(VALID_ROLES)}
+VALID_ROLES = tuple(sorted(TENANT_ROLES | {"owner", "admin"}))
 
 
 class OIDCAuthenticationError(ValueError):
@@ -89,8 +93,10 @@ def _parse_role_mapping(value: str) -> dict[str, str]:
 
 
 def _clean_role(role: str | None) -> str:
-    value = (role or "viewer").strip().lower()
-    return value if value in VALID_ROLES else "viewer"
+    value = normalize_role(role)
+    if value not in TENANT_ROLES:
+        raise ValueError("OIDC role mappings must contain a valid tenant role")
+    return value
 
 
 def _endpoints(config: TenantOIDCConfig | dict[str, Any]) -> dict[str, str]:
@@ -377,17 +383,11 @@ def validate_identity_context(config: dict[str, Any] | TenantOIDCConfig, claims:
 
 def role_from_claims(config: dict[str, Any] | TenantOIDCConfig, claims: dict[str, Any]) -> str:
     groups_claim = config["groups_claim"] if isinstance(config, dict) else config.groups_claim
-    default_role = _clean_role(config.get("default_role") if isinstance(config, dict) else config.default_role)
     mapping = dict(config.get("role_mapping") if isinstance(config, dict) else config.role_mapping or {})
     groups = claims.get(groups_claim) or []
     if isinstance(groups, str):
         groups = [groups]
-    best = default_role
-    for group in groups:
-        mapped = _clean_role(mapping.get(str(group)))
-        if ROLE_RANK[mapped] < ROLE_RANK[best]:
-            best = mapped
-    return best
+    return group_role_mapping(groups, mapping)
 
 
 def issue_console_key(db: Session, tenant: Tenant, user: User, email: str, role: str, source: str) -> tuple[str, list[str]]:
@@ -424,7 +424,8 @@ def map_user(db: Session, tenant: Tenant, config: dict[str, Any] | TenantOIDCCon
         OnboardingEmailOTP.purpose == "invite",
         OnboardingEmailOTP.status == "verified",
     ).first()
-    role = _clean_role(user.role) if invited else role_from_claims(config, claims)
-    if not invited and (user.role != "owner" or role == "owner"):
-        user.role = role
+    # Invitation verification permits OIDC login but must not freeze role
+    # authorization. Re-evaluate the current exact group mapping every login.
+    role = role_from_claims(config, claims)
+    user.role = role
     return user, _clean_role(user.role)

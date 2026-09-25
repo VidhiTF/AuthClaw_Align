@@ -539,6 +539,7 @@ class RemediationRuntime:
             risk_level=plan["risk_level"],
             tenant_id=tenant_id,
             request_id=f"remediation-{uuid.uuid4()}",
+            requester_id=f"system:remediation:{plan_id}",
             reason="remediation_execution",
             metadata=metadata,
             requested_by=requested_by,

@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_tenant_db, require_roles, require_scopes
+from app.core.auth import get_tenant_db, require_permission, require_roles, require_scopes
 from app.core.crypto import encrypt_secret
 from app.db.models import OnboardingStatus, ProviderCredential
 from app.schemas.models import ProviderCredentialCreate, ProviderCredentialResponse
@@ -12,7 +12,7 @@ from app.schemas.models import ProviderCredentialCreate, ProviderCredentialRespo
 router = APIRouter()
 
 
-@router.get("", response_model=list[ProviderCredentialResponse], dependencies=[require_scopes(["read"])])
+@router.get("", response_model=list[ProviderCredentialResponse], dependencies=[require_permission("tenant.credentials.read"), require_scopes(["read"])])
 def list_provider_credentials(request: Request, db: Session = Depends(get_tenant_db)):
     """List provider credential metadata for the current tenant."""
     tenant_id = request.state.tenant_id

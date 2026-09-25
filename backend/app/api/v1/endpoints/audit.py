@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_tenant_db, require_roles, require_scopes
+from app.core.auth import get_tenant_db, require_permission, require_roles, require_scopes
 from app.db.models import AuditLogMetadata
 from app.services.audit_store import (
     build_consistency_report,
@@ -200,7 +200,7 @@ def _verify_chain(records: List[dict]) -> List[dict]:
 @router.get(
     "",
     response_model=AuditLogsResponse,
-    dependencies=[require_scopes(["read"])],
+    dependencies=[require_permission("tenant.audit.read"), require_scopes(["read"])],
 )
 def get_audit_logs(
     request: Request,
@@ -287,7 +287,7 @@ def get_audit_metrics(
 
 @router.get(
     "/export/signing-key",
-    dependencies=[require_scopes(["read"])],
+    dependencies=[require_permission("tenant.audit.read"), require_scopes(["read"])],
 )
 def get_audit_export_signing_key():
     try:
@@ -301,7 +301,7 @@ def get_audit_export_signing_key():
 
 @router.post(
     "/export",
-    dependencies=[require_scopes(["read"])],
+    dependencies=[require_permission("tenant.audit.read"), require_scopes(["read"])],
 )
 def create_signed_audit_export(
     request: Request,
@@ -367,7 +367,6 @@ def create_signed_audit_export(
 @router.post(
     "/export/verify",
     response_model=SignedAuditVerifyResponse,
-    dependencies=[require_scopes(["read"])],
 )
 def verify_audit_export(verify_request: SignedAuditVerifyRequest):
     return verify_signed_audit_export(verify_request.artifact).as_dict()
@@ -376,7 +375,7 @@ def verify_audit_export(verify_request: SignedAuditVerifyRequest):
 @router.get(
     "/store/status",
     response_model=AuditStoreStatusResponse,
-    dependencies=[require_scopes(["read"])],
+    dependencies=[require_permission("tenant.audit.read"), require_scopes(["read"])],
 )
 def get_audit_store_status():
     if not clickhouse_configured():
@@ -409,7 +408,7 @@ def get_audit_store_status():
 
 @router.get(
     "/store/consistency",
-    dependencies=[require_scopes(["read"])],
+    dependencies=[require_permission("tenant.audit.read"), require_scopes(["read"])],
 )
 def get_audit_store_consistency(
     request: Request,

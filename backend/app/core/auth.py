@@ -14,6 +14,11 @@ from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session, object_session
 from app.db.session import SessionLocal, database_auth_context
 from app.db.dependencies import get_db, get_score_db
+from app.core.authorization import (
+    effective_scopes,
+    normalize_role as _canonical_role,
+    role_allows,
+)
 from app.core.crypto import (
     SECRET_ENVELOPE_PREFIX,
     SECRET_ENVELOPE_V2_PREFIX,
@@ -162,9 +167,7 @@ def verify_mfa_code(user, code: str) -> bool:
 
 
 def _normalize_role(role: str | None) -> str:
-    if not role:
-        return "viewer"
-    return str(role).lower()
+    return _canonical_role(role) or "unknown"
 
 
 def _canonical_request_path(request: Request) -> str:
@@ -201,6 +204,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/v1/auth/login",
             "/v1/auth/password-reset/request",
             "/v1/auth/password-reset/confirm",
+            "/v1/audit-logs/export/verify",
+            "/v1/audit/export/verify",
             "/api/public/v1/access-requests",
         }
         public_access_request = (
@@ -305,7 +310,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             # Inject tenant info, scopes, and role into request state.
             request.state.tenant_id = result.tenant_id
-            scopes = list(result.scopes or [])
+            user_role = _normalize_role(result.role)
+            scopes = effective_scopes(user_role, result.scopes or [])
             platform_role = str(result.platform_role).upper()
             request.state.scopes = scopes
             request.state.user_id = result.user_id
@@ -315,7 +321,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.api_key_id = (
                 result.credential_id if credential_kind == "api_key" else None
             )
-            request.state.user_role = _normalize_role(result.role)
+            request.state.user_role = user_role
             request.state.tenant_role = request.state.user_role
             request.state.platform_role = platform_role
             request.state.user_is_active = bool(result.user_is_active)
@@ -397,9 +403,9 @@ def require_scopes(required_scopes: List[str]):
     """Enforce that the requesting client has the required scopes"""
 
     def dependency(request: Request):
-        scopes = getattr(request.state, "scopes", [])
+        scopes = set(getattr(request.state, "scopes", []))
         if "admin" in scopes:
-            return
+            scopes.update({"read", "write"})
         for scope in required_scopes:
             if scope not in scopes:
                 raise HTTPException(
@@ -420,6 +426,19 @@ def require_roles(required_roles: List[str]):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Forbidden: Insufficient role",
+            )
+
+    return Depends(dependency)
+
+
+def require_permission(permission: str):
+    """Enforce the canonical role/action matrix at the API boundary."""
+
+    def dependency(request: Request):
+        if not role_allows(getattr(request.state, "user_role", None), permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Insufficient permission",
             )
 
     return Depends(dependency)

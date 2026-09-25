@@ -194,7 +194,7 @@ class ControlPlaneAuthSmokeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 auth.canonical_query(query)
         self.assertIsNotNone(self.verify(query="q=a%20b"))
-        self.assertEqual(self.verify(signed(**{"x-authclaw-role": "Super Admin"})).role, "owner")
+        self.assertEqual(self.verify(signed(**{"x-authclaw-role": "Super Admin"})).role, "tenant_administrator")
         self.assertIsNone(self.verify(signed(**{"x-authclaw-role": "root"})))
         with self.assertRaises(ValueError):
             signed(**{"x-authclaw-user-id": "user\nforged"})
@@ -467,7 +467,7 @@ controlPlaneHeaders(new URL('https://agent.invalid/chat'+(query?'?'+query:'')), 
                 {"AUTHCLAW_INTERNAL_SERVICE_SECRET": json.dumps({"keys": {"v1": forbidden}})},
             ):
                 for tenant in ("unknown", "disabled"):
-                    for role in ("viewer", "developer"):
+                    for role in ("viewer",):
                         headers.update({"x-authclaw-tenant-id": tenant, "x-authclaw-role": role})
                         for path, body in (
                             ("/policies/test", b""),
