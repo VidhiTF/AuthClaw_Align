@@ -34,6 +34,7 @@ AUTHN_RUNTIME_FUNCTIONS = {
     "bind_api_key_context",
     "bind_platform_session_context",
     "bind_session_context",
+    "current_user_id",
     "current_role",
     "has_role",
     "authorize_action",

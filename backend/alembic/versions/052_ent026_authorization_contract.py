@@ -20,9 +20,17 @@ def _app_role() -> str:
 def upgrade() -> None:
     op.execute(
         """
-        ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'tenant_administrator';
-        ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'auditor';
-        ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'approver';
+        -- Fresh installations use varchar for users.role; older installations
+        -- may still have a PostgreSQL enum that needs the new values.
+        DO $roles$
+        BEGIN
+            IF to_regtype('public.user_role') IS NOT NULL THEN
+                ALTER TYPE public.user_role ADD VALUE IF NOT EXISTS 'tenant_administrator';
+                ALTER TYPE public.user_role ADD VALUE IF NOT EXISTS 'auditor';
+                ALTER TYPE public.user_role ADD VALUE IF NOT EXISTS 'approver';
+            END IF;
+        END
+        $roles$;
 
         CREATE OR REPLACE FUNCTION authn.current_role() RETURNS text
         LANGUAGE plpgsql STABLE SECURITY DEFINER
@@ -62,7 +70,7 @@ def upgrade() -> None:
             IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
                OR NEW.requester_id IS DISTINCT FROM OLD.requester_id
                OR NEW.action_hash IS DISTINCT FROM OLD.action_hash
-               OR NEW.action_payload IS DISTINCT FROM OLD.action_payload
+               OR NEW.action_payload::jsonb IS DISTINCT FROM OLD.action_payload::jsonb
                OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
                 RAISE EXCEPTION 'approval identity and action are immutable';
             END IF;
@@ -121,6 +129,8 @@ def upgrade() -> None:
                 IF NOT authn.authorize_action('tenant.privacy.decide')
                    OR NEW.decision_by IS NULL
                    OR NEW.decision_by IS DISTINCT FROM authn.current_user_id()
+                   OR NEW.requester_id IS NULL
+                   OR NEW.requester_id = authn.current_user_id()
                    OR NEW.identity_verified_by IS NULL
                    OR NEW.identity_verified_by = authn.current_user_id() THEN
                     RAISE EXCEPTION 'data-subject decision is not authorized';
@@ -132,6 +142,8 @@ def upgrade() -> None:
                    OR NEW.decision IS DISTINCT FROM 'APPROVED'
                    OR NEW.decision_by IS NULL
                    OR NEW.decision_by IS DISTINCT FROM authn.current_user_id()
+                   OR NEW.requester_id IS NULL
+                   OR NEW.requester_id = authn.current_user_id()
                    OR NEW.identity_verified_by IS NULL
                    OR NEW.identity_verified_by = authn.current_user_id() THEN
                     RAISE EXCEPTION 'data-subject access completion is not authorized';
@@ -307,7 +319,8 @@ def upgrade() -> None:
         DROP POLICY IF EXISTS tenant_isolation ON public.data_subject_requests;
         CREATE POLICY data_subject_requests_read ON public.data_subject_requests FOR SELECT
             USING (tenant_id = authn.current_tenant_id()
-                   AND authn.authorize_action('tenant.audit.read'));
+                   AND (authn.authorize_action('tenant.audit.read')
+                        OR authn.authorize_action('tenant.privacy.execute')));
         CREATE POLICY data_subject_requests_create ON public.data_subject_requests FOR INSERT
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND authn.authorize_action('tenant.privacy.request'));
@@ -332,9 +345,11 @@ def upgrade() -> None:
     op.execute(
         f"""
         REVOKE ALL ON FUNCTION authn.current_role() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION authn.current_user_id() FROM PUBLIC;
         REVOKE ALL ON FUNCTION authn.has_role(text[]) FROM PUBLIC;
         REVOKE ALL ON FUNCTION authn.authorize_action(text) FROM PUBLIC;
         GRANT EXECUTE ON FUNCTION authn.current_role() TO {app_role};
+        GRANT EXECUTE ON FUNCTION authn.current_user_id() TO {app_role};
         GRANT EXECUTE ON FUNCTION authn.has_role(text[]) TO {app_role};
         GRANT EXECUTE ON FUNCTION authn.authorize_action(text) TO {app_role};
         REVOKE ALL ON FUNCTION authn.enforce_pending_approval_transition() FROM PUBLIC;

@@ -161,14 +161,14 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
             tenant_a_id,
             "DSR Tenant A",
             [
-                (owner_a_id, "owner-a@dsr.test", "tenant_admin"),
+                (owner_a_id, "owner-a@dsr.test", "tenant_administrator"),
                 (viewer_a_id, "viewer-a@dsr.test", "viewer"),
                 (approver_a_id, "approver-a@dsr.test", "approver"),
                 (operator_a_id, "operator-a@dsr.test", "operator"),
-                (verifier_a_id, "verifier-a@dsr.test", "tenant_admin"),
+                (verifier_a_id, "verifier-a@dsr.test", "tenant_administrator"),
             ],
         ),
-        (tenant_b_id, "DSR Tenant B", [(owner_b_id, "owner-b@dsr.test", "tenant_admin")]),
+        (tenant_b_id, "DSR Tenant B", [(owner_b_id, "owner-b@dsr.test", "tenant_administrator")]),
     ):
         db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
         db_session.add(Tenant(id=tenant_id, name=name, tier="enterprise", status="active"))
@@ -258,7 +258,7 @@ def test_data_subject_request_lifecycle_authorization_and_isolation(
         json={"decision_reason": "Identity and scope confirmed"},
         headers=approver_a_headers,
     )
-    assert approved.status_code == status.HTTP_200_OK
+    assert approved.status_code == status.HTTP_200_OK, approved.json()
     assert approved.json()["status"] == "COMPLETED"
     assert approved.json()["completed_at"]
     assert published_tenants[publication_count:] == [(producer, str(tenant_a_id))]

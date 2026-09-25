@@ -209,6 +209,12 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
                         'PENDING', :requester, now() + interval '30 minutes', now(), now())"""),
                 {"id": row_id, "tenant": tenant_id, "action_id": str(row_id),
                  "requester": requester_id})
+        conn.execute(text("""INSERT INTO public.data_subject_requests
+            (id, tenant_id, subject_id, requester_id, request_type, status,
+             identity_verified, scope, created_at, updated_at)
+            VALUES (:id, :tenant, 'ent026-subject', :requester, 'ACCESS',
+                    'PENDING', false, '{}'::json, now(), now())"""),
+            {"id": uuid4(), "tenant": tenant_id, "requester": administrator.user_id})
 
         expected_policies = {
             "api_keys": {"tenant_isolation", "tenant_admin_api_keys_write", "tenant_access_review_api_keys_read"},
@@ -220,9 +226,12 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
             "data_subject_requests": {"data_subject_requests_read", "data_subject_requests_create", "data_subject_requests_update"},
             "audit_log_metadata": {"tenant_audit_read", "tenant_audit_append"},
         }
-        rows = conn.execute(text("""SELECT tablename, policyname FROM pg_policies
-            WHERE schemaname = 'public' AND tablename = ANY(:tables)"""),
-            {"tables": list(expected_policies)}).all()
+        rows = conn.execute(text("""SELECT p.tablename, p.policyname FROM pg_policies p
+            WHERE p.schemaname = 'public' AND p.tablename = ANY(:tables)
+              AND EXISTS (SELECT 1 FROM unnest(p.roles) AS policy_role(role_name)
+                  WHERE CASE WHEN role_name = 'public' THEN true ELSE
+                      pg_has_role(CAST(:app_role AS name), CAST(role_name AS name), 'member') END)"""),
+            {"tables": list(expected_policies), "app_role": isolation.app_engine.url.username}).all()
         for table, names in expected_policies.items():
             assert {row.policyname for row in rows if row.tablename == table} == names
     read_tables = {
@@ -231,6 +240,7 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
         "provider_credentials": {"tenant_administrator"},
         "api_keys": {"tenant_administrator", "auditor"},
         "pending_approvals": set(identities),
+        "data_subject_requests": {"tenant_administrator", "auditor", "approver", "operator"},
     }
     for role, identity in identities.items():
         with isolation.session_for(identity) as db:
@@ -255,9 +265,9 @@ def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness)
             {"actor": identities["approver"].user_id, "id": approval_id}).scalar_one() == approval_id
         db.commit()
     with isolation.owner_engine.connect() as conn:
-        statuses = dict(conn.execute(text("SELECT id, status FROM public.pending_approvals")))
-        assert statuses[approval_id] == "APPROVED"
-        assert statuses[self_approval_id] == "PENDING"
+        assert dict(tuple(row) for row in conn.execute(
+            text("SELECT id, status FROM public.pending_approvals"))) == {
+            approval_id: "APPROVED", self_approval_id: "PENDING"}
 
 
 def test_writer_privileges_cannot_bypass_restricted_audit_verifier(

@@ -162,7 +162,7 @@ class DataSubjectRequestService:
                 raise ValueError("Request identity is not verified")
             approver = db.query(User).filter(
                 User.id == actor_id, User.tenant_id == tenant_id, User.is_active == True
-            ).with_for_update().first()
+            ).first()
             if not approver or normalize_role(approver.role) != "approver":
                 raise ValueError("A distinct active approver is required")
             if record.requester_id in {actor_id, record.identity_verified_by}:
