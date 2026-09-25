@@ -99,7 +99,7 @@ def _create_tenant_approver(
     email: str,
     api_key_raw: str,
     *,
-    role: str = "admin",
+    role: str = "approver",
 ):
     user_id = uuid.uuid4()
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
@@ -273,7 +273,7 @@ def test_phase10_mfa_setup_and_verification(client: TestClient, db_session: Sess
         )
     assert response_backup.status_code == status.HTTP_200_OK
     assert response_backup.json()["approval_status"] == "APPROVED"
-    assert response_backup.json()["current_state"] == "COMPLETE"
+    assert response_backup.json()["current_state"] == "AWAITING_APPROVAL"
 
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
     user_db = db_session.query(User).filter(User.id == approver_id).first()
@@ -353,31 +353,26 @@ def test_phase10_stale_mfa_rejected_before_approval_commit(
 
 def test_phase10_approval_expiration(client: TestClient, db_session: Session):
     """Verify that approvals expire after 30 minutes and are recorded in ApprovalAudit."""
-    tenant_id, _, headers = _create_admin_tenant(
+    tenant_id, requester_id, headers = _create_admin_tenant(
         db_session,
         "Test Tenant E",
         "admin@tenantE.com",
         "system_admin_key_tenant_e",
     )
-    workflow_id, approval_id = _create_workflow_approval(client, headers)
-
-    db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
-    approval = db_session.query(PendingApproval).filter(PendingApproval.id == uuid.UUID(approval_id)).first()
-    approval.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
-    db_session.commit()
-    db_session.execute(text("SET app.current_tenant_id = ''"))
+    approval_id = _create_gateway_approval(
+        db_session, tenant_id, requester_id,
+        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
 
     response_expire = client.post("/v1/workflows/approvals/expire-stale", headers=headers)
     assert response_expire.status_code == status.HTTP_200_OK
     assert response_expire.json()["expired_count"] == 1
 
-    response_status = client.get(f"/v1/workflows/{workflow_id}", headers=headers)
-    assert response_status.json()["approval_status"] == "EXPIRED"
-    assert response_status.json()["execution_status"] == "COMPLETED"
-
     db_session.execute(text(f"SET app.current_tenant_id = '{tenant_id}'"))
+    approval = db_session.get(PendingApproval, approval_id)
+    assert approval.status == "EXPIRED"
     audit = db_session.query(ApprovalAudit).filter(
-        ApprovalAudit.approval_id == uuid.UUID(approval_id),
+        ApprovalAudit.approval_id == approval_id,
         ApprovalAudit.action == "EXPIRED"
     ).first()
     assert audit is not None

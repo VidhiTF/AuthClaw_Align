@@ -118,7 +118,7 @@ def upgrade() -> None:
                 RAISE EXCEPTION 'approval identity and action are immutable';
             END IF;
             IF NEW.status = 'EXPIRED' THEN
-                IF OLD.expires_at IS NULL OR OLD.expires_at >= now()
+                IF OLD.expires_at IS NULL OR OLD.expires_at >= clock_timestamp()
                    OR NOT authn.authorize_action('tenant.approvals.expire') THEN
                     RAISE EXCEPTION 'approval expiration is not authorized';
                 END IF;
@@ -467,7 +467,7 @@ def upgrade() -> None:
         CREATE POLICY tenant_approval_expire ON public.pending_approvals FOR UPDATE
             USING (tenant_id = authn.current_tenant_id()
                    AND status IN ('PENDING','APPROVED')
-                   AND expires_at < now()
+                   AND expires_at < clock_timestamp()
                    AND authn.authorize_action('tenant.approvals.expire'))
             WITH CHECK (tenant_id = authn.current_tenant_id()
                         AND status = 'EXPIRED'

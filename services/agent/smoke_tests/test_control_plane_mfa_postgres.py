@@ -55,7 +55,8 @@ def approval_database(monkeypatch, request):
         conn.execute(text("""
             CREATE TABLE gateway_approvals (
                 id SERIAL PRIMARY KEY, approval_id VARCHAR(100) UNIQUE NOT NULL,
-                request_id VARCHAR(100), correlation_id VARCHAR(100), tenant_id INTEGER NOT NULL,
+                request_id VARCHAR(100), requester_id VARCHAR(255),
+                correlation_id VARCHAR(100), tenant_id INTEGER NOT NULL,
                 status VARCHAR(50) NOT NULL, requested_by VARCHAR(255), created_at TIMESTAMP,
                 expires_at TIMESTAMP, approved_at TIMESTAMP, rejected_at TIMESTAMP,
                 executed_at TIMESTAMP, requested_action TEXT, query TEXT, risk_level VARCHAR(20),
@@ -145,7 +146,9 @@ def test_signed_control_plane_principal_completes_mfa_approval_and_execution_und
     bundle = json.loads(Path(bundle_path).read_text()) if bundle_path else None
     actor = bundle["actor"] if bundle else str(uuid4())
     tenant = bundle["tenant"] if bundle else str(uuid4())
-    actor_role = bundle["role"] if bundle else "owner"
+    actor_role = bundle["role"] if bundle else "approver"
+    executor_actor = bundle["execute_actor"] if bundle else str(uuid4())
+    executor_role = bundle["execute_role"] if bundle else "operator"
     store = redis.Redis.from_url(os.environ["ENT018_REDIS_URL"])
     assert make_url(os.environ["ENT018_REDIS_URL"]).host in {"localhost", "127.0.0.1"}
     assert store.config_get("maxmemory-policy")["maxmemory-policy"] == "noeviction"
@@ -213,7 +216,8 @@ def test_signed_control_plane_principal_completes_mfa_approval_and_execution_und
         assertion = {"verified_at": int(replay["Verified-At"]), "operation": replay["Operation"],
                      "body_sha256": replay["Body-SHA256"], "assertion_id": replay["Assertion-ID"]}
         assert client.post(approve_path, content=b"{}", headers=signed("approve", assertion=assertion)).status_code == 401
-        response = client.post(execute_path, content=b"{}", headers=signed("execute"))
+        response = client.post(execute_path, content=b"{}", headers=signed(
+            "execute", user=executor_actor, role=executor_role))
         assert response.status_code == 200, response.text
         with tenant_one.connect() as conn:
             assert conn.execute(text("SELECT array_agg(action ORDER BY id) FROM approval_audit_events")).scalar() == ["approved", "executing", "executed"]
@@ -223,7 +227,8 @@ def test_signed_control_plane_principal_completes_mfa_approval_and_execution_und
             assert execution["status"] == "executed"
             assert json.loads(execution["execution_outcome"])["outcome"] == "succeeded"
             assert json.loads(execution["execution_outcome"])["executed"] is True
-            assert conn.execute(text("SELECT count(*) FROM approval_audit_events WHERE actor=:actor AND mfa_verified"), {"actor": actor}).scalar_one() == 3
+            assert conn.execute(text("SELECT count(*) FROM approval_audit_events WHERE actor=:actor AND mfa_verified"), {"actor": actor}).scalar_one() == 1
+            assert conn.execute(text("SELECT count(*) FROM approval_audit_events WHERE actor=:actor AND mfa_verified"), {"actor": executor_actor}).scalar_one() == 2
             if evidence_dir := os.getenv("ENT022_EVIDENCE_DIR"):
                 zone = conn.execute(text("SHOW timezone")).scalar_one().replace("/", "-")
                 events = [dict(row) for row in conn.execute(text(
@@ -301,7 +306,7 @@ def test_concurrent_approval_is_single_use_and_audit_failure_rolls_back(approval
         approved = approval_store.get_approval(record["approval_id"], fresh=True)
         with pytest.raises(approval_store.ApprovalPersistenceError):
             approval_store.begin_approval_execution_atomic(
-                approved, actor=winners[0], transition_at=datetime.now(timezone.utc),
+                approved, actor=str(uuid4()), transition_at=datetime.now(timezone.utc),
                 execution_token_hash="b" * 64, execution_operation_id="operation-17",
                 execution_worker_id="worker-17", execution_fence_token="fence-17",
                 reconcile_after=datetime.now(timezone.utc) + timedelta(minutes=1),

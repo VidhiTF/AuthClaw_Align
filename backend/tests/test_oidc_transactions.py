@@ -246,7 +246,7 @@ def test_signed_start_to_real_id_token_validation(monkeypatch, substitution):
         "authorization_endpoint": "https://idp.example/authorize",
         "email_claim": "email",
         "groups_claim": "groups",
-        "role_mapping": {},
+        "role_mapping": {"authclaw-viewers": "viewer"},
         "default_role": "viewer",
         "tenant_claim": "tenant_id",
         "tenant_claim_value": "idp-tenant",
@@ -298,6 +298,7 @@ def test_signed_start_to_real_id_token_validation(monkeypatch, substitution):
             "exp": int(time.time()) + 60,
             "nonce": record["nonce"],
             "email": "user@example.com",
+            "groups": ["authclaw-viewers"],
             "tenant_id": "idp-tenant",
         }
         if substitution == "nonce":

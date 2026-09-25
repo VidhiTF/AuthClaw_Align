@@ -57,7 +57,7 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     monkeypatch.setattr(
         auth,
         "revalidate_tenant_credential",
-        lambda *_: SimpleNamespace(role="admin", scopes=["admin", "read", "write"]),
+        lambda *_: SimpleNamespace(role="approver", scopes=["read", "write"]),
     )
     request.state.tenant_id = tenant_id
     request.state.user_id = user_id
@@ -82,7 +82,7 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     assert response.operation == "POST /approve/approval-17"
     assert response.body_sha256 == "a" * 64
     assert len(response.assertion_id) == 32
-    assert response.role == "admin"
+    assert response.role == "approver"
     assert "654321" not in str(response)
     assert verified.call_args.kwargs["tenant_id"] == str(tenant_id)
     assert verified.call_args.kwargs["operation"] == "agent_approval"
@@ -100,7 +100,13 @@ def test_control_plane_mfa_assertion_uses_canonical_user_factor_and_audit(monkey
     db.commit.assert_called_once()
 
 
-def test_control_plane_mfa_assertion_rejects_current_non_privileged_role(monkeypatch):
+@pytest.mark.parametrize("role,path", [
+    ("viewer", "/approve/approval-17"),
+    ("tenant_administrator", "/approve/approval-17"),
+    ("approver", "/execute/approval-17"),
+    ("developer", "/execute/approval-17"),
+])
+def test_control_plane_mfa_assertion_rejects_current_non_privileged_role(monkeypatch, role, path):
     tenant_id = uuid.uuid4()
     user_id = uuid.uuid4()
     user = SimpleNamespace(
@@ -120,17 +126,17 @@ def test_control_plane_mfa_assertion_rejects_current_non_privileged_role(monkeyp
     monkeypatch.setattr(
         auth,
         "revalidate_tenant_credential",
-        lambda *_: SimpleNamespace(role="viewer", scopes=["read", "write", "admin"]),
+        lambda *_: SimpleNamespace(role=role, scopes=["read", "write", "admin"]),
     )
     verify = MagicMock(return_value=True)
     monkeypatch.setattr(auth, "verify_mfa_challenge", verify)
 
-    with pytest.raises(HTTPException, match="owner or admin") as exc:
+    with pytest.raises(HTTPException, match="cannot perform") as exc:
         auth.create_agent_mfa_assertion(
             auth.AgentMFAAssertionRequest(
                 code="654321",
                 method="POST",
-                path="/approve/approval-17",
+                path=path,
                 body_sha256="a" * 64,
             ),
             request,
