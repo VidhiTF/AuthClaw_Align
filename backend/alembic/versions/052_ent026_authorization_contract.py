@@ -304,6 +304,7 @@ def upgrade() -> None:
         ALTER TABLE public.data_subject_requests
             ADD COLUMN IF NOT EXISTS requester_id uuid REFERENCES public.users(id);
         DROP POLICY IF EXISTS data_subject_requests_tenant_isolation ON public.data_subject_requests;
+        DROP POLICY IF EXISTS tenant_isolation ON public.data_subject_requests;
         CREATE POLICY data_subject_requests_read ON public.data_subject_requests FOR SELECT
             USING (tenant_id = authn.current_tenant_id()
                    AND authn.authorize_action('tenant.audit.read'));

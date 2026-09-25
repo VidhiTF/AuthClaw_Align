@@ -162,6 +162,104 @@ def test_missing_or_forged_context_reads_nothing(isolation: IsolationHarness):
         )
 
 
+def test_ent026_rls_catalog_and_direct_role_denials(isolation: IsolationHarness):
+    """Exercise migrated policies through signed sessions and the restricted DB role."""
+    administrator = isolation.create_identity("ent026-administrator")
+    tenant_id = administrator.tenant_id
+    identities = {"tenant_administrator": administrator}
+    with isolation.owner_engine.begin() as conn:
+        for role in ("viewer", "developer", "operator", "auditor", "approver"):
+            identity = Identity(tenant_id, uuid4(), uuid4().hex + uuid4().hex,
+                f"ent026-{role}-{uuid4().hex}@example.invalid")
+            conn.execute(text("""INSERT INTO public.users
+                (id, tenant_id, email, role, platform_role, is_active, created_at, updated_at)
+                VALUES (:id, :tenant, :email, :role, 'NONE', true, now(), now())"""),
+                {"id": identity.user_id, "tenant": tenant_id, "email": identity.email, "role": role})
+            conn.execute(text("""SELECT authn.create_session(
+                :hash, :tenant, :user_id, 'ent026-rls-test',
+                now() + interval '10 minutes', '{}'::jsonb)"""),
+                {"hash": identity.session_hash, "tenant": tenant_id, "user_id": identity.user_id})
+            identities[role] = identity
+        approval_id, self_approval_id = uuid4(), uuid4()
+        conn.execute(text("""INSERT INTO public.policies
+            (id, tenant_id, name, policy_yaml, version, created_by, created_at, updated_at)
+            VALUES (:id, :tenant, 'ent026-test', 'rules: []', 1, :user_id, now(), now())"""),
+            {"id": uuid4(), "tenant": tenant_id, "user_id": administrator.user_id})
+        conn.execute(text("""INSERT INTO public.gateway_configs (id, tenant_id, name, provider,
+            endpoint, redaction_strategy, redaction_token_retention_days, created_at, updated_at)
+            VALUES (:id, :tenant, 'ent026-test', 'openai', 'https://example.invalid',
+                    'mask', 90, now(), now())"""),
+            {"id": uuid4(), "tenant": tenant_id})
+        conn.execute(text("""INSERT INTO public.provider_credentials (id, tenant_id, provider,
+            display_name, encrypted_secret, created_by, created_at)
+            VALUES (:id, :tenant, 'openai', 'ent026-test', 'encrypted-test-value', :user_id, now())"""),
+            {"id": uuid4(), "tenant": tenant_id, "user_id": administrator.user_id})
+        conn.execute(text("""INSERT INTO public.api_keys (id, tenant_id, key_hash, name, scopes,
+            expires_at, created_by, created_at, updated_at)
+            VALUES (:id, :tenant, :hash, 'ent026-test', ARRAY['read'],
+                    now() + interval '1 day', :user_id, now(), now())"""),
+            {"id": uuid4(), "tenant": tenant_id, "hash": uuid4().hex,
+             "user_id": administrator.user_id})
+        for row_id, requester_id in ((approval_id, administrator.user_id),
+                                     (self_approval_id, identities["approver"].user_id)):
+            conn.execute(text("""INSERT INTO public.pending_approvals
+                (id, tenant_id, action_id, action_type, action_description, action_payload,
+                 status, requester_id, expires_at, created_at, updated_at)
+                VALUES (:id, :tenant, :action_id, 'remediation', 'ent026-test', '{}'::json,
+                        'PENDING', :requester, now() + interval '30 minutes', now(), now())"""),
+                {"id": row_id, "tenant": tenant_id, "action_id": str(row_id),
+                 "requester": requester_id})
+
+        expected_policies = {
+            "api_keys": {"tenant_isolation", "tenant_admin_api_keys_write", "tenant_access_review_api_keys_read"},
+            "users": {"tenant_user_read", "tenant_user_insert", "tenant_user_update", "tenant_user_delete"},
+            "policies": {"tenant_policy_read", "tenant_policy_write", "tenant_policy_update", "tenant_policy_delete"},
+            "gateway_configs": {"tenant_gateway_read", "tenant_gateway_write", "tenant_gateway_update", "tenant_gateway_delete"},
+            "provider_credentials": {"tenant_provider_read", "tenant_provider_write", "tenant_provider_update", "tenant_provider_delete"},
+            "pending_approvals": {"tenant_approval_read", "tenant_approval_create", "tenant_approval_resolve", "tenant_approval_expire"},
+            "data_subject_requests": {"data_subject_requests_read", "data_subject_requests_create", "data_subject_requests_update"},
+            "audit_log_metadata": {"tenant_audit_read", "tenant_audit_append"},
+        }
+        rows = conn.execute(text("""SELECT tablename, policyname FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = ANY(:tables)"""),
+            {"tables": list(expected_policies)}).all()
+        for table, names in expected_policies.items():
+            assert {row.policyname for row in rows if row.tablename == table} == names
+    read_tables = {
+        "policies": {"tenant_administrator"},
+        "gateway_configs": {"tenant_administrator"},
+        "provider_credentials": {"tenant_administrator"},
+        "api_keys": {"tenant_administrator", "auditor"},
+        "pending_approvals": set(identities),
+    }
+    for role, identity in identities.items():
+        with isolation.session_for(identity) as db:
+            assert db.execute(text("SELECT authn.current_role() ")).scalar_one() == role
+            for table, allowed_roles in read_tables.items():
+                count = db.execute(text(f"SELECT count(*) FROM public.{table} WHERE tenant_id = :tenant"),
+                    {"tenant": tenant_id}).scalar_one()
+                expected = (2 if table == "pending_approvals" else 1) if role in allowed_roles else 0
+                assert count == expected, (role, table, count, expected)
+
+    update_approval = text("""UPDATE public.pending_approvals
+        SET status = 'APPROVED', approver_id = :actor, approved_at = now()
+        WHERE id = :id RETURNING id""")
+    for role in ("viewer", "developer", "operator", "auditor", "tenant_administrator"):
+        with isolation.session_for(identities[role]) as db:
+            assert db.execute(update_approval,
+                {"actor": identities[role].user_id, "id": approval_id}).first() is None
+    with isolation.session_for(identities["approver"]) as db:
+        assert db.execute(update_approval,
+            {"actor": identities["approver"].user_id, "id": self_approval_id}).first() is None
+        assert db.execute(update_approval,
+            {"actor": identities["approver"].user_id, "id": approval_id}).scalar_one() == approval_id
+        db.commit()
+    with isolation.owner_engine.connect() as conn:
+        statuses = dict(conn.execute(text("SELECT id, status FROM public.pending_approvals")))
+        assert statuses[approval_id] == "APPROVED"
+        assert statuses[self_approval_id] == "PENDING"
+
+
 def test_writer_privileges_cannot_bypass_restricted_audit_verifier(
     isolation: IsolationHarness,
 ):
