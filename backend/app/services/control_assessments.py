@@ -113,9 +113,11 @@ def lock_review_principals(db: Session, tenant_id, requester_id, reviewer_id) ->
     tid, requester, reviewer = (uuid.UUID(str(value)) for value in (tenant_id, requester_id, reviewer_id))
     if requester == reviewer:
         raise ValueError("The requester cannot review their own assessment")
-    # Lock both actors before consuming MFA so cross-over reviews use one order.
-    users = db.query(User).filter(User.tenant_id == tid, User.id.in_((requester, reviewer))).order_by(
-        User.id).populate_existing().with_for_update().all()
+    # The approver can lock their own row, but RLS deliberately denies locking
+    # the administrator requester's row. The approval row is locked separately.
+    requester_user = db.query(User).filter(User.tenant_id == tid, User.id == requester).populate_existing().first()
+    reviewer_user = db.query(User).filter(User.tenant_id == tid, User.id == reviewer).populate_existing().with_for_update().first()
+    users = [user for user in (requester_user, reviewer_user) if user is not None]
     if len(users) != 2 or any(
         not user.is_active or normalize_role(user.role) != (
             "approver" if user.id == reviewer else "tenant_administrator"

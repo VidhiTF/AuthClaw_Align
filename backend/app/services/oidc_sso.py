@@ -427,6 +427,5 @@ def map_user(db: Session, tenant: Tenant, config: dict[str, Any] | TenantOIDCCon
     # Invitation verification permits OIDC login but must not freeze role
     # authorization. Re-evaluate the current exact group mapping every login.
     role = role_from_claims(config, claims)
-    if user.role != "owner" or role == "owner":
-        user.role = role
+    user.role = role
     return user, _clean_role(user.role)

@@ -32,6 +32,46 @@ def upgrade() -> None:
         END
         $roles$;
 
+        CREATE OR REPLACE FUNCTION authn.issue_oidc_session(
+            p_tenant_id uuid, p_email text, p_claimed_role text,
+            p_token_hash text, p_expires_at timestamptz,
+            p_metadata jsonb DEFAULT '{}'::jsonb
+        ) RETURNS TABLE (user_id uuid, email text, role text)
+        LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog, authn, public
+        AS $$
+        DECLARE v_user public.users%ROWTYPE; v_session_id uuid;
+        BEGIN
+            IF p_claimed_role IS NULL OR p_claimed_role NOT IN
+               ('viewer','developer','operator','auditor','approver','tenant_administrator') THEN
+                RAISE EXCEPTION 'invalid OIDC tenant role';
+            END IF;
+            SELECT * INTO v_user FROM public.users u
+             WHERE u.tenant_id = p_tenant_id
+               AND lower(u.email) = lower(trim(p_email)) AND u.is_active
+             LIMIT 1 FOR UPDATE;
+            IF NOT FOUND THEN RAISE EXCEPTION 'OIDC user is not provisioned'; END IF;
+            -- Invitation and legacy owner labels cannot override the live IdP mapping.
+            IF to_regtype('public.user_role') IS NULL THEN
+                UPDATE public.users u SET role = p_claimed_role
+                 WHERE u.id = v_user.id RETURNING * INTO v_user;
+            ELSE
+                EXECUTE 'UPDATE public.users SET role = $1::public.user_role WHERE id = $2 RETURNING *'
+                    INTO v_user USING p_claimed_role, v_user.id;
+            END IF;
+            INSERT INTO authn.sessions (
+                token_hash, tenant_id, user_id, authentication_method,
+                expires_at, metadata
+            ) VALUES (
+                p_token_hash, p_tenant_id, v_user.id, 'oidc', p_expires_at,
+                coalesce(p_metadata, '{}'::jsonb)
+            ) RETURNING id INTO v_session_id;
+            UPDATE public.users SET last_login = now() WHERE id = v_user.id;
+            PERFORM authn.set_context(p_tenant_id, v_user.id, v_session_id);
+            RETURN QUERY SELECT v_user.id, v_user.email::text, v_user.role::text;
+        END;
+        $$;
+
         CREATE OR REPLACE FUNCTION authn.current_role() RETURNS text
         LANGUAGE plpgsql STABLE SECURITY DEFINER
         SET search_path = pg_catalog, authn, public
@@ -69,6 +109,9 @@ def upgrade() -> None:
             END IF;
             IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
                OR NEW.requester_id IS DISTINCT FROM OLD.requester_id
+               OR NEW.action_id IS DISTINCT FROM OLD.action_id
+               OR NEW.action_type IS DISTINCT FROM OLD.action_type
+               OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
                OR NEW.action_hash IS DISTINCT FROM OLD.action_hash
                OR NEW.action_payload::jsonb IS DISTINCT FROM OLD.action_payload::jsonb
                OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
@@ -80,20 +123,51 @@ def upgrade() -> None:
                     RAISE EXCEPTION 'approval expiration is not authorized';
                 END IF;
             ELSIF NEW.status = 'ALTERED' THEN
-                NULL;
+                IF NEW.approver_id IS DISTINCT FROM OLD.approver_id
+                   OR NEW.approved_at IS DISTINCT FROM OLD.approved_at
+                   OR NEW.consumed_by_id IS DISTINCT FROM OLD.consumed_by_id
+                   OR NEW.consumed_at IS DISTINCT FROM OLD.consumed_at
+                   OR NOT ((OLD.status = 'PENDING'
+                            AND authn.authorize_action('tenant.high_risk.approve')
+                            AND OLD.requester_id <> authn.current_user_id())
+                           OR (OLD.status = 'APPROVED'
+                               AND authn.authorize_action('tenant.workflow.resume')
+                               AND OLD.approver_id <> authn.current_user_id())) THEN
+                    RAISE EXCEPTION 'approval alteration is not authorized';
+                END IF;
             ELSIF OLD.status = 'PENDING' AND NEW.status IN ('APPROVED','REJECTED') THEN
                 IF NOT authn.authorize_action('tenant.high_risk.approve')
                    OR OLD.requester_id IS NULL
                    OR OLD.requester_id = authn.current_user_id()
                    OR NEW.approver_id IS NULL
+                   OR NEW.consumed_by_id IS NOT NULL
+                   OR NEW.consumed_at IS NOT NULL
                    OR NEW.approver_id IS DISTINCT FROM authn.current_user_id() THEN
                     RAISE EXCEPTION 'approval decision is not authorized';
+                END IF;
+            ELSIF OLD.status = 'PENDING' AND NEW.status = 'CONSUMED'
+                  AND OLD.action_type = 'control_assessment' THEN
+                IF NOT authn.authorize_action('tenant.high_risk.approve')
+                   OR OLD.requester_id IS NULL
+                   OR OLD.requester_id = authn.current_user_id()
+                   OR NEW.approver_id IS DISTINCT FROM authn.current_user_id()
+                   OR NEW.consumed_by_id IS DISTINCT FROM authn.current_user_id()
+                   OR NEW.approved_at IS NULL OR NEW.consumed_at IS NULL
+                   OR NEW.mfa_verified IS DISTINCT FROM true
+                   OR NEW.mfa_timestamp IS NULL
+                   OR NEW.mfa_timestamp < now() - interval '30 minutes'
+                   OR NEW.mfa_timestamp > now() + interval '1 minute' THEN
+                    RAISE EXCEPTION 'assessment review is not authorized';
                 END IF;
             ELSIF OLD.status = 'APPROVED' AND NEW.status = 'CONSUMED' THEN
                 IF NOT authn.authorize_action('tenant.workflow.resume')
                    OR OLD.requester_id IS NULL
                    OR OLD.approver_id IS NULL
                    OR OLD.approver_id = authn.current_user_id()
+                   OR NEW.approver_id IS DISTINCT FROM OLD.approver_id
+                   OR NEW.approved_at IS DISTINCT FROM OLD.approved_at
+                   OR NEW.mfa_verified IS DISTINCT FROM OLD.mfa_verified
+                   OR NEW.mfa_timestamp IS DISTINCT FROM OLD.mfa_timestamp
                    OR NEW.consumed_by_id IS DISTINCT FROM authn.current_user_id() THEN
                     RAISE EXCEPTION 'approval consumption is not authorized';
                 END IF;
@@ -107,6 +181,25 @@ def upgrade() -> None:
         CREATE TRIGGER pending_approval_transition_guard
             BEFORE UPDATE ON public.pending_approvals
             FOR EACH ROW EXECUTE FUNCTION authn.enforce_pending_approval_transition();
+
+        CREATE OR REPLACE FUNCTION authn.enforce_pending_approval_insert()
+        RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = pg_catalog, authn, public
+        AS $$
+        BEGIN
+            IF NEW.status IS DISTINCT FROM 'PENDING'
+               OR NEW.approver_id IS NOT NULL OR NEW.approved_at IS NOT NULL
+               OR NEW.consumed_by_id IS NOT NULL OR NEW.consumed_at IS NOT NULL
+               OR NEW.mfa_verified IS TRUE OR NEW.mfa_timestamp IS NOT NULL THEN
+                RAISE EXCEPTION 'approval must be created pending without a decision';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS pending_approval_insert_guard ON public.pending_approvals;
+        CREATE TRIGGER pending_approval_insert_guard
+            BEFORE INSERT ON public.pending_approvals
+            FOR EACH ROW EXECUTE FUNCTION authn.enforce_pending_approval_insert();
 
         CREATE OR REPLACE FUNCTION authn.enforce_dsr_transition()
         RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
@@ -336,7 +429,11 @@ def upgrade() -> None:
                    AND authn.authorize_action('tenant.approvals.read'));
         CREATE POLICY tenant_approval_create ON public.pending_approvals FOR INSERT
             WITH CHECK (tenant_id = authn.current_tenant_id()
-                        AND authn.current_role() IN ('developer','operator','tenant_administrator'));
+                        AND authn.current_role() IN ('developer','operator','tenant_administrator')
+                        AND requester_id = authn.current_user_id()
+                        AND status = 'PENDING'
+                        AND approver_id IS NULL AND approved_at IS NULL
+                        AND consumed_by_id IS NULL AND consumed_at IS NULL);
         CREATE POLICY tenant_approval_resolve ON public.pending_approvals FOR UPDATE
             USING (tenant_id = authn.current_tenant_id()
                    AND ((status = 'PENDING'
@@ -351,7 +448,14 @@ def upgrade() -> None:
                               AND requester_id <> authn.current_user_id())
                              OR (status = 'CONSUMED'
                                  AND authn.authorize_action('tenant.workflow.resume')
-                                 AND approver_id <> authn.current_user_id())));
+                                 AND approver_id <> authn.current_user_id())
+                             OR (status = 'ALTERED'
+                                 AND authn.authorize_action('tenant.workflow.resume')
+                                 AND approver_id <> authn.current_user_id())
+                             OR (status = 'CONSUMED' AND action_type = 'control_assessment'
+                                 AND authn.authorize_action('tenant.high_risk.approve')
+                                 AND requester_id <> authn.current_user_id()
+                                 AND approver_id = authn.current_user_id())));
         CREATE POLICY tenant_approval_expire ON public.pending_approvals FOR UPDATE
             USING (tenant_id = authn.current_tenant_id()
                    AND status IN ('PENDING','APPROVED')

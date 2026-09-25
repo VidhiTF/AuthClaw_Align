@@ -381,6 +381,21 @@ def test_oidc_legacy_owner_without_group_mapping_is_denied():
         )
 
 
+def test_oidc_legacy_owner_with_viewer_group_is_downgraded():
+    db = MagicMock()
+    user = MagicMock(is_active=True, role="owner")
+    db.query.return_value.filter.return_value.first.return_value = user
+    mapped_user, role = oidc_sso.map_user(
+        db, MagicMock(),
+        {"email_claim": "email", "groups_claim": "groups",
+         "role_mapping": {"readers": "viewer"}},
+        {"email": "owner@example.com", "groups": ["readers"]},
+    )
+    assert mapped_user is user
+    assert role == "viewer"
+    assert user.role == "viewer"
+
+
 def _identity_policy():
     return {
         "tenant_claim": "tenant_id",
@@ -749,8 +764,8 @@ def test_oidc_success_emits_actor_and_tenant_audit(monkeypatch):
     ("role", "scopes"),
     [
         ("viewer", ["read"]),
-        ("developer", ["read"]),
-        ("operator", ["read"]),
+        ("developer", ["read", "write"]),
+        ("operator", ["read", "write"]),
         ("admin", ["admin", "read", "write"]),
         ("owner", ["admin", "read", "write"]),
     ],
