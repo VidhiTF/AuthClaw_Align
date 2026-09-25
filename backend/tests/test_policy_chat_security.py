@@ -1,3 +1,4 @@
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -124,3 +125,6 @@ def test_chat_success_retains_results_and_history(chat_case, monkeypatch):
     assert response["results"] == payload and "Unable" not in response["text"]
     assert db.add.call_args.args[0].text == response["text"]
     assert db.add.call_args.args[0].results == payload
+    saved = [call.args[0] for call in db.add.call_args_list]
+    assert [message.sender for message in saved] == ["user", "agent"]
+    assert all(message.timestamp.utcoffset() == timedelta(0) for message in saved)
